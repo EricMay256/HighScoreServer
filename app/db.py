@@ -8,10 +8,16 @@ _connection_pool: pool.SimpleConnectionPool | None = None
 
 def init_db() -> None:
     global _connection_pool
+    url = os.environ["DATABASE_URL"]
+
+    # Heroku provides postgres:// but psycopg2 requires postgresql://
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+
     _connection_pool = pool.SimpleConnectionPool(
         minconn=1,
         maxconn=10,
-        dsn=os.environ["DATABASE_URL"],
+        dsn=url,
     )
 
 
