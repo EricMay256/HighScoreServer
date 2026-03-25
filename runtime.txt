@@ -1,2 +1,2 @@
-python-3.12.3
+python-3.12
 #Check [devcenter.heroku.com/articles/python-support](https://devcenter.heroku.com/articles/python-support) to confirm this version is currently supported before deploying.
