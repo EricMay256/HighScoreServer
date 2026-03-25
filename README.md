@@ -1,13 +1,13 @@
 # Leaderboard Server
 
 A FastAPI leaderboard backend for a Unity game, hosted on Heroku.
-Provides a high score API with a public web view and Redis caching.
+Provides a high score API with Redis caching.
 
 ## Stack
 
 - **Backend:** FastAPI (Python)
 - **Database:** PostgreSQL via psycopg2
-- **Cache:** Redis (30s TTL on leaderboard reads)
+- **Cache:** Redis (120s TTL on leaderboard reads)
 - **Hosting:** Heroku (Postgres + Redis add-ons)
 - **Auth:** API key via `x-api-key` header (writes only)
 
