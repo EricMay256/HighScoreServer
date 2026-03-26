@@ -24,18 +24,3 @@ CREATE TABLE IF NOT EXISTS scores (
     submitted_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     UNIQUE (player, game_mode)
 );
-
--- You are encouraged to replace the password and role below
--- It is granted permission to read and write individual scores, but nothing too destructive
-CREATE ROLE IF NOT EXISTS leaderboard_app WITH LOGIN PASSWORD 'leaderboard_pass';
--- Grant access to the database
-GRANT CONNECT ON DATABASE leaderboard TO leaderboard_app;
-
--- Connect to the leaderboard database to grant table-level permissions
-\c leaderboard
-
--- Grant only what the app actually needs
-GRANT USAGE ON SCHEMA public TO leaderboard_app;
-GRANT SELECT, INSERT, UPDATE ON TABLE scores TO leaderboard_app;
--- The app doesn't need game modes yet but can get them here
--- GRANT SELECT ON TABLE game_modes TO leaderboard_app;
