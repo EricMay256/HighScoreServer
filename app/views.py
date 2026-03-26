@@ -17,19 +17,31 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
     """
     conn = get_conn()
     scores = []
+    game_modes = []
+    score_label = "Score"
+    sort_order = "DESC"
     error: str | None = None
 
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT game_mode FROM scores ORDER BY game_mode")
-            game_modes = [row[0] for row in cur.fetchall()]
-            
+            # Pull tab list and mode config from game_modes table
+            cur.execute("SELECT name, sort_order, label FROM game_modes ORDER BY name")
+            rows = cur.fetchall()
+            game_modes = [r[0] for r in rows]
+            mode_map = {r[0]: {"sort_order": r[1], "label": r[2]} for r in rows}
+
+            config = mode_map.get(game_mode)
+            if config:
+                sort_order = config["sort_order"]
+                score_label = config["label"] or "Score"
+
+            # sort_order comes from the DB, never from user input — safe to interpolate
             cur.execute(
-                """
+                f"""
                 SELECT player, score, submitted_at
                 FROM scores
                 WHERE game_mode = %s
-                ORDER BY score DESC
+                ORDER BY score {sort_order}
                 LIMIT 100
                 """,
                 (game_mode,),
@@ -57,6 +69,8 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
             "game_mode": game_mode,
             "game_modes": game_modes,
             "scores": scores,
+            "score_label": score_label,
+            "sort_order": sort_order,
             "error": error,
         },
     )

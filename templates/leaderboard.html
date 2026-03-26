@@ -40,7 +40,9 @@
         <tr>
           <th class="col-rank">Rank</th>
           <th class="col-player">Player</th>
-          <th class="col-score">Score</th>
+          <th class="col-score"> Score
+            {{ "▲" if sort_order == "ASC" else "▼" }}
+          </th>
           <th class="col-date">Date</th>
         </tr>
       </thead>
