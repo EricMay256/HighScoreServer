@@ -8,9 +8,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 templates = Jinja2Templates(directory="templates")
 
-VALID_GAME_MODES = ["classic", "blitz", "survival"]  # extend as needed
-
-
 @router.get("/leaderboard", response_class=HTMLResponse)
 def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLResponse:
     """
@@ -24,6 +21,9 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
 
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT game_mode FROM scores ORDER BY game_mode")
+            game_modes = [row[0] for row in cur.fetchall()]
+            
             cur.execute(
                 """
                 SELECT player, score, submitted_at
@@ -55,7 +55,7 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
         name="leaderboard.html",
         context={
             "game_mode": game_mode,
-            "game_modes": VALID_GAME_MODES,
+            "game_modes": game_modes,
             "scores": scores,
             "error": error,
         },
