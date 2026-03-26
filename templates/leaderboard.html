@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}{{ game_mode | capitalize }} Leaderboard{% endblock %}
+
+{% block content %}
+<div class="lb-container">
+
+  <div class="lb-header">
+    <h1 class="lb-title">{{ game_mode | upper }} MODE</h1>
+    <p class="lb-subtitle">Top 100 all-time scores</p>
+  </div>
+
+  {# ── Game mode tabs ─────────────────────────────────────────── #}
+  <nav class="mode-tabs" aria-label="Game mode selector">
+    {% for mode in game_modes %}
+      <a
+        href="/leaderboard?game_mode={{ mode }}"
+        class="mode-tab {% if mode == game_mode %}mode-tab--active{% endif %}"
+      >{{ mode | capitalize }}</a>
+    {% endfor %}
+  </nav>
+
+  {# ── Error state ─────────────────────────────────────────────── #}
+  {% if error %}
+    <div class="lb-error" role="alert">
+      ⚠ {{ error }}
+    </div>
+
+  {# ── Empty state ─────────────────────────────────────────────── #}
+  {% elif scores | length == 0 %}
+    <div class="lb-empty">
+      <p>No scores yet for <strong>{{ game_mode }}</strong> mode.</p>
+      <p>Be the first to submit one via the API.</p>
+    </div>
+
+  {# ── Scores table ─────────────────────────────────────────────── #}
+  {% else %}
+    <table class="lb-table" aria-label="Leaderboard scores">
+      <thead>
+        <tr>
+          <th class="col-rank">Rank</th>
+          <th class="col-player">Player</th>
+          <th class="col-score">Score</th>
+          <th class="col-date">Date</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in scores %}
+          <tr class="lb-row {% if entry.rank <= 3 %}lb-row--top{% endif %}">
+            <td class="col-rank">
+              {% if entry.rank == 1 %}🥇
+              {% elif entry.rank == 2 %}🥈
+              {% elif entry.rank == 3 %}🥉
+              {% else %}{{ entry.rank }}
+              {% endif %}
+            </td>
+            <td class="col-player">{{ entry.player }}</td>
+            <td class="col-score">{{ "{:,}".format(entry.score) }}</td>
+            <td class="col-date">{{ entry.submitted_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+</div>
+{% endblock %}

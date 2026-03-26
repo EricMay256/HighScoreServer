@@ -83,15 +83,17 @@ leaderboard-server/
 ├── app/
 │   ├── main.py          # App factory, lifespan startup/shutdown
 │   ├── models.py        # Pydantic schemas
-│   ├── routes.py        # API endpoints
+│   ├── api.py           # API endpoints
+│   ├── views.py         # HTML endpoints
 │   ├── db.py            # psycopg2 connection pool
 │   ├── cache.py         # Redis client
 │   └── dependencies.py  # API key auth
 ├── db/
-│   ├── schemas.sql      # Database Schema
+│   ├── schema.sql       # Database Schema
 │   ├── seed.sql         # Local test data
 ├── public/
-│   └── index.html       # Public leaderboard web view
+│   └── index.html       # Placeholder to receive empty URL requests
+│   └── style.css        # CSS for templates
 ├── requirements.txt
 ├── Procfile
 ├── runtime.txt
