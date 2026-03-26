@@ -1,11 +1,13 @@
 import json
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.models import ScoreSubmission, ScoreResponse, GameModeConfig, GameModeCreate
 from app.db import get_conn, release_conn
 from app.cache import get_cache
 from app.dependencies import require_api_key
+from app.periods import get_period_start, PERIODS
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -102,14 +104,17 @@ def all_scores() -> list[ScoreResponse]:
     ]
 
 @router.get("/scores", response_model=list[ScoreResponse])
-def get_scores(game_mode: str) -> list[ScoreResponse]:
+def get_scores(game_mode: str, period: str = "alltime") -> list[ScoreResponse]:
     try:
         cache = get_cache()
-        cached = cache.get(f"{CACHE_KEY_PREFIX}{game_mode}")
+        cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
+        cached = cache.get(cache_key)
         if cached:
             return json.loads(cached)
     except Exception as e:
         logger.warning("Redis read failed, falling back to DB: %s", e)
+
+    period_start = get_period_start(period)
 
     conn = get_conn()
     try:
@@ -129,13 +134,15 @@ def get_scores(game_mode: str) -> list[ScoreResponse]:
 
             cur.execute(
                 f"""
-                SELECT id, player, score, game_mode, submitted_at
-                FROM scores
+                SELECT id, player, score, game_mode, period, submitted_at
+                FROM leaderboard_snapshots
                 WHERE game_mode = %s
-                ORDER BY score {order}
+                  AND period = %s
+                  AND period_start = %s
+                ORDER BY score {order}, submitted_at ASC, id ASC
                 LIMIT 100
                 """,
-                (game_mode,),
+                (game_mode, period, period_start),
             )
             rows = cur.fetchall()
     except HTTPException:
@@ -148,15 +155,15 @@ def get_scores(game_mode: str) -> list[ScoreResponse]:
     results = [
         ScoreResponse(
             id=row[0], player=row[1], score=row[2],
-            game_mode=row[3],
-            submitted_at=row[4].replace(tzinfo=timezone.utc).isoformat(),
+            game_mode=row[3],period=row[4],
+            submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
         )
         for row in rows
     ]
 
     try:
         get_cache().setex(
-            f"{CACHE_KEY_PREFIX}{game_mode}",
+            cache_key,
             CACHE_TTL,
             json.dumps([r.model_dump() for r in results]),
         )
@@ -173,22 +180,62 @@ def get_scores(game_mode: str) -> list[ScoreResponse]:
 )
 def submit_score(submission: ScoreSubmission) -> ScoreResponse:
     conn = get_conn()
+    now = datetime.now(timezone.utc)
+
     try:
         with conn.cursor() as cur:
+            last_result: ScoreResponse | None = None
+
+
             cur.execute(
-                """
-                INSERT INTO scores (player, score, game_mode)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (player, game_mode)
-                DO UPDATE SET
-                    score = EXCLUDED.score,
-                    submitted_at = NOW()
-                WHERE scores.score < EXCLUDED.score
-                RETURNING id, player, score, game_mode, submitted_at
-                """,
-                (submission.player, submission.score, submission.game_mode),
+                "SELECT sort_order FROM game_modes WHERE name = %s",
+                (submission.game_mode,),
             )
-            row = cur.fetchone()
+            mode_row = cur.fetchone()
+            if mode_row is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Unknown game mode: {submission.game_mode}",
+                )
+
+            order = "ASC" if mode_row[0] == "ASC" else "DESC" # constrained to ASC or DESC
+
+            for period in PERIODS:
+                period_start = get_period_start(period, at=now)
+
+                cur.execute(
+                    f"""
+                    INSERT INTO leaderboard_snapshots (player, score, game_mode, period, period_start, submitted_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (player, game_mode, period, period_start)
+                    DO UPDATE SET
+                        score = EXCLUDED.score,
+                        submitted_at = NOW()
+                    WHERE { "leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score" }
+                    RETURNING id, player, score, game_mode, period, submitted_at
+                    """,
+                    (
+                      submission.player, 
+                      submission.score, 
+                      submission.game_mode, 
+                      period, 
+                      period_start, 
+                      now
+                    ),
+                )
+                row = cur.fetchone()
+
+                # If we updated alltime score, use this instead of querying again later
+                if row and period == "alltime":
+                    last_result = ScoreResponse(
+                        id=row[0],
+                        player=row[1],
+                        score=row[2],
+                        game_mode=row[3],
+                        period=row[4],
+                        submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
+                    )
+
             conn.commit()
     except Exception as e:
         conn.rollback()
@@ -199,21 +246,22 @@ def submit_score(submission: ScoreSubmission) -> ScoreResponse:
     finally:
         release_conn(conn)
 
-    if row is None:
-        return get_scores(submission.game_mode)[0]
-
-    result = ScoreResponse(
-        id=row[0],
-        player=row[1],
-        score=row[2],
-        game_mode=row[3],
-        submitted_at=row[4].replace(tzinfo=timezone.utc).isoformat(),
-    )
-
-    # Attempt cache invalidation — non-fatal if Redis is unavailable
+    # Invalidate all period caches for this game_mode
     try:
-        get_cache().delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}")
+        cache = get_cache()
+        for period in PERIODS:
+            cache.delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}:{period}")
     except Exception as e:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
-    return result
+    if last_result is None:
+        #Score was not a new high score - return current alltime best
+        scores = get_scores(submission.game_mode, "alltime")
+        match = next((s for s in scores if s.player == submission.player), None)
+        if match:
+            return ScoreResponse(**match)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Score not found after insertion, this should not happen",
+        )
+    return last_result

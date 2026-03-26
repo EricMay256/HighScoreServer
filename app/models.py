@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from typing import Literal
 
 #Game mode models
 class GameModeConfig(BaseModel):
@@ -22,4 +23,13 @@ class ScoreResponse(BaseModel):
     player: str
     score: int
     game_mode: str
+    period: str
     submitted_at: str  # ISO 8601 string — easier to serialize across the boundary
+
+#Period based leaderboard queries
+# Maintain against app/periods.py:PERIODS
+Period = Literal["alltime", "daily", "weekly"]
+class LeaderboardQuery(BaseModel):
+    game_mode: str = Field(..., min_length=1, max_length=32)
+    period: Period = "alltime"
+

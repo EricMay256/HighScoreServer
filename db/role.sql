@@ -14,8 +14,8 @@ GRANT CONNECT ON DATABASE leaderboard TO leaderboard_app;
 -- Grant only what the app actually needs
 GRANT USAGE ON SCHEMA public TO leaderboard_app;
 -- Players may retrieve, submit, and update scores. Auth is TODO but this avoids dropping a table.
-GRANT SELECT, INSERT, UPDATE ON TABLE scores TO leaderboard_app;
+GRANT SELECT, INSERT, UPDATE ON TABLE leaderboard_snapshots TO leaderboard_app;
 -- Allow the app to read generated IDs (SERIAL uses a sequence under the hood)
-GRANT USAGE, SELECT ON SEQUENCE scores_id_seq TO leaderboard_app;
+GRANT USAGE, SELECT ON SEQUENCE leaderboard_snapshots_id_seq TO leaderboard_app;
 -- The app doesn't need to modify game modes, so only grant SELECT
 GRANT SELECT ON TABLE game_modes TO leaderboard_app;
