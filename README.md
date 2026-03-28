@@ -1,13 +1,13 @@
 # Leaderboard Server
 
 A FastAPI leaderboard backend for a Unity game, hosted on Heroku.
-Provides a high score API with a public web view and Redis caching.
+Provides a high score API with Redis caching and a simple public HTML leaderboard view.
 
 ## Stack
 
 - **Backend:** FastAPI (Python)
 - **Database:** PostgreSQL via psycopg2
-- **Cache:** Redis (30s TTL on leaderboard reads)
+- **Cache:** Redis (120s TTL on leaderboard reads)
 - **Hosting:** Heroku (Postgres + Redis add-ons)
 - **Auth:** API key via `x-api-key` header (writes only)
 
@@ -83,15 +83,20 @@ leaderboard-server/
 ├── app/
 │   ├── main.py          # App factory, lifespan startup/shutdown
 │   ├── models.py        # Pydantic schemas
-│   ├── routes.py        # API endpoints
+│   ├── periods.py       # Time intervals for renewing leaderboards
+│   ├── api.py           # API endpoints
+│   ├── views.py         # HTML endpoints
 │   ├── db.py            # psycopg2 connection pool
 │   ├── cache.py         # Redis client
-│   └── dependencies.py  # API key auth
+│   ├── dependencies.py  # API key auth
+│   └── env.py           # Enforces expected env variables
 ├── db/
-│   ├── schemas.sql      # Database Schema
+│   ├── schema.sql       # Database Schema
 │   ├── seed.sql         # Local test data
+│   └── role.sql         # Configures role for minimalistic user permissions
 ├── public/
-│   └── index.html       # Public leaderboard web view
+│   ├── index.html       # Placeholder to receive empty URL requests
+│   └── style.css        # CSS for templates
 ├── requirements.txt
 ├── Procfile
 ├── runtime.txt

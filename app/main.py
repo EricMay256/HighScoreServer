@@ -4,7 +4,8 @@ from fastapi.staticfiles import StaticFiles
 from app.db import init_db, close_db
 from app.cache import init_cache, close_cache
 from app.env import load_environment, validate_environment
-from app.routes import router
+from app.api import router as api_router
+from app.views import router as view_router
 
 
 @asynccontextmanager
@@ -20,8 +21,12 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Leaderboard API", lifespan=lifespan)
-    app.include_router(router, prefix="/api")
-    app.mount("/", StaticFiles(directory="public", html=True), name="static")
+    # 1. API routes
+    app.include_router(api_router, prefix="/api")
+    # 2. View (Jinja2) routes — no prefix
+    app.include_router(view_router)
+    # 4. Static files (served at root, so this goes last to avoid shadowing API and view routes)
+    app.mount("/", StaticFiles(directory="public", html=True), name="public")
     return app
 
 
