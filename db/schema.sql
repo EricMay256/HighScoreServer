@@ -6,11 +6,9 @@
 -- lines below and run this file. If you care about your data I hope 
 -- you backed it up!
 --
- DROP TABLE IF EXISTS game_modes;
- DROP TABLE IF EXISTS leaderboard_snapshots;
-
-
-
+-- Recommended drop order due to foreign key from leaderboard_snapshots(game_mode) to game_modes(name):
+-- DROP TABLE IF EXISTS leaderboard_snapshots;
+-- DROP TABLE IF EXISTS game_modes;
 CREATE TABLE IF NOT EXISTS game_modes (
     name        VARCHAR(32)  PRIMARY KEY,
     sort_order  VARCHAR(4) NOT NULL DEFAULT 'DESC'
