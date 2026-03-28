@@ -39,8 +39,9 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
             cur.execute(
                 f"""
                 SELECT player, score, submitted_at
-                FROM scores
+                FROM leaderboard_snapshots
                 WHERE game_mode = %s
+                AND period = 'alltime' 
                 ORDER BY score {sort_order}
                 LIMIT 100
                 """,
