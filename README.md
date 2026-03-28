@@ -1,7 +1,7 @@
 # Leaderboard Server
 
 A FastAPI leaderboard backend for a Unity game, hosted on Heroku.
-Provides a high score API with Redis caching.
+Provides a high score API with Redis caching and a simple public HTML leaderboard view.
 
 ## Stack
 
