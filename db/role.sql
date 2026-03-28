@@ -2,9 +2,18 @@
 -- Run locally:   psql -U postgres -d leaderboard -f db/role.sql
 -- Do NOT run on production (yet...?)
 
--- You are encouraged to replace the password and role below
--- It is granted permission to read and write individual scores, but nothing too destructive
-CREATE ROLE IF NOT EXISTS leaderboard_app WITH LOGIN PASSWORD 'leaderboard_pass';
+-- You are encouraged to replace the password and role below.
+-- It is granted permission to read and write individual scores, but nothing too destructive.
+-- NOTE: PostgreSQL does not support "CREATE ROLE IF NOT EXISTS", so we use a DO block.
+DO
+$$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'leaderboard_app') THEN
+        -- Replace this placeholder password before using in any real environment.
+        CREATE ROLE leaderboard_app WITH LOGIN PASSWORD 'REPLACE_WITH_SECURE_PASSWORD';
+    END IF;
+END
+$$;
 -- Grant access to the database
 GRANT CONNECT ON DATABASE leaderboard TO leaderboard_app;
 
