@@ -78,7 +78,7 @@ def all_scores() -> list[ScoreResponse]:
             cur.execute(
                 """
                 SELECT id, player, score, game_mode, submitted_at
-                FROM scores
+                FROM leaderboard_snapshots
                 ORDER BY submitted_at DESC
                 LIMIT 100
                 """,
