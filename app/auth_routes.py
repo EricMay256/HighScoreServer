@@ -15,7 +15,7 @@ from app.auth import (
 from app.db import get_conn, release_conn
 
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(tags=["auth"])
 logger = logging.getLogger(__name__)
 
 

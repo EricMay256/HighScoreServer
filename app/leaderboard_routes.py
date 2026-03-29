@@ -9,8 +9,7 @@ from app.dependencies import require_api_key
 from app.periods import get_period_start, PERIODS
 from psycopg2 import errors as pg_errors
 
-
-router = APIRouter()
+router = APIRouter(tags=["leaderboard"])
 logger = logging.getLogger(__name__)
 
 CACHE_KEY_PREFIX = "leaderboard:"
