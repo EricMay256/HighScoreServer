@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.models import ScoreSubmission, ScoreResponse, GameModeConfig, GameModeCreate
 from app.db import get_conn, release_conn
 from app.cache import get_cache
-from app.dependencies import require_api_key
+from app.dependencies import require_api_key, require_user
 from app.periods import get_period_start, PERIODS
 from psycopg2 import errors as pg_errors
 

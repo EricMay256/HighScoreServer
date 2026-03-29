@@ -17,7 +17,7 @@ from app.db import get_conn, release_conn
 from app.dependencies import require_user
 
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(tags=["auth"])
 logger = logging.getLogger(__name__)
 
 

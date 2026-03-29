@@ -9,8 +9,8 @@
 -- Recommended drop order due to foreign key usage:
 -- DROP TABLE IF EXISTS leaderboard_snapshots;
 -- DROP TABLE IF EXISTS game_modes;
--- DROP TABLE IF EXISTS users;
 -- DROP TABLE IF EXISTS refresh_tokens;
+-- DROP TABLE IF EXISTS users;
 
 CREATE TABLE IF NOT EXISTS game_modes (
     name          VARCHAR(32)  PRIMARY KEY,
@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS game_modes (
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      VARCHAR(64)  UNIQUE NOT NULL,
-    email         VARCHAR(256) UNIQUE NOT NULL,
-    password_hash TEXT         NOT NULL,
+    email         VARCHAR(256) UNIQUE,
+    password_hash TEXT         ,
     is_guest      BOOLEAN      NOT NULL DEFAULT FALSE,
     is_verified   BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()

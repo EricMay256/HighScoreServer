@@ -38,7 +38,7 @@ def _secret() -> str:
     return secret
 
 
-def create_access_token(user_id: int, username: str) -> str:
+def create_access_token(user_id: int, username: str, is_guest: bool) -> str:
     """
     Issues a signed JWT access token.
 
