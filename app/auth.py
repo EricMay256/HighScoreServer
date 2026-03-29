@@ -17,6 +17,14 @@ def hash_password(plain: str) -> str:
 def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
+# ── Guest username generation ──────────────────────────────────────────────
+
+def generate_guest_username() -> str:
+    """
+    Generates a random guest display name.
+    Uniqueness is enforced at the DB level — callers should retry on conflict.
+    """
+    return f"guest_{secrets.token_hex(4)}"
 
 # ── JWT ────────────────────────────────────────────────────────────────────
 

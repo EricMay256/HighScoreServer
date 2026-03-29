@@ -20,14 +20,14 @@ def list_game_modes() -> list[GameModeConfig]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT name, sort_order, label FROM game_modes ORDER BY name")
+            cur.execute("SELECT name, sort_order, label, requires_auth FROM game_modes ORDER BY name")
             rows = cur.fetchall()
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         release_conn(conn)
 
-    return [GameModeConfig(name=r[0], sort_order=r[1], label=r[2]) for r in rows]
+    return [GameModeConfig(name=r[0], sort_order=r[1], label=r[2], requires_auth=r[3]) for r in rows]
 
 
 @router.post(
@@ -42,7 +42,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO game_modes (name, sort_order, label)
+                INSERT INTO game_modes (name, sort_order, label, requires_auth)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                     sort_order = EXCLUDED.sort_order,
@@ -176,19 +176,24 @@ def get_scores(game_mode: str, period: str = "alltime") -> list[ScoreResponse]:
     "/scores",
     response_model=ScoreResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_api_key)],
 )
-def submit_score(submission: ScoreSubmission) -> ScoreResponse:
+def submit_score(
+    submission: ScoreSubmission,
+    payload:    dict = Depends(require_user),
+) -> ScoreResponse:
+    user_id  = int(payload["sub"])
+    username = payload["username"]
+    is_guest = payload.get("is_guest", False)
+
     conn = get_conn()
-    now = datetime.now(timezone.utc)
+    now  = datetime.now(timezone.utc)
 
     try:
         with conn.cursor() as cur:
             last_result: ScoreResponse | None = None
 
-
             cur.execute(
-                "SELECT sort_order FROM game_modes WHERE name = %s",
+                "SELECT sort_order, requires_auth FROM game_modes WHERE name = %s",
                 (submission.game_mode,),
             )
             mode_row = cur.fetchone()
@@ -198,48 +203,47 @@ def submit_score(submission: ScoreSubmission) -> ScoreResponse:
                     detail=f"Unknown game mode: {submission.game_mode}",
                 )
 
-            order = "ASC" if mode_row[0] == "ASC" else "DESC" # constrained to ASC or DESC
+            sort_order, requires_auth = mode_row
+
+            if requires_auth and is_guest:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="This game mode requires a claimed account",
+                )
+
+            order = "ASC" if sort_order == "ASC" else "DESC"
 
             for period in PERIODS:
                 period_start = get_period_start(period, at=now)
 
                 cur.execute(
                     f"""
-                    INSERT INTO leaderboard_snapshots (player, score, game_mode, period, period_start, submitted_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO leaderboard_snapshots
+                        (player, score, game_mode, period, period_start, submitted_at, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (player, game_mode, period, period_start)
                     DO UPDATE SET
-                        score = EXCLUDED.score,
+                        score        = EXCLUDED.score,
                         submitted_at = NOW()
-                    WHERE { "leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score" }
+                    WHERE {"leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score"}
                     RETURNING id, player, score, game_mode, period, submitted_at
                     """,
-                    (
-                      submission.player, 
-                      submission.score, 
-                      submission.game_mode, 
-                      period, 
-                      period_start, 
-                      now
-                    ),
+                    (username, submission.score, submission.game_mode,
+                     period, period_start, now, user_id),
                 )
                 row = cur.fetchone()
 
-                # If we updated alltime score, use this instead of querying again later
                 if row and period == "alltime":
                     last_result = ScoreResponse(
-                        id=row[0],
-                        player=row[1],
-                        score=row[2],
-                        game_mode=row[3],
-                        period=row[4],
+                        id=row[0], player=row[1], score=row[2],
+                        game_mode=row[3], period=row[4],
                         submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
                     )
 
             conn.commit()
+    except HTTPException:
+        raise
     except pg_errors.ForeignKeyViolation:
-        # Defensive: mode_row check above makes this unreachable in normal operation.
-        # Guards against a race condition where game_mode is deleted mid-transaction.
         conn.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -247,14 +251,10 @@ def submit_score(submission: ScoreSubmission) -> ScoreResponse:
         )
     except Exception as e:
         conn.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         release_conn(conn)
 
-    # Invalidate all period caches for this game_mode
     try:
         cache = get_cache()
         for period in PERIODS:
@@ -263,11 +263,10 @@ def submit_score(submission: ScoreSubmission) -> ScoreResponse:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
     if last_result is None:
-        #Score was not a new high score - return current alltime best
         scores = get_scores(submission.game_mode, "alltime")
-        match = next((s for s in scores if s.player == submission.player), None)
+        match  = next((s for s in scores if s.player == username), None)
         if match:
-            return ScoreResponse(**match)
+            return ScoreResponse(**match.model_dump())
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Score not found after insertion, this should not happen",

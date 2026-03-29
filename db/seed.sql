@@ -4,12 +4,15 @@
 
 SET timezone = 'UTC';
 
-INSERT INTO game_modes (name, sort_order, label) VALUES
-    ('classic', 'DESC', 'Classic Mode'),
-    ('endless', 'DESC', 'Endless Mode'),
-    ('speedrun', 'ASC', 'Speedrun Mode')
-ON CONFLICT (name) DO NOTHING;
-
+INSERT INTO game_modes (name, sort_order, label, requires_auth) VALUES
+    ('classic',  'DESC', 'Classic Mode',  FALSE),
+    ('endless',  'DESC', 'Endless Mode',  FALSE),
+    ('speedrun', 'ASC',  'Speedrun Mode', TRUE)
+ON CONFLICT (name) DO UPDATE SET
+    sort_order    = EXCLUDED.sort_order,
+    label         = EXCLUDED.label,
+    requires_auth = EXCLUDED.requires_auth;
+    
 INSERT INTO leaderboard_snapshots (player, score, game_mode, period, period_start, submitted_at) VALUES
     ('alice',   1500, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
     ('alice',   1500, 'classic', 'weekly', '2000-01-01', '2023-01-01 00:00:00+00'),

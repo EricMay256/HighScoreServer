@@ -3,27 +3,28 @@ from typing import Literal
 
 #Game mode models
 class GameModeConfig(BaseModel):
-    name: str
-    sort_order: str  # 'ASC' | 'DESC'
-    label: str | None = None
+    name:           str
+    sort_order:     str  # 'ASC' | 'DESC'
+    label:          str | None = None
+    requires_auth:  bool = False
 
 class GameModeCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=32)
-    sort_order: str = Field("DESC", pattern="^(ASC|DESC)$")
-    label: str | None = Field(None, max_length=128)
+    name:           str = Field(..., min_length=1, max_length=32)
+    sort_order:     str = Field("DESC", pattern="^(ASC|DESC)$")
+    label:          str | None = Field(None, max_length=128)
+    requires_auth:  bool = Field(False)
 
 #Score models
 class ScoreSubmission(BaseModel):
-    player: str = Field(..., min_length=1, max_length=64)
-    score: int = Field(..., ge=0)
-    game_mode: str = Field(..., min_length=1, max_length=32)
+    score:      int = Field(..., ge=0, le=18_000_000_420)  # Arbitrary upper limit to prevent abuse
+    game_mode:  str = Field(..., min_length=1, max_length=32)
 
 class ScoreResponse(BaseModel):
-    id: int
-    player: str
-    score: int
-    game_mode: str
-    period: str
+    id:           int
+    player:       str
+    score:        int
+    game_mode:    str
+    period:       str
     submitted_at: str  # ISO 8601 string — easier to serialize across the boundary
 
 #Period based leaderboard queries
