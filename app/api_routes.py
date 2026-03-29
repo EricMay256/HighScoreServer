@@ -7,6 +7,7 @@ from app.db import get_conn, release_conn
 from app.cache import get_cache
 from app.dependencies import require_api_key
 from app.periods import get_period_start, PERIODS
+from psycopg2 import errors as pg_errors
 
 
 router = APIRouter()
@@ -237,6 +238,14 @@ def submit_score(submission: ScoreSubmission) -> ScoreResponse:
                     )
 
             conn.commit()
+    except pg_errors.ForeignKeyViolation:
+        # Defensive: mode_row check above makes this unreachable in normal operation.
+        # Guards against a race condition where game_mode is deleted mid-transaction.
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid game mode: {submission.game_mode}",
+        )
     except Exception as e:
         conn.rollback()
         raise HTTPException(
