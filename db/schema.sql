@@ -48,14 +48,14 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 
 CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
     id           SERIAL PRIMARY KEY,
+    user_id      INTEGER      REFERENCES users(id) ON DELETE SET NULL,
+    game_mode    VARCHAR(32)  NOT NULL REFERENCES game_modes(name),
     player       VARCHAR(64)  NOT NULL,
     score        BIGINT      NOT NULL,
-    game_mode    VARCHAR(32)  NOT NULL REFERENCES game_modes(name),
     period       VARCHAR(16)  NOT NULL,  -- 'alltime', 'weekly', 'daily'
     period_start TIMESTAMPTZ  NOT NULL,  -- start of the window this score belongs to
     submitted_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    user_id      INTEGER      REFERENCES users(id) ON DELETE SET NULL,
-    UNIQUE (player, game_mode, period, period_start)
+    UNIQUE (user_id, game_mode, period, period_start)
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_lookup_desc
     ON leaderboard_snapshots (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC);

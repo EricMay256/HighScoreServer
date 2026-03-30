@@ -202,19 +202,12 @@ def rename(
     body:    RenameRequest,
     payload: dict = Depends(require_user),
 ) -> None:
-    """
-    Renames the authenticated user's display name.
-    Available to both guest and claimed accounts.
-    Cannot rename to a username held by a claimed account.
-    Cascades to all historical leaderboard_snapshots rows.
-    """
     user_id      = int(payload["sub"])
     new_username = body.username
 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Guard: block rename to any username owned by a claimed account
             cur.execute(
                 """
                 SELECT id FROM users
@@ -232,13 +225,6 @@ def rename(
                 "UPDATE users SET username = %s WHERE id = %s",
                 (new_username, user_id),
             )
-
-            # Cascade to historical scores
-            cur.execute(
-                "UPDATE leaderboard_snapshots SET player = %s WHERE user_id = %s",
-                (new_username, user_id),
-            )
-
             conn.commit()
     except HTTPException:
         raise

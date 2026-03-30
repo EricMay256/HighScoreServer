@@ -217,20 +217,21 @@ def submit_score(
                 period_start = get_period_start(period, at=now)
 
                 cur.execute(
-                    f"""
-                    INSERT INTO leaderboard_snapshots
-                        (player, score, game_mode, period, period_start, submitted_at, user_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (player, game_mode, period, period_start)
-                    DO UPDATE SET
-                        score        = EXCLUDED.score,
-                        submitted_at = NOW()
-                    WHERE {"leaderboard_snapshots.score > EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score < EXCLUDED.score"}
-                    RETURNING id, player, score, game_mode, period, submitted_at
-                    """,
-                    (username, submission.score, submission.game_mode,
-                     period, period_start, now, user_id),
-                )
+                            f"""
+                            INSERT INTO leaderboard_snapshots
+                                (player, score, game_mode, period, period_start, submitted_at, user_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (user_id, game_mode, period, period_start)
+                            DO UPDATE SET
+                                score        = EXCLUDED.score,
+                                player       = EXCLUDED.player,
+                                submitted_at = NOW()
+                            WHERE {"leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score"}
+                            RETURNING id, player, score, game_mode, period, submitted_at
+                            """,
+                            (username, submission.score, submission.game_mode,
+                            period, period_start, now, user_id),
+                            )
                 row = cur.fetchone()
 
                 if row and period == "alltime":
@@ -263,12 +264,12 @@ def submit_score(
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
     if last_result is None:
-        scores = get_scores(submission.game_mode, "alltime")
-        match  = next((s for s in scores if s.player == username), None)
-        if match:
-            return ScoreResponse(**match.model_dump())
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Score not found after insertion, this should not happen",
+      scores = get_scores(submission.game_mode, "alltime")
+      match  = next((s for s in scores if s.player == username), None)
+      if match:
+          return ScoreResponse(**match.model_dump())
+      raise HTTPException(
+          status_code=status.HTTP_404_NOT_FOUND,
+          detail="Score not found after insertion, this should not happen",
         )
     return last_result
