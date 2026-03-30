@@ -48,9 +48,8 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 
 CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
     id           SERIAL PRIMARY KEY,
-    user_id      INTEGER      REFERENCES users(id) ON DELETE SET NULL,
+    user_id      INTEGER      NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     game_mode    VARCHAR(32)  NOT NULL REFERENCES game_modes(name),
-    player       VARCHAR(64)  NOT NULL,
     score        BIGINT      NOT NULL,
     period       VARCHAR(16)  NOT NULL,  -- 'alltime', 'weekly', 'daily'
     period_start TIMESTAMPTZ  NOT NULL,  -- start of the window this score belongs to

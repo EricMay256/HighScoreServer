@@ -133,17 +133,18 @@ def get_scores(game_mode: str, period: str = "alltime") -> list[ScoreResponse]:
             order = "ASC" if mode_row[0] == "ASC" else "DESC"
 
             cur.execute(
-                f"""
-                SELECT id, player, score, game_mode, period, submitted_at
-                FROM leaderboard_snapshots
-                WHERE game_mode = %s
-                  AND period = %s
-                  AND period_start = %s
-                ORDER BY score {order}, submitted_at ASC, id ASC
-                LIMIT 100
-                """,
-                (game_mode, period, period_start),
-            )
+                            f"""
+                            SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at
+                            FROM leaderboard_snapshots s
+                            JOIN users u ON u.id = s.user_id
+                            WHERE s.game_mode = %s
+                              AND s.period = %s
+                              AND s.period_start = %s
+                            ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC
+                            LIMIT 100
+                            """,
+                            (game_mode, period, period_start),
+                        )
             rows = cur.fetchall()
     except HTTPException:
         raise
@@ -217,28 +218,27 @@ def submit_score(
                 period_start = get_period_start(period, at=now)
 
                 cur.execute(
-                            f"""
-                            INSERT INTO leaderboard_snapshots
-                                (player, score, game_mode, period, period_start, submitted_at, user_id)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (user_id, game_mode, period, period_start)
-                            DO UPDATE SET
-                                score        = EXCLUDED.score,
-                                player       = EXCLUDED.player,
-                                submitted_at = NOW()
-                            WHERE {"leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score"}
-                            RETURNING id, player, score, game_mode, period, submitted_at
-                            """,
-                            (username, submission.score, submission.game_mode,
-                            period, period_start, now, user_id),
-                            )
+                    f"""
+                    INSERT INTO leaderboard_snapshots
+                        (score, game_mode, period, period_start, submitted_at, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id, game_mode, period, period_start)
+                    DO UPDATE SET
+                        score        = EXCLUDED.score,
+                        submitted_at = NOW()
+                    WHERE {"leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score"}
+                    RETURNING id, score, game_mode, period, submitted_at
+                    """,
+                    (submission.score, submission.game_mode,
+                    period, period_start, now, user_id),
+                )
                 row = cur.fetchone()
 
                 if row and period == "alltime":
                     last_result = ScoreResponse(
-                        id=row[0], player=row[1], score=row[2],
-                        game_mode=row[3], period=row[4],
-                        submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
+                        id=row[0], player=username, score=row[1],
+                        game_mode=row[2], period=row[3],
+                        submitted_at=row[4].replace(tzinfo=timezone.utc).isoformat(),
                     )
 
             conn.commit()
@@ -264,12 +264,42 @@ def submit_score(
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
     if last_result is None:
-      scores = get_scores(submission.game_mode, "alltime")
-      match  = next((s for s in scores if s.player == username), None)
-      if match:
-          return ScoreResponse(**match.model_dump())
+      conn2 = get_conn()
+      try:
+          with conn2.cursor() as cur:
+              cur.execute(
+                  "SELECT sort_order FROM game_modes WHERE name = %s",
+                  (submission.game_mode,),
+              )
+              mode_row = cur.fetchone()
+              order = "ASC" if mode_row[0] == "ASC" else "DESC"
+
+              cur.execute(
+                  f"""
+                  SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at
+                  FROM leaderboard_snapshots s
+                  JOIN users u ON u.id = s.user_id
+                  WHERE s.user_id = %s
+                    AND s.game_mode = %s
+                    AND s.period = 'alltime'
+                    AND s.period_start = %s
+                  ORDER BY s.score {order}
+                  LIMIT 1
+                  """,
+                  (user_id, submission.game_mode, get_period_start("alltime")),
+              )
+              row = cur.fetchone()
+      finally:
+          release_conn(conn2)
+
+      if row:
+          return ScoreResponse(
+              id=row[0], player=row[1], score=row[2],
+              game_mode=row[3], period=row[4],
+              submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
+          )
       raise HTTPException(
-          status_code=status.HTTP_404_NOT_FOUND,
+          status_code=status.HTTP_404_NOT_INTERNAL_SERVER_ERROR,
           detail="Score not found after insertion, this should not happen",
-        )
+      )
     return last_result

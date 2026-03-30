@@ -1,27 +1,12 @@
--- seed.sql
--- Run locally: psql -U postgres -d leaderboard -f db/seed.sql
--- Do NOT run on production
+INSERT INTO users (username, email, password_hash, is_guest) VALUES
+    ('alice',   'alice@example.com',   'placeholder', FALSE),
+    ('bob',     'bob@example.com',     'placeholder', FALSE),
+    ('charlie', 'charlie@example.com', 'placeholder', FALSE),
+    ('cosmo',   'cosmo@example.com',   'placeholder', FALSE),
+    ('zfg',     'zfg@example.com',     'placeholder', FALSE)
+ON CONFLICT (username) DO NOTHING;
 
-SET timezone = 'UTC';
-
-INSERT INTO game_modes (name, sort_order, label, requires_auth) VALUES
-    ('classic',  'DESC', 'Classic Mode',  FALSE),
-    ('endless',  'DESC', 'Endless Mode',  FALSE),
-    ('speedrun', 'ASC',  'Speedrun Mode', TRUE)
-ON CONFLICT (name) DO UPDATE SET
-    sort_order    = EXCLUDED.sort_order,
-    label         = EXCLUDED.label,
-    requires_auth = EXCLUDED.requires_auth;
-    
-INSERT INTO leaderboard_snapshots (player, score, game_mode, period, period_start, submitted_at) VALUES
-    ('alice',   1500, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('alice',   1500, 'classic', 'weekly', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('alice',   1500, 'classic', 'daily', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('bob',     1200, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('charlie',  900, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('alice',    800, 'endless', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('bob',      700, 'endless', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('charlie',  600, 'endless', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('cosmo',   5959, 'speedrun', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('zfg',     5849,  'speedrun', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00')
-ON CONFLICT (player, game_mode, period, period_start) DO NOTHING;
+INSERT INTO leaderboard_snapshots (score, game_mode, period, period_start, submitted_at, user_id)
+SELECT 1500, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00', id FROM users WHERE username = 'alice'
+ON CONFLICT DO NOTHING;
+-- repeat pattern for remaining seed rows

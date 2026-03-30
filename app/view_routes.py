@@ -38,11 +38,12 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
             # sort_order comes from the DB, never from user input — safe to interpolate
             cur.execute(
                 f"""
-                SELECT player, score, submitted_at
-                FROM leaderboard_snapshots
-                WHERE game_mode = %s
-                AND period = 'alltime' 
-                ORDER BY score {sort_order}
+                SELECT u.username, s.score, s.submitted_at
+                FROM leaderboard_snapshots s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.game_mode = %s
+                  AND s.period = 'alltime'
+                ORDER BY s.score {sort_order}
                 LIMIT 100
                 """,
                 (game_mode,),
