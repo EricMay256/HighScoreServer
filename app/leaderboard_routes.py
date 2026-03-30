@@ -225,7 +225,7 @@ def submit_score(
                     DO UPDATE SET
                         score        = EXCLUDED.score,
                         submitted_at = NOW()
-                    WHERE {"leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score"}
+                    WHERE {"leaderboard_snapshots.score > EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score < EXCLUDED.score"}
                     RETURNING id, player, score, game_mode, period, submitted_at
                     """,
                     (username, submission.score, submission.game_mode,
