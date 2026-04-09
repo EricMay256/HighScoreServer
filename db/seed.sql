@@ -6,6 +6,13 @@ INSERT INTO users (username, email, password_hash, is_guest) VALUES
     ('zfg',     'zfg@example.com',     'placeholder', FALSE)
 ON CONFLICT (username) DO NOTHING;
 
+INSERT INTO game_modes (name, sort_order, label, requires_auth) VALUES
+    ('classic', 'DESC', 'Classic Mode', FALSE),
+    ('speedrun', 'ASC', 'Speedrun Mode', FALSE),
+    ('challenge', 'DESC', 'Challenge Mode', TRUE)
+ON CONFLICT (name) DO NOTHING;
+
+
 INSERT INTO leaderboard_snapshots (score, game_mode, period, period_start, submitted_at, user_id)
 SELECT 1500, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00', id FROM users WHERE username = 'alice'
 ON CONFLICT DO NOTHING;
