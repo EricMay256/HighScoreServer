@@ -53,6 +53,7 @@ def create_access_token(user_id: int, username: str, is_guest: bool) -> str:
     payload = {
         "sub": str(user_id),
         "username": username,
+        "is_guest": is_guest,
         "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         "iat": now,
     }
