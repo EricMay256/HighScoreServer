@@ -1,9 +1,9 @@
 INSERT INTO users (username, email, password_hash, is_guest) VALUES
-    ('alice',   'alice@example.com',   'placeholder', FALSE),
-    ('bob',     'bob@example.com',     'placeholder', FALSE),
-    ('charlie', 'charlie@example.com', 'placeholder', FALSE),
-    ('cosmo',   'cosmo@example.com',   'placeholder', FALSE),
-    ('zfg',     'zfg@example.com',     'placeholder', FALSE)
+    ('alice',   'alice@example.com',   '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('bob',     'bob@example.com',     '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('charlie', 'charlie@example.com', '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('cosmo',   'cosmo@example.com',   '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('zfg',     'zfg@example.com',     '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE)
 ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO game_modes (name, sort_order, label, requires_auth) VALUES
