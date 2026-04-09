@@ -100,7 +100,7 @@ def latest_scores() -> list[ScoreResponse]:
             player=row[1],
             score=row[2],
             game_mode=row[3],
-            submitted_at=row[4].replace(tzinfo=timezone.utc).isoformat(),
+            submitted_at=row[4].astimezone(timezone.utc).isoformat(),
         )
         for row in rows
     ]
@@ -174,7 +174,7 @@ def get_scores(game_mode: str, period: str = "alltime") -> LeaderboardResponse:
         ScoreResponse(
             id=row[0], player=row[1], score=row[2],
             game_mode=row[3],period=row[4],
-            submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
+            submitted_at=row[5].astimezone(timezone.utc).isoformat(),
             rank=row[6],
             percentile=round((1 - (row[6] - 1) / row[7]) * 100, 2) if row[7] > 1 else 100.0
         )
@@ -332,7 +332,7 @@ def _fetch_score_with_rank(player: str, game_mode: str, period: str = "alltime")
     return ScoreResponse(
         id=row[0], player=row[1], score=row[2],
         game_mode=row[3], period=row[4],
-        submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
+        submitted_at=row[5].astimezone(timezone.utc).isoformat(),
         rank=row[6],
         percentile=round((1 - (row[6] - 1) / total) * 100, 2) if total > 1 else 100.0,
     )
