@@ -208,7 +208,6 @@ def submit_score(
     payload:    dict = Depends(require_user),
 ) -> ScoreResponse:
     user_id  = int(payload["sub"])
-    username = payload.get("username")
     is_guest = payload["is_guest"]
 
     conn = get_conn()
@@ -278,7 +277,7 @@ def submit_score(
     except Exception as e:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
-    result = _fetch_score_with_rank(username, submission.game_mode, "alltime")
+    result = _fetch_score_with_rank(user_id, submission.game_mode, "alltime")
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -286,9 +285,11 @@ def submit_score(
         )
     return result
 
-def _fetch_score_with_rank(player: str, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
-    """Fetch a single player's score with rank and percentile computed server-side."""
-    from app.periods import get_period_start  # avoid circular at module level
+def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
+    # 
+    """Fetch a single player's score with rank and percentile computed server-side.
+    
+    period is assumed to be a valid PERIODS value; callers responsible for validation"""
     period_start = get_period_start(period)
 
     conn = get_conn()
@@ -307,6 +308,7 @@ def _fetch_score_with_rank(player: str, game_mode: str, period: str = "alltime")
                 WITH ranked AS (
                     SELECT
                         s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
+                        s.user_id,
                         RANK()  OVER (ORDER BY score {order}, s.submitted_at ASC, s.id ASC) AS rank,
                         COUNT(*) OVER ()                                                AS total_count
                     FROM leaderboard_snapshots s
@@ -317,10 +319,10 @@ def _fetch_score_with_rank(player: str, game_mode: str, period: str = "alltime")
                 )
                 SELECT id, username, score, game_mode, period, submitted_at, rank, total_count
                 FROM ranked
-                WHERE username = %s
+                WHERE user_id = %s
                 LIMIT 1
                 """,
-                (game_mode, period, period_start, player),
+                (game_mode, period, period_start, user_id),
             )
             row = cur.fetchone()
     finally:
