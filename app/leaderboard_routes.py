@@ -209,7 +209,7 @@ def submit_score(
 ) -> ScoreResponse:
     user_id  = int(payload["sub"])
     username = payload.get("username")
-    is_guest = payload.get("is_guest", False)
+    is_guest = payload["is_guest"]
 
     conn = get_conn()
     now  = datetime.now(timezone.utc)
