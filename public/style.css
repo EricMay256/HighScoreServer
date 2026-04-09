@@ -186,6 +186,13 @@ a:hover { color: var(--accent-dim); }
 .col-rank   { width: 60px;  text-align: center; font-family: var(--font-mono); }
 .col-player { font-weight: 600; letter-spacing: 0.02em; }
 .col-score  { font-family: var(--font-mono); text-align: right; width: 120px; }
+.col-percentile {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    width: 100px;
+    text-align: right;
+}
 .col-date   { font-family: var(--font-mono); font-size: 0.8rem;
               color: var(--text-muted); width: 110px; text-align: right; }
 

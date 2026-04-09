@@ -1,4 +1,5 @@
 import logging
+from app.periods import get_period_start
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -49,15 +50,21 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
             # sort_order comes from the DB, never from user input — safe to interpolate
             cur.execute(
                 f"""
-                SELECT u.username, s.score, s.submitted_at
+                SELECT
+                    u.username,
+                    s.score,
+                    s.submitted_at,
+                    RANK()   OVER (ORDER BY s.score {sort_order}, s.submitted_at ASC, s.id ASC) AS rank,
+                    COUNT(*) OVER ()                                                             AS total_count
                 FROM leaderboard_snapshots s
                 JOIN users u ON u.id = s.user_id
-                WHERE s.game_mode = %s
-                  AND s.period = 'alltime'
-                ORDER BY s.score {sort_order}
+                WHERE s.game_mode    = %s
+                  AND s.period       = 'alltime'
+                  AND s.period_start = %s
+                ORDER BY s.score {sort_order}, s.submitted_at ASC, s.id ASC
                 LIMIT 100
                 """,
-                (game_mode,),
+                (game_mode, get_period_start("alltime")),
             )
             rows = cur.fetchall()
             scores = [
@@ -66,6 +73,8 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
                     "player": row[0],
                     "score": row[1],
                     "submitted_at": row[2].strftime("%Y-%m-%d"),
+                    "percentile": round((1 - (row[3] - 1) / row[4]) * 100, 2) if row[4] > 1 else 100.0,
+
                 }
                 for i, row in enumerate(rows)
             ]

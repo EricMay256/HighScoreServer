@@ -43,6 +43,7 @@
           <th class="col-score"> Score
             {{ "▲" if sort_order == "ASC" else "▼" }}
           </th>
+          <th class="col-percentile">Percentile</th>
           <th class="col-date">Date</th>
         </tr>
       </thead>
@@ -58,6 +59,7 @@
             </td>
             <td class="col-player">{{ entry.player }}</td>
             <td class="col-score">{{ "{:,}".format(entry.score) }}</td>
+            <td class="col-percentile">{{ entry.percentile }}%</td>
             <td class="col-date">{{ entry.submitted_at }}</td>
           </tr>
         {% endfor %}
