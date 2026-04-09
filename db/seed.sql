@@ -1,24 +1,21 @@
--- seed.sql
--- Run locally: psql -U postgres -d leaderboard -f db/seed.sql
--- Do NOT run on production
+INSERT INTO users (username, email, password_hash, is_guest) VALUES
+    ('alice',   'alice@example.com',   '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('bob',     'bob@example.com',     '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('charlie', 'charlie@example.com', '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('cosmo',   'cosmo@example.com',   '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
+    ('zfg',     'zfg@example.com',     '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE)
+ON CONFLICT (username) DO NOTHING;
 
-SET timezone = 'UTC';
-
-INSERT INTO game_modes (name, sort_order, label) VALUES
-    ('classic', 'DESC', 'Classic Mode'),
-    ('endless', 'DESC', 'Endless Mode'),
-    ('speedrun', 'ASC', 'Speedrun Mode')
+INSERT INTO game_modes (name, sort_order, label, requires_auth) VALUES
+    ('classic', 'DESC', 'Classic Mode', FALSE),
+    ('speedrun', 'ASC', 'Speedrun Mode', FALSE),
+    ('challenge', 'DESC', 'Challenge Mode', TRUE)
 ON CONFLICT (name) DO NOTHING;
 
-INSERT INTO leaderboard_snapshots (player, score, game_mode, period, period_start, submitted_at) VALUES
-    ('alice',   1500, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('alice',   1500, 'classic', 'weekly', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('alice',   1500, 'classic', 'daily', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('bob',     1200, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('charlie',  900, 'classic', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('alice',    800, 'endless', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('bob',      700, 'endless', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('charlie',  600, 'endless', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('cosmo',   5959, 'speedrun', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00'),
-    ('zfg',     5849,  'speedrun', 'alltime', '2000-01-01', '2023-01-01 00:00:00+00')
-ON CONFLICT (player, game_mode, period, period_start) DO NOTHING;
+INSERT INTO leaderboard_snapshots (score, game_mode, period, period_start, submitted_at, user_id) VALUES
+    (1500, 'classic', 'alltime', '2000-01-01 00:00:00+00', '2023-01-01 00:00:00+00', (SELECT id FROM users WHERE username = 'alice')),
+    (1200, 'classic', 'alltime', '2000-01-01 00:00:00+00', '2023-01-02 00:00:00+00', (SELECT id FROM users WHERE username = 'bob')),
+    (1800, 'classic', 'alltime', '2000-01-01 00:00:00+00', '2023-01-03 00:00:00+00', (SELECT id FROM users WHERE username = 'charlie')),
+    (900,  'speedrun', 'alltime', '2000-01-01 00:00:00+00', '2023-01-04 00:00:00+00', (SELECT id FROM users WHERE username = 'cosmo')),
+    (1100, 'speedrun', 'alltime', '2000-01-01 00:00:00+00', '2023-01-05 00:00:00+00', (SELECT id FROM users WHERE username = 'zfg'))
+ON CONFLICT DO NOTHING;

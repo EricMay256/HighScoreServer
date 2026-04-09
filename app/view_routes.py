@@ -1,12 +1,24 @@
 import logging
+from app.periods import get_period_start
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from app.db import get_conn, release_conn
 
-router = APIRouter()
+router = APIRouter(tags=["views"])
 logger = logging.getLogger(__name__)
 templates = Jinja2Templates(directory="templates")
+
+@router.get("/", response_class=HTMLResponse)
+def home_view(request: Request) -> HTMLResponse:
+    """
+    Renders the home page.
+    """
+    return templates.TemplateResponse(
+        request=request,
+        name="home.html",
+        context={},
+    )
 
 @router.get("/leaderboard", response_class=HTMLResponse)
 def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLResponse:
@@ -38,14 +50,21 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
             # sort_order comes from the DB, never from user input — safe to interpolate
             cur.execute(
                 f"""
-                SELECT player, score, submitted_at
-                FROM leaderboard_snapshots
-                WHERE game_mode = %s
-                AND period = 'alltime' 
-                ORDER BY score {sort_order}
+                SELECT
+                    u.username,
+                    s.score,
+                    s.submitted_at,
+                    RANK()   OVER (ORDER BY s.score {sort_order}, s.submitted_at ASC, s.id ASC) AS rank,
+                    COUNT(*) OVER ()                                                             AS total_count
+                FROM leaderboard_snapshots s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.game_mode    = %s
+                  AND s.period       = 'alltime'
+                  AND s.period_start = %s
+                ORDER BY s.score {sort_order}, s.submitted_at ASC, s.id ASC
                 LIMIT 100
                 """,
-                (game_mode,),
+                (game_mode, get_period_start("alltime")),
             )
             rows = cur.fetchall()
             scores = [
@@ -54,6 +73,8 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
                     "player": row[0],
                     "score": row[1],
                     "submitted_at": row[2].strftime("%Y-%m-%d"),
+                    "percentile": round((1 - (row[3] - 1) / row[4]) * 100, 2) if row[4] > 1 else 100.0,
+
                 }
                 for i, row in enumerate(rows)
             ]

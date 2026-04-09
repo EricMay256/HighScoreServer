@@ -7,6 +7,7 @@ REQUIRED_ENV_VARS = (
     "DATABASE_URL",
     "REDIS_URL",
     "API_KEY",
+    "JWT_SECRET"
 )
 
 
