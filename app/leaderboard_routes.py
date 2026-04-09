@@ -255,11 +255,6 @@ def submit_score(
                     (submission.score, submission.game_mode,
                     period, period_start, now, user_id),
                 )
-                row = cur.fetchone()
-
-                if row and period == "alltime":
-                    alltime_row = row  # save raw row; rank not available here yet
-
 
             conn.commit()
     except HTTPException:
