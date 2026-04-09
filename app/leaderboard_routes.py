@@ -127,6 +127,12 @@ def get_scores(game_mode: str, period: str = "alltime") -> LeaderboardResponse:
     except Exception as e:
         logger.warning("Redis read failed, falling back to DB: %s", e)
 
+    if period not in PERIODS:
+        allowed_periods = ", ".join(PERIODS)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid period: {period}. Allowed values: {allowed_periods}",
+        )
     period_start = get_period_start(period)
 
     conn = get_conn()
