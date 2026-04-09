@@ -202,7 +202,7 @@ def submit_score(
     payload:    dict = Depends(require_user),
 ) -> ScoreResponse:
     user_id  = int(payload["sub"])
-    username = payload["username"]
+    username = payload.get("username")
     is_guest = payload.get("is_guest", False)
 
     conn = get_conn()
@@ -210,8 +210,6 @@ def submit_score(
 
     try:
         with conn.cursor() as cur:
-            last_result: ScoreResponse | None = None
-
             cur.execute(
                 "SELECT sort_order, requires_auth FROM game_modes WHERE name = %s",
                 (submission.game_mode,),
@@ -279,7 +277,7 @@ def submit_score(
     except Exception as e:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
-    result = _fetch_score_with_rank(submission.player, submission.game_mode, "alltime")
+    result = _fetch_score_with_rank(username, submission.game_mode, "alltime")
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -307,17 +305,19 @@ def _fetch_score_with_rank(player: str, game_mode: str, period: str = "alltime")
                 f"""
                 WITH ranked AS (
                     SELECT
-                        id, player, score, game_mode, period, submitted_at,
-                        RANK()  OVER (ORDER BY score {order}, submitted_at ASC, id ASC) AS rank,
+                        s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
+                        RANK()  OVER (ORDER BY score {order}, s.submitted_at ASC, s.id ASC) AS rank,
                         COUNT(*) OVER ()                                                AS total_count
-                    FROM leaderboard_snapshots
+                    FROM leaderboard_snapshots s
+                    JOIN users u ON u.id = s.user_id
                     WHERE game_mode    = %s
                       AND period       = %s
                       AND period_start = %s
                 )
-                SELECT id, player, score, game_mode, period, submitted_at, rank, total_count
+                SELECT id, username, score, game_mode, period, submitted_at, rank, total_count
                 FROM ranked
-                WHERE player = %s
+                WHERE username = %s
+                LIMIT 1
                 """,
                 (game_mode, period, period_start, player),
             )
