@@ -249,7 +249,7 @@ def submit_score(
                     DO UPDATE SET
                         score        = EXCLUDED.score,
                         submitted_at = NOW()
-                    WHERE {"leaderboard_snapshots.score < EXCLUDED.score" if order == "ASC" else "leaderboard_snapshots.score > EXCLUDED.score"}
+                    WHERE { _is_improvement_predicate(order) }
                     RETURNING id, score, game_mode, period, submitted_at
                     """,
                     (submission.score, submission.game_mode,
@@ -337,3 +337,14 @@ def _fetch_score_with_rank(player: str, game_mode: str, period: str = "alltime")
         rank=row[6],
         percentile=round((1 - (row[6] - 1) / total) * 100, 2) if total > 1 else 100.0,
     )
+
+def _is_improvement_predicate(order: str) -> str:
+    # Returns a SQL fragment: true when EXCLUDED.score is better than stored score
+    # ASC = lower score is better (ie race time)
+    # DESC = higher score is better (ie points).
+    # Update scores when new score "beats" old score 
+    # (new < stored for ASC, new > stored for DESC)
+    if order == "ASC":
+        return "EXCLUDED.score < leaderboard_snapshots.score"
+    else:
+        return "EXCLUDED.score > leaderboard_snapshots.score"
