@@ -8,6 +8,17 @@ router = APIRouter(tags=["views"])
 logger = logging.getLogger(__name__)
 templates = Jinja2Templates(directory="templates")
 
+@router.get("/", response_class=HTMLResponse)
+def home_view(request: Request) -> HTMLResponse:
+    """
+    Renders the home page.
+    """
+    return templates.TemplateResponse(
+        request=request,
+        name="home.html",
+        context={},
+    )
+
 @router.get("/leaderboard", response_class=HTMLResponse)
 def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLResponse:
     """

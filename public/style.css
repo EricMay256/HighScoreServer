@@ -189,6 +189,27 @@ a:hover { color: var(--accent-dim); }
 .col-date   { font-family: var(--font-mono); font-size: 0.8rem;
               color: var(--text-muted); width: 110px; text-align: right; }
 
+/* ── Home page ────────────────────────────────────────────────── */
+.home-container { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 2rem; }
+.home-desc { color: var(--text-muted); font-size: 0.95rem; max-width: 520px; line-height: 1.7; }
+.home-links { display: flex; gap: 1rem; flex-wrap: wrap; }
+.home-link {
+  display: inline-block;
+  padding: 0.55rem 1.4rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  transition: background var(--transition), color var(--transition);
+}
+.home-link:hover { background: rgba(232, 255, 71, 0.08); }
+.home-link--muted { border-color: var(--border); color: var(--text-muted); }
+.home-link--muted:hover { border-color: var(--accent-dim); color: var(--text); }
+              
 /* ── Responsive ───────────────────────────────────────────────── */
 @media (max-width: 600px) {
   .col-date { display: none; }
