@@ -114,7 +114,7 @@ def latest_scores() -> list[ScoreResponse]:
     except Exception as e:
         logger.warning("Redis write failed, continuing without cache: %s", e)
 
-    return results;
+    return results
 
 @router.get("/scores", response_model=LeaderboardResponse)
 def get_scores(game_mode: str, period: str = "alltime") -> LeaderboardResponse:
