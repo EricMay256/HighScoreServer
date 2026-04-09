@@ -101,6 +101,9 @@ def create_refresh_token(user_id: int) -> str:
                 (user_id, token_hash, expires_at),
             )
             conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise
     finally:
         release_conn(conn)
 
@@ -133,6 +136,9 @@ def rotate_refresh_token(raw: str) -> tuple[str, int]:
             )
             row = cur.fetchone()
             conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise
     finally:
         release_conn(conn)
 
@@ -155,5 +161,8 @@ def revoke_refresh_token(raw: str) -> None:
                 (token_hash,),
             )
             conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise
     finally:
         release_conn(conn)
