@@ -1,3 +1,7 @@
+-- seed.sql
+-- Run locally:   psql -U postgres -d leaderboard -f db/seed.sql
+-- Run on Heroku: heroku pg:psql < db/seed.sql
+
 INSERT INTO users (username, email, password_hash, is_guest) VALUES
     ('alice',   'alice@example.com',   '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),
     ('bob',     'bob@example.com',     '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE),

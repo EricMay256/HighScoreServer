@@ -1,6 +1,6 @@
 -- schema.sql
 -- Run locally:   psql -U postgres -d leaderboard -f db/schema.sql
--- Run on Heroku: heroku pg:psql < schema.sql
+-- Run on Heroku: heroku pg:psql < db/schema.sql
 
 -- If you are REALLY SURE you want to destroy all data, uncomment the 
 -- lines below and run this file. If you care about your data I hope 
