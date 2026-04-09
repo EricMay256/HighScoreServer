@@ -29,7 +29,7 @@ GRANT USAGE, SELECT ON SEQUENCE leaderboard_snapshots_id_seq TO leaderboard_app;
 -- The app doesn't need to modify game modes, so only grant SELECT
 GRANT SELECT ON TABLE game_modes TO leaderboard_app;
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE users TO leaderboard_app;
+GRANT SELECT, INSERT, UPDATE ON TABLE users TO leaderboard_app;
 GRANT USAGE, SELECT ON SEQUENCE users_id_seq TO leaderboard_app;
 
 GRANT SELECT, INSERT, DELETE ON TABLE refresh_tokens TO leaderboard_app;
