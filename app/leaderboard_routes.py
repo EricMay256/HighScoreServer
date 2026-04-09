@@ -2,7 +2,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
-from app.models import ScoreSubmission, ScoreResponse, GameModeConfig, GameModeCreate
+from app.models import LeaderboardResponse, ScoreSubmission, ScoreResponse, GameModeConfig, GameModeCreate
 from app.db import get_conn, release_conn
 from app.cache import get_cache
 from app.dependencies import require_api_key, require_user
@@ -43,13 +43,14 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
             cur.execute(
                 """
                 INSERT INTO game_modes (name, sort_order, label, requires_auth)
-                VALUES (%s, %s, %s)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                     sort_order = EXCLUDED.sort_order,
-                    label      = EXCLUDED.label
-                RETURNING name, sort_order, label
+                    label      = EXCLUDED.label,
+                    requires_auth = EXCLUDED.requires_auth
+                RETURNING name, sort_order, label, requires_auth
                 """,
-                (config.name, config.sort_order, config.label),
+                (config.name, config.sort_order, config.label, config.requires_auth),
             )
             row = cur.fetchone()
             conn.commit()
@@ -59,16 +60,16 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
     finally:
         release_conn(conn)
 
-    return GameModeConfig(name=row[0], sort_order=row[1], label=row[2])
+    return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_auth=row[3])
 
 @router.get("/scores/latest", response_model=list[ScoreResponse])
-def all_scores() -> list[ScoreResponse]:
+def latest_scores() -> list[ScoreResponse]:
     # Attempt cache read — fall through to DB if Redis is unavailable
     try:
         cache = get_cache()
-        cached = cache.get(f"{CACHE_KEY_PREFIX}")
+        cached = cache.get(f"{CACHE_KEY_PREFIX}latest")
         if cached:
-            return json.loads(cached)
+            return [ScoreResponse(**s) for s in json.loads(cached)]
     except Exception as e:
         logger.warning("Redis read failed, falling back to DB: %s", e)
 
@@ -77,11 +78,12 @@ def all_scores() -> list[ScoreResponse]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, player, score, game_mode, submitted_at
-                FROM leaderboard_snapshots
-                ORDER BY submitted_at DESC
+                SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at
+                FROM leaderboard_snapshots s
+                JOIN users u ON u.id = s.user_id
+                ORDER BY s.submitted_at DESC
                 LIMIT 100
-                """,
+                """
             )
             rows = cur.fetchall()
     except Exception as e:
@@ -92,7 +94,7 @@ def all_scores() -> list[ScoreResponse]:
     finally:
         release_conn(conn)
 
-    return [
+    results = [
         ScoreResponse(
             id=row[0],
             player=row[1],
@@ -103,14 +105,25 @@ def all_scores() -> list[ScoreResponse]:
         for row in rows
     ]
 
-@router.get("/scores", response_model=list[ScoreResponse])
-def get_scores(game_mode: str, period: str = "alltime") -> list[ScoreResponse]:
+    try:
+        get_cache().setex(
+            f"{CACHE_KEY_PREFIX}latest",
+            CACHE_TTL,
+            json.dumps([s.model_dump() for s in results]),
+        )
+    except Exception as e:
+        logger.warning("Redis write failed, continuing without cache: %s", e)
+
+    return results;
+
+@router.get("/scores", response_model=LeaderboardResponse)
+def get_scores(game_mode: str, period: str = "alltime") -> LeaderboardResponse:
     try:
         cache = get_cache()
         cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
         cached = cache.get(cache_key)
         if cached:
-            return json.loads(cached)
+            return LeaderboardResponse(**json.loads(cached))
     except Exception as e:
         logger.warning("Redis read failed, falling back to DB: %s", e)
 
@@ -134,7 +147,9 @@ def get_scores(game_mode: str, period: str = "alltime") -> list[ScoreResponse]:
 
             cur.execute(
                             f"""
-                            SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at
+                            SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
+                            RANK() OVER (ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC) AS rank,
+                            COUNT(*) OVER() AS total_count
                             FROM leaderboard_snapshots s
                             JOIN users u ON u.id = s.user_id
                             WHERE s.game_mode = %s
@@ -153,11 +168,15 @@ def get_scores(game_mode: str, period: str = "alltime") -> list[ScoreResponse]:
     finally:
         release_conn(conn)
 
+    total_count = rows[0][7] if rows else 0
+
     results = [
         ScoreResponse(
             id=row[0], player=row[1], score=row[2],
             game_mode=row[3],period=row[4],
             submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
+            rank=row[6],
+            percentile=round((1 - (row[6] - 1) / row[7]) * 100, 2) if row[7] > 1 else 100.0
         )
         for row in rows
     ]
@@ -166,12 +185,12 @@ def get_scores(game_mode: str, period: str = "alltime") -> list[ScoreResponse]:
         get_cache().setex(
             cache_key,
             CACHE_TTL,
-            json.dumps([r.model_dump() for r in results]),
+            json.dumps(LeaderboardResponse(scores=results, total_count=total_count).model_dump()),
         )
     except Exception as e:
         logger.warning("Redis write failed, continuing without cache: %s", e)
 
-    return results
+    return LeaderboardResponse(scores=results, total_count=total_count)
 
 @router.post(
     "/scores",
@@ -235,11 +254,8 @@ def submit_score(
                 row = cur.fetchone()
 
                 if row and period == "alltime":
-                    last_result = ScoreResponse(
-                        id=row[0], player=username, score=row[1],
-                        game_mode=row[2], period=row[3],
-                        submitted_at=row[4].replace(tzinfo=timezone.utc).isoformat(),
-                    )
+                    alltime_row = row  # save raw row; rank not available here yet
+
 
             conn.commit()
     except HTTPException:
@@ -263,43 +279,60 @@ def submit_score(
     except Exception as e:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
-    if last_result is None:
-      conn2 = get_conn()
-      try:
-          with conn2.cursor() as cur:
-              cur.execute(
-                  "SELECT sort_order FROM game_modes WHERE name = %s",
-                  (submission.game_mode,),
-              )
-              mode_row = cur.fetchone()
-              order = "ASC" if mode_row[0] == "ASC" else "DESC"
+    result = _fetch_score_with_rank(submission.player, submission.game_mode, "alltime")
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Score not found after insertion, this should not happen",
+        )
+    return result
 
-              cur.execute(
-                  f"""
-                  SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at
-                  FROM leaderboard_snapshots s
-                  JOIN users u ON u.id = s.user_id
-                  WHERE s.user_id = %s
-                    AND s.game_mode = %s
-                    AND s.period = 'alltime'
-                    AND s.period_start = %s
-                  ORDER BY s.score {order}
-                  LIMIT 1
-                  """,
-                  (user_id, submission.game_mode, get_period_start("alltime")),
-              )
-              row = cur.fetchone()
-      finally:
-          release_conn(conn2)
+def _fetch_score_with_rank(player: str, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
+    """Fetch a single player's score with rank and percentile computed server-side."""
+    from app.periods import get_period_start  # avoid circular at module level
+    period_start = get_period_start(period)
 
-      if row:
-          return ScoreResponse(
-              id=row[0], player=row[1], score=row[2],
-              game_mode=row[3], period=row[4],
-              submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
-          )
-      raise HTTPException(
-          status_code=status.HTTP_404_NOT_INTERNAL_SERVER_ERROR,
-          detail="Score not found after insertion, this should not happen",
-      )
-    return last_result
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT sort_order FROM game_modes WHERE name = %s", (game_mode,)
+            )
+            mode_row = cur.fetchone()
+            if mode_row is None:
+                return None
+            order = "ASC" if mode_row[0] == "ASC" else "DESC"
+
+            cur.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT
+                        id, player, score, game_mode, period, submitted_at,
+                        RANK()  OVER (ORDER BY score {order}, submitted_at ASC, id ASC) AS rank,
+                        COUNT(*) OVER ()                                                AS total_count
+                    FROM leaderboard_snapshots
+                    WHERE game_mode    = %s
+                      AND period       = %s
+                      AND period_start = %s
+                )
+                SELECT id, player, score, game_mode, period, submitted_at, rank, total_count
+                FROM ranked
+                WHERE player = %s
+                """,
+                (game_mode, period, period_start, player),
+            )
+            row = cur.fetchone()
+    finally:
+        release_conn(conn)
+
+    if row is None:
+        return None
+
+    total = row[7]
+    return ScoreResponse(
+        id=row[0], player=row[1], score=row[2],
+        game_mode=row[3], period=row[4],
+        submitted_at=row[5].replace(tzinfo=timezone.utc).isoformat(),
+        rank=row[6],
+        percentile=round((1 - (row[6] - 1) / total) * 100, 2) if total > 1 else 100.0,
+    )
