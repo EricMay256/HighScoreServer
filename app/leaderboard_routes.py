@@ -118,9 +118,9 @@ def latest_scores() -> list[ScoreResponse]:
 
 @router.get("/scores", response_model=LeaderboardResponse)
 def get_scores(game_mode: str, period: str = "alltime") -> LeaderboardResponse:
+    cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
     try:
         cache = get_cache()
-        cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
         cached = cache.get(cache_key)
         if cached:
             return LeaderboardResponse(**json.loads(cached))
