@@ -24,7 +24,7 @@ class ScoreResponse(BaseModel):
     player:       str
     score:        int
     game_mode:    str
-    period:       str | None
+    period:       str | None = None
     submitted_at: str  # ISO 8601 string — easier to serialize across the boundary
     rank:         int | None = None  # Optional, only included in certain responses
     percentile:   float | None = None #0.0 to 100.0, two decimal places
