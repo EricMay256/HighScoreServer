@@ -40,7 +40,8 @@ C# client and have a fully functional leaderboard with auth, score history, and 
   per-mode tabs, rank, percentile, and medal highlights for the top three.
 - **Unity C# client** — drop-in `LeaderboardService.cs` with coroutine-based
   API calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
-  errors without exceptions.
+  errors without exceptions. Handles the full auth lifecycle including silent
+  guest login, token storage via PlayerPrefs, and account claiming.
 
 ---
 
@@ -91,8 +92,7 @@ automatically — neither has sort logic hardcoded.
 FastAPI supports async route handlers, but the psycopg2 driver is synchronous.
 Running blocking DB calls inside `async def` handlers would block the event loop,
 making async worse than sync in practice. All routes are `def` (synchronous),
-which is honest about the blocking nature of the DB calls and avoids a subtle
-footgun.
+which is honest about the blocking nature of the DB calls.
 
 The migration path if concurrency becomes a bottleneck is psycopg2 → asyncpg
 directly, keeping raw SQL. This is deferred until there is a concrete concurrency
@@ -196,7 +196,7 @@ All API routes are prefixed with `/api`.
 |---|---|---|---|
 | GET | `/scores` | None | Fetch leaderboard for a game mode and period |
 | POST | `/scores` | Bearer | Submit a score |
-| GET | `/scores/latest` | None | Fetch the 100 most recently submitted scores |
+| GET | `/latest` | None | Fetch the 100 most recently submitted scores |
 | GET | `/game_modes` | None | List all registered game modes |
 | POST | `/game_modes` | API Key | Create or update a game mode |
 
@@ -221,34 +221,94 @@ new score is an improvement. Returns the player's current best with rank and per
 
 ## Unity Client
 
-The `UnityClient/` directory contains a drop-in C# leaderboard client.
+The `UnityClient/` directory contains a drop-in C# leaderboard client for Unity 6.
 
 | File | Purpose |
 |---|---|
 | `LeaderboardService.cs` | All HTTP communication with the API |
 | `LeaderboardModels.cs` | Typed request/response models |
 | `LeaderboardConfig.cs` | ScriptableObject for base URL and API key configuration |
-| `LeaderboardExample.cs` | Minimal usage example |
+| `LeaderboardExample.cs` | Annotated usage example covering the full auth and score lifecycle |
 
 ### Setup
 1. Copy the `UnityClient/` files into your Unity project
-2. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
-3. Set the base URL and API key in the Inspector
-4. Gitignore the config asset — it contains your API key
+2. Install [Newtonsoft.Json for Unity] via Package Manager
+3. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
+4. Set the base URL to your Heroku app URL (no trailing slash)
+5. Gitignore the config asset — it contains your server URL
 
-### Usage
+### Authentication lifecycle
+
+The client handles auth silently. On first launch, call `GuestLogin()` — a guest
+account is created server-side and tokens are stored in `PlayerPrefs`. On every
+subsequent launch the stored token is used directly. No login screen is required
+to submit scores.
+
+Guest accounts can be upgraded to claimed accounts at any time via `Claim()`.
+All existing scores transfer automatically since they are already associated with
+the user's ID server-side.
+
 ```csharp
-// Fetch scores
-StartCoroutine(_service.GetScores("classic", OnScoresReceived));
+private void Start()
+{
+    if (!_service.IsAuthenticated)
+        StartCoroutine(_service.GuestLogin(OnGuestLogin));
+}
 
-// Submit a score (requires authentication)
-StartCoroutine(_service.SubmitScore(playerName, score, "classic", OnScoreSubmitted));
-
-// Guest authentication on first launch
-StartCoroutine(_service.GuestLogin(OnGuestLogin));
+// Upgrade to a claimed account from a registration form
+public void ClaimAccount(string email, string password)
+{
+    StartCoroutine(_service.Claim(email, password, OnClaimed));
+}
 ```
 
----
+### Submitting scores
+
+Score submission requires an authenticated user. The player name is derived
+server-side from the Bearer token — callers supply only the score and game mode.
+The server upserts — if the player already has a better score, the existing
+record is preserved and returned.
+
+```csharp
+public void OnGameOver(int finalScore)
+{
+    StartCoroutine(_service.SubmitScore(finalScore, "classic", OnScoreSubmitted));
+}
+
+private void OnScoreSubmitted(ApiResult<ScoreResponse> result)
+{
+    if (!result.Success)
+    {
+        Debug.LogWarning($"[Leaderboard] {result.Error}");
+        return;
+    }
+    Debug.Log($"Rank #{result.Data.Rank} — best score: {result.Data.Score}");
+}
+```
+
+### Fetching the leaderboard
+
+```csharp
+// period is one of: "alltime", "daily", "weekly"
+StartCoroutine(_service.GetScores("classic", OnScoresReceived, period: "weekly"));
+
+private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
+{
+    if (!result.Success) return;
+
+    foreach (ScoreResponse entry in result.Data.Scores)
+        Debug.Log($"#{entry.Rank} {entry.Player}: {entry.Score} ({entry.Percentile:F1}%)");
+}
+```
+
+### Known limitations
+- **Token expiry** — access tokens expire after 60 minutes. If a request fails
+  with a 401, call `RefreshTokens()` and retry. Automatic retry on 401 is a
+  known future improvement.
+- **Token storage** — tokens are stored in `PlayerPrefs`, which is not encrypted.
+  This is standard Unity practice for session tokens. The correct long-term
+  answer is server-side revocation (JTI denylist) rather than client-side
+  encryption.
 
 ## Project Structure
 HighScoreServer/
