@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     try:
       init_cache()
     except Exception as e:
-       logger.warning("Redis unavailable at startup, cache disabled: %s", e)
+      logger.warning("Redis unavailable at startup, cache disabled: %s", e)
     yield
     close_db()
     close_cache()
