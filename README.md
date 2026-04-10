@@ -31,6 +31,7 @@ C# client and have a fully functional leaderboard with auth, score history, and 
 - **Period bucketing** — scores are tracked across three independent windows:
   all-time, weekly, and daily. A single submission upserts into all three periods
   simultaneously.
+  **Rate limiting** — many API endpoints are rate limited per client IP via slowapi and Redis. Write endpoints and auth routes are more tightly constrained than reads to reflect their relative abuse potential. Limits degrade gracefully to in-process memory if Redis is unavailable, keeping the API live rather than failing closed.
 - **Flexible sort order** — game modes are individually configured as highest-score
   or lowest-score wins. The same API and client code handles both — a speedrun mode
   and a points mode are treated symmetrically.
@@ -42,6 +43,7 @@ C# client and have a fully functional leaderboard with auth, score history, and 
   API calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
   errors without exceptions. Handles the full auth lifecycle including silent
   guest login, token storage via PlayerPrefs, and account claiming.
+  **Error tracking** — Sentry integration captures unhandled exceptions with full request context. Configured to sample 20% of requests for performance tracing without saturating the free tier. The DSN is treated as optional monitoring config so the app starts cleanly in environments where Sentry isn't provisioned.
 
 ---
 
@@ -382,10 +384,6 @@ Guest accounts with scores are intentionally preserved.
 
 - **Access token revocation** — `# DENYLIST HOOK` comments mark the insertion points.
   Requires a Redis JTI denylist checked on every decode.
-- **Rate limiting** — `slowapi` integration is the intended approach, with
-  `get_real_ip` already in place to handle Heroku's `X-Forwarded-For` header correctly.
-- **Sentry** — error tracking via `sentry-sdk[fastapi]`. DSN is treated as optional
-  monitoring config rather than a required environment variable.
 - **Async migration** — psycopg2 → asyncpg if concurrency becomes a bottleneck.
   Neither SQLAlchemy nor Alembic are in scope for this migration.
 - **Guest cleanup for accounts with scores** — scoreless guests are pruned automatically.
