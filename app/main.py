@@ -7,6 +7,10 @@ from app.env import load_environment, validate_environment
 from app.leaderboard_routes import router as leaderboard_router
 from app.view_routes import router as view_router
 from app.auth_routes import router as auth_router
+import os
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 
 import logging
 logger = logging.getLogger(__name__)
@@ -15,11 +19,21 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     load_environment()
     validate_environment()
+
+    dsn = os.environ.get("SENTRY_DSN")
+    if dsn:
+        sentry_sdk.init(
+            dsn=dsn,
+            integrations=[
+                StarletteIntegration(),
+                FastApiIntegration(),
+            ],
+            traces_sample_rate=0.2,  # capture 20% of requests as performance traces
+            send_default_pii=False,  # don't ship request headers/bodies by default
+        )
+
     init_db()
-    try:
-      init_cache()
-    except Exception as e:
-      logger.warning("Redis unavailable at startup, cache disabled: %s", e)
+    init_cache()
     yield
     close_db()
     close_cache()
