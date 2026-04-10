@@ -1,7 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-import app
 from app.db import init_db, close_db
 from app.cache import init_cache, close_cache
 from app.env import load_environment, validate_environment
