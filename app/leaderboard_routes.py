@@ -62,7 +62,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 
     return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_auth=row[3])
 
-@router.get("/scores/latest", response_model=list[ScoreResponse])
+@router.get("/latest", response_model=list[ScoreResponse])
 def latest_scores() -> list[ScoreResponse]:
     # Attempt cache read — fall through to DB if Redis is unavailable
     try:
