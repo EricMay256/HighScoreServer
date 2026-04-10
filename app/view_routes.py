@@ -69,14 +69,13 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
             rows = cur.fetchall()
             scores = [
                 {
-                    "rank": i + 1,
+                    "rank": row[3],
                     "player": row[0],
                     "score": row[1],
                     "submitted_at": row[2].strftime("%Y-%m-%d"),
                     "percentile": round((1 - (row[3] - 1) / row[4]) * 100, 2) if row[4] > 1 else 100.0,
-
                 }
-                for i, row in enumerate(rows)
+                for row in rows
             ]
     except Exception as e:
         logger.error("DB error in leaderboard_view: %s", e)
