@@ -27,7 +27,7 @@ namespace UBear.Leaderboard
     public class LeaderboardService : MonoBehaviour
     {
         [Header("Configuration")]
-        [Tooltip("Responsible for base URL and API Key. Create via Assets → Create → UBear → LeaderboardConfig.")]
+        [Tooltip("Responsible for the leaderboard base URL. Create via Assets → Create → UBear → LeaderboardConfig.")]
         [SerializeField] private LeaderboardConfig _config;
 
         private const int TimeoutSeconds = 10;

@@ -341,7 +341,7 @@ HighScoreServer/
 │   ├── conftest.py           # Fixtures: test client, DB cleanup, cache disable
 │   ├── test_periods.py       # Unit tests for period bucketing
 │   ├── test_api_scores.py    # Integration tests for leaderboard routes
-│   ├── test_auth.py          # Integration tests for auth routes
+│   ├── test_api_auth.py      # Integration tests for auth routes
 │   └── test_prune_guests.py  # Integration tests for guest pruning
 ├── UnityClient/
 │   ├── LeaderboardService.cs
