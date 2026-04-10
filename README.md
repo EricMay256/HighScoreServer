@@ -43,7 +43,7 @@ C# client and have a fully functional leaderboard with auth, score history, and 
   API calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
   errors without exceptions. Handles the full auth lifecycle including silent
   guest login, token storage via PlayerPrefs, and account claiming.
-  **Error tracking** — Sentry integration captures unhandled exceptions with full request context. Configured to sample 20% of requests for performance tracing without saturating the free tier. The DSN is treated as optional monitoring config so the app starts cleanly in environments where Sentry isn't provisioned.
+- **Error tracking** — Sentry integration captures unhandled exceptions with full request context. Configured to sample 20% of requests for performance tracing without saturating the free tier. The DSN is treated as optional monitoring config so the app starts cleanly in environments where Sentry isn't provisioned.
 
 ---
 
