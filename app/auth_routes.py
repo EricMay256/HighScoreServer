@@ -209,10 +209,7 @@ def rename(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT id FROM users
-                WHERE username = %s AND is_guest = FALSE
-                """,
+                "SELECT id FROM users WHERE username = %s",
                 (new_username,),
             )
             if cur.fetchone() is not None:
