@@ -1,4 +1,5 @@
 import os
+os.environ["RATE_LIMIT_ENABLED"] = "false"  # disable rate limiter for tests
 import pytest
 import psycopg2
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ def client(configure_test_env):
     FastAPI's lifespan runs on first request, initializing the DB pool
     against TEST_DATABASE_URL.
     """
+    os.environ["RATE_LIMITER_ENABLED"] = "false"  # disable rate limiter for tests
     with TestClient(app) as c:
         yield c
 

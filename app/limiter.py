@@ -2,6 +2,7 @@ import logging
 import os
 
 from slowapi import Limiter
+from slowapi.util import get_remote_address
 from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,8 @@ def _make_limiter() -> Limiter:
     or dynos, so limits are per-process in degraded mode. Acceptable — the
     alternative is taking the API down when Redis has a blip.
     """
+    enabled = os.environ.get("RATE_LIMIT_ENABLED", "true").lower() != "false"
+    
     redis_url = os.environ.get("REDIS_URL")
     if redis_url:
         try:
@@ -38,12 +41,18 @@ def _make_limiter() -> Limiter:
             client = redis_lib.from_url(redis_url)
             client.ping()
             logger.info("Rate limiter using Redis storage: %s", redis_url)
-            return Limiter(key_func=get_real_ip, storage_uri=redis_url)
+            return Limiter(key_func=get_real_ip, storage_uri=redis_url, enabled=enabled)
         except Exception as e:
             logger.warning(
                 "Redis unavailable for rate limiter, falling back to memory: %s", e
             )
-    return Limiter(key_func=get_real_ip, storage_uri="memory://")
+    return Limiter(key_func=get_real_ip, storage_uri="memory://", enabled=enabled)
 
 
 limiter = _make_limiter()
+
+
+limiter = Limiter(
+    key_func=get_real_ip,
+    enabled=os.environ.get("RATE_LIMIT_ENABLED", "true").lower() != "false",
+)
