@@ -209,22 +209,10 @@ def rename(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM users WHERE username = %s",
-                (new_username,),
-            )
-            if cur.fetchone() is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Username is already taken",
-                )
-
-            cur.execute(
                 "UPDATE users SET username = %s WHERE id = %s",
                 (new_username, user_id),
             )
             conn.commit()
-    except HTTPException:
-        raise
     except Exception as e:
         conn.rollback()
         if hasattr(e, "pgcode") and e.pgcode == "23505":
