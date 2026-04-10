@@ -8,13 +8,18 @@ from app.leaderboard_routes import router as leaderboard_router
 from app.view_routes import router as view_router
 from app.auth_routes import router as auth_router
 
+import logging
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_environment()
     validate_environment()
     init_db()
-    init_cache()
+    try:
+      init_cache()
+    except Exception as e:
+       logger.warning("Redis unavailable at startup, cache disabled: %s", e)
     yield
     close_db()
     close_cache()
