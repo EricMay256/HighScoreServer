@@ -7,19 +7,46 @@ from app.env import load_environment, validate_environment
 from app.leaderboard_routes import router as leaderboard_router
 from app.view_routes import router as view_router
 from app.auth_routes import router as auth_router
+import os
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from slowapi.middleware import SlowAPIMiddleware
+from app.limiter import limiter
 
 import logging
 logger = logging.getLogger(__name__)
+
+async def _custom_rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"Rate limit exceeded: {exc.detail}"},
+        headers=dict(exc.headers) if exc.headers else {},
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_environment()
     validate_environment()
+
+    dsn = os.environ.get("SENTRY_DSN")
+    if dsn:
+        sentry_sdk.init(
+            dsn=dsn,
+            integrations=[
+                StarletteIntegration(),
+                FastApiIntegration(),
+            ],
+            traces_sample_rate=0.2,  # capture 20% of requests as performance traces
+            send_default_pii=False,  # don't ship request headers/bodies by default
+        )
+
     init_db()
-    try:
-      init_cache()
-    except Exception as e:
-       logger.warning("Redis unavailable at startup, cache disabled: %s", e)
+    init_cache()
     yield
     close_db()
     close_cache()
@@ -27,6 +54,11 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Leaderboard API", lifespan=lifespan)
+
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
+    app.add_middleware(SlowAPIMiddleware)
+
     # 1. View (Jinja2) routes — no prefix
     app.include_router(view_router)
     # 2. Leaderboard routes

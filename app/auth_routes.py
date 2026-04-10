@@ -2,6 +2,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import JWTError
 from pydantic import BaseModel, EmailStr, Field
+from app.limiter import limiter
+from starlette.requests import Request
 
 from app.auth import (
     create_access_token,
@@ -51,7 +53,8 @@ class TokenResponse(BaseModel):
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 @router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def guest_login() -> TokenResponse:
+@limiter.limit("5/minute")
+def guest_login(request: Request) -> TokenResponse:
     """
     Creates a guest account with a generated username.
     Retries on the rare username collision (token_hex(4) = 4 billion combinations).
@@ -93,7 +96,8 @@ def guest_login() -> TokenResponse:
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def register(body: RegisterRequest) -> TokenResponse:
+@limiter.limit("5/minute")
+def register(request: Request, body: RegisterRequest) -> TokenResponse:
     password_hash = hash_password(body.password)
     conn          = get_conn()
     try:
@@ -127,7 +131,8 @@ def register(body: RegisterRequest) -> TokenResponse:
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest) -> TokenResponse:
+@limiter.limit("10/minute")
+def login(request: Request, body: LoginRequest) -> TokenResponse:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -209,22 +214,10 @@ def rename(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM users WHERE username = %s",
-                (new_username,),
-            )
-            if cur.fetchone() is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Username is already taken",
-                )
-
-            cur.execute(
                 "UPDATE users SET username = %s WHERE id = %s",
                 (new_username, user_id),
             )
             conn.commit()
-    except HTTPException:
-        raise
     except Exception as e:
         conn.rollback()
         if hasattr(e, "pgcode") and e.pgcode == "23505":

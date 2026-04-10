@@ -57,7 +57,7 @@ def prune_guests(prune_days: int = 30) -> int:
                 """
                 DELETE FROM users
                 WHERE is_guest    = TRUE
-                  AND created_at  < NOW() - INTERVAL '%s days'
+                  AND created_at  < NOW() - (%s * INTERVAL '1 day')
                   AND NOT EXISTS (
                       SELECT 1
                       FROM leaderboard_snapshots s
