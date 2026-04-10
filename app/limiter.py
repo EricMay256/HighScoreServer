@@ -40,7 +40,7 @@ def _make_limiter() -> Limiter:
             import redis as redis_lib
             client = redis_lib.from_url(redis_url)
             client.ping()
-            logger.info("Rate limiter using Redis storage: %s", redis_url)
+            logger.info("Rate limiter using Redis storage" )
             return Limiter(key_func=get_real_ip, storage_uri=redis_url, enabled=enabled)
         except Exception as e:
             logger.warning(
