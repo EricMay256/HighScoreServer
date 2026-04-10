@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+import app
 from app.db import init_db, close_db
 from app.cache import init_cache, close_cache
 from app.env import load_environment, validate_environment
@@ -11,9 +12,21 @@ import os
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from slowapi.middleware import SlowAPIMiddleware
+from app.limiter import limiter
 
 import logging
 logger = logging.getLogger(__name__)
+
+async def _custom_rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"Rate limit exceeded: {exc.detail}"},
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,6 +54,11 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Leaderboard API", lifespan=lifespan)
+
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
+    app.add_middleware(SlowAPIMiddleware)
+
     # 1. View (Jinja2) routes — no prefix
     app.include_router(view_router)
     # 2. Leaderboard routes
