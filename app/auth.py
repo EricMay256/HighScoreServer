@@ -113,15 +113,20 @@ def create_refresh_token(user_id: int) -> str:
 def rotate_refresh_token(raw: str) -> tuple[str, int]:
     """
     Validates an incoming refresh token, deletes it (one-time use),
-    and returns a fresh raw token + the associated user_id.
+    inserts its replacement, and returns the new raw token + user_id.
 
-    Raises ValueError if the token is invalid or expired.
-
+    The delete and insert run in a single transaction on one connection,
+    so a failure after the delete cannot silently log the user out.
     Rotation means a stolen refresh token can only be used once before
     the legitimate client's next refresh invalidates it.
+
+    Raises ValueError if the token is invalid or expired.
     """
-    token_hash = _hash_token(raw)
-    now = datetime.now(timezone.utc)
+    token_hash  = _hash_token(raw)
+    now         = datetime.now(timezone.utc)
+    new_raw     = secrets.token_urlsafe(32)
+    new_hash    = _hash_token(new_raw)
+    new_expires = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
     conn = get_conn()
     try:
@@ -135,18 +140,25 @@ def rotate_refresh_token(raw: str) -> tuple[str, int]:
                 (token_hash, now),
             )
             row = cur.fetchone()
+            if row is None:
+                conn.rollback()
+                raise ValueError("Invalid or expired refresh token")
+
+            user_id = row[0]
+            cur.execute(
+                """
+                INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+                VALUES (%s, %s, %s)
+                """,
+                (user_id, new_hash, new_expires),
+            )
             conn.commit()
-    except Exception as e:
+    except Exception:
         conn.rollback()
         raise
     finally:
         release_conn(conn)
 
-    if row is None:
-        raise ValueError("Invalid or expired refresh token")
-
-    user_id = row[0]
-    new_raw = create_refresh_token(user_id)
     return new_raw, user_id
 
 
