@@ -11,6 +11,6 @@ dist/
 build/
 
 # Frontend (Node/Vite)
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+leaderboard-frontend/node_modules/
+leaderboard-frontend/dist/
+leaderboard-frontend/.vite/
