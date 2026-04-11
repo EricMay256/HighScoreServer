@@ -47,12 +47,3 @@ def _make_limiter() -> Limiter:
                 "Redis unavailable for rate limiter, falling back to memory: %s", e
             )
     return Limiter(key_func=get_real_ip, storage_uri="memory://", enabled=enabled)
-
-
-limiter = _make_limiter()
-
-
-limiter = Limiter(
-    key_func=get_real_ip,
-    enabled=os.environ.get("RATE_LIMIT_ENABLED", "true").lower() != "false",
-)
