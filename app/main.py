@@ -7,6 +7,8 @@ from app.env import load_environment, validate_environment
 from app.leaderboard_routes import router as leaderboard_router
 from app.view_routes import router as view_router
 from app.auth_routes import router as auth_router
+from app.limiter import limiter
+from app import spa_routes
 import os
 import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
@@ -16,7 +18,6 @@ from slowapi.errors import RateLimitExceeded
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from slowapi.middleware import SlowAPIMiddleware
-from app.limiter import limiter
 
 import logging
 logger = logging.getLogger(__name__)
@@ -65,7 +66,11 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard_router, prefix="/api/leaderboard")
     # 3. Authentication routes
     app.include_router(auth_router, prefix="/api/auth")
-    # 4. Static files (served at root, so this goes last to avoid shadowing API and view routes)
+    # 4. SPA assets mount — MUST come before the SPA catch-all router below.
+    spa_routes.mount_spa_assets(app)
+    # 5. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.
+    app.include_router(spa_routes.router)
+    # 6. Static files (served at root, so this goes last to avoid shadowing API and view routes)
     app.mount("/", StaticFiles(directory="public", html=True), name="public")
     return app
 
