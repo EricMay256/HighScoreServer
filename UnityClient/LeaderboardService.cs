@@ -82,6 +82,32 @@ namespace UBear.Leaderboard
         }
 
         /// <summary>
+        /// Ensures the client has a valid access token before proceeding.
+        ///
+        /// If a token is already stored, the callback is invoked immediately with
+        /// a successful result — no network call is made. If no token exists, falls
+        /// through to GuestLogin() and forwards its outcome as ApiResult&lt;bool&gt;.
+        ///
+        /// Use this in Start() or any entry point where you need auth before making
+        /// game API calls, without caring whether the session is new or resumed.
+        /// </summary>
+        public IEnumerator EnsureAuthenticated(Action<ApiResult<bool>> callback)
+        {
+            if (IsAuthenticated)
+            {
+                callback(ApiResult<bool>.Ok(true));
+                yield break;
+            }
+
+            yield return GuestLogin(result =>
+            {
+                callback(result.Success
+                    ? ApiResult<bool>.Ok(true)
+                    : ApiResult<bool>.Fail(result.Error));
+            });
+        }
+
+        /// <summary>
         /// Logs in with username and password. Stores the returned tokens.
         /// </summary>
         public IEnumerator Login(
