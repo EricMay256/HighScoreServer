@@ -1,6 +1,6 @@
 # HighScoreServer
 
-A production-deployed game leaderboard backend built with FastAPI, PostgreSQL, and Redis.
+A production-deployed game leaderboard backend built with FastAPI and PostgreSQL, with optional Redis support for caching and rate limiting.
 Designed as a reusable backend for Unity games — any project can drop in the included
 C# client and have a fully functional leaderboard with auth and score history visible through a shared public web view.
 
@@ -14,11 +14,9 @@ C# client and have a fully functional leaderboard with auth and score history vi
 flowchart LR
     Unity["Unity Client<br/>(C#)"]
     Browser["Web Browser"]
-    subgraph Heroku["Heroku"]
+    subgraph Heroku["Heroku (single dyno)"]
         API["FastAPI<br/>api_routes + view_routes"]
-        Backend{{"Cache backend<br/>(CACHE_BACKEND env)"}}
-        Memory["In-process memory<br/>(active, single dyno)"]
-        Redis[("Redis<br/>(available, dormant)")]
+        Cache["In-process TTL cache<br/>(cachetools)"]
         Postgres[("PostgreSQL")]
     end
     Sentry["Sentry<br/>(error monitoring)"]
@@ -26,21 +24,19 @@ flowchart LR
     Browser -->|server-rendered HTML<br/>Jinja2| API
     Browser -->|SPA shell + JSON<br/>React/Vite| API
     API --> Postgres
-    API --> Backend
-    Backend ---|default| Memory
-    Backend -.->|when enabled| Redis
+    API --> Cache
     API -.->|errors| Sentry
     classDef external fill:#e8e8e8,stroke:#888,color:#000
     classDef infra fill:#d4e6f1,stroke:#2874a6,color:#000
     classDef ephemeral fill:#fcf3cf,stroke:#b9770e,color:#000
-    classDef dormant fill:#eaeaea,stroke:#888,color:#555,stroke-dasharray: 4 3
     classDef monitoring fill:#fdebd0,stroke:#b9770e,color:#000
     class Unity,Browser external
     class API,Postgres infra
-    class Memory ephemeral
-    class Redis dormant
+    class Cache ephemeral
     class Sentry monitoring
 ```
+
+> **Cache backend.** The deployed configuration uses an in-process TTL cache (`CACHE_BACKEND=memory`). Redis is supported by the same cache interface and can be re-enabled by provisioning the Heroku Redis add-on and setting `CACHE_BACKEND=redis` — no code changes required. At a single dyno with a single worker, the two backends are behaviorally equivalent, so the add-on was removed to eliminate cost.
 
 
 ## Features
@@ -51,10 +47,11 @@ flowchart LR
 - **Period bucketing** — scores are tracked across three independent windows:
   all-time, weekly, and daily. A single submission upserts into all three periods
   simultaneously.
-- **Rate limiting** — many API endpoints are rate limited per client IP via slowapi  
-  and Redis. Write endpoints and auth routes are more tightly constrained than reads 
-  to reflect their relative abuse potential. Limits degrade gracefully to in-process 
-  memory if Redis is unavailable, keeping the API live rather than failing closed.
+- **Rate limiting** — many API endpoints are rate limited per client IP via slowapi.
+  Write endpoints and auth routes are more tightly constrained than reads to reflect
+  their relative abuse potential. The deployed configuration uses slowapi's in-process
+  memory backend; a Redis backend is supported and can be enabled by provisioning the
+  add-on, which is the correct path if the API ever runs on more than one dyno.
 - **Flexible sort order** — game modes are individually configured as highest-score
   or lowest-score wins. The same API and client code handles both — a speedrun mode
   and a points mode are treated symmetrically.
@@ -77,7 +74,7 @@ flowchart LR
 ### Prerequisites
 - Python 3.12+
 - PostgreSQL
-- Redis (or Memurai on Windows) — optional, caching and rate limiting fall back to in-process memory
+- Redis (or Memurai on Windows) — optional; caching and rate limiting use in-process memory by default and only need Redis if you want to exercise that code path locally
 
 ### Steps
 
@@ -294,7 +291,7 @@ sequenceDiagram
     participant U as Unity Client
     participant API as FastAPI
     participant DB as PostgreSQL
-    participant R as Redis
+    participant C as Cache
     U->>API: POST /api/leaderboard/scores {game_mode, score}<br/>Bearer access_token
     Note right of API: rate limited · require_user
     API->>DB: SELECT sort_order, requires_auth<br/>FROM game_modes WHERE name = ?
@@ -308,79 +305,26 @@ sequenceDiagram
         end
         API->>DB: COMMIT
         loop for period in (alltime, daily, weekly)
-            API->>R: DELETE leaderboard:{mode}:{period}
+            API->>C: DELETE leaderboard:{mode}:{period}
         end
-        Note right of R: Cache miss forces next read<br/>to rebuild from DB
+        Note right of C: Cache miss forces next read<br/>to rebuild from DB
         API->>DB: SELECT RANK() OVER (...), COUNT(*) OVER ()<br/>for submitted user
         API-->>U: 201 ScoreResponse<br/>{id, score, rank, percentile, ...}
     end
 ```
 
-The cache participant is shown as Redis for clarity; in practice the cache
-backend is selected via `CACHE_BACKEND` and falls back to in-process memory,
-as shown in the [Architecture Overview](#architecture-overview). Both backends
-honor the same key-delete contract.
+The cache participant is labeled "Cache" in the diagram because it's backend-agnostic — 
+the deployed configuration uses an in-process TTL cache, and Redis is supported by the 
+same interface (see [Architecture Overview](#architecture-overview)). Both backends honor 
+the same key-delete contract.
 
 
 ## Architecture Decisions
 
-These are the non-obvious choices worth understanding if you're reading the code.
-
-### Guest accounts over nullable foreign keys
-The common approach to anonymous score submission is a nullable `user_id` on the
-score table. This creates a class of scores with no owner and complicates every
-query that joins to users.
-
-Instead, every score submission requires an authenticated user — but authentication
-is silent. On first launch the Unity client calls `POST /api/auth/guest`, receives
-a JWT, and stores it in PlayerPrefs. From that point the client is indistinguishable
-from a registered user at the API layer. Guest accounts can be upgraded to claimed
-accounts at any time; all scores transfer automatically since they're already
-associated with the user's ID.
-
-### Raw SQL over ORM
-The leaderboard queries use window functions (`RANK()`, `COUNT(*) OVER()`),
-period-bucketed upserts with conditional updates, and dynamic `ORDER BY` direction.
-These resist ORM abstraction and would require `text()` fallbacks anyway. Raw SQL
-with psycopg2 is more explicit, easier to reason about, and keeps the query logic
-visible rather than hidden behind a query builder.
-
-SQLAlchemy and Alembic are intentionally absent. The primary value of SQLAlchemy
-at this scale is autogenerated migrations, which requires the ORM to be aware of
-your models. Without the ORM, Alembic is just a migration runner with setup cost.
-Schema changes are managed via `db/schema.sql` directly.
-
-### Period bucketing via upsert
-Each score submission writes to three rows simultaneously — one per period
-(`alltime`, `daily`, `weekly`) — using `ON CONFLICT DO UPDATE WHERE` to preserve
-the best score in each window. The `period_start` column anchors each row to its
-time window, so when a new daily or weekly period begins, fresh rows are inserted
-naturally without any cleanup job or scheduled reset.
-
-### Ascending and descending sort order
-Game modes declare their sort order (`ASC` or `DESC`) in the `game_modes` table.
-A speedrun mode where lower times win and a points mode where higher scores win
-are both first-class citizens. Sort direction is fetched from the DB before
-every leaderboard query and used to construct the correct `ORDER BY` and
-improvement predicate for upserts. The Unity client and web view adapt
-automatically — neither has sort logic hardcoded.
-
-### Sync over async
-FastAPI supports async route handlers, but the psycopg2 driver is synchronous.
-Running blocking DB calls inside `async def` handlers would block the event loop,
-making async worse than sync in practice. All routes are `def` (synchronous),
-which is honest about the blocking nature of the DB calls.
-
-The migration path if concurrency becomes a bottleneck is psycopg2 → asyncpg
-directly, keeping raw SQL. This is deferred until there is a concrete concurrency
-problem rather than in anticipation of one.
-
-### JWT + opaque refresh tokens
-Access tokens are short-lived JWTs (60 minutes, HS256). Refresh tokens are
-cryptographically random opaque strings stored as SHA-256 hashes in the database.
-Refresh tokens are single-use — each refresh rotates to a new token, invalidating
-the previous one. This limits the window of a stolen refresh token to one
-rotation cycle.
+The non-obvious architectural choices in this project — and the reasoning
+behind them — are documented as [Architecture Decision Records](docs/adr/)
+in the Nygard format. Start with the [index](docs/adr/README.md) for a
+one-line summary of each decision.
 
 
 ## Unity Client
@@ -527,9 +471,12 @@ HighScoreServer/
 ```bash
 heroku create your-app-name
 heroku addons:create heroku-postgresql:essential-0
-heroku addons:create heroku-redis:mini
 heroku config:set API_KEY=your-production-secret
 heroku config:set JWT_SECRET=your-jwt-secret
+
+# Optional: enable Redis-backed cache and rate limiting
+# heroku addons:create heroku-redis:mini
+# heroku config:set CACHE_BACKEND=redis
 
 # MacOS/Linux
 heroku pg:psql < db/schema.sql
