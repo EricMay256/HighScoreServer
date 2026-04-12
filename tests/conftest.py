@@ -1,5 +1,5 @@
 import os
-os.environ["RATE_LIMIT_ENABLED"] = "false"  # disable rate limiter for tests
+os.environ["RATE_LIMITER_ENABLED"] = "false"  # disable rate limiter for tests
 import pytest
 import psycopg2
 from fastapi.testclient import TestClient
