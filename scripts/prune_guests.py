@@ -20,13 +20,6 @@ import sys
 
 from app.env import load_environment
 
-load_environment()
-
-# Validate DATABASE_URL specifically — we don't need the full app env
-if not os.environ.get("DATABASE_URL"):
-    print("ERROR: DATABASE_URL is not set.", file=sys.stderr)
-    sys.exit(1)
-
 import psycopg2
 
 logging.basicConfig(
@@ -79,6 +72,12 @@ def prune_guests(prune_days: int = 30) -> int:
 
 
 if __name__ == "__main__":
+    load_environment()
+
+    # Validate DATABASE_URL specifically — we don't need the full app env
+    if not os.environ.get("DATABASE_URL"):
+        print("ERROR: DATABASE_URL is not set.", file=sys.stderr)
+        sys.exit(1)
     prune_days = int(os.environ.get("GUEST_PRUNE_DAYS", 30))
     logger.info("Pruning guest accounts with no scores older than %d days", prune_days)
 

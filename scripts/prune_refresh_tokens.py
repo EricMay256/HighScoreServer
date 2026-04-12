@@ -20,12 +20,6 @@ import sys
 
 from app.env import load_environment
 
-load_environment()
-
-if not os.environ.get("DATABASE_URL"):
-    print("ERROR: DATABASE_URL is not set.", file=sys.stderr)
-    sys.exit(1)
-
 import psycopg2
 
 logging.basicConfig(
@@ -71,6 +65,11 @@ def prune_refresh_tokens() -> int:
 
 
 if __name__ == "__main__":
+    load_environment()
+
+    if not os.environ.get("DATABASE_URL"):
+        print("ERROR: DATABASE_URL is not set.", file=sys.stderr)
+        sys.exit(1)
     logger.info("Pruning expired refresh tokens")
 
     deleted = prune_refresh_tokens()
