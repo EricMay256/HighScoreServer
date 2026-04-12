@@ -228,6 +228,7 @@ def submit_score(
             )
             mode_row = cur.fetchone()
             if mode_row is None:
+                # Raises without rolling back transaction - OK since no modifications made.
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Unknown game mode: {submission.game_mode}",
@@ -236,6 +237,7 @@ def submit_score(
             sort_order, requires_auth = mode_row
 
             if requires_auth and is_guest:
+                # Raises without rolling back transaction - OK since no modifications made.
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="This game mode requires a claimed account",
@@ -282,8 +284,8 @@ def submit_score(
 
     try:
         cache = get_cache()
-        for period in PERIODS:
-            cache.delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}:{period}")
+        for invalidate_period in PERIODS:
+            cache.delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}:{invalidate_period}")
         cache.delete(f"{CACHE_KEY_PREFIX}latest")
     except Exception as e:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
