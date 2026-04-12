@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS game_modes (
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      VARCHAR(64)  UNIQUE NOT NULL,
-    email         VARCHAR(256) UNIQUE,
+    email         VARCHAR(256) , -- Uniqueness imposed by idx_users_email
     password_hash TEXT         ,
     is_guest      BOOLEAN      NOT NULL DEFAULT FALSE,
     is_verified   BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -57,6 +57,6 @@ CREATE TABLE IF NOT EXISTS scores (
     UNIQUE (user_id, game_mode, period, period_start)
 );
 CREATE INDEX IF NOT EXISTS idx_scores_lookup_desc
-    ON scores (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC);
+    ON scores (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC, user_id);
 CREATE INDEX IF NOT EXISTS idx_scores_lookup_asc
-    ON scores (game_mode, period, period_start, score ASC, submitted_at ASC, id ASC);
+    ON scores (game_mode, period, period_start, score ASC, submitted_at ASC, id ASC, user_id);
