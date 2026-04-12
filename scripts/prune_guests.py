@@ -43,7 +43,7 @@ def prune_guests(prune_days: int = 30) -> int:
     Returns the number of accounts deleted.
 
     The NOT EXISTS subquery ensures we never touch a guest with scores.
-    The ON DELETE RESTRICT on leaderboard_snapshots is a secondary safety
+    The ON DELETE RESTRICT on scores is a secondary safety
     net — the DB will refuse the delete if a score row exists regardless.
     """
     url = os.environ["DATABASE_URL"]
@@ -60,7 +60,7 @@ def prune_guests(prune_days: int = 30) -> int:
                   AND created_at  < NOW() - (%s * INTERVAL '1 day')
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM leaderboard_snapshots s
+                      FROM scores s
                       WHERE s.user_id = users.id
                   )
                 """,

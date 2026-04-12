@@ -52,7 +52,7 @@ def insert_score(user_id: int, game_mode: str = "classic") -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO leaderboard_snapshots
+                INSERT INTO scores
                     (user_id, game_mode, score, period, period_start, submitted_at)
                 VALUES (%s, %s, 100, 'alltime', '2000-01-01 00:00:00+00', NOW())
                 """,
