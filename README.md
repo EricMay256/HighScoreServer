@@ -221,7 +221,7 @@ erDiagram
         string name PK "natural key, e.g. 'classic'"
         string sort_order "ASC | DESC"
         string label "display name for web view"
-        bool requires_claimed_account "blocks guests when true"
+        bool requires_auth "blocks guests when true"
     }
     scores {
         int id PK
