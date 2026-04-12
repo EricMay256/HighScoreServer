@@ -86,6 +86,9 @@ def guest_login(request: Request) -> TokenResponse:
         if row:
             return TokenResponse(
                 access_token=create_access_token(row[0], username, is_guest=True),
+                # Note: user INSERT and refresh token INSERT are separate transactions.
+                # A crash between them leaves an orphaned user row with no token.
+                # The client will receive an error and can retry. See auth.py for discussion.
                 refresh_token=create_refresh_token(row[0]),
             )
 
@@ -126,6 +129,9 @@ def register(request: Request, body: RegisterRequest) -> TokenResponse:
 
     return TokenResponse(
         access_token=create_access_token(row[0], body.username, is_guest=False),
+        # Note: user INSERT and refresh token INSERT are separate transactions.
+        # A crash between them leaves an orphaned user row with no token.
+        # The client will receive an error and can retry. See auth.py for discussion.
         refresh_token=create_refresh_token(row[0]),
     )
 
