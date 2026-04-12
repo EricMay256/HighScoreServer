@@ -1,0 +1,14 @@
+{
+  "name": "highscoreserver",
+  "version": "1.0.0",
+  "description": "Root package.json for Heroku nodejs buildpack — delegates to leaderboard-frontend/",
+  "private": true,
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
+  },
+  "scripts": {
+    "build": "cd leaderboard-frontend && npm ci && npm run build",
+    "heroku-postbuild": "npm run build"
+  }
+}
