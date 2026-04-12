@@ -56,7 +56,7 @@ def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLRespon
                     s.submitted_at,
                     RANK()   OVER (ORDER BY s.score {sort_order}, s.submitted_at ASC, s.id ASC) AS rank,
                     COUNT(*) OVER ()                                                             AS total_count
-                FROM leaderboard_snapshots s
+                FROM scores s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.game_mode    = %s
                   AND s.period       = 'alltime'

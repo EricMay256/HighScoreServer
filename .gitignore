@@ -1,16 +1,106 @@
-# .gitignore
-.env
+# =============================================================================
+# Python / FastAPI backend
+# =============================================================================
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Virtual environments
 .venv/
 venv/
-*.egg-info/
-dist/
-build/
+env/
+ENV/
+.python-version
 
-# Frontend (Node/Vite)
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checkers
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter (in case of ad-hoc analysis)
+.ipynb_checkpoints/
+
+# =============================================================================
+# Secrets and environment
+# =============================================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Keep example files committed
+!.env.example
+
+# =============================================================================
+# Logs and databases
+# =============================================================================
+*.log
+logs/
+*.sqlite
+*.sqlite3
+*.db
+
+# =============================================================================
+# Editor / IDE
+# =============================================================================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.project
+.pydevproject
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# =============================================================================
+# Heroku
+# =============================================================================
+# Heroku doesn't produce local artifacts typically, but if you use
+# `heroku local` with a .env, it's already covered above.

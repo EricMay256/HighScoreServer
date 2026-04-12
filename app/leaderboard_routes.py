@@ -83,7 +83,7 @@ def latest_scores(request: Request) -> list[ScoreResponse]:
             cur.execute(
                 """
                 SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at
-                FROM leaderboard_snapshots s
+                FROM scores s
                 JOIN users u ON u.id = s.user_id
                 ORDER BY s.submitted_at DESC
                 LIMIT 100
@@ -161,7 +161,7 @@ def get_scores(request: Request, game_mode: str, period: str = "alltime") -> Lea
                             SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
                             RANK() OVER (ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC) AS rank,
                             COUNT(*) OVER() AS total_count
-                            FROM leaderboard_snapshots s
+                            FROM scores s
                             JOIN users u ON u.id = s.user_id
                             WHERE s.game_mode = %s
                               AND s.period = %s
@@ -248,7 +248,7 @@ def submit_score(
 
                 cur.execute(
                     f"""
-                    INSERT INTO leaderboard_snapshots
+                    INSERT INTO scores
                         (score, game_mode, period, period_start, submitted_at, user_id)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (user_id, game_mode, period, period_start)
@@ -318,7 +318,7 @@ def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime"
                         s.user_id,
                         RANK()  OVER (ORDER BY score {order}, s.submitted_at ASC, s.id ASC) AS rank,
                         COUNT(*) OVER ()                                                AS total_count
-                    FROM leaderboard_snapshots s
+                    FROM scores s
                     JOIN users u ON u.id = s.user_id
                     WHERE game_mode    = %s
                       AND period       = %s
@@ -354,6 +354,6 @@ def _is_improvement_predicate(order: str) -> str:
     # Update scores when new score "beats" old score 
     # (new < stored for ASC, new > stored for DESC)
     if order == "ASC":
-        return "EXCLUDED.score < leaderboard_snapshots.score"
+        return "EXCLUDED.score < scores.score"
     else:
-        return "EXCLUDED.score > leaderboard_snapshots.score"
+        return "EXCLUDED.score > scores.score"

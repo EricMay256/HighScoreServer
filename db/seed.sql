@@ -16,7 +16,7 @@ INSERT INTO game_modes (name, sort_order, label, requires_auth) VALUES
     ('challenge', 'DESC', 'Challenge Mode', TRUE)
 ON CONFLICT (name) DO NOTHING;
 
-INSERT INTO leaderboard_snapshots (score, game_mode, period, period_start, submitted_at, user_id) VALUES
+INSERT INTO scores (score, game_mode, period, period_start, submitted_at, user_id) VALUES
     (1500, 'classic', 'alltime', '2000-01-01 00:00:00+00', '2023-01-01 00:00:00+00', (SELECT id FROM users WHERE username = 'alice')),
     (1200, 'classic', 'alltime', '2000-01-01 00:00:00+00', '2023-01-02 00:00:00+00', (SELECT id FROM users WHERE username = 'bob')),
     (1800, 'classic', 'alltime', '2000-01-01 00:00:00+00', '2023-01-03 00:00:00+00', (SELECT id FROM users WHERE username = 'charlie')),

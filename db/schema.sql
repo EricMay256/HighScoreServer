@@ -7,7 +7,7 @@
 -- you backed it up!
 --
 -- Recommended drop order due to foreign key usage:
--- DROP TABLE IF EXISTS leaderboard_snapshots;
+-- DROP TABLE IF EXISTS scores;
 -- DROP TABLE IF EXISTS game_modes;
 -- DROP TABLE IF EXISTS refresh_tokens;
 -- DROP TABLE IF EXISTS users;
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 --     ON refresh_tokens (user_id);
 
 
-CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
+CREATE TABLE IF NOT EXISTS scores (
     id           SERIAL PRIMARY KEY,
     user_id      INTEGER      NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     game_mode    VARCHAR(32)  NOT NULL REFERENCES game_modes(name),
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
     submitted_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, game_mode, period, period_start)
 );
-CREATE INDEX IF NOT EXISTS idx_snapshots_lookup_desc
-    ON leaderboard_snapshots (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC);
-CREATE INDEX IF NOT EXISTS idx_snapshots_lookup_asc
-    ON leaderboard_snapshots (game_mode, period, period_start, score ASC, submitted_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_scores_lookup_desc
+    ON scores (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_scores_lookup_asc
+    ON scores (game_mode, period, period_start, score ASC, submitted_at ASC, id ASC);
