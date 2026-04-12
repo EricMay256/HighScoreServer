@@ -4,8 +4,8 @@
   "description": "Root package.json for Heroku nodejs buildpack — delegates to leaderboard-frontend/",
   "private": true,
   "engines": {
-    "node": "20.x",
-    "npm": "10.x"
+    "node": "24.x",
+    "npm": "11.x"
   },
   "scripts": {
     "build": "cd leaderboard-frontend && npm ci && npm run build",
