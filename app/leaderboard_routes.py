@@ -246,6 +246,7 @@ def submit_score(
             for period in PERIODS:
                 period_start = get_period_start(period, at=now)
 
+                # order is DB-sourced, CHECK-constrained to 'ASC'|'DESC'
                 cur.execute(
                     f"""
                     INSERT INTO scores
@@ -266,6 +267,8 @@ def submit_score(
     except HTTPException:
         raise
     except pg_errors.ForeignKeyViolation:
+        # Shouldn't be reachable: game_mode is validated prior to upsert,
+        # and user_id comes from a verified JWT. Kept for redundancy.
         conn.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -281,6 +284,7 @@ def submit_score(
         cache = get_cache()
         for period in PERIODS:
             cache.delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}:{period}")
+        cache.delete(f"{CACHE_KEY_PREFIX}latest")
     except Exception as e:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 
