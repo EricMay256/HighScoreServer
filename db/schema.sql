@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS scores (
     submitted_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, game_mode, period, period_start)
 );
-CREATE INDEX IF NOT EXISTS idx_snapshots_lookup_desc
+CREATE INDEX IF NOT EXISTS idx_scores_lookup_desc
     ON scores (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC);
-CREATE INDEX IF NOT EXISTS idx_snapshots_lookup_asc
+CREATE INDEX IF NOT EXISTS idx_scores_lookup_asc
     ON scores (game_mode, period, period_start, score ASC, submitted_at ASC, id ASC);
