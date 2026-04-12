@@ -297,10 +297,10 @@ sequenceDiagram
     participant R as Redis
     U->>API: POST /api/leaderboard/scores {game_mode, score}<br/>Bearer access_token
     Note right of API: rate limited · require_user
-    API->>DB: SELECT sort_order, requires_claimed_account<br/>FROM game_modes WHERE name = ?
+    API->>DB: SELECT sort_order, requires_auth<br/>FROM game_modes WHERE name = ?
     alt mode not found
         API-->>U: 404 Unknown game mode
-    else requires_claimed_account AND is_guest
+    else requires_auth AND is_guest
         API-->>U: 403 Claimed account required
     else valid
         loop for period in (alltime, daily, weekly)
