@@ -31,7 +31,7 @@ def _make_limiter() -> Limiter:
     or dynos, so limits are per-process in degraded mode. Acceptable — the
     alternative is taking the API down when Redis has a blip.
     """
-    enabled = os.environ.get("RATE_LIMIT_ENABLED", "true").lower() != "false"
+    enabled = os.environ.get("RATE_LIMITER_ENABLED", "true").lower() != "false"
 
     redis_url = os.environ.get("REDIS_URL")
     if redis_url:
