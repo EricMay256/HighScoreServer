@@ -1,6 +1,7 @@
 -- role.sql
 -- Run locally:   psql -U postgres -d leaderboard -f db/role.sql
--- Do NOT run on production (yet...?)
+-- Heroku is currently using the default user for operations
+-- TODO: add minimally permissioned user for deployed app
 
 -- You are encouraged to replace the password and role below.
 -- It is granted permission to read and write individual scores, but nothing too destructive.
