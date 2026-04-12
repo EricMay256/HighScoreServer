@@ -501,16 +501,9 @@ Guest accounts with scores are intentionally preserved.
 
 - **Access token revocation** — `# DENYLIST HOOK` comments mark the insertion points.
   Requires a Redis JTI denylist checked on every decode.
-- **`leaderboard:latest` cache invalidation** — score submission currently invalidates
-  the three period keys (`leaderboard:{mode}:{period}`) but not `leaderboard:latest`.
-  A new submission won't appear in the "100 most recent" view until the 120s TTL
-  expires. Fix is a one-line `cache.delete("leaderboard:latest")` in `submit_score`
-  alongside the existing period-key invalidation loop.
 - **Async migration** — psycopg2 → asyncpg if concurrency becomes a bottleneck.
   Neither SQLAlchemy nor Alembic are in scope for this migration.
 - **Guest cleanup for accounts with scores** — scoreless guests are pruned automatically.
   Pruning guests with score history requires a separate retention policy decision.
 - **Password reset** — requires token storage, email delivery, and new UI. The `email`
   column is already nullable on the `users` table to keep the schema ready.
-- **Redis Fallback** - Redis already falls back gracefully when not provided, but to 
-  preserve funds a local caching solution will be implemented for single dyno environments.
