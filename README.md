@@ -2,26 +2,46 @@
 
 A production-deployed game leaderboard backend built with FastAPI, PostgreSQL, and Redis.
 Designed as a reusable backend for Unity games — any project can drop in the included
-C# client and have a fully functional leaderboard with auth, score history, and a public web view.
+C# client and have a fully functional leaderboard with auth and score history visible through a shared public web view.
 
-**Live:** https://high-score-server-9db572197af4.herokuapp.com/
-**API Docs:** https://high-score-server-9db572197af4.herokuapp.com/docs
+- **Live:** https://high-score-server-9db572197af4.herokuapp.com/
+- **API Docs:** https://high-score-server-9db572197af4.herokuapp.com/docs
 
----
 
-## Stack
+## Architecture Overview
 
-| Layer | Technology |
-|---|---|
-| API | FastAPI (Python 3.12) |
-| Database | PostgreSQL via psycopg2 |
-| Cache | Redis (120s TTL on leaderboard reads) |
-| Auth | JWT (HS256) + opaque refresh tokens |
-| Client | Unity C# (UnityWebRequest + Newtonsoft.Json) |
-| Hosting | Heroku (Postgres + Redis add-ons) |
-| Testing | pytest + pytest-cov |
+```mermaid
+flowchart LR
+    Unity["Unity Client<br/>(C#)"]
+    Browser["Web Browser"]
+    subgraph Heroku["Heroku"]
+        API["FastAPI<br/>api_routes + view_routes"]
+        Backend{{"Cache backend<br/>(CACHE_BACKEND env)"}}
+        Memory["In-process memory<br/>(active, single dyno)"]
+        Redis[("Redis<br/>(available, dormant)")]
+        Postgres[("PostgreSQL")]
+    end
+    Sentry["Sentry<br/>(error monitoring)"]
+    Unity -->|JSON over HTTPS| API
+    Browser -->|server-rendered HTML<br/>Jinja2| API
+    Browser -->|SPA shell + JSON<br/>React/Vite| API
+    API --> Postgres
+    API --> Backend
+    Backend ---|default| Memory
+    Backend -.->|when enabled| Redis
+    API -.->|errors| Sentry
+    classDef external fill:#e8e8e8,stroke:#888,color:#000
+    classDef infra fill:#d4e6f1,stroke:#2874a6,color:#000
+    classDef ephemeral fill:#fcf3cf,stroke:#b9770e,color:#000
+    classDef dormant fill:#eaeaea,stroke:#888,color:#555,stroke-dasharray: 4 3
+    classDef monitoring fill:#fdebd0,stroke:#b9770e,color:#000
+    class Unity,Browser external
+    class API,Postgres infra
+    class Memory ephemeral
+    class Redis dormant
+    class Sentry monitoring
+```
 
----
 
 ## Features
 
@@ -31,7 +51,10 @@ C# client and have a fully functional leaderboard with auth, score history, and 
 - **Period bucketing** — scores are tracked across three independent windows:
   all-time, weekly, and daily. A single submission upserts into all three periods
   simultaneously.
-  **Rate limiting** — many API endpoints are rate limited per client IP via slowapi and Redis. Write endpoints and auth routes are more tightly constrained than reads to reflect their relative abuse potential. Limits degrade gracefully to in-process memory if Redis is unavailable, keeping the API live rather than failing closed.
+- **Rate limiting** — many API endpoints are rate limited per client IP via slowapi  
+  and Redis. Write endpoints and auth routes are more tightly constrained than reads 
+  to reflect their relative abuse potential. Limits degrade gracefully to in-process 
+  memory if Redis is unavailable, keeping the API live rather than failing closed.
 - **Flexible sort order** — game modes are individually configured as highest-score
   or lowest-score wins. The same API and client code handles both — a speedrun mode
   and a points mode are treated symmetrically.
@@ -43,9 +66,261 @@ C# client and have a fully functional leaderboard with auth, score history, and 
   API calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
   errors without exceptions. Handles the full auth lifecycle including silent
   guest login, token storage via PlayerPrefs, and account claiming.
-- **Error tracking** — Sentry integration captures unhandled exceptions with full request context. Configured to sample 20% of requests for performance tracing without saturating the free tier. The DSN is treated as optional monitoring config so the app starts cleanly in environments where Sentry isn't provisioned.
+- **Error tracking** — Sentry integration captures unhandled exceptions with full 
+  request context. Configured to sample 20% of requests for performance tracing 
+  without saturating the free tier. The DSN is treated as optional monitoring config 
+  so the app starts cleanly in environments where Sentry isn't provisioned.
 
----
+
+## Local Setup
+
+### Prerequisites
+- Python 3.12+
+- PostgreSQL
+- Redis (or Memurai on Windows) — optional, caching and rate limiting fall back to in-process memory
+
+### Steps
+
+1. Clone the repo and create a virtual environment:
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1  # Windows PowerShell
+source .venv/bin/activate   # macOS/Linux
+pip install -r requirements.txt
+```
+
+2. Copy the example environment file and fill in your values:
+```bash
+cp .env.example .env          # macOS/Linux
+Copy-Item .env.example .env   # Windows Powershell
+```
+At minimum you'll need `DATABASE_URL`, `JWT_SECRET`, and `API_KEY`.
+Redis and Sentry configuration is optional.
+
+3. Create the local database and apply the schema:
+```bash
+psql -U postgres -c "CREATE DATABASE leaderboard;"
+psql -U postgres -d leaderboard -f db/schema.sql
+```
+
+4. Optionally load seed data:
+```bash
+psql -U postgres -d leaderboard -f db/seed.sql
+```
+
+5. Start the development server:
+```bash
+uvicorn app.main:app --reload
+```
+
+6. Visit `http://localhost:8000/docs` to explore the API.
+
+
+## API Reference
+
+All API routes are prefixed with `/api`. Full request and response schemas,
+including field types and example payloads, are available in the interactive
+[API docs](https://high-score-server-9db572197af4.herokuapp.com/docs) - this
+section covers the surface area and behavior; `/docs` covers the shapes.
+
+Write endpoints and auth routes are rate limited per client IP. Reads are
+unrestricted or lightly limited. Exact values provided by FastAPI rather than
+this document to ensure accuracy without maintenance cost.
+
+### Auth Model
+
+The API has two distinct authentication mechanisms for two distinct principals:
+
+- **Bearer tokens (JWT)** authenticate end users. Every player-scoped action —
+  submitting scores, renaming, claiming a guest account — uses a bearer token.
+  Guest accounts receive tokens silently on first launch, so this is transparent
+  to the player.
+- **API keys** authenticate the server operator. Administrative actions like
+  creating or updating game modes use an API key and are not exposed to players,
+  even authenticated ones.
+
+This separation keeps operator concerns out of the user table and prevents a
+compromised player account from reconfiguring the server.
+
+### Auth — `/api/auth`
+
+| Method | Route | Auth | Description |
+|---|---|---|---|
+| POST | `/guest` | Public | Create a guest account, returns tokens |
+| POST | `/register` | Public | Register a claimed account, returns tokens |
+| POST | `/login` | Public | Login, returns tokens |
+| POST | `/refresh` | Public | Rotate refresh token, returns new tokens |
+| POST | `/logout` | Public | Revoke refresh token |
+| POST | `/rename` | Bearer | Rename the authenticated user |
+| POST | `/claim` | Bearer | Upgrade guest account to claimed |
+
+`/rename` returns **409** on username collision — the `users.username` UNIQUE
+constraint is enforced at the DB layer and surfaced as a clean error rather
+than a 500.
+
+### Leaderboard — `/api/leaderboard`
+
+| Method | Route | Auth | Description |
+|---|---|---|---|
+| GET | `/scores` | Public | Fetch leaderboard for a game mode and `period` |
+| POST | `/scores` | Bearer | Submit a score |
+| GET | `/latest` | Public | Fetch the 100 most recently submitted scores |
+| GET | `/game_modes` | Public | List all registered game modes |
+| POST | `/game_modes` | API Key | Create or update a game mode (Operator Action) |
+
+#### GET `/scores` parameters
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `game_mode` | string | required | Game mode name |
+| `period` | string | `alltime` | One of: `alltime`, `weekly`, `daily` |
+
+#### POST `/scores` body
+```json
+{
+  "score": 1500,
+  "game_mode": "classic"
+}
+```
+
+**Behavior:** Upserts on `(user_id, game_mode, period, period_start)`. Only 
+updates if the new score is an improvement (respecting the game mode's sort
+order). Returns the player's current best with rank and percentile.
+
+
+## Architecture Diagrams
+
+Three diagrams cover the parts of the system that are hardest to understand from
+code alone: the data model, the authentication lifecycle, and what happens when
+a score is submitted. The rationale behind these shapes lives in
+[Architecture Decisions](#architecture-decisions) directly below.
+
+### Data model
+
+```mermaid
+erDiagram
+    users ||--o{ refresh_tokens : "has"
+    users ||--o{ scores : "submits"
+    game_modes ||--o{ scores : "categorizes"
+    users {
+        int id PK
+        string username UK "set at guest creation"
+        string email UK "nullable, reserved for reset"
+        string password_hash "nullable for guests"
+        bool is_guest "true until /claim"
+        bool is_verified
+        timestamptz created_at
+    }
+    refresh_tokens {
+        int id PK
+        int user_id FK "ON DELETE CASCADE"
+        string token_hash UK "SHA-256, rotated on refresh"
+        timestamptz expires_at
+        timestamptz created_at
+    }
+    game_modes {
+        string name PK "natural key, e.g. 'classic'"
+        string sort_order "ASC | DESC"
+        string label "display name for web view"
+        bool requires_claimed_account "blocks guests when true"
+    }
+    scores {
+        int id PK
+        int user_id FK "ON DELETE RESTRICT"
+        string game_mode FK
+        bigint score
+        string period "alltime | weekly | daily"
+        timestamptz period_start "UQ(user, mode, period, start)"
+        timestamptz submitted_at
+    }
+```
+
+A few things worth noting that the diagram can't express cleanly:
+
+- **`scores` is upsert-on-best, not append-only.** The `UNIQUE (user_id, game_mode, period, period_start)` constraint is what makes period bucketing work — each player has at most one row per period window, and submissions either improve it or no-op.
+- **`ON DELETE RESTRICT` on `scores.user_id`** prevents accidental user deletion from silently destroying leaderboard history. Guest pruning explicitly checks for score ownership before deleting.
+- **`game_modes.name` is a natural key.** Cardinality is tiny and stable, and it makes raw SQL and logs human-readable without joining.
+
+### Authentication lifecycle
+
+Covers the three flows a Unity client goes through: silent guest creation on
+first launch, claiming the account later, and rotating an expired access token.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Unity Client
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    Note over U,DB: First launch — silent guest auth
+    U->>API: POST /api/auth/guest
+    API->>DB: INSERT users (username, is_guest=true, password_hash=NULL)
+    API->>DB: INSERT refresh_tokens (hash, expires_at)
+    API-->>U: access_token (JWT, 60min) + refresh_token (opaque)
+    Note over U: Store tokens in PlayerPrefs
+    Note over U,DB: Later — player claims the account
+    U->>API: POST /api/auth/claim {email, password}
+    Note right of API: Bearer access_token<br/>user_id read from JWT
+    API->>DB: UPDATE users SET email, password_hash, is_guest=false WHERE id = ?
+    API-->>U: 200 OK
+    Note over U,DB: Access token expires after 60 minutes
+    U->>API: POST /api/auth/refresh {refresh_token}
+    Note right of API: rotate_refresh_token — single transaction
+    API->>DB: DELETE refresh_tokens WHERE token_hash = SHA256(refresh_token) RETURNING user_id
+    alt row returned (valid, not expired, not already rotated)
+        API->>DB: INSERT refresh_tokens (new hash, expires_at)
+        API->>DB: COMMIT
+        API-->>U: new access_token + new refresh_token
+    else no row
+        API->>DB: ROLLBACK
+        API-->>U: 401 Unauthorized
+        Note over U: Fall back to guest login or prompt claim
+    end
+```
+
+The `DELETE ... RETURNING` pattern is what makes refresh tokens single-use
+safely. If two clients race to rotate the same token, exactly one `DELETE`
+returns a row and the other gets nothing — no read-then-write window where
+both could succeed.
+
+### Score submission lifecycle
+
+Covers the full path of `POST /api/leaderboard/scores`: validation, the
+three-period upsert, cache invalidation, and the rank/percentile computation
+that ships back in the response.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Unity Client
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    participant R as Redis
+    U->>API: POST /api/leaderboard/scores {game_mode, score}<br/>Bearer access_token
+    Note right of API: rate limited · require_user
+    API->>DB: SELECT sort_order, requires_claimed_account<br/>FROM game_modes WHERE name = ?
+    alt mode not found
+        API-->>U: 404 Unknown game mode
+    else requires_claimed_account AND is_guest
+        API-->>U: 403 Claimed account required
+    else valid
+        loop for period in (alltime, daily, weekly)
+            API->>DB: INSERT INTO scores ... ON CONFLICT DO UPDATE<br/>WHERE new score beats stored (per sort_order)
+        end
+        API->>DB: COMMIT
+        loop for period in (alltime, daily, weekly)
+            API->>R: DELETE leaderboard:{mode}:{period}
+        end
+        Note right of R: Cache miss forces next read<br/>to rebuild from DB
+        API->>DB: SELECT RANK() OVER (...), COUNT(*) OVER ()<br/>for submitted user
+        API-->>U: 201 ScoreResponse<br/>{id, score, rank, percentile, ...}
+    end
+```
+
+The cache participant is shown as Redis for clarity; in practice the cache
+backend is selected via `CACHE_BACKEND` and falls back to in-process memory,
+as shown in the [Architecture Overview](#architecture-overview). Both backends
+honor the same key-delete contract.
+
 
 ## Architecture Decisions
 
@@ -107,119 +382,6 @@ Refresh tokens are single-use — each refresh rotates to a new token, invalidat
 the previous one. This limits the window of a stolen refresh token to one
 rotation cycle.
 
----
-
-## Local Setup
-
-### Prerequisites
-- Python 3.12+
-- PostgreSQL
-- Redis (or Memurai on Windows) — optional, routes fall back to DB gracefully
-
-### Steps
-
-1. Clone the repo and create a virtual environment:
-```bash
-python -m venv .venv
-.venv\Scripts\Activate.ps1  # Windows PowerShell
-source .venv/bin/activate   # macOS/Linux
-pip install -r requirements.txt
-```
-
-2. Copy the example environment file and fill in your values:
-```bash
-cp .env.example .env
-```
-
-3. Create the local database and apply the schema:
-```bash
-psql -U postgres -c "CREATE DATABASE leaderboard;"
-psql -U postgres -d leaderboard -f db/schema.sql
-```
-
-4. Optionally load seed data:
-```bash
-psql -U postgres -d leaderboard -f db/seed.sql
-```
-
-5. Start the development server:
-```bash
-uvicorn app.main:app --reload
-```
-
-6. Visit `http://localhost:8000/docs` to explore the API.
-
----
-
-## Testing
-
-```bash
-# Create the test database
-psql -U postgres -c "CREATE DATABASE leaderboard_test;"
-psql -U postgres -d leaderboard_test -f db/schema.sql
-
-# Add to .env
-TEST_DATABASE_URL=postgresql://postgres:password@localhost:5432/leaderboard_test
-
-# Run the suite
-pytest -v
-```
-
-Tests are organized in three layers:
-- **`test_periods.py`** — pure unit tests for period bucketing logic, no DB required
-- **`test_api_scores.py`** — integration tests for leaderboard routes including upsert behavior, ordering, period bucketing, and auth gating
-- **`test_auth.py`** — integration tests for the full auth lifecycle: register, login, refresh, logout, rename, claim, and guest flow
-- **`test_prune_guests.py`** — integration tests for the guest account cleanup script
-
-Integration tests run against a dedicated local test database. Redis is disabled
-during tests — routes fall back to the DB, which is the correct behavior to test.
-
----
-
-## API Reference
-
-All API routes are prefixed with `/api`.
-
-### Auth — `/api/auth`
-
-| Method | Route | Auth | Description |
-|---|---|---|---|
-| POST | `/guest` | None | Create a guest account, returns tokens |
-| POST | `/register` | None | Register a claimed account, returns tokens |
-| POST | `/login` | None | Login, returns tokens |
-| POST | `/refresh` | None | Rotate refresh token, returns new tokens |
-| POST | `/logout` | None | Revoke refresh token |
-| POST | `/rename` | Bearer | Rename the authenticated user |
-| POST | `/claim` | Bearer | Upgrade guest account to claimed |
-
-### Leaderboard — `/api/leaderboard`
-
-| Method | Route | Auth | Description |
-|---|---|---|---|
-| GET | `/scores` | None | Fetch leaderboard for a game mode and period |
-| POST | `/scores` | Bearer | Submit a score |
-| GET | `/latest` | None | Fetch the 100 most recently submitted scores |
-| GET | `/game_modes` | None | List all registered game modes |
-| POST | `/game_modes` | API Key | Create or update a game mode |
-
-#### GET `/scores` parameters
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `game_mode` | string | required | Game mode name |
-| `period` | string | `alltime` | One of: `alltime`, `weekly`, `daily` |
-
-#### POST `/scores` body
-```json
-{
-  "score": 1500,
-  "game_mode": "classic"
-}
-```
-
-Upserts on `(user_id, game_mode, period, period_start)` — only updates if the
-new score is an improvement. Returns the player's current best with rank and percentile.
-
----
 
 ## Unity Client
 
@@ -237,7 +399,7 @@ The `UnityClient/` directory contains a drop-in C# leaderboard client for Unity 
 2. Install [Newtonsoft.Json for Unity] via Package Manager
 3. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
 4. Set the base URL to your Heroku app URL (no trailing slash)
-5. Gitignore the config asset — it contains your server URL
+5. Gitignore your config asset — no sensitive data currently, but it may be introduced.
 
 ### Authentication lifecycle
 
@@ -304,15 +466,16 @@ private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
 ```
 
 ### Known limitations
-- **Token expiry** — access tokens expire after 60 minutes. If a request fails
-  with a 401, call `RefreshTokens()` and retry. Automatic retry on 401 is a
-  known future improvement.
+- **Token expiry** — access tokens expire after 60 minutes. `EnsureAuthenticated` handles the missing-token case by falling through to guest login, but does not yet detect 401 responses from expired tokens mid-session. If a request fails with a 401, call `RefreshTokens()` and retry. Automatic retry on 401 is a known future improvement.
 - **Token storage** — tokens are stored in `PlayerPrefs`, which is not encrypted.
   This is standard Unity practice for session tokens. The correct long-term
   answer is server-side revocation (JTI denylist) rather than client-side
   encryption.
 
+
 ## Project Structure
+
+```
 HighScoreServer/
 ├── app/
 │   ├── main.py               # App factory, lifespan startup/shutdown
@@ -339,6 +502,7 @@ HighScoreServer/
 ├── public/
 │   ├── index.html            # Redirect to home
 │   └── style.css             # Leaderboard styles
+├── leaderboard-frontend/     # React 18 + Vite + TypeScript SPA (dev branch, not yet integrated)
 ├── tests/
 │   ├── conftest.py           # Fixtures: test client, DB cleanup, cache disable
 │   ├── test_periods.py       # Unit tests for period bucketing
@@ -355,6 +519,8 @@ HighScoreServer/
 ├── runtime.txt
 ├── wsgi.py
 └── .env.example
+```
+
 
 ## Deployment
 
@@ -364,7 +530,12 @@ heroku addons:create heroku-postgresql:essential-0
 heroku addons:create heroku-redis:mini
 heroku config:set API_KEY=your-production-secret
 heroku config:set JWT_SECRET=your-jwt-secret
+
+# MacOS/Linux
 heroku pg:psql < db/schema.sql
+# Powershell
+Get-Content db\schema.sql | heroku pg:psql --app your-app-name
+
 git push heroku main
 ```
 
@@ -378,15 +549,21 @@ heroku addons:open scheduler
 Scoreless guest accounts older than `GUEST_PRUNE_DAYS` (default: 30) are pruned.
 Guest accounts with scores are intentionally preserved.
 
----
 
 ## Known Future Considerations
 
 - **Access token revocation** — `# DENYLIST HOOK` comments mark the insertion points.
   Requires a Redis JTI denylist checked on every decode.
+- **`leaderboard:latest` cache invalidation** — score submission currently invalidates
+  the three period keys (`leaderboard:{mode}:{period}`) but not `leaderboard:latest`.
+  A new submission won't appear in the "100 most recent" view until the 120s TTL
+  expires. Fix is a one-line `cache.delete("leaderboard:latest")` in `submit_score`
+  alongside the existing period-key invalidation loop.
 - **Async migration** — psycopg2 → asyncpg if concurrency becomes a bottleneck.
   Neither SQLAlchemy nor Alembic are in scope for this migration.
 - **Guest cleanup for accounts with scores** — scoreless guests are pruned automatically.
   Pruning guests with score history requires a separate retention policy decision.
 - **Password reset** — requires token storage, email delivery, and new UI. The `email`
   column is already nullable on the `users` table to keep the schema ready.
+- **Redis Fallback** - Redis already falls back gracefully when not provided, but to 
+  preserve funds a local caching solution will be implemented for single dyno environments.
