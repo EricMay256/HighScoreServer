@@ -179,10 +179,13 @@ namespace UBear.Leaderboard
             }
 
             string url  = $"{_config.BaseUrl}/api/auth/logout";
+            // Note: user token provided here in body instead of header like elsewhere.
             var    body = new RefreshRequest { RefreshToken = stored };
 
             // Logout returns 204 No Content — we parse success from the status code
-            // rather than deserializing a response body.
+            // rather than deserializing a response body. Regardless of the network 
+            // outcome, we clear local tokens to ensure local logout; degradation
+            // means a refresh token remains valid until expiry - satisfactory here.
             yield return Post<RefreshRequest, bool>(url, body, result =>
             {
                 ClearTokens();
@@ -254,7 +257,7 @@ namespace UBear.Leaderboard
         /// Requires a stored access token.
         /// </summary>
         public IEnumerator SubmitScore(
-            int                              score,
+            long                             score,
             string                           gameMode,
             Action<ApiResult<ScoreResponse>> callback)
         {
@@ -316,25 +319,46 @@ namespace UBear.Leaderboard
         }
 
         /// <summary>
-        /// Interprets a completed UnityWebRequest as ApiResult&lt;T&gt;.
+        /// Interprets a completed UnityWebRequest as ApiResult<T>.
         /// Network errors, HTTP errors (4xx/5xx), and JSON parse failures
         /// all surface as ApiResult.Fail with a message rather than exceptions.
         /// 204 No Content responses are treated as success with default(T).
         /// </summary>
         private static ApiResult<T> ParseResponse<T>(UnityWebRequest request)
         {
+            // Network-level failure: no HTTP response at all (DNS, timeout, connection refused)
+            if (request.result == UnityWebRequest.Result.ConnectionError)
+            {
+                return ApiResult<T>.Fail(
+                    $"Network error: {request.error}",
+                    ApiErrorKind.Network,
+                    statusCode: null);
+            }
+
+            long status = request.responseCode;
+
+            // HTTP error (4xx/5xx) — UnityWebRequest reports these as ProtocolError
+            if (request.result == UnityWebRequest.Result.ProtocolError)
+            {
+                string detail = TryExtractDetail(request.downloadHandler?.text);
+                string message = string.IsNullOrEmpty(detail)
+                    ? $"Request failed ({status}): {request.error}"
+                    : $"Request failed ({status}): {detail}";
+
+                return ApiResult<T>.Fail(message, ClassifyStatus(status), (int)status);
+            }
+
+            // Other non-success result (DataProcessingError, etc.)
             if (request.result != UnityWebRequest.Result.Success)
             {
-                string serverDetail = TryExtractDetail(request.downloadHandler?.text);
-                string message = string.IsNullOrEmpty(serverDetail)
-                    ? $"Request failed: {request.error}"
-                    : $"Request failed ({request.responseCode}): {serverDetail}";
-
-                return ApiResult<T>.Fail(message);
+                return ApiResult<T>.Fail(
+                    $"Request failed: {request.error}",
+                    ApiErrorKind.Network,
+                    statusCode: null);
             }
 
             // 204 No Content — success with no body to deserialize
-            if (request.responseCode == 204)
+            if (status == 204)
                 return ApiResult<T>.Ok(default);
 
             string responseBody = request.downloadHandler.text;
@@ -347,9 +371,25 @@ namespace UBear.Leaderboard
             catch (JsonException ex)
             {
                 Debug.LogError($"[LeaderboardService] JSON parse error: {ex.Message}\nBody: {responseBody}");
-                return ApiResult<T>.Fail("Unexpected response format from server.");
+                return ApiResult<T>.Fail(
+                    "Unexpected response format from server.",
+                    ApiErrorKind.ParseError,
+                    (int)status);
             }
         }
+
+        private static ApiErrorKind ClassifyStatus(long status) => status switch
+        {
+            400 => ApiErrorKind.BadRequest,
+            401 => ApiErrorKind.Unauthorized,
+            403 => ApiErrorKind.Forbidden,
+            404 => ApiErrorKind.NotFound,
+            409 => ApiErrorKind.Conflict,
+            422 => ApiErrorKind.Validation,
+            429 => ApiErrorKind.RateLimited,
+            >= 500 and < 600 => ApiErrorKind.Server,
+            _ => ApiErrorKind.Server,
+        };
 
         /// <summary>
         /// FastAPI wraps validation/HTTP errors in {"detail": "..."}.
