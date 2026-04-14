@@ -497,6 +497,69 @@ Scoreless guest accounts older than `GUEST_PRUNE_DAYS` (default: 30) are pruned.
 Guest accounts with scores are intentionally preserved.
 
 
+## Known Limitations
+
+These are the tradeoffs the current design accepts deliberately. Each one has
+a documented trigger for revisiting — none are "we forgot." If a limitation
+has a full ADR behind it, that ADR is the authoritative source and this
+section is the summary.
+
+- **Access tokens cannot be revoked within their 60-minute lifetime.** A stolen
+  access token is valid until it expires; there is no server-side kill switch.
+  The mitigation is the short lifetime itself — blast radius is bounded to one
+  hour — and the refresh token (which *can* be revoked) is what gates
+  longer-lived access. **Trigger for revisiting:** a known compromise, an
+  account-claim flow that wants to invalidate the guest's prior tokens, or any
+  threat model where one hour is too long. The full fix is a JTI denylist
+  checked at decode time; insertion points are marked in the codebase with
+  `# DENYLIST HOOK` comments. See [ADR 0006](docs/adr/0006-jwt-plus-opaque-refresh-tokens.md)
+  for the full reasoning.
+- **Rate limiting and cache invalidation are per-process.** Both share a root
+  cause: the in-process storage chosen in [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md)
+  is correct at single-process scale but degrades the moment a second worker
+  appears. **Trigger for revisiting:** any move beyond single-process deployment
+  (second dyno, second uvicorn worker, background job process). The mitigation
+  is already in place — setting `CACHE_BACKEND=redis` and provisioning the
+  Heroku Redis add-on flips both subsystems to Redis-backed storage in one
+  config change.
+
+  - **Rate limits** currently use slowapi's in-process memory storage. At
+    single-dyno, single-worker scale this is correct, but the moment the process
+    count increases the documented limit silently weakens to N× its stated
+    value: an attacker who gets load-balanced across N workers can make N times
+    the allowed requests, with no visible symptom until someone tries to abuse
+    it.
+
+  - **Cache invalidation** is local to each process. A score submission served
+    by process A invalidates process A's cache keys, but process B will continue
+    serving stale leaderboard data until its own copy expires by TTL (currently
+    120 seconds). This is a freshness issue, not a correctness one — stale data
+    is still valid data, just older than it should be.
+
+- **Three scenarios are deliberately untested.** Each was considered and
+  deferred with a specific reason, not missed:
+  - **Guest-retry exhaustion.** The guest account creation loop retries on
+    username collision up to a small bound. Exercising the exhaustion path in
+    a test requires either mocking the username generator (which tests the
+    mock, not the code) or generating enough collisions to exhaust the retry
+    budget legitimately (which is too slow for CI). The loop bound is small
+    and the collision probability is low; the scenario is accepted as tested
+    by inspection.
+  - **Refresh-rotation race.** The `DELETE ... RETURNING` pattern makes refresh
+    rotation race-safe at the database level (see the ADR 0006 consequences).
+    Testing the race requires a real concurrency harness with two clients
+    hitting the refresh endpoint simultaneously, which isn't worth building
+    at current scale. The correctness argument rests on PostgreSQL's atomicity
+    guarantees, not on test coverage.
+  - **FK violation on score submission.** `submit_score` catches
+    `psycopg2.errors.ForeignKeyViolation` and returns 400. Triggering a real FK
+    violation in a test requires creating a score for a user that is then
+    deleted between the Pydantic validation and the INSERT — a window that
+    doesn't naturally occur in a synchronous handler. The alternative is
+    mocking psycopg2 to raise the exception, which would test the `except`
+    block but not the scenario it exists to handle.
+
+
 ## Known Future Considerations
 
 - **Access token revocation** — `# DENYLIST HOOK` comments mark the insertion points.
