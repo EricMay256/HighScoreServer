@@ -1,8 +1,8 @@
 # HighScoreServer
 
-A production-deployed game leaderboard backend built with FastAPI and PostgreSQL, with optional Redis support for caching and rate limiting.
-Designed as a reusable backend for Unity games — any project can drop in the included
-C# client and have a fully functional leaderboard with auth and score history visible through a shared public web view.
+A production-deployed game leaderboard backend built with FastAPI and PostgreSQL. Designed as a reusable backend for Unity games — drop in the included C# client and get a fully functional leaderboard with silent guest auth, per-period score history, rank and percentile, and a public web view.
+
+Architectural decisions are captured as ADRs, and Known Limitations documents the current tradeoffs.
 
 - **Live:** https://high-score-server-9db572197af4.herokuapp.com/
 - **API Docs:** https://high-score-server-9db572197af4.herokuapp.com/docs
@@ -74,7 +74,7 @@ flowchart LR
 ### Prerequisites
 - Python 3.12+
 - PostgreSQL
-- Redis (or Memurai on Windows) — optional; caching and rate limiting use in-process memory by default and only need Redis if you want to exercise that code path locally
+- Redis (or Memurai on Windows) — Implemented for scalable caching, but not required for normal development or single dyno deployment. Caching and rate limiting default to in-process memory; Redis is only needed if you want to exercise the Redis code path locally (see [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md))
 
 ### Steps
 
@@ -430,7 +430,7 @@ HighScoreServer/
 │   ├── models.py             # Pydantic request/response schemas
 │   ├── periods.py            # Period bucketing logic
 │   ├── db.py                 # psycopg2 connection pool
-│   ├── cache.py              # Redis client with graceful fallback
+│   ├── cache.py              # Pluggable cache interface (in-process TTL default, Redis optional)
 │   ├── dependencies.py       # Auth dependencies (require_user, require_api_key)
 │   └── env.py                # Environment variable loading and validation
 ├── db/
