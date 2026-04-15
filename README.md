@@ -149,7 +149,7 @@ erDiagram
         string name PK "natural key, e.g. 'classic'"
         string sort_order "ASC | DESC"
         string label "display name for web view"
-        bool requires_auth "blocks guests when true"
+        bool requires_claimed_account "blocks guests when true"
     }
     scores {
         int id PK
@@ -225,10 +225,10 @@ sequenceDiagram
     participant C as Cache
     U->>API: POST /api/leaderboard/scores {game_mode, score}<br/>Bearer access_token
     Note right of API: rate limited · require_user
-    API->>DB: SELECT sort_order, requires_auth<br/>FROM game_modes WHERE name = ?
+    API->>DB: SELECT sort_order, requires_claimed_account<br/>FROM game_modes WHERE name = ?
     alt mode not found
         API-->>U: 404 Unknown game mode
-    else requires_auth AND is_guest
+    else requires_claimed_account AND is_guest
         API-->>U: 403 Claimed account required
     else valid
         loop for period in (alltime, daily, weekly)
@@ -302,7 +302,7 @@ all.
 | `Network` | — | Connection failed, DNS lookup failed, or timeout. No HTTP response was received. |
 | `BadRequest` | 400 | Malformed request — the server understood the shape but rejected the content. |
 | `Unauthorized` | 401 | Missing, invalid, or expired token. Client should refresh or fall back to guest login. |
-| `Forbidden` | 403 | Authenticated but not allowed — e.g. a guest hitting a `requires_auth` game mode. |
+| `Forbidden` | 403 | Authenticated but not allowed — e.g. a guest hitting a `requires_claimed_account` game mode. |
 | `NotFound` | 404 | Unknown resource — typically an unknown `game_mode`. |
 | `Conflict` | 409 | Resource collision — e.g. username already taken during `/rename`. |
 | `Validation` | 422 | Pydantic validation error. The server's `detail` payload is an array, not a string. |
@@ -334,7 +334,7 @@ private void OnScoreSubmitted(ApiResult<ScoreResponse> result)
             break;
 
         case ApiErrorKind.Forbidden:
-            // Guest account hit a requires_auth game mode. Prompt to claim.
+            // Guest account hit a requires_claimed_account game mode. Prompt to claim.
             ShowClaimAccountDialog();
             break;
 
@@ -498,8 +498,8 @@ private void OnScoreSubmitted(ApiResult<ScoreResponse> result)
 ### Fetching the leaderboard
 
 ```csharp
-// period is one of: "alltime", "daily", "weekly"
-StartCoroutine(_service.GetScores("classic", OnScoresReceived, period: "weekly"));
+// period is a TimePeriod, described in the Enums region of LeaderboardModels.cs
+StartCoroutine(_service.GetScores("classic", OnScoresReceived, period: TimePeriod.Weekly));
 
 private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
 {
