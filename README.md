@@ -139,6 +139,93 @@ The API has two distinct authentication mechanisms for two distinct principals:
 This separation keeps operator concerns out of the user table and prevents a
 compromised player account from reconfiguring the server.
 
+### Error Contract
+
+The API returns two distinct error shapes, both under the `detail` key:
+
+- **`{"detail": "string"}`** — raised explicitly via `HTTPException`. Used for
+  401, 403, 404, 409, and application-level 400s. The string is a
+  human-readable message suitable for logging or displaying to developers.
+- **`{"detail": [ {...}, {...} ]}`** — raised automatically by FastAPI when a
+  request fails Pydantic validation. Used for 422. Each array entry describes
+  one validation failure with `loc`, `msg`, and `type` fields.
+
+Both shapes share the same top-level key, which means a naive client that
+reads `response.detail` as a string will break on validation errors. The
+C# client's `TryExtractDetail` handles both shapes and normalizes them into
+a single string for logging, and the structured `ApiResult<T>.ErrorKind`
+enum lets callers branch on the failure category without parsing strings at
+all.
+
+#### `ApiErrorKind` values
+
+| Kind | HTTP | Meaning |
+|---|---|---|
+| `None` | — | Success. `Error` and `StatusCode` are unset. |
+| `Network` | — | Connection failed, DNS lookup failed, or timeout. No HTTP response was received. |
+| `BadRequest` | 400 | Malformed request — the server understood the shape but rejected the content. |
+| `Unauthorized` | 401 | Missing, invalid, or expired token. Client should refresh or fall back to guest login. |
+| `Forbidden` | 403 | Authenticated but not allowed — e.g. a guest hitting a `requires_auth` game mode. |
+| `NotFound` | 404 | Unknown resource — typically an unknown `game_mode`. |
+| `Conflict` | 409 | Resource collision — e.g. username already taken during `/rename`. |
+| `Validation` | 422 | Pydantic validation error. The server's `detail` payload is an array, not a string. |
+| `RateLimited` | 429 | Per-IP rate limit exceeded. Client should back off. |
+| `Server` | 5xx | Server-side failure. Retry with backoff is appropriate. |
+| `ParseError` | — | Response received but couldn't deserialize — usually a contract mismatch. |
+
+`None` is idiomatic C# as a success sentinel. The enum covers named failure
+categories, not every HTTP status — unexpected statuses (e.g., 3xx redirects)
+fall through to `ParseError` or `Server` depending on whether the body
+deserializes.
+
+#### Handling errors on the C# side
+
+```csharp
+private void OnScoreSubmitted(ApiResult<ScoreResponse> result)
+{
+    if (result.Success)
+    {
+        Debug.Log($"Rank #{result.Data.Rank} — best score: {result.Data.Score}");
+        return;
+    }
+
+    switch (result.ErrorKind)
+    {
+        case ApiErrorKind.Unauthorized:
+            // Token expired mid-session. Refresh and retry.
+            StartCoroutine(_service.RefreshTokens(OnRefreshed));
+            break;
+
+        case ApiErrorKind.Forbidden:
+            // Guest account hit a requires_auth game mode. Prompt to claim.
+            ShowClaimAccountDialog();
+            break;
+
+        case ApiErrorKind.RateLimited:
+            // Back off and retry with exponential delay.
+            StartCoroutine(RetryAfterDelay(result));
+            break;
+
+        case ApiErrorKind.Network:
+        case ApiErrorKind.Server:
+            // Transient. Show a "try again later" banner.
+            ShowTransientErrorBanner(result.Error);
+            break;
+
+        default:
+            // BadRequest, Validation, NotFound, Conflict, ParseError —
+            // not expected during normal play. Log for debugging.
+            Debug.LogWarning($"[Leaderboard] {result.ErrorKind}: {result.Error}");
+            break;
+    }
+}
+```
+
+The value of the enum is that each branch corresponds to a different *user-facing*
+response, not just a different log line. `Unauthorized` triggers a refresh,
+`Forbidden` triggers a claim flow, `RateLimited` triggers backoff — these are
+decisions the client has to make, and the enum is more explicit than a return code.
+
 ### Auth — `/api/auth`
 
 | Method | Route | Auth | Description |
