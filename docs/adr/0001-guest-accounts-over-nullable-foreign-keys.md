@@ -4,7 +4,7 @@ Date: 2026-04-12
 
 ## Status
 
-Accepted
+Superseded by 0008 (naming-only; the decision in this ADR still applies)
 
 ## Context
 
@@ -22,4 +22,4 @@ Every query joining `scores` to `users` is an unconditional `INNER JOIN` with no
 
 The cost is that the `users` table accumulates guest rows that may never become real users. This is the problem `scripts/prune_guests.py` exists to solve: it deletes `is_guest=true` rows older than `GUEST_PRUNE_DAYS` that have no associated scores. Guests who actually played and left a score are preserved indefinitely, since their rows are load-bearing for the leaderboard.
 
-A second consequence worth naming: the `is_guest` flag becomes an authorization input, not just a label. Game modes can set a claimed-account requirement (currently the `requires_auth` column, to be renamed to `requires_claimed_account` in ADR 0008) to block guest submission, which is the right shape for modes where the player identity matters (a tournament leaderboard, say) but adds a small amount of branching to the score submission path.
+A second consequence worth naming: the `is_guest` flag becomes an authorization input, not just a label. Game modes can set a claimed-account requirement (the `requires_claimed_account` column [renamed from `requires_auth` in ADR 0008]) to block guest submission, which is the right shape for modes where the player identity matters (a tournament leaderboard, say) but adds a small amount of branching to the score submission path.

@@ -27,10 +27,11 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 
 | #    | Title                                                                                  | Status   |
 |------|----------------------------------------------------------------------------------------|----------|
-| 0001 | [Guest accounts over nullable foreign keys](0001-guest-accounts-over-nullable-foreign-keys.md) | Accepted |
+| 0001 | [Guest accounts over nullable foreign keys](0001-guest-accounts-over-nullable-foreign-keys.md) | Superseded by 0008 |
 | 0002 | [Raw SQL over ORM](0002-raw-sql-over-orm.md)                                           | Accepted |
 | 0003 | [Period bucketing via upsert](0003-period-bucketing-via-upsert.md)                     | Accepted |
 | 0004 | [Ascending and descending sort order as a first-class concept](0004-ascending-and-descending-sort-order.md) | Accepted |
 | 0005 | [Sync over async](0005-sync-over-async.md)                                             | Accepted |
 | 0006 | [JWT plus opaque refresh tokens](0006-jwt-plus-opaque-refresh-tokens.md)               | Accepted |
 | 0007 | [In-process cache over Redis at single-dyno scale](0007-in-process-cache-over-redis.md) | Accepted |
+| 0008 | [Naming Audit: requires_claimed_account and client-side enums](0008-naming-audit-requires-claimed-account-and-client-enums.md) | Accepted |
