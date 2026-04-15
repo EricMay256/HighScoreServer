@@ -47,11 +47,13 @@ flowchart LR
 - **Period bucketing** — scores are tracked across three independent windows:
   all-time, weekly, and daily. A single submission upserts into all three periods
   simultaneously.
-- **Rate limiting** — many API endpoints are rate limited per client IP via slowapi.
-  Write endpoints and auth routes are more tightly constrained than reads to reflect
-  their relative abuse potential. The deployed configuration uses slowapi's in-process
-  memory backend; a Redis backend is supported and can be enabled by provisioning the
-  add-on, which is the correct path if the API ever runs on more than one dyno.
+- **Rate limiting** — write endpoints and auth routes are rate limited per
+  client IP via slowapi, tuned to reflect their relative abuse potential.
+  The deployed configuration uses in-process memory storage; the limiter
+  also falls through to memory if a configured Redis is unreachable, so a
+  Redis blip degrades rate limiting rather than taking the API down. Both
+  backends are driven by `CACHE_BACKEND` — flipping the cache and the
+  limiter to Redis is a single config change (see [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md)).
 - **Flexible sort order** — game modes are individually configured as highest-score
   or lowest-score wins. The same API and client code handles both — a speedrun mode
   and a points mode are treated symmetrically.
@@ -431,6 +433,10 @@ The `UnityClient/` directory contains a drop-in C# leaderboard client for Unity 
 3. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
 4. Set the base URL to your Heroku app URL (no trailing slash)
 5. Gitignore your config asset — no sensitive data currently, but it may be introduced.
+6. **Note on `submitted_at`**: the field is typed as `string` on `ScoreResponse`, not `DateTime`.
+   This is a deliberate dodge of Newtonsoft's default local-time conversion, which would silently
+   shift timestamps based on the player's device timezone. Parse it explicitly with
+   `DateTimeOffset.Parse(...)` if you need a typed value — the server always emits UTC ISO 8601.
 
 ### Authentication lifecycle
 
@@ -456,6 +462,14 @@ public void ClaimAccount(string email, string password)
     StartCoroutine(_service.Claim(email, password, OnClaimed));
 }
 ```
+Logout is best-effort. _service.Logout() attempts to revoke the refresh
+token server-side, but clears the locally stored tokens regardless of whether
+the server call succeeds. This is the right behavior — a failed logout should
+not leave the client in a state where it thinks it's still authenticated —
+but it means a logout during network failure succeeds locally and fails
+server-side, leaving the refresh token valid until its natural expiry. The
+mitigation is the refresh token's own lifetime, which is short enough that
+the window of exposure is bounded.
 
 ### Submitting scores
 
@@ -497,7 +511,10 @@ private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
 ```
 
 ### Known limitations
-- **Token expiry** — access tokens expire after 60 minutes. `EnsureAuthenticated` handles the missing-token case by falling through to guest login, but does not yet detect 401 responses from expired tokens mid-session. If a request fails with a 401, call `RefreshTokens()` and retry. Automatic retry on 401 is a known future improvement.
+- **Automatic retry on 401** — `EnsureAuthenticated` handles the missing-token
+  case by falling through to guest login, but does not detect 401 responses
+  from expired tokens mid-session. If a request fails with a 401, call
+  `RefreshTokens()` and retry. Automatic retry is a known future improvement.
 - **Token storage** — tokens are stored in `PlayerPrefs`, which is not encrypted.
   This is standard Unity practice for session tokens. The correct long-term
   answer is server-side revocation (JTI denylist) rather than client-side
