@@ -684,3 +684,6 @@ section is the summary.
 - **Password reset flow.** Requires token storage, email delivery, new
   endpoints, and reset UI. The `email` column is already nullable on the
   `users` table to keep the schema ready.
+- **Cumulative Score support.** Allow for users to track how many points
+  have been scored across all sessions within a time period. Include 
+  protections against duplicate submissions.
