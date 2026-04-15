@@ -23,14 +23,14 @@ def list_game_modes(request: Request) -> list[GameModeConfig]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT name, sort_order, label, requires_auth FROM game_modes ORDER BY name")
+            cur.execute("SELECT name, sort_order, label, requires_claimed_account FROM game_modes ORDER BY name")
             rows = cur.fetchall()
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         release_conn(conn)
 
-    return [GameModeConfig(name=r[0], sort_order=r[1], label=r[2], requires_auth=r[3]) for r in rows]
+    return [GameModeConfig(name=r[0], sort_order=r[1], label=r[2], requires_claimed_account=r[3]) for r in rows]
 
 
 @router.post(
@@ -45,15 +45,15 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO game_modes (name, sort_order, label, requires_auth)
+                INSERT INTO game_modes (name, sort_order, label, requires_claimed_account)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                     sort_order = EXCLUDED.sort_order,
                     label      = EXCLUDED.label,
-                    requires_auth = EXCLUDED.requires_auth
-                RETURNING name, sort_order, label, requires_auth
+                    requires_claimed_account = EXCLUDED.requires_claimed_account
+                RETURNING name, sort_order, label, requires_claimed_account
                 """,
-                (config.name, config.sort_order, config.label, config.requires_auth),
+                (config.name, config.sort_order, config.label, config.requires_claimed_account),
             )
             row = cur.fetchone()
             conn.commit()
@@ -63,7 +63,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
     finally:
         release_conn(conn)
 
-    return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_auth=row[3])
+    return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3])
 
 @router.get("/latest", response_model=list[ScoreResponse], responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
@@ -224,7 +224,7 @@ def submit_score(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT sort_order, requires_auth FROM game_modes WHERE name = %s",
+                "SELECT sort_order, requires_claimed_account FROM game_modes WHERE name = %s",
                 (submission.game_mode,),
             )
             mode_row = cur.fetchone()
@@ -235,9 +235,9 @@ def submit_score(
                     detail=f"Unknown game mode: {submission.game_mode}",
                 )
 
-            sort_order, requires_auth = mode_row
+            sort_order, requires_claimed_account = mode_row
 
-            if requires_auth and is_guest:
+            if requires_claimed_account and is_guest:
                 # Raises without rolling back transaction - OK since no modifications made.
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,

@@ -37,7 +37,7 @@ namespace UBear.Leaderboard
     private const string PrefAccessToken  = "leaderboard_access_token";
     private const string PrefRefreshToken = "leaderboard_refresh_token";
 
-    // ── Token access ───────────────────────────────────────────────────────
+    #region  Token Access
 
     /// <summary>
     /// Returns true if an access token is currently stored.
@@ -65,7 +65,8 @@ namespace UBear.Leaderboard
       PlayerPrefs.Save();
     }
 
-    // ── Auth endpoints ─────────────────────────────────────────────────────
+    #endregion
+    #region  Auth Endpoints
 
     /// <summary>
     /// Creates a guest account and stores the returned tokens.
@@ -226,18 +227,19 @@ namespace UBear.Leaderboard
       }, requiresAuth: true);
     }
 
-    // ── Leaderboard endpoints ──────────────────────────────────────────────
+    #endregion
+    #region  Leaderboard Endpoints
 
     /// <summary>
     /// Fetches the leaderboard for a given game mode and period.
-    /// Period is one of: "alltime", "daily", "weekly".
+    /// Period defaults to all-time; pass Period.Daily or Period.Weekly for time-bucketed views.
     /// </summary>
     public IEnumerator GetScores(
       string                                   gameMode,
       Action<ApiResult<LeaderboardResponse>>   callback,
-      string                                   period = "alltime")
+      TimePeriod                               period = TimePeriod.Alltime)
     {
-      string url = $"{_config.BaseUrl}/api/leaderboard/scores?game_mode={gameMode}&period={period}";
+      string url = $"{_config.BaseUrl}/api/leaderboard/scores?game_mode={gameMode}&period={period.ToWireValue()}";
       yield return Get(url, callback);
     }
 
@@ -267,7 +269,8 @@ namespace UBear.Leaderboard
       yield return Post<ScoreSubmission, ScoreResponse>(url, body, callback, requiresAuth: true);
     }
 
-    // ── Private HTTP helpers ───────────────────────────────────────────────
+    #endregion
+    #region  Private HTTP Helpers
 
     /// <summary>
     /// Generic GET — deserializes the response body into T.
@@ -424,5 +427,6 @@ namespace UBear.Leaderboard
       }
       catch { return null; }
     }
+  #endregion
   }
 }

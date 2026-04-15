@@ -13,11 +13,11 @@
 -- DROP TABLE IF EXISTS users;
 
 CREATE TABLE IF NOT EXISTS game_modes (
-    name          VARCHAR(32)  PRIMARY KEY,
-    sort_order    VARCHAR(4) NOT NULL DEFAULT 'DESC'
+    name                      VARCHAR(32)  PRIMARY KEY,
+    sort_order                VARCHAR(4) NOT NULL DEFAULT 'DESC'
       CHECK (sort_order IN ('ASC', 'DESC')),
-    label         TEXT,
-    requires_auth BOOLEAN      NOT NULL DEFAULT FALSE
+    label                     TEXT,
+    requires_claimed_account  BOOLEAN      NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS users (
