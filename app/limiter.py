@@ -25,7 +25,11 @@ def get_real_ip(request: Request) -> str:
 def _make_limiter() -> Limiter:
     """
     Attempts to connect to Redis for distributed rate limiting.
-    Falls back to in-process memory if Redis is unreachable.
+    Uses Redis only when CACHE_BACKEND=redis AND REDIS_URL is set, so the
+    rate limiter's storage backend tracks the cache by design rather than
+    by accident of env var layout (see ADR 0007). Falls back to in-process
+    memory if Redis is configured but unreachable — a Redis blip degrades
+    rate limiting rather than taking the API down.
 
     The tradeoff: memory storage doesn't share state across gunicorn workers
     or dynos, so limits are per-process in degraded mode. Acceptable — the
@@ -33,8 +37,9 @@ def _make_limiter() -> Limiter:
     """
     enabled = os.environ.get("RATE_LIMITER_ENABLED", "true").lower() != "false"
 
+    cache_backend = os.environ.get("CACHE_BACKEND", "memory").lower()
     redis_url = os.environ.get("REDIS_URL")
-    if redis_url:
+    if cache_backend == "redis" and redis_url:
         try:
             import redis as redis_lib
             client = redis_lib.from_url(redis_url)
@@ -49,6 +54,10 @@ def _make_limiter() -> Limiter:
             logger.warning(
                 "Redis unavailable for rate limiter, falling back to memory: %s", e
             )
+    elif cache_backend == "redis" and not redis_url:
+        logger.warning(
+            "CACHE_BACKEND=redis but REDIS_URL is unset; rate limiter falling back to memory"
+        )
 
     return Limiter(
         key_func=get_real_ip,
