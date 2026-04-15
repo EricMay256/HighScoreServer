@@ -1,8 +1,12 @@
+# Base concerns
 import logging
 import os
 
+#Necessary libraries for rate limiting
 from slowapi import Limiter
 from starlette.requests import Request
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,7 @@ def _make_limiter() -> Limiter:
                 key_func=get_real_ip,
                 storage_uri=redis_url,
                 enabled=enabled,
+                headers_enabled=True,
             )
         except Exception as e:
             logger.warning(
@@ -63,7 +68,28 @@ def _make_limiter() -> Limiter:
         key_func=get_real_ip,
         storage_uri="memory://",
         enabled=enabled,
+        headers_enabled=True,
     )
 
 
 limiter = _make_limiter()
+
+
+
+def rate_limited_responses(limit_description: str) -> dict:
+    return {
+        429: {
+            "description": f"Rate limit exceeded: {limit_description}.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": f"Rate limit exceeded: {limit_description}"}
+                }
+            },
+            "headers": {
+                "Retry-After": {"schema": {"type": "integer"}},
+                "X-RateLimit-Limit": {"schema": {"type": "integer"}},
+                "X-RateLimit-Remaining": {"schema": {"type": "integer"}},
+                "X-RateLimit-Reset": {"schema": {"type": "integer"}},
+            },
+        },
+    }

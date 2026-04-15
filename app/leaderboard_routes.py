@@ -8,7 +8,7 @@ from app.cache import get_cache
 from app.dependencies import require_api_key, require_user
 from app.periods import get_period_start, PERIODS
 from psycopg2 import errors as pg_errors
-from app.limiter import limiter
+from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
 
 router = APIRouter(tags=["leaderboard"])
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 CACHE_KEY_PREFIX = "leaderboard:"
 CACHE_TTL = 120  # seconds
 
-@router.get("/game_modes", response_model=list[GameModeConfig])
+@router.get("/game_modes", response_model=list[GameModeConfig], responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
 def list_game_modes(request: Request) -> list[GameModeConfig]:
     conn = get_conn()
@@ -65,7 +65,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 
     return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_auth=row[3])
 
-@router.get("/latest", response_model=list[ScoreResponse])
+@router.get("/latest", response_model=list[ScoreResponse], responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
 def latest_scores(request: Request) -> list[ScoreResponse]:
     # Attempt cache read — fall through to DB if Redis is unavailable
@@ -120,7 +120,7 @@ def latest_scores(request: Request) -> list[ScoreResponse]:
 
     return results
 
-@router.get("/scores", response_model=LeaderboardResponse)
+@router.get("/scores", response_model=LeaderboardResponse, responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
 def get_scores(request: Request, game_mode: str, period: str = "alltime") -> LeaderboardResponse:
     cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
@@ -207,6 +207,7 @@ def get_scores(request: Request, game_mode: str, period: str = "alltime") -> Lea
     "/scores",
     response_model=ScoreResponse,
     status_code=status.HTTP_201_CREATED,
+    responses=rate_limited_responses("10 per minute"),
 )
 @limiter.limit("10/minute")
 def submit_score(

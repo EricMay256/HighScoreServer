@@ -2,7 +2,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import JWTError
 from pydantic import BaseModel, EmailStr, Field
-from app.limiter import limiter
+from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
 
 from app.auth import (
@@ -52,7 +52,8 @@ class TokenResponse(BaseModel):
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
-@router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
+             responses=rate_limited_responses("5 per minute"))
 @limiter.limit("5/minute")
 def guest_login(request: Request) -> TokenResponse:
     """
@@ -98,8 +99,9 @@ def guest_login(request: Request) -> TokenResponse:
     )
 
 
-@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-@limiter.limit("5/minute")
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
+             responses=rate_limited_responses("10 per minute"))
+@limiter.limit("10/minute")
 def register(request: Request, body: RegisterRequest) -> TokenResponse:
     password_hash = hash_password(body.password)
     conn          = get_conn()
@@ -136,7 +138,7 @@ def register(request: Request, body: RegisterRequest) -> TokenResponse:
     )
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
 def login(request: Request, body: LoginRequest) -> TokenResponse:
     conn = get_conn()

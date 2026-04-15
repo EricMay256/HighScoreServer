@@ -258,8 +258,8 @@ including field types and example payloads, are available in the interactive
 section covers the surface area and behavior; `/docs` covers the shapes.
 
 Write endpoints and auth routes are rate limited per client IP. Reads are
-unrestricted or lightly limited. Exact values provided by FastAPI rather than
-this document to ensure accuracy without maintenance cost.
+unrestricted or lightly limited. Exact limits are visible in the interactive
+`/docs` so they can't drift from the code.
 
 ### Auth Model
 
