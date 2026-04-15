@@ -88,8 +88,8 @@ pip install -r requirements.txt
 
 2. Copy the example environment file and fill in your values:
 ```bash
-cp .env.example .env          # macOS/Linux
 Copy-Item .env.example .env   # Windows Powershell
+cp .env.example .env          # macOS/Linux
 ```
 At minimum you'll need `DATABASE_URL`, `JWT_SECRET`, and `API_KEY`.
 Redis and Sentry configuration is optional.
@@ -111,6 +111,141 @@ uvicorn app.main:app --reload
 ```
 
 6. Visit `http://localhost:8000/docs` to explore the API.
+
+
+## Architecture Diagrams
+
+Three diagrams cover the parts of the system that are hardest to understand from
+code alone: the data model, the authentication lifecycle, and what happens when
+a score is submitted. The rationale behind these shapes lives in
+[Architecture Decisions](#architecture-decisions) directly below.
+
+### Data model
+
+```mermaid
+erDiagram
+    users ||--o{ refresh_tokens : "has"
+    users ||--o{ scores : "submits"
+    game_modes ||--o{ scores : "categorizes"
+    users {
+        int id PK
+        string username UK "set at guest creation"
+        string email UK "nullable, reserved for reset"
+        string password_hash "nullable for guests"
+        bool is_guest "true until /claim"
+        bool is_verified
+        timestamptz created_at
+    }
+    refresh_tokens {
+        int id PK
+        int user_id FK "ON DELETE CASCADE"
+        string token_hash UK "SHA-256, rotated on refresh"
+        timestamptz expires_at
+        timestamptz created_at
+    }
+    game_modes {
+        string name PK "natural key, e.g. 'classic'"
+        string sort_order "ASC | DESC"
+        string label "display name for web view"
+        bool requires_auth "blocks guests when true"
+    }
+    scores {
+        int id PK
+        int user_id FK "ON DELETE RESTRICT"
+        string game_mode FK
+        bigint score
+        string period "alltime | weekly | daily"
+        timestamptz period_start "UQ(user, mode, period, start)"
+        timestamptz submitted_at
+    }
+```
+
+A few things worth noting that the diagram can't express cleanly:
+
+- **`scores` is upsert-on-best, not append-only.** The `UNIQUE (user_id, game_mode, period, period_start)` constraint is what makes period bucketing work — each player has at most one row per period window, and submissions either improve it or no-op.
+- **`ON DELETE RESTRICT` on `scores.user_id`** prevents accidental user deletion from silently destroying leaderboard history. Guest pruning explicitly checks for score ownership before deleting.
+- **`game_modes.name` is a natural key.** Cardinality is tiny and stable, and it makes raw SQL and logs human-readable without joining.
+
+### Authentication lifecycle
+
+Covers the three flows a Unity client goes through: silent guest creation on
+first launch, claiming the account later, and rotating an expired access token.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Unity Client
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    Note over U,DB: First launch — silent guest auth
+    U->>API: POST /api/auth/guest
+    API->>DB: INSERT users (username, is_guest=true, password_hash=NULL)
+    API->>DB: INSERT refresh_tokens (hash, expires_at)
+    API-->>U: access_token (JWT, 60min) + refresh_token (opaque)
+    Note over U: Store tokens in PlayerPrefs
+    Note over U,DB: Later — player claims the account
+    U->>API: POST /api/auth/claim {email, password}
+    Note right of API: Bearer access_token<br/>user_id read from JWT
+    API->>DB: UPDATE users SET email, password_hash, is_guest=false WHERE id = ?
+    API-->>U: 200 OK
+    Note over U,DB: Access token expires after 60 minutes
+    U->>API: POST /api/auth/refresh {refresh_token}
+    Note right of API: rotate_refresh_token — single transaction
+    API->>DB: DELETE refresh_tokens WHERE token_hash = SHA256(refresh_token) RETURNING user_id
+    alt row returned (valid, not expired, not already rotated)
+        API->>DB: INSERT refresh_tokens (new hash, expires_at)
+        API->>DB: COMMIT
+        API-->>U: new access_token + new refresh_token
+    else no row
+        API->>DB: ROLLBACK
+        API-->>U: 401 Unauthorized
+        Note over U: Fall back to guest login or prompt claim
+    end
+```
+
+The `DELETE ... RETURNING` pattern is what makes refresh tokens single-use
+safely. If two clients race to rotate the same token, exactly one `DELETE`
+returns a row and the other gets nothing — no read-then-write window where
+both could succeed.
+
+### Score submission lifecycle
+
+Covers the full path of `POST /api/leaderboard/scores`: validation, the
+three-period upsert, cache invalidation, and the rank/percentile computation
+that ships back in the response.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Unity Client
+    participant API as FastAPI
+    participant DB as PostgreSQL
+    participant C as Cache
+    U->>API: POST /api/leaderboard/scores {game_mode, score}<br/>Bearer access_token
+    Note right of API: rate limited · require_user
+    API->>DB: SELECT sort_order, requires_auth<br/>FROM game_modes WHERE name = ?
+    alt mode not found
+        API-->>U: 404 Unknown game mode
+    else requires_auth AND is_guest
+        API-->>U: 403 Claimed account required
+    else valid
+        loop for period in (alltime, daily, weekly)
+            API->>DB: INSERT INTO scores ... ON CONFLICT DO UPDATE<br/>WHERE new score beats stored (per sort_order)
+        end
+        API->>DB: COMMIT
+        loop for period in (alltime, daily, weekly)
+            API->>C: DELETE leaderboard:{mode}:{period}
+        end
+        Note right of C: Cache miss forces next read<br/>to rebuild from DB
+        API->>DB: SELECT RANK() OVER (...), COUNT(*) OVER ()<br/>for submitted user
+        API-->>U: 201 ScoreResponse<br/>{id, score, rank, percentile, ...}
+    end
+```
+
+The cache participant is labeled "Cache" in the diagram because it's backend-agnostic — 
+the deployed configuration uses an in-process TTL cache, and Redis is supported by the 
+same interface (see [Architecture Overview](#architecture-overview)). Both backends honor 
+the same key-delete contract.
 
 
 ## API Reference
@@ -269,141 +404,6 @@ than a 500.
 **Behavior:** Upserts on `(user_id, game_mode, period, period_start)`. Only 
 updates if the new score is an improvement (respecting the game mode's sort
 order). Returns the player's current best with rank and percentile.
-
-
-## Architecture Diagrams
-
-Three diagrams cover the parts of the system that are hardest to understand from
-code alone: the data model, the authentication lifecycle, and what happens when
-a score is submitted. The rationale behind these shapes lives in
-[Architecture Decisions](#architecture-decisions) directly below.
-
-### Data model
-
-```mermaid
-erDiagram
-    users ||--o{ refresh_tokens : "has"
-    users ||--o{ scores : "submits"
-    game_modes ||--o{ scores : "categorizes"
-    users {
-        int id PK
-        string username UK "set at guest creation"
-        string email UK "nullable, reserved for reset"
-        string password_hash "nullable for guests"
-        bool is_guest "true until /claim"
-        bool is_verified
-        timestamptz created_at
-    }
-    refresh_tokens {
-        int id PK
-        int user_id FK "ON DELETE CASCADE"
-        string token_hash UK "SHA-256, rotated on refresh"
-        timestamptz expires_at
-        timestamptz created_at
-    }
-    game_modes {
-        string name PK "natural key, e.g. 'classic'"
-        string sort_order "ASC | DESC"
-        string label "display name for web view"
-        bool requires_auth "blocks guests when true"
-    }
-    scores {
-        int id PK
-        int user_id FK "ON DELETE RESTRICT"
-        string game_mode FK
-        bigint score
-        string period "alltime | weekly | daily"
-        timestamptz period_start "UQ(user, mode, period, start)"
-        timestamptz submitted_at
-    }
-```
-
-A few things worth noting that the diagram can't express cleanly:
-
-- **`scores` is upsert-on-best, not append-only.** The `UNIQUE (user_id, game_mode, period, period_start)` constraint is what makes period bucketing work — each player has at most one row per period window, and submissions either improve it or no-op.
-- **`ON DELETE RESTRICT` on `scores.user_id`** prevents accidental user deletion from silently destroying leaderboard history. Guest pruning explicitly checks for score ownership before deleting.
-- **`game_modes.name` is a natural key.** Cardinality is tiny and stable, and it makes raw SQL and logs human-readable without joining.
-
-### Authentication lifecycle
-
-Covers the three flows a Unity client goes through: silent guest creation on
-first launch, claiming the account later, and rotating an expired access token.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Unity Client
-    participant API as FastAPI
-    participant DB as PostgreSQL
-    Note over U,DB: First launch — silent guest auth
-    U->>API: POST /api/auth/guest
-    API->>DB: INSERT users (username, is_guest=true, password_hash=NULL)
-    API->>DB: INSERT refresh_tokens (hash, expires_at)
-    API-->>U: access_token (JWT, 60min) + refresh_token (opaque)
-    Note over U: Store tokens in PlayerPrefs
-    Note over U,DB: Later — player claims the account
-    U->>API: POST /api/auth/claim {email, password}
-    Note right of API: Bearer access_token<br/>user_id read from JWT
-    API->>DB: UPDATE users SET email, password_hash, is_guest=false WHERE id = ?
-    API-->>U: 200 OK
-    Note over U,DB: Access token expires after 60 minutes
-    U->>API: POST /api/auth/refresh {refresh_token}
-    Note right of API: rotate_refresh_token — single transaction
-    API->>DB: DELETE refresh_tokens WHERE token_hash = SHA256(refresh_token) RETURNING user_id
-    alt row returned (valid, not expired, not already rotated)
-        API->>DB: INSERT refresh_tokens (new hash, expires_at)
-        API->>DB: COMMIT
-        API-->>U: new access_token + new refresh_token
-    else no row
-        API->>DB: ROLLBACK
-        API-->>U: 401 Unauthorized
-        Note over U: Fall back to guest login or prompt claim
-    end
-```
-
-The `DELETE ... RETURNING` pattern is what makes refresh tokens single-use
-safely. If two clients race to rotate the same token, exactly one `DELETE`
-returns a row and the other gets nothing — no read-then-write window where
-both could succeed.
-
-### Score submission lifecycle
-
-Covers the full path of `POST /api/leaderboard/scores`: validation, the
-three-period upsert, cache invalidation, and the rank/percentile computation
-that ships back in the response.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Unity Client
-    participant API as FastAPI
-    participant DB as PostgreSQL
-    participant C as Cache
-    U->>API: POST /api/leaderboard/scores {game_mode, score}<br/>Bearer access_token
-    Note right of API: rate limited · require_user
-    API->>DB: SELECT sort_order, requires_auth<br/>FROM game_modes WHERE name = ?
-    alt mode not found
-        API-->>U: 404 Unknown game mode
-    else requires_auth AND is_guest
-        API-->>U: 403 Claimed account required
-    else valid
-        loop for period in (alltime, daily, weekly)
-            API->>DB: INSERT INTO scores ... ON CONFLICT DO UPDATE<br/>WHERE new score beats stored (per sort_order)
-        end
-        API->>DB: COMMIT
-        loop for period in (alltime, daily, weekly)
-            API->>C: DELETE leaderboard:{mode}:{period}
-        end
-        Note right of C: Cache miss forces next read<br/>to rebuild from DB
-        API->>DB: SELECT RANK() OVER (...), COUNT(*) OVER ()<br/>for submitted user
-        API-->>U: 201 ScoreResponse<br/>{id, score, rank, percentile, ...}
-    end
-```
-
-The cache participant is labeled "Cache" in the diagram because it's backend-agnostic — 
-the deployed configuration uses an in-process TTL cache, and Redis is supported by the 
-same interface (see [Architecture Overview](#architecture-overview)). Both backends honor 
-the same key-delete contract.
 
 
 ## Architecture Decisions
