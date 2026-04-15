@@ -60,11 +60,11 @@ def mode(request, classic_mode, speedrun_mode):
     
 
 @pytest.fixture(scope="module")
-def requires_auth_mode(client: TestClient, api_key: str) -> str:
+def requires_claimed_account_mode(client: TestClient, api_key: str) -> str:
     """Creates a game mode that requires a claimed account."""
     response = client.post(
         "/api/leaderboard/game_modes",
-        json={"name": "challenge", "sort_order": "DESC", "label": "Challenge", "requires_auth": True},
+        json={"name": "challenge", "sort_order": "DESC", "label": "Challenge", "requires_claimed_account": True},
         headers={"x-api-key": api_key},
     )
     assert response.status_code in (200, 201)
@@ -289,19 +289,19 @@ def test_submit_score_appears_in_all_periods(client, auth_headers, classic_mode)
 
 # ── Auth gating ────────────────────────────────────────────────────────────
 
-def test_guest_blocked_from_requires_auth_mode(client, guest_headers, requires_auth_mode):
+def test_guest_blocked_from_requires_claimed_account_mode(client, guest_headers, requires_claimed_account_mode):
     response = client.post(
         "/api/leaderboard/scores",
-        json={"score": 1000, "game_mode": requires_auth_mode},
+        json={"score": 1000, "game_mode": requires_claimed_account_mode},
         headers=guest_headers,
     )
     assert response.status_code == 403
 
 
-def test_claimed_user_allowed_in_requires_auth_mode(client, auth_headers, requires_auth_mode):
+def test_claimed_user_allowed_in_requires_claimed_account_mode(client, auth_headers, requires_claimed_account_mode):
     response = client.post(
         "/api/leaderboard/scores",
-        json={"score": 1000, "game_mode": requires_auth_mode},
+        json={"score": 1000, "game_mode": requires_claimed_account_mode},
         headers=auth_headers,
     )
     assert response.status_code == 201
@@ -554,7 +554,7 @@ def test_get_game_modes_returns_list(client, classic_mode):
 
 
 def test_get_game_modes_entry_shape(client, classic_mode):
-    """Each game mode entry should include name, sort_order, label, requires_auth."""
+    """Each game mode entry should include name, sort_order, label, requires_claimed_account."""
     response = client.get("/api/leaderboard/game_modes")
     modes = response.json()
     assert len(modes) >= 1
@@ -562,7 +562,7 @@ def test_get_game_modes_entry_shape(client, classic_mode):
     assert "name" in entry
     assert "sort_order" in entry
     assert "label" in entry
-    assert "requires_auth" in entry
+    assert "requires_claimed_account" in entry
 
 
 def test_get_game_modes_includes_created_mode(client, classic_mode, speedrun_mode):
