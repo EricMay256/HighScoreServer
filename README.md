@@ -542,7 +542,7 @@ section is the summary.
     username collision up to a small bound. Exercising the exhaustion path in
     a test requires either mocking the username generator (which tests the
     mock, not the code) or generating enough collisions to exhaust the retry
-    budget legitimately (which is too slow for CI). The loop bound is small
+    budget legitimately (which is too slow to justify). The loop bound is small
     and the collision probability is low; the scenario is accepted as tested
     by inspection.
   - **Refresh-rotation race.** The `DELETE ... RETURNING` pattern makes refresh
@@ -553,8 +553,8 @@ section is the summary.
     guarantees, not on test coverage.
   - **FK violation on score submission.** `submit_score` catches
     `psycopg2.errors.ForeignKeyViolation` and returns 400. Triggering a real FK
-    violation in a test requires creating a score for a user that is then
-    deleted between the Pydantic validation and the INSERT — a window that
+    violation in a test requires creating a score for a game mode and/or user that 
+    is then deleted between the Pydantic validation and the INSERT — a window that
     doesn't naturally occur in a synchronous handler. The alternative is
     mocking psycopg2 to raise the exception, which would test the `except`
     block but not the scenario it exists to handle.
