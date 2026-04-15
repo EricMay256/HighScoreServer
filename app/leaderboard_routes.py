@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.models import LeaderboardResponse, ScoreSubmission, ScoreResponse, GameModeConfig, GameModeCreate
 from app.db import get_conn, release_conn
 from app.cache import get_cache
@@ -19,7 +19,7 @@ CACHE_TTL = 120  # seconds
 
 @router.get("/game_modes", response_model=list[GameModeConfig], responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
-def list_game_modes(request: Request) -> list[GameModeConfig]:
+def list_game_modes(request: Request, response: Response) -> list[GameModeConfig]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -67,7 +67,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 
 @router.get("/latest", response_model=list[ScoreResponse], responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
-def latest_scores(request: Request) -> list[ScoreResponse]:
+def latest_scores(request: Request, response: Response) -> list[ScoreResponse]:
     # Attempt cache read — fall through to DB if Redis is unavailable
     try:
         cache = get_cache()
@@ -122,7 +122,7 @@ def latest_scores(request: Request) -> list[ScoreResponse]:
 
 @router.get("/scores", response_model=LeaderboardResponse, responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
-def get_scores(request: Request, game_mode: str, period: str = "alltime") -> LeaderboardResponse:
+def get_scores(request: Request, response: Response, game_mode: str, period: str = "alltime") -> LeaderboardResponse:
     cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
     try:
         cache = get_cache()
@@ -212,6 +212,7 @@ def get_scores(request: Request, game_mode: str, period: str = "alltime") -> Lea
 @limiter.limit("10/minute")
 def submit_score(
     request:    Request,
+    response:   Response,
     submission: ScoreSubmission,
     payload:    dict = Depends(require_user),
 ) -> ScoreResponse:

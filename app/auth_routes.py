@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from jose import JWTError
 from pydantic import BaseModel, EmailStr, Field
 from app.limiter import limiter, rate_limited_responses
@@ -55,7 +55,7 @@ class TokenResponse(BaseModel):
 @router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
              responses=rate_limited_responses("5 per minute"))
 @limiter.limit("5/minute")
-def guest_login(request: Request) -> TokenResponse:
+def guest_login(request: Request, response: Response) -> TokenResponse:
     """
     Creates a guest account with a generated username.
     Retries on the rare username collision (token_hex(4) = 4 billion combinations).
@@ -102,7 +102,7 @@ def guest_login(request: Request) -> TokenResponse:
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
              responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
-def register(request: Request, body: RegisterRequest) -> TokenResponse:
+def register(request: Request, response: Response, body: RegisterRequest) -> TokenResponse:
     password_hash = hash_password(body.password)
     conn          = get_conn()
     try:
@@ -140,7 +140,7 @@ def register(request: Request, body: RegisterRequest) -> TokenResponse:
 
 @router.post("/login", response_model=TokenResponse, responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
-def login(request: Request, body: LoginRequest) -> TokenResponse:
+def login(request: Request, response: Response, body: LoginRequest) -> TokenResponse:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
