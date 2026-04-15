@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS scores (
     id           SERIAL PRIMARY KEY,
     user_id      INTEGER      NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     game_mode    VARCHAR(32)  NOT NULL REFERENCES game_modes(name),
-    score        BIGINT      NOT NULL,
+    score        BIGINT      NOT NULL,   -- Using BIGINT to allow for very large scores, but this can be adjusted based on expected score ranges
     period       VARCHAR(16)  NOT NULL,  -- 'alltime', 'weekly', 'daily'
     period_start TIMESTAMPTZ  NOT NULL,  -- start of the window this score belongs to
     submitted_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

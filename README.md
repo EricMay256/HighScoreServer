@@ -432,7 +432,7 @@ The `UnityClient/` directory contains a drop-in C# leaderboard client for Unity 
 2. Install [Newtonsoft.Json for Unity] via Package Manager
 3. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
 4. Set the base URL to your Heroku app URL (no trailing slash)
-5. Gitignore your config asset — no sensitive data currently, but it may be introduced.
+5. Gitignore your config asset
 6. **Note on `submitted_at`**: the field is typed as `string` on `ScoreResponse`, not `DateTime`.
    This is a deliberate dodge of Newtonsoft's default local-time conversion, which would silently
    shift timestamps based on the player's device timezone. Parse it explicitly with
@@ -666,11 +666,17 @@ section is the summary.
 
 ## Known Future Considerations
 
-- **Access token revocation** — `# DENYLIST HOOK` comments mark the insertion points.
-  Requires a Redis JTI denylist checked on every decode.
-- **Async migration** — psycopg2 → asyncpg if concurrency becomes a bottleneck.
-  Neither SQLAlchemy nor Alembic are in scope for this migration.
-- **Guest cleanup for accounts with scores** — scoreless guests are pruned automatically.
-  Pruning guests with score history requires a separate retention policy decision.
-- **Password reset** — requires token storage, email delivery, and new UI. The `email`
-  column is already nullable on the `users` table to keep the schema ready.
+- **Access token revocation via JTI denylist.** Insertion points are marked
+  with `# DENYLIST HOOK` comments. Requires a shared store that survives
+  dyno restarts (Redis) and adds a per-request decode-time check.
+- **Async migration from psycopg2 to asyncpg.** Triggered by observable
+  concurrency pressure (threadpool queue depth, p95 latency under load,
+  Heroku `H12` timeouts), not speculation. Neither SQLAlchemy nor Alembic
+  are in scope for this migration — the path is raw SQL throughout.
+- **Retention policy for guest accounts with score history.** Scoreless
+  guests are pruned automatically via `scripts/prune_guests.py`. Pruning
+  guests with score history requires a separate retention policy decision
+  (how long to keep, how to communicate to players if at all).
+- **Password reset flow.** Requires token storage, email delivery, new
+  endpoints, and reset UI. The `email` column is already nullable on the
+  `users` table to keep the schema ready.
