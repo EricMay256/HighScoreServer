@@ -18,7 +18,7 @@ The deployment is a single Heroku web dyno running a single worker process. Earl
 
 Use the in-process backends (`cachetools.TTLCache` for caching, slowapi's memory storage for rate limiting) as the deployed configuration. Set `CACHE_BACKEND=memory`. Remove the Heroku Redis add-on.
 
-Retain the Redis code path in `app/cache.py` and the slowapi Redis configuration. Re-enabling Redis is a config change (`heroku addons:create heroku-redis:mini` plus `heroku config:set CACHE_BACKEND=redis`), not a code change.
+Retain the Redis code path in `app/cache.py` and the slowapi Redis configuration. Both backends are driven by a single env var, `CACHE_BACKEND`, so re-enabling Redis is a config change (`heroku addons:create heroku-redis:mini` plus `heroku config:set CACHE_BACKEND=redis`), not a code change. The rate limiter additionally retains a graceful-degradation fallback: if `CACHE_BACKEND=redis` but Redis is unreachable at startup, the limiter logs a warning and falls through to memory rather than failing to initialize.
 
 ## Consequences
 

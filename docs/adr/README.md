@@ -4,6 +4,27 @@ This directory contains the architectural decisions made on HighScoreServer, rec
 
 ADRs 0001–0006 were recorded retroactively on 2026-04-12 as part of formalizing the project's decision log; the decisions themselves predate the records. ADR 0007 was written at the time of the decision.
 
+## Conventions
+
+**Status line is mutable.** The `## Status` line of an ADR may be updated when
+the ADR's status changes — for example, from `Accepted` to `Superseded by
+0008`. This is the only part of an ADR file that is edited in place after
+commit; context, decision, and consequences are immutable.
+
+**Bootstrap-phase editability.** ADRs 0001–0007 were committed as an initial
+decision log for a solo-developer project and were left open for accuracy, 
+clarity, and to absorb observations from subsequent audit phases while minimizing 
+superseding ADRS. This is an explicit departure from strict Nygard conventions 
+and exists because the ADRs have no external readers yet — the immutability 
+rule primarily solves a team-coordination problem (preventing stale citations 
+across reviewers), which doesn't apply while the project has a single author.
+
+**Strict superseding begins with ADR 0008.** From ADR 0008 onward, the
+immutability rule applies in full: new ADRs for reversals and refinements,
+no in-place edits beyond the status line, and a commitment to treat the
+decision log as an append-only record. `requires_auth` rename ADR will be 
+0008 and is the first ADR written under the strict convention.
+
 | #    | Title                                                                                  | Status   |
 |------|----------------------------------------------------------------------------------------|----------|
 | 0001 | [Guest accounts over nullable foreign keys](0001-guest-accounts-over-nullable-foreign-keys.md) | Accepted |
