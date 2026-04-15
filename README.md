@@ -608,6 +608,10 @@ a documented trigger for revisiting — none are "we forgot." If a limitation
 has a full ADR behind it, that ADR is the authoritative source and this
 section is the summary.
 
+- **Duplicate source of truth for periods and sort order** `app/periods.py` is used throughout
+  the application, but the model for LeaderboardQuery includes a separately
+  constructed literal type, necessitated by evaluating at type-check time, not runtime.
+  Sort order similarly has a C# enum based on the regex values permitted in column.
 - **Access tokens cannot be revoked within their 60-minute lifetime.** A stolen
   access token is valid until it expires; there is no server-side kill switch.
   The mitigation is the short lifetime itself — blast radius is bounded to one
