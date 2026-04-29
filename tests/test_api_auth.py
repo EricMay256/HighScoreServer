@@ -357,7 +357,7 @@ def test_claim_requires_auth(client):
 def test_claimed_account_can_submit_to_requires_auth_mode(client):
     """
     Verifies claim via behavior rather than token inspection —
-    claimed account should be able to submit to a requires_auth mode.
+    claimed account should be able to submit to a requires_claimed_account mode.
     """
     guest_tokens = guest(client)
     claimed_tokens = client.post(
@@ -369,7 +369,7 @@ def test_claimed_account_can_submit_to_requires_auth_mode(client):
     mode_name = f"auth_mode_{secrets.token_hex(3)}"
     client.post(
         "/api/leaderboard/game_modes",
-        json={"name": mode_name, "sort_order": "DESC", "label": "Auth Mode", "requires_auth": True},
+        json={"name": mode_name, "sort_order": "DESC", "label": "Auth Mode", "requires_claimed_account": True},
         headers={"x-api-key": os.environ["API_KEY"]},
     )
 

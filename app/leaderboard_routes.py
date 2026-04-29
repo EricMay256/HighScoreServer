@@ -1,14 +1,14 @@
 import json
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.models import LeaderboardResponse, ScoreSubmission, ScoreResponse, GameModeConfig, GameModeCreate
 from app.db import get_conn, release_conn
 from app.cache import get_cache
 from app.dependencies import require_api_key, require_user
 from app.periods import get_period_start, PERIODS
 from psycopg2 import errors as pg_errors
-from app.limiter import limiter
+from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
 
 router = APIRouter(tags=["leaderboard"])
@@ -17,20 +17,20 @@ logger = logging.getLogger(__name__)
 CACHE_KEY_PREFIX = "leaderboard:"
 CACHE_TTL = 120  # seconds
 
-@router.get("/game_modes", response_model=list[GameModeConfig])
+@router.get("/game_modes", response_model=list[GameModeConfig], responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
-def list_game_modes(request: Request) -> list[GameModeConfig]:
+def list_game_modes(request: Request, response: Response) -> list[GameModeConfig]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT name, sort_order, label, requires_auth FROM game_modes ORDER BY name")
+            cur.execute("SELECT name, sort_order, label, requires_claimed_account FROM game_modes ORDER BY name")
             rows = cur.fetchall()
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         release_conn(conn)
 
-    return [GameModeConfig(name=r[0], sort_order=r[1], label=r[2], requires_auth=r[3]) for r in rows]
+    return [GameModeConfig(name=r[0], sort_order=r[1], label=r[2], requires_claimed_account=r[3]) for r in rows]
 
 
 @router.post(
@@ -45,15 +45,15 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO game_modes (name, sort_order, label, requires_auth)
+                INSERT INTO game_modes (name, sort_order, label, requires_claimed_account)
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                     sort_order = EXCLUDED.sort_order,
                     label      = EXCLUDED.label,
-                    requires_auth = EXCLUDED.requires_auth
-                RETURNING name, sort_order, label, requires_auth
+                    requires_claimed_account = EXCLUDED.requires_claimed_account
+                RETURNING name, sort_order, label, requires_claimed_account
                 """,
-                (config.name, config.sort_order, config.label, config.requires_auth),
+                (config.name, config.sort_order, config.label, config.requires_claimed_account),
             )
             row = cur.fetchone()
             conn.commit()
@@ -63,11 +63,11 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
     finally:
         release_conn(conn)
 
-    return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_auth=row[3])
+    return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3])
 
-@router.get("/latest", response_model=list[ScoreResponse])
+@router.get("/latest", response_model=list[ScoreResponse], responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
-def latest_scores(request: Request) -> list[ScoreResponse]:
+def latest_scores(request: Request, response: Response) -> list[ScoreResponse]:
     # Attempt cache read — fall through to DB if Redis is unavailable
     try:
         cache = get_cache()
@@ -120,9 +120,9 @@ def latest_scores(request: Request) -> list[ScoreResponse]:
 
     return results
 
-@router.get("/scores", response_model=LeaderboardResponse)
+@router.get("/scores", response_model=LeaderboardResponse, responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
-def get_scores(request: Request, game_mode: str, period: str = "alltime") -> LeaderboardResponse:
+def get_scores(request: Request, response: Response, game_mode: str, period: str = "alltime") -> LeaderboardResponse:
     cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
     try:
         cache = get_cache()
@@ -207,10 +207,12 @@ def get_scores(request: Request, game_mode: str, period: str = "alltime") -> Lea
     "/scores",
     response_model=ScoreResponse,
     status_code=status.HTTP_201_CREATED,
+    responses=rate_limited_responses("10 per minute"),
 )
 @limiter.limit("10/minute")
 def submit_score(
     request:    Request,
+    response:   Response,
     submission: ScoreSubmission,
     payload:    dict = Depends(require_user),
 ) -> ScoreResponse:
@@ -223,19 +225,21 @@ def submit_score(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT sort_order, requires_auth FROM game_modes WHERE name = %s",
+                "SELECT sort_order, requires_claimed_account FROM game_modes WHERE name = %s",
                 (submission.game_mode,),
             )
             mode_row = cur.fetchone()
             if mode_row is None:
+                # Raises without rolling back transaction - OK since no modifications made.
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Unknown game mode: {submission.game_mode}",
                 )
 
-            sort_order, requires_auth = mode_row
+            sort_order, requires_claimed_account = mode_row
 
-            if requires_auth and is_guest:
+            if requires_claimed_account and is_guest:
+                # Raises without rolling back transaction - OK since no modifications made.
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="This game mode requires a claimed account",
@@ -246,6 +250,7 @@ def submit_score(
             for period in PERIODS:
                 period_start = get_period_start(period, at=now)
 
+                # order is DB-sourced, CHECK-constrained to 'ASC'|'DESC'
                 cur.execute(
                     f"""
                     INSERT INTO scores
@@ -266,6 +271,8 @@ def submit_score(
     except HTTPException:
         raise
     except pg_errors.ForeignKeyViolation:
+        # Shouldn't be reachable: game_mode is validated prior to upsert,
+        # and user_id comes from a verified JWT. Kept for redundancy.
         conn.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -279,8 +286,9 @@ def submit_score(
 
     try:
         cache = get_cache()
-        for period in PERIODS:
-            cache.delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}:{period}")
+        for invalidate_period in PERIODS:
+            cache.delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}:{invalidate_period}")
+        cache.delete(f"{CACHE_KEY_PREFIX}latest")
     except Exception as e:
         logger.warning("Redis cache invalidation failed, continuing: %s", e)
 

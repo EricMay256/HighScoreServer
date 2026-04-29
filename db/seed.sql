@@ -10,7 +10,7 @@ INSERT INTO users (username, email, password_hash, is_guest) VALUES
     ('zfg',     'zfg@example.com',     '$2b$04$COuT3ESMTH4HY9HgxtkrdeKKKaTnjpx3JB5fdMJPEo5JC/WBhY5wi', FALSE)
 ON CONFLICT (username) DO NOTHING;
 
-INSERT INTO game_modes (name, sort_order, label, requires_auth) VALUES
+INSERT INTO game_modes (name, sort_order, label, requires_claimed_account) VALUES
     ('classic', 'DESC', 'Classic Mode', FALSE),
     ('speedrun', 'ASC', 'Speedrun Mode', FALSE),
     ('challenge', 'DESC', 'Challenge Mode', TRUE)

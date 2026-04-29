@@ -30,6 +30,17 @@ The common case is fast: an authenticated API call is one signature verification
 
 Refresh tokens are stored as hashes, so a database read does not leak valid tokens. An attacker with read-only DB access cannot impersonate a user without also having the plaintext refresh token from the client side.
 
+A secondary observation on the revocation path: `POST /api/auth/logout`
+authenticates by possession of the refresh token in the request body, not
+by a bearer access token. Anyone holding a valid refresh token can revoke
+it, including a thief who already has it. This is the standard pattern for
+opaque tokens (possession = auth) and matches the behavior of `/api/auth/refresh`,
+which has the same authentication model for the same reason. It is worth
+naming explicitly because the absence of an ownership check can read as a
+flaw on first inspection — it is not. The mitigations are the refresh
+token's own security properties: cryptographically random, SHA-256 hashed
+at rest, single-use, and rotated on every refresh.
+
 The known gap is access token revocation. A stolen access token is valid until its 60-minute expiry, and there is no server-side way to invalidate it within that window. The mitigation is the short lifetime itself: the blast radius of a stolen access token is bounded to one hour. The full fix is a JTI denylist — every access token carries a unique `jti` claim, and a check at decode time consults a fast store (Redis or similar) to see if that `jti` has been revoked. The decode-time check points are marked in the codebase with `# DENYLIST HOOK` comments so the implementation is a well-defined patch rather than an exploration.
 
 The denylist is deferred deliberately. It requires a shared store that survives dyno restarts, which means provisioning Redis (see ADR 0007 for why Redis is currently not provisioned), and it adds a per-request cost that is only worth paying once there is a concrete reason to revoke tokens proactively — a known compromise, an account claim flow that wants to invalidate the guest's old tokens, or similar. None of those are present today.

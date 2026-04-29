@@ -28,8 +28,14 @@ def get_conn() -> psycopg2.extensions.connection:
 
 
 def release_conn(conn: psycopg2.extensions.connection) -> None:
-    if _connection_pool is not None:
-        _connection_pool.putconn(conn)
+    if _connection_pool is None:
+        return;
+    try:
+        conn.rollback()
+    except Exception:
+        # Connection is broken; allow pool to discard it on putconn.
+        pass
+    _connection_pool.putconn(conn)
 
 
 def close_db() -> None:
