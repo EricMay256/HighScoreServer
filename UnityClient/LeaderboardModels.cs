@@ -44,7 +44,7 @@ namespace UBear.Leaderboard
     public class GameModeConfig
     {
         [JsonProperty("name")]          public string Name         { get; set; }
-        [JsonProperty("sort_order")]    public SortOrdering SortOrder { get; set; }
+        [JsonProperty("sort_order")]    public SortOrder SortOrdering { get; set; }
         [JsonProperty("label")]         public string Label        { get; set; }
         [JsonProperty("requires_claimed_account")] public bool   RequiresClaimedAccount { get; set; }
     }
@@ -199,9 +199,9 @@ namespace UBear.Leaderboard
         public static string ToWireValue(this TimePeriod period) =>
             period switch
             {
-                period.Alltime => "alltime",
-                period.Daily   => "daily",  
-                period.Weekly  => "weekly",
+                TimePeriod.Alltime => "alltime",
+                TimePeriod.Daily   => "daily",  
+                TimePeriod.Weekly  => "weekly",
                 _ => throw new ArgumentOutOfRangeException(nameof(period), $"Unsupported TimePeriod: {period}")
             };
     }
