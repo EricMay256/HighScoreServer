@@ -12,9 +12,6 @@ Different game modes rank scores differently. A points-based mode wants the high
 
 ## Decision
 
-## Decision
-
-
 The `game_modes` table has a `sort_order` column with values `ASC` or `DESC`, defined as follows:
 
 - **`DESC`** — higher scores are better. The leaderboard is ordered highest-first, and a submission improves the player's record when the new value is **greater than** the stored value. Used for points, kills, distance, survival time, and similar accumulating metrics.
