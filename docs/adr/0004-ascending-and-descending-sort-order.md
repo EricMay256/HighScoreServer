@@ -12,7 +12,14 @@ Different game modes rank scores differently. A points-based mode wants the high
 
 ## Decision
 
-The `game_modes` table has a `sort_order` column with values `ASC` or `DESC`. Every leaderboard query fetches the sort order for the requested mode before constructing its `ORDER BY` clause and improvement predicate. A speedrun mode and a points mode are the same code path, distinguished only by a single column value in the `game_modes` table. Neither the Unity client nor the web view has hardcoded sort logic — both render whatever the API returns in the order the API returns it.
+The `game_modes` table has a `sort_order` column with values `ASC` or `DESC`, defined as follows:
+
+- **`DESC`** — higher scores are better. The leaderboard is ordered highest-first, and a submission improves the player's record when the new value is **greater than** the stored value. Used for points, kills, distance, survival time, and similar accumulating metrics.
+- **`ASC`** — lower scores are better. The leaderboard is ordered lowest-first, and a submission improves the player's record when the new value is **less than** the stored value. Used for race times, speedruns, stroke counts, and similar "less is more" metrics.
+
+These names match the SQL `ORDER BY` direction the column is substituted into, which is the property that makes the query construction trivial. The semantic meaning ("better") is derived from the sort direction, not the other way around.
+
+Every leaderboard query fetches the sort order for the requested mode before constructing its `ORDER BY` clause and improvement predicate. A speedrun mode and a points mode are the same code path, distinguished only by a single column value in the `game_modes` table. Neither the Unity client nor the web view has hardcoded sort logic — both render whatever the API returns in the order the API returns it.
 
 ## Consequences
 

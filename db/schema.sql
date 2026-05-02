@@ -13,17 +13,17 @@
 -- DROP TABLE IF EXISTS users;
 
 CREATE TABLE IF NOT EXISTS game_modes (
-    name          VARCHAR(32)  PRIMARY KEY,
-    sort_order    VARCHAR(4) NOT NULL DEFAULT 'DESC'
+    name                      VARCHAR(32)  PRIMARY KEY,
+    sort_order                VARCHAR(4) NOT NULL DEFAULT 'DESC'
       CHECK (sort_order IN ('ASC', 'DESC')),
-    label         TEXT,
-    requires_auth BOOLEAN      NOT NULL DEFAULT FALSE
+    label                     TEXT,
+    requires_claimed_account  BOOLEAN      NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS users (
     id            SERIAL PRIMARY KEY,
     username      VARCHAR(64)  UNIQUE NOT NULL,
-    email         VARCHAR(256) UNIQUE,
+    email         VARCHAR(256) , -- Uniqueness imposed by idx_users_email
     password_hash TEXT         ,
     is_guest      BOOLEAN      NOT NULL DEFAULT FALSE,
     is_verified   BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -50,13 +50,13 @@ CREATE TABLE IF NOT EXISTS scores (
     id           SERIAL PRIMARY KEY,
     user_id      INTEGER      NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     game_mode    VARCHAR(32)  NOT NULL REFERENCES game_modes(name),
-    score        BIGINT      NOT NULL,
+    score        BIGINT      NOT NULL,   -- Using BIGINT to allow for very large scores, but this can be adjusted based on expected score ranges
     period       VARCHAR(16)  NOT NULL,  -- 'alltime', 'weekly', 'daily'
     period_start TIMESTAMPTZ  NOT NULL,  -- start of the window this score belongs to
     submitted_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     UNIQUE (user_id, game_mode, period, period_start)
 );
 CREATE INDEX IF NOT EXISTS idx_scores_lookup_desc
-    ON scores (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC);
+    ON scores (game_mode, period, period_start, score DESC, submitted_at ASC, id ASC, user_id);
 CREATE INDEX IF NOT EXISTS idx_scores_lookup_asc
-    ON scores (game_mode, period, period_start, score ASC, submitted_at ASC, id ASC);
+    ON scores (game_mode, period, period_start, score ASC, submitted_at ASC, id ASC, user_id);

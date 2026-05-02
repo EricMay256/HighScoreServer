@@ -1,9 +1,10 @@
 using System;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 
 namespace UBear.Leaderboard
 {
-    // ── Leaderboard models ─────────────────────────────────────────────────
+    #region Leaderboard Models 
 
     /// <summary>
     /// Maps to the API's ScoreResponse shape.
@@ -13,14 +14,17 @@ namespace UBear.Leaderboard
     [Serializable]
     public class ScoreResponse
     {
+        // SERIAL in Postgres → int32. Widen to long if schema ever moves to BIGSERIAL.
         [JsonProperty("id")]           public int    Id          { get; set; }
         [JsonProperty("player")]       public string Player      { get; set; }
-        [JsonProperty("score")]        public int    Score       { get; set; }
+        [JsonProperty("score")]        public long    Score       { get; set; }
         [JsonProperty("game_mode")]    public string GameMode    { get; set; }
-        [JsonProperty("period")]       public string Period      { get; set; }
+        [JsonProperty("period")]       public TimePeriod? Period      { get; set; }
+        // Kept as string to avoid Newtonsoft's local-time DateTime conversion.
+        // Parse with DateTimeStyles.RoundtripKind at the call site if needed.
         [JsonProperty("submitted_at")] public string SubmittedAt { get; set; }
         [JsonProperty("rank")]         public int?   Rank        { get; set; }
-        [JsonProperty("percentile")]   public float? Percentile  { get; set; }
+        [JsonProperty("percentile")]   public double? Percentile  { get; set; }
     }
 
     /// <summary>
@@ -40,9 +44,9 @@ namespace UBear.Leaderboard
     public class GameModeConfig
     {
         [JsonProperty("name")]          public string Name         { get; set; }
-        [JsonProperty("sort_order")]    public string SortOrder    { get; set; }
+        [JsonProperty("sort_order")]    public SortOrder SortOrdering { get; set; }
         [JsonProperty("label")]         public string Label        { get; set; }
-        [JsonProperty("requires_auth")] public bool   RequiresAuth { get; set; }
+        [JsonProperty("requires_claimed_account")] public bool   RequiresClaimedAccount { get; set; }
     }
 
     /// <summary>
@@ -52,11 +56,12 @@ namespace UBear.Leaderboard
     [Serializable]
     public class ScoreSubmission
     {
-        [JsonProperty("score")]     public int    Score    { get; set; }
+        [JsonProperty("score")]     public long    Score    { get; set; }
         [JsonProperty("game_mode")] public string GameMode { get; set; }
     }
 
-    // ── Auth models ────────────────────────────────────────────────────────
+    #endregion
+    #region Auth Models 
 
     /// <summary>
     /// Response from any auth endpoint that issues tokens.
@@ -118,26 +123,100 @@ namespace UBear.Leaderboard
         [JsonProperty("username")] public string Username { get; set; }
     }
 
-    // ── Result wrapper ─────────────────────────────────────────────────────
+    #endregion
+    #region Result wrapper 
 
     /// <summary>
-    /// Wraps a successful result or an error message.
+    /// Categorizes API failures by source so callers can branch on kind
+    /// without parsing error message strings.
+    /// </summary>
+    public enum ApiErrorKind
+    {
+        None,           // Success — Error/StatusCode unset
+        Network,        // Connection failed, DNS, timeout — no HTTP response
+        BadRequest,     // 400 — malformed request
+        Unauthorized,   // 401 — missing/invalid/expired token
+        Forbidden,      // 403 — authenticated but not allowed (e.g. guest hitting requires_claimed_account mode)
+        NotFound,       // 404
+        Conflict,       // 409 — e.g. username taken
+        Validation,     // 422 — Pydantic validation error
+        RateLimited,    // 429
+        Server,         // 5xx
+        ParseError,     // Response received but couldn't deserialize
+    }
+
+    /// <summary>
+    /// Wraps a successful result or a structured error.
     /// Callers check Success before reading Data.
+    /// On failure, ErrorKind classifies the failure and StatusCode (if non-null)
+    /// gives the raw HTTP status. Error is always populated with a human-readable
+    /// message suitable for logging or UI display.
     /// </summary>
     public class ApiResult<T>
     {
-        public bool   Success { get; }
-        public T      Data    { get; }
-        public string Error   { get; }
+        public bool         Success    { get; }
+        public T            Data       { get; }
+        public string       Error      { get; }
+        public ApiErrorKind ErrorKind  { get; }
+        public int?         StatusCode { get; }
 
-        private ApiResult(bool success, T data, string error)
+        private ApiResult(bool success, T data, string error, ApiErrorKind kind, int? statusCode)
         {
-            Success = success;
-            Data    = data;
-            Error   = error;
+            Success    = success;
+            Data       = data;
+            Error      = error;
+            ErrorKind  = kind;
+            StatusCode = statusCode;
         }
 
-        public static ApiResult<T> Ok(T data)           => new ApiResult<T>(true,  data,    null);
-        public static ApiResult<T> Fail(string message) => new ApiResult<T>(false, default, message);
+        public static ApiResult<T> Ok(T data) =>
+            new ApiResult<T>(true, data, null, ApiErrorKind.None, null);
+
+        // Preserved for backward compatibility — defaults to ErrorKind.Network
+        // since that's what existing pre-StatusCode callers were implicitly assuming.
+        public static ApiResult<T> Fail(string message) =>
+            new ApiResult<T>(false, default, message, ApiErrorKind.Network, null);
+
+        public static ApiResult<T> Fail(string message, ApiErrorKind kind, int? statusCode = null) =>
+            new ApiResult<T>(false, default, message, kind, statusCode);
     }
+    #endregion
+    #region Enums
+    /// <summary>
+    /// Time bucket for leaderboard queries.
+    /// Wire format: lowercase string ("alltime", "daily", "weekly").
+    /// Maintain against app/periods.py:PERIODS on the server.
+    /// </summary>
+    [JsonConverter(typeof(StringEnumConverter))]
+    public enum TimePeriod
+    {
+        [System.Runtime.Serialization.EnumMember(Value = "alltime")] Alltime,
+        [System.Runtime.Serialization.EnumMember(Value = "daily")]   Daily,
+        [System.Runtime.Serialization.EnumMember(Value = "weekly")]  Weekly,
+    }
+    public static class TimePeriodExtensions
+    {
+        public static string ToWireValue(this TimePeriod period) =>
+            period switch
+            {
+                TimePeriod.Alltime => "alltime",
+                TimePeriod.Daily   => "daily",  
+                TimePeriod.Weekly  => "weekly",
+                _ => throw new ArgumentOutOfRangeException(nameof(period), $"Unsupported TimePeriod: {period}")
+            };
+    }
+
+    /// <summary>
+    /// Direction a leaderboard is ranked.
+    /// Wire format: uppercase string ("ASC" or "DESC"), constrained server-side
+    /// by the regex ^(ASC|DESC)$ in app/models.py:GameModeCreate.
+    /// Received as part of GameModeConfig; the client does not send it.
+    /// </summary>
+    [JsonConverter(typeof(StringEnumConverter))]
+    public enum SortOrder
+    {
+        [System.Runtime.Serialization.EnumMember(Value = "ASC")]  Asc,
+        [System.Runtime.Serialization.EnumMember(Value = "DESC")] Desc,
+    }
+  #endregion
 }

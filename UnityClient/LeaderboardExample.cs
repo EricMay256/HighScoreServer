@@ -45,7 +45,7 @@ namespace UBear.Leaderboard
             StartCoroutine(_service.SubmitScore(score, "classic", OnScoreSubmitted));
         }
 
-        // ── Callbacks ──────────────────────────────────────────────────────────
+        #region Callbacks
 
         private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
         {
@@ -75,5 +75,6 @@ namespace UBear.Leaderboard
 
             Debug.Log($"Score accepted. Current best: {result.Data.Score}");
         }
+    #endregion
     }
 }

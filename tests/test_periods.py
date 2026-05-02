@@ -43,6 +43,19 @@ def test_daily_strips_microseconds():
     assert result.microsecond == 0
 
 
+def test_daily_boundary_changes_at_midnight():
+    """
+    A timestamp at 23:59:59 and one at 00:00:01 the next day should
+    produce different period_start values. Pins the discontinuity at
+    midnight UTC, separate from the floor-correctness tests above.
+    """
+    just_before = utc(2024, 6, 15, 23, 59, 59)
+    just_after  = utc(2024, 6, 16, 0, 0, 1)
+    assert get_period_start("daily", at=just_before) == utc(2024, 6, 15)
+    assert get_period_start("daily", at=just_after) == utc(2024, 6, 16)
+    assert get_period_start("daily", at=just_before) != get_period_start("daily", at=just_after)
+
+
 # ── weekly ─────────────────────────────────────────────────────────────────
 
 def test_weekly_rolls_back_to_monday():
@@ -74,6 +87,19 @@ def test_weekly_strips_microseconds():
     result = get_period_start("weekly", at=at)
     assert result.microsecond == 0
 
+
+def test_weekly_boundary_changes_at_monday_midnight():
+    """
+    Sunday 23:59 and Monday 00:01 should produce different period_start
+    values — the week boundary lives at Monday 00:00 UTC. Pins the
+    discontinuity, separate from the day-of-week tests above.
+    """
+    sunday_late = utc(2024, 6, 23, 23, 59, 59)  # Sunday
+    monday_early = utc(2024, 6, 24, 0, 0, 1)    # Monday
+    assert get_period_start("weekly", at=sunday_late) == utc(2024, 6, 17)   # Mon 6/17
+    assert get_period_start("weekly", at=monday_early) == utc(2024, 6, 24)  # Mon 6/24
+    assert get_period_start("weekly", at=sunday_late) != get_period_start("weekly", at=monday_early)
+    
 
 # ── return type ────────────────────────────────────────────────────────────
 

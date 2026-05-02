@@ -1,8 +1,8 @@
 # HighScoreServer
 
-A production-deployed game leaderboard backend built with FastAPI and PostgreSQL, with optional Redis support for caching and rate limiting.
-Designed as a reusable backend for Unity games — any project can drop in the included
-C# client and have a fully functional leaderboard with auth and score history visible through a shared public web view.
+A production-deployed game leaderboard backend built with FastAPI and PostgreSQL. Designed as a reusable backend for Unity games — drop in the included C# client and get a fully functional leaderboard with silent guest auth, per-period score history, rank and percentile, and a public web view.
+
+Architectural decisions are captured as ADRs, and Known Limitations documents the current tradeoffs.
 
 - **Live:** https://high-score-server-9db572197af4.herokuapp.com/
 - **API Docs:** https://high-score-server-9db572197af4.herokuapp.com/docs
@@ -47,11 +47,13 @@ flowchart LR
 - **Period bucketing** — scores are tracked across three independent windows:
   all-time, weekly, and daily. A single submission upserts into all three periods
   simultaneously.
-- **Rate limiting** — many API endpoints are rate limited per client IP via slowapi.
-  Write endpoints and auth routes are more tightly constrained than reads to reflect
-  their relative abuse potential. The deployed configuration uses slowapi's in-process
-  memory backend; a Redis backend is supported and can be enabled by provisioning the
-  add-on, which is the correct path if the API ever runs on more than one dyno.
+- **Rate limiting** — write endpoints and auth routes are rate limited per
+  client IP via slowapi, tuned to reflect their relative abuse potential.
+  The deployed configuration uses in-process memory storage; the limiter
+  also falls through to memory if a configured Redis is unreachable, so a
+  Redis blip degrades rate limiting rather than taking the API down. Both
+  backends are driven by `CACHE_BACKEND` — flipping the cache and the
+  limiter to Redis is a single config change (see [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md)).
 - **Flexible sort order** — game modes are individually configured as highest-score
   or lowest-score wins. The same API and client code handles both — a speedrun mode
   and a points mode are treated symmetrically.
@@ -74,7 +76,7 @@ flowchart LR
 ### Prerequisites
 - Python 3.12+
 - PostgreSQL
-- Redis (or Memurai on Windows) — optional; caching and rate limiting use in-process memory by default and only need Redis if you want to exercise that code path locally
+- Redis (or Memurai on Windows) — Implemented for scalable caching, but not required for normal development or single dyno deployment. Caching and rate limiting default to in-process memory; Redis is only needed if you want to exercise the Redis code path locally (see [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md))
 
 ### Steps
 
@@ -88,8 +90,8 @@ pip install -r requirements.txt
 
 2. Copy the example environment file and fill in your values:
 ```bash
-cp .env.example .env          # macOS/Linux
 Copy-Item .env.example .env   # Windows Powershell
+cp .env.example .env          # macOS/Linux
 ```
 At minimum you'll need `DATABASE_URL`, `JWT_SECRET`, and `API_KEY`.
 Redis and Sentry configuration is optional.
@@ -111,77 +113,6 @@ uvicorn app.main:app --reload
 ```
 
 6. Visit `http://localhost:8000/docs` to explore the API.
-
-
-## API Reference
-
-All API routes are prefixed with `/api`. Full request and response schemas,
-including field types and example payloads, are available in the interactive
-[API docs](https://high-score-server-9db572197af4.herokuapp.com/docs) - this
-section covers the surface area and behavior; `/docs` covers the shapes.
-
-Write endpoints and auth routes are rate limited per client IP. Reads are
-unrestricted or lightly limited. Exact values provided by FastAPI rather than
-this document to ensure accuracy without maintenance cost.
-
-### Auth Model
-
-The API has two distinct authentication mechanisms for two distinct principals:
-
-- **Bearer tokens (JWT)** authenticate end users. Every player-scoped action —
-  submitting scores, renaming, claiming a guest account — uses a bearer token.
-  Guest accounts receive tokens silently on first launch, so this is transparent
-  to the player.
-- **API keys** authenticate the server operator. Administrative actions like
-  creating or updating game modes use an API key and are not exposed to players,
-  even authenticated ones.
-
-This separation keeps operator concerns out of the user table and prevents a
-compromised player account from reconfiguring the server.
-
-### Auth — `/api/auth`
-
-| Method | Route | Auth | Description |
-|---|---|---|---|
-| POST | `/guest` | Public | Create a guest account, returns tokens |
-| POST | `/register` | Public | Register a claimed account, returns tokens |
-| POST | `/login` | Public | Login, returns tokens |
-| POST | `/refresh` | Public | Rotate refresh token, returns new tokens |
-| POST | `/logout` | Public | Revoke refresh token |
-| POST | `/rename` | Bearer | Rename the authenticated user |
-| POST | `/claim` | Bearer | Upgrade guest account to claimed |
-
-`/rename` returns **409** on username collision — the `users.username` UNIQUE
-constraint is enforced at the DB layer and surfaced as a clean error rather
-than a 500.
-
-### Leaderboard — `/api/leaderboard`
-
-| Method | Route | Auth | Description |
-|---|---|---|---|
-| GET | `/scores` | Public | Fetch leaderboard for a game mode and `period` |
-| POST | `/scores` | Bearer | Submit a score |
-| GET | `/latest` | Public | Fetch the 100 most recently submitted scores |
-| GET | `/game_modes` | Public | List all registered game modes |
-| POST | `/game_modes` | API Key | Create or update a game mode (Operator Action) |
-
-#### GET `/scores` parameters
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `game_mode` | string | required | Game mode name |
-| `period` | string | `alltime` | One of: `alltime`, `weekly`, `daily` |
-
-#### POST `/scores` body
-```json
-{
-  "score": 1500,
-  "game_mode": "classic"
-}
-```
-
-**Behavior:** Upserts on `(user_id, game_mode, period, period_start)`. Only 
-updates if the new score is an improvement (respecting the game mode's sort
-order). Returns the player's current best with rank and percentile.
 
 
 ## Architecture Diagrams
@@ -218,7 +149,7 @@ erDiagram
         string name PK "natural key, e.g. 'classic'"
         string sort_order "ASC | DESC"
         string label "display name for web view"
-        bool requires_auth "blocks guests when true"
+        bool requires_claimed_account "blocks guests when true"
     }
     scores {
         int id PK
@@ -294,10 +225,10 @@ sequenceDiagram
     participant C as Cache
     U->>API: POST /api/leaderboard/scores {game_mode, score}<br/>Bearer access_token
     Note right of API: rate limited · require_user
-    API->>DB: SELECT sort_order, requires_auth<br/>FROM game_modes WHERE name = ?
+    API->>DB: SELECT sort_order, requires_claimed_account<br/>FROM game_modes WHERE name = ?
     alt mode not found
         API-->>U: 404 Unknown game mode
-    else requires_auth AND is_guest
+    else requires_claimed_account AND is_guest
         API-->>U: 403 Claimed account required
     else valid
         loop for period in (alltime, daily, weekly)
@@ -317,6 +248,164 @@ The cache participant is labeled "Cache" in the diagram because it's backend-agn
 the deployed configuration uses an in-process TTL cache, and Redis is supported by the 
 same interface (see [Architecture Overview](#architecture-overview)). Both backends honor 
 the same key-delete contract.
+
+
+## API Reference
+
+All API routes are prefixed with `/api`. Full request and response schemas,
+including field types and example payloads, are available in the interactive
+[API docs](https://high-score-server-9db572197af4.herokuapp.com/docs) - this
+section covers the surface area and behavior; `/docs` covers the shapes.
+
+Write endpoints and auth routes are rate limited per client IP. Reads are
+unrestricted or lightly limited. Exact limits are visible in the interactive
+`/docs` so they can't drift from the code.
+
+### Auth Model
+
+The API has two distinct authentication mechanisms for two distinct principals:
+
+- **Bearer tokens (JWT)** authenticate end users. Every player-scoped action —
+  submitting scores, renaming, claiming a guest account — uses a bearer token.
+  Guest accounts receive tokens silently on first launch, so this is transparent
+  to the player.
+- **API keys** authenticate the server operator. Administrative actions like
+  creating or updating game modes use an API key and are not exposed to players,
+  even authenticated ones.
+
+This separation keeps operator concerns out of the user table and prevents a
+compromised player account from reconfiguring the server.
+
+### Error Contract
+
+The API returns two distinct error shapes, both under the `detail` key:
+
+- **`{"detail": "string"}`** — raised explicitly via `HTTPException`. Used for
+  401, 403, 404, 409, and application-level 400s. The string is a
+  human-readable message suitable for logging or displaying to developers.
+- **`{"detail": [ {...}, {...} ]}`** — raised automatically by FastAPI when a
+  request fails Pydantic validation. Used for 422. Each array entry describes
+  one validation failure with `loc`, `msg`, and `type` fields.
+
+Both shapes share the same top-level key, which means a naive client that
+reads `response.detail` as a string will break on validation errors. The
+C# client's `TryExtractDetail` handles both shapes and normalizes them into
+a single string for logging, and the structured `ApiResult<T>.ErrorKind`
+enum lets callers branch on the failure category without parsing strings at
+all.
+
+#### `ApiErrorKind` values
+
+| Kind | HTTP | Meaning |
+|---|---|---|
+| `None` | — | Success. `Error` and `StatusCode` are unset. |
+| `Network` | — | Connection failed, DNS lookup failed, or timeout. No HTTP response was received. |
+| `BadRequest` | 400 | Malformed request — the server understood the shape but rejected the content. |
+| `Unauthorized` | 401 | Missing, invalid, or expired token. Client should refresh or fall back to guest login. |
+| `Forbidden` | 403 | Authenticated but not allowed — e.g. a guest hitting a `requires_claimed_account` game mode. |
+| `NotFound` | 404 | Unknown resource — typically an unknown `game_mode`. |
+| `Conflict` | 409 | Resource collision — e.g. username already taken during `/rename`. |
+| `Validation` | 422 | Pydantic validation error. The server's `detail` payload is an array, not a string. |
+| `RateLimited` | 429 | Per-IP rate limit exceeded. Client should back off. |
+| `Server` | 5xx | Server-side failure. Retry with backoff is appropriate. |
+| `ParseError` | — | Response received but couldn't deserialize — usually a contract mismatch. |
+
+`None` is idiomatic C# as a success sentinel. The enum covers named failure
+categories, not every HTTP status — unexpected statuses (e.g., 3xx redirects)
+fall through to `ParseError` or `Server` depending on whether the body
+deserializes.
+
+#### Handling errors on the C# side
+
+```csharp
+private void OnScoreSubmitted(ApiResult<ScoreResponse> result)
+{
+    if (result.Success)
+    {
+        Debug.Log($"Rank #{result.Data.Rank} — best score: {result.Data.Score}");
+        return;
+    }
+
+    switch (result.ErrorKind)
+    {
+        case ApiErrorKind.Unauthorized:
+            // Token expired mid-session. Refresh and retry.
+            StartCoroutine(_service.RefreshTokens(OnRefreshed));
+            break;
+
+        case ApiErrorKind.Forbidden:
+            // Guest account hit a requires_claimed_account game mode. Prompt to claim.
+            ShowClaimAccountDialog();
+            break;
+
+        case ApiErrorKind.RateLimited:
+            // Back off and retry with exponential delay.
+            StartCoroutine(RetryAfterDelay(result));
+            break;
+
+        case ApiErrorKind.Network:
+        case ApiErrorKind.Server:
+            // Transient. Show a "try again later" banner.
+            ShowTransientErrorBanner(result.Error);
+            break;
+
+        default:
+            // BadRequest, Validation, NotFound, Conflict, ParseError —
+            // not expected during normal play. Log for debugging.
+            Debug.LogWarning($"[Leaderboard] {result.ErrorKind}: {result.Error}");
+            break;
+    }
+}
+```
+
+The value of the enum is that each branch corresponds to a different *user-facing*
+response, not just a different log line. `Unauthorized` triggers a refresh,
+`Forbidden` triggers a claim flow, `RateLimited` triggers backoff — these are
+decisions the client has to make, and the enum is more explicit than a return code.
+
+### Auth — `/api/auth`
+
+| Method | Route | Auth | Description |
+|---|---|---|---|
+| POST | `/guest` | Public | Create a guest account, returns tokens |
+| POST | `/register` | Public | Register a claimed account, returns tokens |
+| POST | `/login` | Public | Login, returns tokens |
+| POST | `/refresh` | Public | Rotate refresh token, returns new tokens |
+| POST | `/logout` | Public | Revoke refresh token |
+| POST | `/rename` | Bearer | Rename the authenticated user |
+| POST | `/claim` | Bearer | Upgrade guest account to claimed |
+
+`/rename` returns **409** on username collision — the `users.username` UNIQUE
+constraint is enforced at the DB layer and surfaced as a clean error rather
+than a 500.
+
+### Leaderboard — `/api/leaderboard`
+
+| Method | Route | Auth | Description |
+|---|---|---|---|
+| GET | `/scores` | Public | Fetch leaderboard for a game mode and `period` |
+| POST | `/scores` | Bearer | Submit a score |
+| GET | `/latest` | Public | Fetch the 100 most recently submitted scores |
+| GET | `/game_modes` | Public | List all registered game modes |
+| POST | `/game_modes` | API Key | Create or update a game mode (Operator Action) |
+
+#### GET `/scores` parameters
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `game_mode` | string | required | Game mode name |
+| `period` | string | `alltime` | One of: `alltime`, `weekly`, `daily` |
+
+#### POST `/scores` body
+```json
+{
+  "score": 1500,
+  "game_mode": "classic"
+}
+```
+
+**Behavior:** Upserts on `(user_id, game_mode, period, period_start)`. Only 
+updates if the new score is an improvement (respecting the game mode's sort
+order). Returns the player's current best with rank and percentile.
 
 
 ## Architecture Decisions
@@ -343,7 +432,11 @@ The `UnityClient/` directory contains a drop-in C# leaderboard client for Unity 
 2. Install [Newtonsoft.Json for Unity] via Package Manager
 3. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
 4. Set the base URL to your Heroku app URL (no trailing slash)
-5. Gitignore your config asset — no sensitive data currently, but it may be introduced.
+5. Gitignore your config asset
+6. **Note on `submitted_at`**: the field is typed as `string` on `ScoreResponse`, not `DateTime`.
+   This is a deliberate dodge of Newtonsoft's default local-time conversion, which would silently
+   shift timestamps based on the player's device timezone. Parse it explicitly with
+   `DateTimeOffset.Parse(...)` if you need a typed value — the server always emits UTC ISO 8601.
 
 ### Authentication lifecycle
 
@@ -369,6 +462,14 @@ public void ClaimAccount(string email, string password)
     StartCoroutine(_service.Claim(email, password, OnClaimed));
 }
 ```
+Logout is best-effort. _service.Logout() attempts to revoke the refresh
+token server-side, but clears the locally stored tokens regardless of whether
+the server call succeeds. This is the right behavior — a failed logout should
+not leave the client in a state where it thinks it's still authenticated —
+but it means a logout during network failure succeeds locally and fails
+server-side, leaving the refresh token valid until its natural expiry. The
+mitigation is the refresh token's own lifetime, which is short enough that
+the window of exposure is bounded.
 
 ### Submitting scores
 
@@ -397,8 +498,8 @@ private void OnScoreSubmitted(ApiResult<ScoreResponse> result)
 ### Fetching the leaderboard
 
 ```csharp
-// period is one of: "alltime", "daily", "weekly"
-StartCoroutine(_service.GetScores("classic", OnScoresReceived, period: "weekly"));
+// period is a TimePeriod, described in the Enums region of LeaderboardModels.cs
+StartCoroutine(_service.GetScores("classic", OnScoresReceived, period: TimePeriod.Weekly));
 
 private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
 {
@@ -410,7 +511,10 @@ private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
 ```
 
 ### Known limitations
-- **Token expiry** — access tokens expire after 60 minutes. `EnsureAuthenticated` handles the missing-token case by falling through to guest login, but does not yet detect 401 responses from expired tokens mid-session. If a request fails with a 401, call `RefreshTokens()` and retry. Automatic retry on 401 is a known future improvement.
+- **Automatic retry on 401** — `EnsureAuthenticated` handles the missing-token
+  case by falling through to guest login, but does not detect 401 responses
+  from expired tokens mid-session. If a request fails with a 401, call
+  `RefreshTokens()` and retry. Automatic retry is a known future improvement.
 - **Token storage** — tokens are stored in `PlayerPrefs`, which is not encrypted.
   This is standard Unity practice for session tokens. The correct long-term
   answer is server-side revocation (JTI denylist) rather than client-side
@@ -430,7 +534,7 @@ HighScoreServer/
 │   ├── models.py             # Pydantic request/response schemas
 │   ├── periods.py            # Period bucketing logic
 │   ├── db.py                 # psycopg2 connection pool
-│   ├── cache.py              # Redis client with graceful fallback
+│   ├── cache.py              # Pluggable cache interface (in-process TTL default, Redis optional)
 │   ├── dependencies.py       # Auth dependencies (require_user, require_api_key)
 │   └── env.py                # Environment variable loading and validation
 ├── db/
@@ -497,20 +601,89 @@ Scoreless guest accounts older than `GUEST_PRUNE_DAYS` (default: 30) are pruned.
 Guest accounts with scores are intentionally preserved.
 
 
+## Known Limitations
+
+These are the tradeoffs the current design accepts deliberately. Each one has
+a documented trigger for revisiting — none are "we forgot." If a limitation
+has a full ADR behind it, that ADR is the authoritative source and this
+section is the summary.
+
+- **Duplicate source of truth for periods and sort order** `app/periods.py` is used throughout
+  the application, but the model for LeaderboardQuery includes a separately
+  constructed literal type, necessitated by evaluating at type-check time, not runtime.
+  Sort order similarly has a C# enum based on the regex values permitted in column.
+- **Access tokens cannot be revoked within their 60-minute lifetime.** A stolen
+  access token is valid until it expires; there is no server-side kill switch.
+  The mitigation is the short lifetime itself — blast radius is bounded to one
+  hour — and the refresh token (which *can* be revoked) is what gates
+  longer-lived access. **Trigger for revisiting:** a known compromise, an
+  account-claim flow that wants to invalidate the guest's prior tokens, or any
+  threat model where one hour is too long. The full fix is a JTI denylist
+  checked at decode time; insertion points are marked in the codebase with
+  `# DENYLIST HOOK` comments. See [ADR 0006](docs/adr/0006-jwt-plus-opaque-refresh-tokens.md)
+  for the full reasoning.
+- **Rate limiting and cache invalidation are per-process.** Both share a root
+  cause: the in-process storage chosen in [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md)
+  is correct at single-process scale but degrades the moment a second worker
+  appears. **Trigger for revisiting:** any move beyond single-process deployment
+  (second dyno, second uvicorn worker, background job process). The mitigation
+  is already in place — setting `CACHE_BACKEND=redis` and provisioning the
+  Heroku Redis add-on flips both subsystems to Redis-backed storage in one
+  config change.
+
+  - **Rate limits** currently use slowapi's in-process memory storage. At
+    single-dyno, single-worker scale this is correct, but the moment the process
+    count increases the documented limit silently weakens to N× its stated
+    value: an attacker who gets load-balanced across N workers can make N times
+    the allowed requests, with no visible symptom until someone tries to abuse
+    it.
+
+  - **Cache invalidation** is local to each process. A score submission served
+    by process A invalidates process A's cache keys, but process B will continue
+    serving stale leaderboard data until its own copy expires by TTL (currently
+    120 seconds). This is a freshness issue, not a correctness one — stale data
+    is still valid data, just older than it should be.
+
+- **Three scenarios are deliberately untested.** Each was considered and
+  deferred with a specific reason, not missed:
+  - **Guest-retry exhaustion.** The guest account creation loop retries on
+    username collision up to a small bound. Exercising the exhaustion path in
+    a test requires either mocking the username generator (which tests the
+    mock, not the code) or generating enough collisions to exhaust the retry
+    budget legitimately (which is too slow to justify). The loop bound is small
+    and the collision probability is low; the scenario is accepted as tested
+    by inspection.
+  - **Refresh-rotation race.** The `DELETE ... RETURNING` pattern makes refresh
+    rotation race-safe at the database level (see the ADR 0006 consequences).
+    Testing the race requires a real concurrency harness with two clients
+    hitting the refresh endpoint simultaneously, which isn't worth building
+    at current scale. The correctness argument rests on PostgreSQL's atomicity
+    guarantees, not on test coverage.
+  - **FK violation on score submission.** `submit_score` catches
+    `psycopg2.errors.ForeignKeyViolation` and returns 400. Triggering a real FK
+    violation in a test requires creating a score for a game mode and/or user that 
+    is then deleted between the Pydantic validation and the INSERT — a window that
+    doesn't naturally occur in a synchronous handler. The alternative is
+    mocking psycopg2 to raise the exception, which would test the `except`
+    block but not the scenario it exists to handle.
+
+
 ## Known Future Considerations
 
-- **Access token revocation** — `# DENYLIST HOOK` comments mark the insertion points.
-  Requires a Redis JTI denylist checked on every decode.
-- **`leaderboard:latest` cache invalidation** — score submission currently invalidates
-  the three period keys (`leaderboard:{mode}:{period}`) but not `leaderboard:latest`.
-  A new submission won't appear in the "100 most recent" view until the 120s TTL
-  expires. Fix is a one-line `cache.delete("leaderboard:latest")` in `submit_score`
-  alongside the existing period-key invalidation loop.
-- **Async migration** — psycopg2 → asyncpg if concurrency becomes a bottleneck.
-  Neither SQLAlchemy nor Alembic are in scope for this migration.
-- **Guest cleanup for accounts with scores** — scoreless guests are pruned automatically.
-  Pruning guests with score history requires a separate retention policy decision.
-- **Password reset** — requires token storage, email delivery, and new UI. The `email`
-  column is already nullable on the `users` table to keep the schema ready.
-- **Redis Fallback** - Redis already falls back gracefully when not provided, but to 
-  preserve funds a local caching solution will be implemented for single dyno environments.
+- **Access token revocation via JTI denylist.** Insertion points are marked
+  with `# DENYLIST HOOK` comments. Requires a shared store that survives
+  dyno restarts (Redis) and adds a per-request decode-time check.
+- **Async migration from psycopg2 to asyncpg.** Triggered by observable
+  concurrency pressure (threadpool queue depth, p95 latency under load,
+  Heroku `H12` timeouts), not speculation. Neither SQLAlchemy nor Alembic
+  are in scope for this migration — the path is raw SQL throughout.
+- **Retention policy for guest accounts with score history.** Scoreless
+  guests are pruned automatically via `scripts/prune_guests.py`. Pruning
+  guests with score history requires a separate retention policy decision
+  (how long to keep, how to communicate to players if at all).
+- **Password reset flow.** Requires token storage, email delivery, new
+  endpoints, and reset UI. The `email` column is already nullable on the
+  `users` table to keep the schema ready.
+- **Cumulative Score support.** Allow for users to track how many points
+  have been scored across all sessions within a time period. Include 
+  protections against duplicate submissions.

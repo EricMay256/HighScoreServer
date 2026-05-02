@@ -35,12 +35,36 @@ def speedrun_mode(client: TestClient, api_key: str) -> str:
     return "speedrun"
 
 
+@pytest.fixture(params=["desc", "asc"], ids=["desc_mode", "asc_mode"])
+def mode(request, classic_mode, speedrun_mode):
+    """
+    Direction-agnostic mode fixture for tests that assert invariants
+    holding in both sort directions.
+
+    Yields a dict with everything a direction-agnostic test needs:
+      - name: the game mode string to send in requests
+      - better: a score that should beat any existing record
+      - worse: a score that should lose to `better`
+
+    Tests using this fixture run twice — once against a DESC mode where
+    "better" means higher, once against an ASC mode where "better" means
+    lower. The test body never has to know which direction it's in.
+
+    Reuses the existing classic_mode and speedrun_mode fixtures rather than
+    re-seeding game_modes, so the row-creation logic stays in one place.
+    """
+    if request.param == "desc":
+        return {"name": classic_mode, "better": 2000, "worse": 500}
+    else:
+        return {"name": speedrun_mode, "better": 300, "worse": 500}
+    
+
 @pytest.fixture(scope="module")
-def requires_auth_mode(client: TestClient, api_key: str) -> str:
+def requires_claimed_account_mode(client: TestClient, api_key: str) -> str:
     """Creates a game mode that requires a claimed account."""
     response = client.post(
         "/api/leaderboard/game_modes",
-        json={"name": "challenge", "sort_order": "DESC", "label": "Challenge", "requires_auth": True},
+        json={"name": "challenge", "sort_order": "DESC", "label": "Challenge", "requires_claimed_account": True},
         headers={"x-api-key": api_key},
     )
     assert response.status_code in (200, 201)
@@ -114,68 +138,67 @@ def test_submit_score_rank_and_percentile_single_player(client, auth_headers, cl
 
 # ── Upsert behavior ────────────────────────────────────────────────────────
 
-def test_better_score_overwrites(client, auth_headers, classic_mode):
-    """A higher score on a DESC mode should replace the existing record."""
+def test_better_score_overwrites(client, auth_headers, mode):
+    """
+    The mirror invariant: an improving submission replaces the stored record.
+    Runs against both directions via the `mode` fixture.
+    """
+    # Seed with a worse score so there's something for the improving
+    # submission to overwrite. Without this first POST, the second POST
+    # would take the INSERT path of the upsert rather than the UPDATE path,
+    # and we'd be testing the wrong thing.
     client.post(
         "/api/leaderboard/scores",
-        json={"score": 1000, "game_mode": classic_mode},
+        json={"score": mode["worse"], "game_mode": mode["name"]},
         headers=auth_headers,
     )
+    # The submission under test: a better score should replace the seed.
     response = client.post(
         "/api/leaderboard/scores",
-        json={"score": 2000, "game_mode": classic_mode},
+        json={"score": mode["better"], "game_mode": mode["name"]},
         headers=auth_headers,
     )
     assert response.status_code == 201
-    assert response.json()["score"] == 2000
+    assert response.json()["score"] == mode["better"]
+
+    # Verify via a separate read path, same as the worse-score test.
+    leaderboard = client.get(
+        f"/api/leaderboard/scores?game_mode={mode['name']}&period=alltime"
+    )
+    assert leaderboard.json()["scores"][0]["score"] == mode["better"]
 
 
-def test_worse_score_does_not_overwrite(client, auth_headers, classic_mode):
-    """A lower score on a DESC mode should be rejected — existing record preserved."""
+def test_worse_score_does_not_overwrite(client, auth_headers, mode):
+    """
+    The improvement predicate is the linchpin of the upsert SQL: a submission
+    that isn't an improvement must leave the stored record untouched, in either
+    sort direction. The `mode` fixture runs this test against both a DESC and
+    an ASC mode — the body asserts the invariant without knowing which.
+    """
+    # Establish the record to defend.
     client.post(
         "/api/leaderboard/scores",
-        json={"score": 2000, "game_mode": classic_mode},
+        json={"score": mode["better"], "game_mode": mode["name"]},
         headers=auth_headers,
     )
+
+    # Submit a worse score; the API still returns 201 because the request
+    # was valid — the upsert just no-ops on the improvement check.
     response = client.post(
         "/api/leaderboard/scores",
-        json={"score": 500, "game_mode": classic_mode},
+        json={"score": mode["worse"], "game_mode": mode["name"]},
         headers=auth_headers,
     )
     assert response.status_code == 201
-    assert response.json()["score"] == 2000
+    assert response.json()["score"] == mode["better"]
 
-
-def test_asc_mode_better_score_is_lower(client, auth_headers, speedrun_mode):
-    """On an ASC mode, a lower score is better and should overwrite."""
-    client.post(
-        "/api/leaderboard/scores",
-        json={"score": 500, "game_mode": speedrun_mode},
-        headers=auth_headers,
+    # Verify the stored record via a separate read path. Without this,
+    # a hypothetical bug where submit_score wrote the worse score AND
+    # returned the new row would still pass the assertion above.
+    leaderboard = client.get(
+        f"/api/leaderboard/scores?game_mode={mode['name']}&period=alltime"
     )
-    response = client.post(
-        "/api/leaderboard/scores",
-        json={"score": 300, "game_mode": speedrun_mode},
-        headers=auth_headers,
-    )
-    assert response.status_code == 201
-    assert response.json()["score"] == 300
-
-
-def test_asc_mode_worse_score_does_not_overwrite(client, auth_headers, speedrun_mode):
-    """On an ASC mode, a higher score is worse and should not overwrite."""
-    client.post(
-        "/api/leaderboard/scores",
-        json={"score": 300, "game_mode": speedrun_mode},
-        headers=auth_headers,
-    )
-    response = client.post(
-        "/api/leaderboard/scores",
-        json={"score": 500, "game_mode": speedrun_mode},
-        headers=auth_headers,
-    )
-    assert response.status_code == 201
-    assert response.json()["score"] == 300
+    assert leaderboard.json()["scores"][0]["score"] == mode["better"]
 
 
 # ── Leaderboard ordering ───────────────────────────────────────────────────
@@ -266,19 +289,19 @@ def test_submit_score_appears_in_all_periods(client, auth_headers, classic_mode)
 
 # ── Auth gating ────────────────────────────────────────────────────────────
 
-def test_guest_blocked_from_requires_auth_mode(client, guest_headers, requires_auth_mode):
+def test_guest_blocked_from_requires_claimed_account_mode(client, guest_headers, requires_claimed_account_mode):
     response = client.post(
         "/api/leaderboard/scores",
-        json={"score": 1000, "game_mode": requires_auth_mode},
+        json={"score": 1000, "game_mode": requires_claimed_account_mode},
         headers=guest_headers,
     )
     assert response.status_code == 403
 
 
-def test_claimed_user_allowed_in_requires_auth_mode(client, auth_headers, requires_auth_mode):
+def test_claimed_user_allowed_in_requires_claimed_account_mode(client, auth_headers, requires_claimed_account_mode):
     response = client.post(
         "/api/leaderboard/scores",
-        json={"score": 1000, "game_mode": requires_auth_mode},
+        json={"score": 1000, "game_mode": requires_claimed_account_mode},
         headers=auth_headers,
     )
     assert response.status_code == 201
@@ -429,10 +452,13 @@ def test_rank_ordering_across_players(client, classic_mode):
     scores = response.json()["scores"]
     assert scores[0]["score"] == 3000
     assert scores[0]["rank"] == 1
+    assert scores[0]["percentile"] == 100.0
     assert scores[1]["score"] == 2000
     assert scores[1]["rank"] == 2
+    assert scores[1]["percentile"] == 66.67
     assert scores[2]["score"] == 1000
     assert scores[2]["rank"] == 3
+    assert scores[2]["percentile"] == 33.33
 
 
 def test_total_count_matches_player_count(client, classic_mode):
@@ -528,7 +554,7 @@ def test_get_game_modes_returns_list(client, classic_mode):
 
 
 def test_get_game_modes_entry_shape(client, classic_mode):
-    """Each game mode entry should include name, sort_order, label, requires_auth."""
+    """Each game mode entry should include name, sort_order, label, requires_claimed_account."""
     response = client.get("/api/leaderboard/game_modes")
     modes = response.json()
     assert len(modes) >= 1
@@ -536,7 +562,7 @@ def test_get_game_modes_entry_shape(client, classic_mode):
     assert "name" in entry
     assert "sort_order" in entry
     assert "label" in entry
-    assert "requires_auth" in entry
+    assert "requires_claimed_account" in entry
 
 
 def test_get_game_modes_includes_created_mode(client, classic_mode, speedrun_mode):
@@ -545,3 +571,27 @@ def test_get_game_modes_includes_created_mode(client, classic_mode, speedrun_mod
     names = [m["name"] for m in response.json()]
     assert classic_mode in names
     assert speedrun_mode in names
+
+# ── Input Validation ────────────────────────────────────────────────────
+def test_score_at_upper_bound_accepted(client, auth_headers, classic_mode):
+    """
+    The Pydantic cap is le=18_000_000_420. Exactly the cap must be accepted —
+    this is the contract the C# client's score field needs to honor.
+    """
+    response = client.post(
+        "/api/leaderboard/scores",
+        json={"score": 18_000_000_420, "game_mode": classic_mode},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    assert response.json()["score"] == 18_000_000_420
+
+
+def test_score_over_upper_bound_rejected(client, auth_headers, classic_mode):
+    """One over the cap must be rejected by Pydantic with 422."""
+    response = client.post(
+        "/api/leaderboard/scores",
+        json={"score": 18_000_000_421, "game_mode": classic_mode},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422

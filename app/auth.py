@@ -85,6 +85,9 @@ def create_refresh_token(user_id: int) -> str:
     """
     Generates a cryptographically random opaque token, persists its hash
     to the DB, and returns the raw token to be sent to the client once.
+    This currently runs in its own transaction - when the scale demands
+    stronger atomicity guarantees, add optional conn parameter to share 
+    caller's transaction with user creation / update.
     """
     raw = secrets.token_urlsafe(32)
     token_hash = _hash_token(raw)

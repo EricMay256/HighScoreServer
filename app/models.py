@@ -3,16 +3,16 @@ from typing import Literal
 
 #Game mode models
 class GameModeConfig(BaseModel):
-    name:           str
-    sort_order:     str  # 'ASC' | 'DESC'
-    label:          str | None = None
-    requires_auth:  bool = False
+    name:         str
+    sort_order:   str  # 'ASC' | 'DESC'
+    label:        str | None = None
+    requires_claimed_account:   bool = False
 
 class GameModeCreate(BaseModel):
-    name:           str = Field(..., min_length=1, max_length=32)
-    sort_order:     str = Field("DESC", pattern="^(ASC|DESC)$")
-    label:          str | None = Field(None, max_length=128)
-    requires_auth:  bool = Field(False)
+    name:         str = Field(..., min_length=1, max_length=32)
+    sort_order:   str = Field("DESC", pattern="^(ASC|DESC)$")
+    label:        str | None = Field(None, max_length=128)
+    requires_claimed_account:   bool = Field(False)
 
 #Score models
 class ScoreSubmission(BaseModel):
