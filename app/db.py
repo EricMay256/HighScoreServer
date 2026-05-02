@@ -29,7 +29,7 @@ def get_conn() -> psycopg2.extensions.connection:
 
 def release_conn(conn: psycopg2.extensions.connection) -> None:
     if _connection_pool is None:
-        return;
+        return
     try:
         conn.rollback()
     except Exception:
