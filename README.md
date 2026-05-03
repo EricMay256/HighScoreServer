@@ -462,7 +462,7 @@ public void ClaimAccount(string email, string password)
     StartCoroutine(_service.Claim(email, password, OnClaimed));
 }
 ```
-Logout is best-effort. _service.Logout() attempts to revoke the refresh
+Logout is best-effort. `_service.Logout()` attempts to revoke the refresh
 token server-side, but clears the locally stored tokens regardless of whether
 the server call succeeds. This is the right behavior — a failed logout should
 not leave the client in a state where it thinks it's still authenticated —
@@ -608,10 +608,9 @@ a documented trigger for revisiting — none are "we forgot." If a limitation
 has a full ADR behind it, that ADR is the authoritative source and this
 section is the summary.
 
-- **Duplicate source of truth for periods and sort order** `app/periods.py` is used throughout
-  the application, but the model for LeaderboardQuery includes a separately
-  constructed literal type, necessitated by evaluating at type-check time, not runtime.
-  Sort order similarly has a C# enum based on the regex values permitted in column.
+- **Duplicate source of truth for periods and sort order** Two values in the schema have to be redeclared in a downstream type system that doesn't share Python's runtime introspection. In both cases the canonical definition is authoritative; the parallel one has to be kept in sync by hand.
+  - Periods. `app/periods.py` defines the valid values. `LeaderboardQuery` redeclares them as a `Literal[...]` because the values have to be statically visible to give both Pydantic's validator and the static type checker something to work with.
+  - Sort order. The `game_modes.sort_order` column is constrained by a `CHECK` regex on the database side. The C# client redeclares the same values as an enum so the Unity caller gets compile-time safety.
 - **Access tokens cannot be revoked within their 60-minute lifetime.** A stolen
   access token is valid until it expires; there is no server-side kill switch.
   The mitigation is the short lifetime itself — blast radius is bounded to one
@@ -659,13 +658,13 @@ section is the summary.
     hitting the refresh endpoint simultaneously, which isn't worth building
     at current scale. The correctness argument rests on PostgreSQL's atomicity
     guarantees, not on test coverage.
-  - **FK violation on score submission.** `submit_score` catches
-    `psycopg2.errors.ForeignKeyViolation` and returns 400. Triggering a real FK
-    violation in a test requires creating a score for a game mode and/or user that 
-    is then deleted between the Pydantic validation and the INSERT — a window that
-    doesn't naturally occur in a synchronous handler. The alternative is
-    mocking psycopg2 to raise the exception, which would test the `except`
-    block but not the scenario it exists to handle.
+  - **FK violation on score submission.** Triggering a real FK violation requires
+    another connection to delete a referenced `users` or `game_modes` row in the brief
+    window between the handler reading the row and the `INSERT` firing. That window
+    exists, but it doesn't open by accident — there's no normal application flow
+    that deletes a `game_modes` row mid-game, and `users` rows can't be deleted while
+    they have scores (`ON DELETE RESTRICT`). The alternative is mocking psycopg2 to
+    raise the exception, which would test the except block but not the scenario it exists to handle.
 
 
 ## Known Future Considerations
@@ -684,6 +683,5 @@ section is the summary.
 - **Password reset flow.** Requires token storage, email delivery, new
   endpoints, and reset UI. The `email` column is already nullable on the
   `users` table to keep the schema ready.
-- **Cumulative Score support.** Allow for users to track how many points
-  have been scored across all sessions within a time period. Include 
-  protections against duplicate submissions.
+- **Cumulative Score tracking.** Sum of points across sessions within a
+  time period, with deduplication protections against double submissions.
