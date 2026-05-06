@@ -1,0 +1,115 @@
+# CI for HighScoreServer.
+#
+# Two parallel jobs: pytest (against an ephemeral Postgres) and ruff lint.
+# Both install from requirements-dev.txt so dev tool versions match local.
+#
+# A note on the Postgres version: this is pinned to match Heroku production
+# (currently 17). When Heroku eventually upgrades, bump this to match —
+# `heroku pg:info` shows the live version. Major-version drift between CI
+# and prod is exactly the kind of bug this workflow exists to catch, so
+# it's worth keeping in sync.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel older in-progress runs when a new commit lands on the same ref.
+# Mostly useful for PRs where I push fix-up commits in quick succession.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: highscore_test
+        ports:
+          - 5432:5432
+        # Without the health check, the schema-apply step occasionally races
+        # the container startup and fails with "connection refused".
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Credentials here are duplicated from the postgres service definition above.
+      # If I change one, I have to change the other.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/highscore_test
+      # API_KEY and JWT_SECRET are functional fixtures, not real secrets — the
+      # test suite doesn't validate them against any external system, it just
+      # needs them to be set. Inlining is intentional; promoting them to
+      # repository secrets would be cargo-culting.
+      API_KEY: ci-test-api-key
+      JWT_SECRET: ci-test-jwt-secret-not-used-against-real-tokens
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          # Both files are part of the cache key so bumping a dev tool version
+          # actually invalidates the cache.
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # ON_ERROR_STOP=1 makes psql exit non-zero on the first SQL error;
+      # without it, a broken schema would silently leave the test DB in a
+      # half-applied state and pytest would fail later with confusing errors.
+      # -w fails fast if PGPASSWORD somehow isn't set, instead of hanging
+      # on a password prompt.
+      - name: Apply database schema
+        env:
+          PGPASSWORD: postgres
+        run: psql -h localhost -U postgres -d highscore_test -w -v ON_ERROR_STOP=1 -f db/schema.sql
+
+      - name: Run pytest
+        run: pytest -v
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Ruff lint
+        run: ruff check app/ tests/ scripts/
