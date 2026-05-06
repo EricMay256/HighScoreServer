@@ -3,7 +3,7 @@ import os
 import secrets
 from datetime import datetime, timezone, timedelta
 
-from jose import JWTError, jwt
+from jose import jwt
 import bcrypt
 
 from app.db import get_conn, release_conn
@@ -104,7 +104,7 @@ def create_refresh_token(user_id: int) -> str:
                 (user_id, token_hash, expires_at),
             )
             conn.commit()
-    except Exception as e:
+    except Exception:
         conn.rollback()
         raise
     finally:
@@ -176,7 +176,7 @@ def revoke_refresh_token(raw: str) -> None:
                 (token_hash,),
             )
             conn.commit()
-    except Exception as e:
+    except Exception:
         conn.rollback()
         raise
     finally:

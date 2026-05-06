@@ -4,7 +4,6 @@ import psycopg2
 from fastapi.testclient import TestClient
 os.environ["RATE_LIMITER_ENABLED"] = "false"  # disable rate limiter for tests
 from app.main import app  # Must import after overriding env var
-from app.db import _connection_pool
 from unittest.mock import patch
 
 

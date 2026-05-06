@@ -1,6 +1,5 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from jose import JWTError
 from pydantic import BaseModel, EmailStr, Field
 from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
@@ -8,7 +7,6 @@ from starlette.requests import Request
 from app.auth import (
     create_access_token,
     create_refresh_token,
-    decode_access_token,
     generate_guest_username,
     hash_password,
     revoke_refresh_token,

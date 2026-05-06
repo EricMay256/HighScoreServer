@@ -1,4 +1,3 @@
-import pytest
 from scripts.prune_guests import prune_guests
 from datetime import datetime, timezone, timedelta
 import psycopg2
@@ -127,7 +126,7 @@ def test_prune_spares_claimed_accounts(client):
                 VALUES (%s, FALSE, %s)
                 RETURNING id
                 """,
-                (f"claimed_old_user", old),
+                ("claimed_old_user", old),
             )
             user_id = cur.fetchone()[0]
             conn.commit()

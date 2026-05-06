@@ -1,6 +1,5 @@
 import os
 import secrets
-import pytest
 from jose import jwt
 from fastapi.testclient import TestClient
 
