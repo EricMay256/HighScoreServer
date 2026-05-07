@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, Query, status
 from app.models import LeaderboardResponse, ScoreSubmission, ScoreResponse, GameModeConfig, GameModeCreate
 from app.db import get_conn, release_conn
 from app.cache import get_cache
@@ -65,32 +65,39 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 
     return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3])
 
-@router.get("/latest", response_model=list[ScoreResponse], responses=rate_limited_responses("10 per minute"))
+@router.get("/latest", response_model=LeaderboardResponse)
 @limiter.limit("10/minute")
-def latest_scores(request: Request, response: Response) -> list[ScoreResponse]:
-    # Attempt cache read — fall through to DB if Redis is unavailable
+def latest_scores(
+    request: Request,
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> LeaderboardResponse:
+    cache_key = f"{CACHE_KEY_PREFIX}latest:{limit}:{offset}"
     try:
         cache = get_cache()
-        cached = cache.get(f"{CACHE_KEY_PREFIX}latest")
+        cached = cache.get(cache_key)
         if cached:
-            return [ScoreResponse(**s) for s in json.loads(cached)]
+            return LeaderboardResponse(**json.loads(cached))
     except Exception as e:
         logger.warning("Redis read failed, falling back to DB: %s", e)
 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # COUNT(*) OVER () gives total scores across the whole table.
+            # Unlike /scores this isn't filtered to a mode/period — the "latest"
+            # feed is global. Worth knowing if the table grows large; the count
+            # is cheap on indexed columns but not free.
             cur.execute(
                 """
-                SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at
+                SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at,
+                       COUNT(*) OVER() AS total_count
                 FROM scores s
                 JOIN users u ON u.id = s.user_id
-                WHERE s.period = 'alltime'
-                  AND s.period_start = %s
-                ORDER BY s.submitted_at DESC
-                LIMIT 100
+                ORDER BY s.submitted_at DESC, s.id DESC
+                LIMIT %s OFFSET %s
                 """,
-                (get_period_start("alltime"),),
+                (limit, offset),
             )
             rows = cur.fetchall()
     except Exception as e:
@@ -100,6 +107,13 @@ def latest_scores(request: Request, response: Response) -> list[ScoreResponse]:
         )
     finally:
         release_conn(conn)
+
+    if rows:
+        total_count = rows[0][5]
+    elif offset > 0:
+        total_count = _count_all_scores()
+    else:
+        total_count = 0
 
     results = [
         ScoreResponse(
@@ -112,21 +126,29 @@ def latest_scores(request: Request, response: Response) -> list[ScoreResponse]:
         for row in rows
     ]
 
+    response = LeaderboardResponse(scores=results, total_count=total_count)
+
     try:
         get_cache().setex(
-            f"{CACHE_KEY_PREFIX}latest",
+            cache_key,
             CACHE_TTL,
-            json.dumps([s.model_dump() for s in results]),
+            json.dumps(response.model_dump()),
         )
     except Exception as e:
         logger.warning("Redis write failed, continuing without cache: %s", e)
 
-    return results
+    return response
 
-@router.get("/scores", response_model=LeaderboardResponse, responses=rate_limited_responses("60 per minute"))
+@router.get("/scores", response_model=LeaderboardResponse)
 @limiter.limit("60/minute")
-def get_scores(request: Request, response: Response, game_mode: str, period: str = "alltime") -> LeaderboardResponse:
-    cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}"
+def get_scores(
+    request: Request,
+    game_mode: str,
+    period: str = "alltime",
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> LeaderboardResponse:
+    cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}:{limit}:{offset}"
     try:
         cache = get_cache()
         cached = cache.get(cache_key)
@@ -159,21 +181,25 @@ def get_scores(request: Request, response: Response, game_mode: str, period: str
 
             order = "ASC" if mode_row[0] == "ASC" else "DESC"
 
+            # RANK() and COUNT(*) OVER () are computed over the full filtered set
+            # *before* LIMIT/OFFSET — so rank and total_count remain correct
+            # regardless of the page being requested. This is the key reason
+            # offset pagination composes cleanly with this query shape.
             cur.execute(
-                            f"""
-                            SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
-                            RANK() OVER (ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC) AS rank,
-                            COUNT(*) OVER() AS total_count
-                            FROM scores s
-                            JOIN users u ON u.id = s.user_id
-                            WHERE s.game_mode = %s
-                              AND s.period = %s
-                              AND s.period_start = %s
-                            ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC
-                            LIMIT 100
-                            """,
-                            (game_mode, period, period_start),
-                        )
+                f"""
+                SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
+                RANK() OVER (ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC) AS rank,
+                COUNT(*) OVER() AS total_count
+                FROM scores s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.game_mode = %s
+                  AND s.period = %s
+                  AND s.period_start = %s
+                ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC
+                LIMIT %s OFFSET %s
+                """,
+                (game_mode, period, period_start, limit, offset),
+            )
             rows = cur.fetchall()
     except HTTPException:
         raise
@@ -182,15 +208,24 @@ def get_scores(request: Request, response: Response, game_mode: str, period: str
     finally:
         release_conn(conn)
 
-    total_count = rows[0][7] if rows else 0
+    # total_count from the window function is only present on returned rows.
+    # If the page is empty (offset past end, or no scores at all), fall back
+    # to a separate COUNT — but only when offset > 0, since a truly empty
+    # leaderboard should report 0 without a second query.
+    if rows:
+        total_count = rows[0][7]
+    elif offset > 0:
+        total_count = _count_scores(game_mode, period, period_start)
+    else:
+        total_count = 0
 
     results = [
         ScoreResponse(
             id=row[0], player=row[1], score=row[2],
-            game_mode=row[3],period=row[4],
+            game_mode=row[3], period=row[4],
             submitted_at=row[5].astimezone(timezone.utc).isoformat(),
             rank=row[6],
-            percentile=round((1 - (row[6] - 1) / row[7]) * 100, 2) if row[7] > 1 else 100.0
+            percentile=round((1 - (row[6] - 1) / row[7]) * 100, 2) if row[7] > 1 else 100.0,
         )
         for row in rows
     ]
@@ -302,6 +337,34 @@ def submit_score(
             detail="Score not found after insertion, this should not happen",
         )
     return result
+
+def _count_scores(game_mode: str, period: str, period_start) -> int:
+    """Count scores for a given mode/period bucket. Used when a paginated
+    response returns an empty page but the leaderboard isn't actually empty."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM scores
+                WHERE game_mode = %s AND period = %s AND period_start = %s
+                """,
+                (game_mode, period, period_start),
+            )
+            return cur.fetchone()[0]
+    finally:
+        release_conn(conn)
+
+def _count_all_scores() -> int:
+    """Total row count for the scores table. Used by the /latest endpoint
+    to report total_count when a paginated request lands on an empty page."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM scores")
+            return cur.fetchone()[0]
+    finally:
+        release_conn(conn)
 
 def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
     # 
