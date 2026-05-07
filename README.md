@@ -1,8 +1,10 @@
 # HighScoreServer
 
+[![CI](https://github.com/EricMay256/HighScoreServer/actions/workflows/ci.yml/badge.svg)](https://github.com/EricMay256/HighScoreServer/actions/workflows/ci.yml)
+
 A production-deployed game leaderboard backend built with FastAPI and PostgreSQL. Designed as a reusable backend for Unity games — drop in the included C# client and get a fully functional leaderboard with silent guest auth, per-period score history, rank and percentile, and a public web view.
 
-Architectural decisions are captured as ADRs, and Known Limitations documents the current tradeoffs.
+Architectural decisions are captured as [ADRs](docs/adr/README.md), and Known Limitations documents the current tradeoffs.
 
 - **Live:** https://high-score-server-9db572197af4.herokuapp.com/
 - **API Docs:** https://high-score-server-9db572197af4.herokuapp.com/docs
@@ -36,7 +38,7 @@ flowchart LR
     class Sentry monitoring
 ```
 
-> **Cache backend.** The deployed configuration uses an in-process TTL cache (`CACHE_BACKEND=memory`). Redis is supported by the same cache interface and can be re-enabled by provisioning the Heroku Redis add-on and setting `CACHE_BACKEND=redis` — no code changes required. At a single dyno with a single worker, the two backends are behaviorally equivalent, so the add-on was removed to eliminate cost.
+> **Cache backend.** The deployed configuration uses an in-process TTL cache (`CACHE_BACKEND=memory`). Redis is opt-in using the same cache interface and can be re-enabled by provisioning the Heroku Redis add-on and setting `CACHE_BACKEND=redis` — no code changes required. At a single dyno with a single worker, the two backends are behaviorally equivalent, so the add-on was removed to reduce cost with no side-effects.
 
 
 ## Features
