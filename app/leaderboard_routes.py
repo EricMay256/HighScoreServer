@@ -85,9 +85,12 @@ def latest_scores(request: Request, response: Response) -> list[ScoreResponse]:
                 SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at
                 FROM scores s
                 JOIN users u ON u.id = s.user_id
+                WHERE s.period = 'alltime'
+                  AND s.period_start = %s
                 ORDER BY s.submitted_at DESC
                 LIMIT 100
-                """
+                """,
+                (get_period_start("alltime"),),
             )
             rows = cur.fetchall()
     except Exception as e:

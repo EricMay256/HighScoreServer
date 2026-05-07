@@ -685,5 +685,7 @@ section is the summary.
 - **Password reset flow.** Requires token storage, email delivery, new
   endpoints, and reset UI. The `email` column is already nullable on the
   `users` table to keep the schema ready.
-- **Cumulative Score tracking.** Sum of points across sessions within a
-  time period, with deduplication protections against double submissions.
+- **Pluggable aggregation strategies.** Generalize game modes beyond
+  best-score: introduce a `score_events` table (append-only, idempotent via
+  client event IDs) and add `aggregation: best | sum` to `game_modes`. Sum
+  unlocks cumulative tracking; the event log unlocks audit and anti-cheat.
