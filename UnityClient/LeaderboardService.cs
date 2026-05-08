@@ -238,7 +238,7 @@ namespace UBear.Leaderboard
     public IEnumerator GetScores(
         string                                   gameMode,
         Action<ApiResult<LeaderboardResponse>>   callback,
-        TimePeriod                               period = TimePeriod.AllTime,
+        TimePeriod                               period = TimePeriod.Alltime,
         int                                      limit  = 100,
         int                                      offset = 0)
     {
