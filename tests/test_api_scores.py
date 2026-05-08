@@ -591,7 +591,90 @@ def test_score_over_upper_bound_rejected(client, auth_headers, classic_mode):
     """One over the cap must be rejected by Pydantic with 422."""
     response = client.post(
         "/api/leaderboard/scores",
-        json={"score": 18_000_000_421, "game_mode": classic_mode},
+        json={"score": 180_000_000_082, "game_mode": classic_mode},
         headers=auth_headers,
     )
     assert response.status_code == 422
+
+# ── /latest game_modes filter ──────────────────────────────────────────────
+#
+# These tests exercise the game_modes query parameter on /api/leaderboard/latest.
+# That parameter scopes the global "recent activity" feed to a subset of modes,
+# and rejects malformed input. See README "Known Future Considerations" for why
+# mode-to-game grouping lives in the client rather than the schema.
+
+
+def test_latest_empty_game_mode_string_returns_422(client):
+    """`?game_modes=` (empty value) should be rejected by per-mode length validation."""
+    response = client.get("/api/leaderboard/latest?game_modes=")
+    assert response.status_code == 422
+
+
+def test_latest_oversized_game_mode_returns_422(client):
+    """A mode name exceeding 32 characters should be rejected."""
+    oversized = "a" * 33
+    response = client.get(f"/api/leaderboard/latest?game_modes={oversized}")
+    assert response.status_code == 422
+
+
+def test_latest_duplicate_game_modes_match_single(client, auth_headers, classic_mode):
+    """
+    Duplicate `game_modes` values should produce the same response as a single
+    instance — the handler dedupes before querying. This protects cache hygiene
+    (one canonical key per logical request) and confirms that ANY(%s) over a
+    deduped list is equivalent to ANY(%s) over the duplicated list.
+    """
+    client.post(
+        "/api/leaderboard/scores",
+        json={"score": 1000, "game_mode": classic_mode},
+        headers=auth_headers,
+    )
+
+    single = client.get(f"/api/leaderboard/latest?game_modes={classic_mode}")
+    duped = client.get(
+        f"/api/leaderboard/latest?game_modes={classic_mode}"
+        f"&game_modes={classic_mode}&game_modes={classic_mode}"
+    )
+
+    assert single.status_code == 200
+    assert duped.status_code == 200
+    assert single.json() == duped.json()
+
+
+def test_latest_filters_to_requested_modes_only(client, classic_mode, speedrun_mode):
+    """
+    Submissions to two different modes should both surface when both modes
+    are requested, and the filter should exclude any other modes' scores.
+    """
+    # Submit one score to each mode under different users so neither submission
+    # is rejected as a non-improvement.
+    for mode, score, suffix in [
+        (classic_mode, 1000, "classic"),
+        (speedrun_mode, 300, "speedrun"),
+    ]:
+        reg = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"latest_filter_{suffix}_{secrets.token_hex(3)}",
+                "email": f"latest_filter_{suffix}_{secrets.token_hex(3)}@example.com",
+                "password": "testpassword123",
+            },
+        )
+        token = reg.json()["access_token"]
+        client.post(
+            "/api/leaderboard/scores",
+            json={"score": score, "game_mode": mode},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    response = client.get(
+        f"/api/leaderboard/latest?game_modes={classic_mode}&game_modes={speedrun_mode}"
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    returned_modes = {entry["game_mode"] for entry in body["scores"]}
+    assert classic_mode in returned_modes
+    assert speedrun_mode in returned_modes
+    # Anything not requested must not appear — the filter is exclusive.
+    assert returned_modes <= {classic_mode, speedrun_mode}

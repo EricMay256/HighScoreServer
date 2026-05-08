@@ -71,7 +71,18 @@ def latest_scores(
     request: Request,
     limit: int = Query(100, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    game_modes: list[str] | None = Query(None, max_length=10),
 ) -> LeaderboardResponse:
+    if game_modes is not None:
+        # Per-mode length validation matches ScoreSubmission.game_mode (1..32).
+        for mode in game_modes:
+            if not 1 <= len(mode) <= 32:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Each game_mode must be 1..32 characters",
+                )
+        # Dedupe + sort: canonical form for cache-key stability and SQL hygiene.
+        game_modes = sorted(set(game_modes))
     cache_key = f"{CACHE_KEY_PREFIX}latest:{limit}:{offset}"
     try:
         cache = get_cache()

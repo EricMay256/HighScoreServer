@@ -397,6 +397,13 @@ than a 500.
 | `game_mode` | string | required | Game mode name |
 | `period` | string | `alltime` | One of: `alltime`, `weekly`, `daily` |
 
+#### GET `/latest` parameters
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `limit` | integer | 100 | Max rows returned. Server-clamped to 1..100. |
+| `offset` | integer | 0 | Pagination offset. Non-negative. |
+| `game_modes` | string (repeatable) | none | Filter to specific modes. Pass once per mode: `?game_modes=a&game_modes=b`. Omit for all modes. |
+
 #### POST `/scores` body
 ```json
 {
@@ -689,3 +696,9 @@ section is the summary.
   best-score: introduce a `score_events` table (append-only, idempotent via
   client event IDs) and add `aggregation: best | sum` to `game_modes`. Sum
   unlocks cumulative tracking; the event log unlocks audit and anti-cheat.
+- **Game-to-mode ownership** — `game_modes` is a flat list with no parent
+  grouping. Clients filter `/latest` by passing the modes they care about 
+  via `?game_modes=`. If a second distinct game ships against this backend, 
+  modeling games as a first-class schema concept (a `game` column on 
+  `game_modes`) becomes the better answer. Deferred until that decision is 
+  forced.

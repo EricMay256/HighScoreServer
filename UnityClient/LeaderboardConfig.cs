@@ -12,5 +12,9 @@ namespace UBear.Leaderboard
     {
         [Tooltip("Base URL of the leaderboard server, no trailing slash.")]
         public string BaseUrl = "https://your-app.herokuapp.com";
+        [Tooltip("Game modes this client cares about. Used to scope /latest queries.")]
+        //This is currently the only way games "claim" game modes
+        //See README "Known Future Considerations" for deferred server-side ownership option
+        public string[] GameModes;
     }
 }

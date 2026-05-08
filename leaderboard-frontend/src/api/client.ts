@@ -155,12 +155,18 @@ export function getGameModes(): Promise<GameModeConfig[]> {
 export function getLatestScores(
   limit: number = 100,
   offset: number = 0,
+  game_modes?: string[],
 ): Promise<LeaderboardResponse> {
-  const qs = new URLSearchParams({
+  const params = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
-  }).toString();
-  return request<LeaderboardResponse>(`/api/leaderboard/latest?${qs}`);
+  });
+  if (game_modes) {
+    for (const mode of game_modes) params.append("game_modes", mode);
+  }
+  return request<LeaderboardResponse>(
+    `/api/leaderboard/latest?${params.toString()}`,
+  );
 }
 
 export function submitScore(

@@ -230,17 +230,44 @@ namespace UBear.Leaderboard
     #endregion
     #region  Leaderboard Endpoints
 
-    /// <summary>
-    /// Fetches the leaderboard for a given game mode and period.
-    /// Period defaults to all-time; pass Period.Daily or Period.Weekly for time-bucketed views.
-    /// </summary>
+/// <summary>
+/// Fetches the leaderboard for a given game mode and period.
+/// Period is one of: "alltime", "daily", "weekly".
+/// limit is clamped server-side to 1..100; offset is non-negative.
+/// </summary>
     public IEnumerator GetScores(
-      string                                   gameMode,
-      Action<ApiResult<LeaderboardResponse>>   callback,
-      TimePeriod                               period = TimePeriod.Alltime)
+        string                                   gameMode,
+        Action<ApiResult<LeaderboardResponse>>   callback,
+        TimePeriod                               period = TimePeriod.AllTime,
+        int                                      limit  = 100,
+        int                                      offset = 0)
     {
-      string url = $"{_config.BaseUrl}/api/leaderboard/scores?game_mode={gameMode}&period={period.ToWireValue()}";
+      string url = $"{_config.BaseUrl}/api/leaderboard/scores"
+                + $"?game_mode={UnityWebRequest.EscapeURL(gameMode)}"
+                + $"&period={UnityWebRequest.EscapeURL(period)}"
+                + $"&limit={limit}"
+                + $"&offset={offset}";
       yield return Get(url, callback);
+    }
+
+    /// <summary>
+    /// Fetches the most recently submitted scores across all game modes.
+    /// Useful for a "recent activity" feed.
+    /// limit is clamped server-side to 1..100; offset is non-negative.
+    /// </summary>
+    public IEnumerator GetLatestScores(
+      Action<ApiResult<LeaderboardResponse>>   callback,
+      int                                      limit     = 100,
+      int                                      offset    = 0,
+      string[]                                 gameModes = null)
+    {
+      var sb = new StringBuilder($"{_config.BaseUrl}/api/leaderboard/latest?limit={limit}&offset={offset}");
+      if (gameModes != null)
+      {
+          foreach (string mode in gameModes)
+              sb.Append($"&game_modes={UnityWebRequest.EscapeURL(mode)}");
+      }
+      yield return Get(sb.ToString(), callback);
     }
 
     /// <summary>
