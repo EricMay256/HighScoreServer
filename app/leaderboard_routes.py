@@ -65,7 +65,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 
     return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3])
 
-@router.get("/latest", response_model=LeaderboardResponse)
+@router.get("/latest", response_model=LeaderboardResponse, responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
 def latest_scores(
     request: Request,
