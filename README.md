@@ -693,6 +693,11 @@ section is the summary.
     revisiting:** clients that need stable feed pagination through high
     insert rates, or any move toward >100-entry leaderboards where the
     offset-counting cost matters.
+  - **Filtering /latest doesn't impact total count.** The total
+    score count will reflect all values rather than the results
+    that fit the filter. Identified as non-vital edge case,
+    revisit trigger is a client that seeks paginated latest
+    scores against a filtered set of game modes.
 
 
 ## Known Future Considerations
