@@ -392,22 +392,23 @@ than a 500.
 | POST | `/game_modes` | API Key | Create or update a game mode (Operator Action) |
 
 Both `GET /scores` and `GET /latest` support `limit` and `offset` query
-parameters for pagination, capped at 100 entries per request. `total_count`
-in the response envelope is the unpaginated count, so clients can compute
-total pages without a separate request.
+parameters for pagination. `limit` must be between 1 and 100; invalid
+values are rejected with a `422` response. `total_count` in the response
+envelope is the unpaginated count, so clients can compute total pages
+without a separate request.
 
 #### GET `/scores` parameters
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `game_mode` | string | required | Game mode name |
 | `period` | string | `alltime` | One of: `alltime`, `weekly`, `daily` |
-| `limit` | integer | 100 | Max rows returned. Server-clamped to 1..100. |
+| `limit` | integer | 100 | Max rows returned. Must be between 1 and 100; invalid values return `422`. |
 | `offset` | integer | 0 | Pagination offset. Non-negative. |
 
 #### GET `/latest` parameters
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `limit` | integer | 100 | Max rows returned. Server-clamped to 1..100. |
+| `limit` | integer | 100 | Max rows returned. Must be between 1 and 100; invalid values return `422`. |
 | `offset` | integer | 0 | Pagination offset. Non-negative. |
 | `game_modes` | string (repeatable) | none | Filter to specific modes. Pass once per mode: `?game_modes=a&game_modes=b`. Omit for all modes. |
 
