@@ -166,7 +166,7 @@ def latest_scores(
 
     return response
 
-@router.get("/scores", response_model=LeaderboardResponse)
+@router.get("/scores", response_model=LeaderboardResponse, responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
 def get_scores(
     request: Request,
