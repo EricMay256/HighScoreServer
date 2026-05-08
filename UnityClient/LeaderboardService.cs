@@ -233,7 +233,7 @@ namespace UBear.Leaderboard
 /// <summary>
 /// Fetches the leaderboard for a given game mode and period.
 /// Period is one of: "alltime", "daily", "weekly".
-/// limit is clamped client-side to 1..100; offset is clamped to ≥ 0.
+/// limit is clamped client-side to 1..100; offset is clamped to >= 0.
 /// The server enforces these ranges and returns HTTP 422 for out-of-range values.
 /// </summary>
     public IEnumerator GetScores(
@@ -256,7 +256,7 @@ namespace UBear.Leaderboard
     /// <summary>
     /// Fetches the most recently submitted scores across all game modes.
     /// Useful for a "recent activity" feed.
-    /// limit is clamped client-side to 1..100; offset is clamped to ≥ 0.
+    /// limit is clamped client-side to 1..100; offset is clamped to >= 0.
     /// The server enforces these ranges and returns HTTP 422 for out-of-range values.
     /// </summary>
     public IEnumerator GetLatestScores(
