@@ -1,0 +1,11 @@
+# Configuration for Python tooling. Heroku build manifests
+# (requirements.txt, runtime.txt, Procfile) are intentionally kept separate —
+# the buildpack reads those, not this file.
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # slowapi 0.1.9 uses deprecated asyncio.iscoroutinefunction. Removal isn't
+    # until Python 3.16; the warning is informational on 3.14. Filter scoped
+    # to slowapi only so our own deprecations remain visible.
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:slowapi.*",
+]
