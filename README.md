@@ -387,15 +387,22 @@ than a 500.
 |---|---|---|---|
 | GET | `/scores` | Public | Fetch leaderboard for a game mode and `period` |
 | POST | `/scores` | Bearer | Submit a score |
-| GET | `/latest` | Public | Fetch the 100 most recently submitted scores |
+| GET | `/latest` | Public | Fetch recently submitted scores, optionally filtered by game mode |
 | GET | `/game_modes` | Public | List all registered game modes |
 | POST | `/game_modes` | API Key | Create or update a game mode (Operator Action) |
+
+Both `GET /scores` and `GET /latest` support `limit` and `offset` query
+parameters for pagination, capped at 100 entries per request. `total_count`
+in the response envelope is the unpaginated count, so clients can compute
+total pages without a separate request.
 
 #### GET `/scores` parameters
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `game_mode` | string | required | Game mode name |
 | `period` | string | `alltime` | One of: `alltime`, `weekly`, `daily` |
+| `limit` | integer | 100 | Max rows returned. Server-clamped to 1..100. |
+| `offset` | integer | 0 | Pagination offset. Non-negative. |
 
 #### GET `/latest` parameters
 | Parameter | Type | Default | Description |
@@ -673,7 +680,18 @@ section is the summary.
     exists, but it doesn't open by accident — there's no normal application flow
     that deletes a `game_modes` row mid-game, and `users` rows can't be deleted while
     they have scores (`ON DELETE RESTRICT`). The alternative is mocking psycopg2 to
-    raise the exception, which would test the except block but not the scenario it exists to handle.
+    raise the exception, which would test the except block but not the scenario it 
+    exists to handle.
+  - **Offset pagination over cursor pagination.** `/scores` and `/latest`
+    use `limit` + `offset` rather than cursor-based pagination. Offset is
+    simpler and composes cleanly with the existing `RANK()` window function
+    on `/scores` — the rank is computed over the full filtered set before
+    pagination, so page boundaries don't distort it. The known cost is on
+    `/latest`, where the feed is time-ordered and inserts between page
+    fetches can cause page 2 to repeat or skip entries. **Trigger for
+    revisiting:** clients that need stable feed pagination through high
+    insert rates, or any move toward >100-entry leaderboards where the
+    offset-counting cost matters.
 
 
 ## Known Future Considerations
