@@ -1,12 +1,12 @@
 import os
 import pytest
 import psycopg2
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from dotenv import load_dotenv
 load_dotenv()  # load .env before any os.environ reads
 os.environ["RATE_LIMITER_ENABLED"] = "false"  # disable rate limiter for tests
-from app.main import app  # Must import after overriding env var
-from unittest.mock import patch
+from app.main import app  # noqa: E402 Must import after overriding env var
 
 
 @pytest.fixture(scope="session", autouse=True)
