@@ -111,3 +111,101 @@ def test_concurrent_writes_do_not_corrupt_cache():
         t.join()
 
     assert not errors, f"Thread errors: {errors}"
+
+# ── Prefix delete ──────────────────────────────────────────────────────────
+#
+# delete_prefix is what the leaderboard route invalidation depends on. Cache
+# keys for /scores have shape `leaderboard:{mode}:{period}:{limit}:{offset}`,
+# so a score submission deletes by the prefix `leaderboard:{mode}:`. The
+# trailing-colon boundary case is the most important — without it, mode
+# `classic` would invalidate `classic_endless` too.
+
+
+def test_delete_prefix_removes_matching_keys():
+    cache = make_cache()
+    cache.setex("foo:1", 120, "a")
+    cache.setex("foo:2", 120, "b")
+    cache.setex("bar:1", 120, "c")
+    deleted = cache.delete_prefix("foo:")
+    assert deleted == 2
+    assert cache.get("foo:1") is None
+    assert cache.get("foo:2") is None
+    assert cache.get("bar:1") == "c"
+
+
+def test_delete_prefix_no_matches_returns_zero():
+    cache = make_cache()
+    cache.setex("bar:1", 120, "c")
+    assert cache.delete_prefix("foo:") == 0
+    assert cache.get("bar:1") == "c"
+
+
+def test_delete_prefix_empty_prefix_clears_cache():
+    """An empty prefix matches every key — useful as a flush operation."""
+    cache = make_cache()
+    cache.setex("a", 120, "1")
+    cache.setex("b", 120, "2")
+    deleted = cache.delete_prefix("")
+    assert deleted == 2
+    assert cache.get("a") is None
+    assert cache.get("b") is None
+
+
+def test_delete_prefix_respects_trailing_colon_boundary():
+    """
+    `foo:` should not match keys starting with `foo` but not `foo:`.
+    This is the boundary that protects /scores invalidation from accidentally
+    nuking a sibling mode whose name shares a prefix with the submitted mode.
+    """
+    cache = make_cache()
+    cache.setex("foo:1", 120, "a")
+    cache.setex("foobar", 120, "b")
+    deleted = cache.delete_prefix("foo:")
+    assert deleted == 1
+    assert cache.get("foo:1") is None
+    assert cache.get("foobar") == "b"
+
+
+def test_delete_prefix_concurrent_with_writes():
+    """
+    Smoke test: prefix delete running concurrently with writers should not
+    corrupt the cache. The per-method lock guarantees consistency, but we
+    exercise the contended path to catch lock-ordering regressions.
+    """
+    import threading
+    cache = make_cache()
+    errors: list[Exception] = []
+
+    def writer(thread_id: int) -> None:
+        try:
+            for i in range(100):
+                cache.setex(f"prefix:t{thread_id}:k{i}", 120, str(i))
+                cache.setex(f"other:t{thread_id}:k{i}", 120, str(i))
+        except Exception as e:
+            errors.append(e)
+
+    def deleter() -> None:
+        try:
+            for _ in range(50):
+                cache.delete_prefix("prefix:")
+        except Exception as e:
+            errors.append(e)
+
+    threads = (
+        [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+        + [threading.Thread(target=deleter) for _ in range(2)]
+    )
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"Thread errors: {errors}"
+    # `other:` keys should be untouched by any prefix delete.
+    other_keys_present = any(
+        cache.get(f"other:t{tid}:k{i}") is not None
+        for tid in range(4)
+        for i in range(100)
+    )
+    assert other_keys_present
+

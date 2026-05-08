@@ -136,8 +136,15 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 export function getScores(
   game_mode: string,
   period: Period = "alltime",
+  limit: number = 100,
+  offset: number = 0,
 ): Promise<LeaderboardResponse> {
-  const qs = new URLSearchParams({ game_mode, period }).toString();
+  const qs = new URLSearchParams({
+    game_mode,
+    period,
+    limit: String(limit),
+    offset: String(offset),
+  }).toString();
   return request<LeaderboardResponse>(`/api/leaderboard/scores?${qs}`);
 }
 
@@ -145,8 +152,21 @@ export function getGameModes(): Promise<GameModeConfig[]> {
   return request<GameModeConfig[]>("/api/leaderboard/game_modes");
 }
 
-export function getLatestScores(): Promise<ScoreResponse[]> {
-  return request<ScoreResponse[]>("/api/leaderboard/latest");
+export function getLatestScores(
+  limit: number = 100,
+  offset: number = 0,
+  game_modes?: string[],
+): Promise<LeaderboardResponse> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (game_modes) {
+    for (const mode of game_modes) params.append("game_modes", mode);
+  }
+  return request<LeaderboardResponse>(
+    `/api/leaderboard/latest?${params.toString()}`,
+  );
 }
 
 export function submitScore(

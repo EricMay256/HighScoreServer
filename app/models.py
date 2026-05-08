@@ -16,7 +16,7 @@ class GameModeCreate(BaseModel):
 
 #Score models
 class ScoreSubmission(BaseModel):
-    score:      int = Field(..., ge=0, le=18_000_000_420)  # Arbitrary upper limit to prevent abuse
+    score:      int = Field(..., ge=0, le=180_000_000_081)  # Arbitrary upper limit to prevent abuse
     game_mode:  str = Field(..., min_length=1, max_length=32)
 
 class ScoreResponse(BaseModel):
