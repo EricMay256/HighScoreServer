@@ -680,7 +680,7 @@ section is the summary.
     exists, but it doesn't open by accident — there's no normal application flow
     that deletes a `game_modes` row mid-game, and `users` rows can't be deleted while
     they have scores (`ON DELETE RESTRICT`). The alternative is mocking psycopg2 to
-    raise the exception, which would test the except block but not the scenario it 
+    raise the exception, which would test the except block but not the scenario it
     exists to handle.
   - **Offset pagination over cursor pagination.** `/scores` and `/latest`
     use `limit` + `offset` rather than cursor-based pagination. Offset is
