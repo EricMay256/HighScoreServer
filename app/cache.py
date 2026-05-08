@@ -18,6 +18,7 @@ class CacheBackend(Protocol):
     def get(self, key: str) -> Optional[str]: ...
     def setex(self, key: str, ttl_seconds: int, value: str) -> None: ...
     def delete(self, key: str) -> None: ...
+    def delete_prefix(self, prefix: str) -> int: ...
     def close(self) -> None: ...
 
 
@@ -56,6 +57,19 @@ class MemoryCache:
     def delete(self, key: str) -> None:
         with self._lock:
             self._cache.pop(key, None)
+    
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete all keys starting with `prefix`. Returns count of deleted entries.
+
+        cachetools.TTLCache exposes .keys() but mutating during iteration is
+        unsafe; collect matches first, then pop. The lock spans both phases
+        so concurrent writers can't add new matching keys mid-delete.
+        """
+        with self._lock:
+            matches = [k for k in self._cache.keys() if k.startswith(prefix)]
+            for k in matches:
+                self._cache.pop(k, None)
+            return len(matches)
 
     def close(self) -> None:
         with self._lock:
@@ -77,6 +91,26 @@ class RedisCache:
 
     def delete(self, key: str) -> None:
         self._client.delete(key)
+
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete all keys starting with `prefix`. Returns count of deleted keys.
+        Uses SCAN rather than KEYS to avoid blocking the Redis server on large
+        keyspaces. SCAN returns keys in batches; we collect them and delete in
+        chunks. count=100 is a hint to the server about batch size, not a cap.
+        """
+        deleted = 0
+        pattern = f"{prefix}*"
+        # scan_iter handles cursor management internally
+        keys_to_delete: list[str] = []
+        for key in self._client.scan_iter(match=pattern, count=100):
+            keys_to_delete.append(key)
+            # Delete in batches of 500 to bound memory and round-trip size
+            if len(keys_to_delete) >= 500:
+                deleted += self._client.delete(*keys_to_delete)
+                keys_to_delete = []
+        if keys_to_delete:
+            deleted += self._client.delete(*keys_to_delete)
+        return deleted
 
     def close(self) -> None:
         self._client.close()

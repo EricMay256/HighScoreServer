@@ -678,3 +678,222 @@ def test_latest_filters_to_requested_modes_only(client, classic_mode, speedrun_m
     assert speedrun_mode in returned_modes
     # Anything not requested must not appear — the filter is exclusive.
     assert returned_modes <= {classic_mode, speedrun_mode}
+
+def test_latest_filter_excludes_unrequested_modes(
+    client, classic_mode, speedrun_mode, requires_claimed_account_mode, auth_headers
+):
+    """
+    Submitting to three modes and requesting two should return entries from
+    only the requested two — both present, the third absent. Locks down the
+    exclusion semantics of the game_modes filter on /latest.
+
+    Uses requires_claimed_account_mode as a convenient third mode; the claimed account-gating
+    aspect is incidental to this test.
+    """
+    for mode in [classic_mode, speedrun_mode, requires_claimed_account_mode]:
+        submission = client.post(
+            "/api/leaderboard/scores",
+            json={"score": 1000, "game_mode": mode},
+            headers=auth_headers,
+        )
+        assert submission.status_code == 201, f"Setup failed for mode {mode}"
+
+    response = client.get(
+        f"/api/leaderboard/latest?game_modes={classic_mode}&game_modes={speedrun_mode}"
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    returned_modes = {entry["game_mode"] for entry in body["scores"]}
+
+    # Inclusion: both requested modes present.
+    assert classic_mode in returned_modes
+    assert speedrun_mode in returned_modes
+    # Exclusion: the unrequested mode absent.
+    assert requires_claimed_account_mode not in returned_modes
+    # Envelope: total_count reflects the filtered count, not the table count.
+    assert body["total_count"] == len(body["scores"])
+
+# ── Pagination ─────────────────────────────────────────────────────────────
+#
+# These tests lock down the limit/offset contract on /scores and /latest.
+# The most important case is total_count and rank correctness under pagination
+# — both are computed via window functions over the full filtered set, which
+# is the entire reason offset pagination composes cleanly with this query
+# shape. A future refactor that moved the LIMIT before the window functions
+# would break both, silently.
+
+
+def test_scores_limit_caps_returned_entries(client, classic_mode):
+    """?limit=2 should return at most 2 entries even when more exist."""
+    for i, suffix in enumerate(["a", "b", "c", "d"]):
+        reg = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"limit_cap_{suffix}_{secrets.token_hex(3)}",
+                "email": f"limit_cap_{suffix}_{secrets.token_hex(3)}@example.com",
+                "password": "testpassword123",
+            },
+        )
+        token = reg.json()["access_token"]
+        client.post(
+            "/api/leaderboard/scores",
+            json={"score": (i + 1) * 100, "game_mode": classic_mode},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    response = client.get(
+        f"/api/leaderboard/scores?game_mode={classic_mode}&period=alltime&limit=2"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["scores"]) == 2
+    # total_count reflects the full filtered set, not the page size
+    assert body["total_count"] == 4
+
+
+def test_scores_limit_zero_returns_422(client, classic_mode):
+    """?limit=0 violates Query(ge=1)."""
+    response = client.get(
+        f"/api/leaderboard/scores?game_mode={classic_mode}&period=alltime&limit=0"
+    )
+    assert response.status_code == 422
+
+
+def test_scores_limit_above_cap_returns_422(client, classic_mode):
+    """?limit=101 violates Query(le=100)."""
+    response = client.get(
+        f"/api/leaderboard/scores?game_mode={classic_mode}&period=alltime&limit=101"
+    )
+    assert response.status_code == 422
+
+
+def test_scores_offset_skips_entries(client, classic_mode):
+    """?offset=2&limit=2 should return entries 3 and 4 of a 4-entry leaderboard."""
+    for i, suffix in enumerate(["a", "b", "c", "d"]):
+        reg = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"offset_{suffix}_{secrets.token_hex(3)}",
+                "email": f"offset_{suffix}_{secrets.token_hex(3)}@example.com",
+                "password": "testpassword123",
+            },
+        )
+        token = reg.json()["access_token"]
+        client.post(
+            "/api/leaderboard/scores",
+            json={"score": (i + 1) * 100, "game_mode": classic_mode},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    page1 = client.get(
+        f"/api/leaderboard/scores?game_mode={classic_mode}&period=alltime&limit=2&offset=0"
+    ).json()
+    page2 = client.get(
+        f"/api/leaderboard/scores?game_mode={classic_mode}&period=alltime&limit=2&offset=2"
+    ).json()
+
+    page1_ids = {s["id"] for s in page1["scores"]}
+    page2_ids = {s["id"] for s in page2["scores"]}
+
+    assert len(page1_ids) == 2
+    assert len(page2_ids) == 2
+    # Pages must not overlap.
+    assert page1_ids.isdisjoint(page2_ids)
+    # total_count is identical across pages.
+    assert page1["total_count"] == page2["total_count"] == 4
+
+
+def test_scores_offset_negative_returns_422(client, classic_mode):
+    """?offset=-1 violates Query(ge=0)."""
+    response = client.get(
+        f"/api/leaderboard/scores?game_mode={classic_mode}&period=alltime&offset=-1"
+    )
+    assert response.status_code == 422
+
+
+def test_scores_rank_consistent_across_pages(client, classic_mode):
+    """
+    Rank is computed via RANK() OVER () over the full filtered set, *before*
+    LIMIT/OFFSET. So rank 1 appears on page 1, rank 4 appears on page 2 with
+    offset=3 — the rank values are global, not page-relative.
+
+    This is the test that protects against a refactor moving the window
+    function inside a subquery that's already been paginated.
+    """
+    for i, suffix in enumerate(["a", "b", "c", "d"]):
+        reg = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"rank_pg_{suffix}_{secrets.token_hex(3)}",
+                "email": f"rank_pg_{suffix}_{secrets.token_hex(3)}@example.com",
+                "password": "testpassword123",
+            },
+        )
+        token = reg.json()["access_token"]
+        client.post(
+            "/api/leaderboard/scores",
+            json={"score": (i + 1) * 100, "game_mode": classic_mode},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    # Page through one entry at a time. Ranks should be 1, 2, 3, 4.
+    ranks = []
+    for offset in range(4):
+        page = client.get(
+            f"/api/leaderboard/scores?game_mode={classic_mode}"
+            f"&period=alltime&limit=1&offset={offset}"
+        ).json()
+        ranks.append(page["scores"][0]["rank"])
+
+    assert ranks == [1, 2, 3, 4]
+
+
+def test_scores_offset_past_end_returns_empty_with_correct_total(client, auth_headers, classic_mode):
+    """
+    When offset > total, the page is empty but total_count must still reflect
+    the real count — that's the empty-page COUNT fallback path.
+    """
+    client.post(
+        "/api/leaderboard/scores",
+        json={"score": 1000, "game_mode": classic_mode},
+        headers=auth_headers,
+    )
+
+    response = client.get(
+        f"/api/leaderboard/scores?game_mode={classic_mode}&period=alltime&limit=10&offset=100"
+    ).json()
+    assert response["scores"] == []
+    assert response["total_count"] == 1
+
+
+# ── /latest envelope and parameter caps ────────────────────────────────────
+
+
+def test_latest_response_envelope(client, auth_headers, classic_mode):
+    """
+    /latest returns LeaderboardResponse, not a bare list — the envelope wrap
+    was a breaking change from the original shape, normalized to match
+    /scores. Lock down the contract so a future refactor doesn't silently
+    revert it.
+    """
+    client.post(
+        "/api/leaderboard/scores",
+        json={"score": 1000, "game_mode": classic_mode},
+        headers=auth_headers,
+    )
+    response = client.get("/api/leaderboard/latest")
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body, dict)
+    assert "scores" in body
+    assert "total_count" in body
+    assert isinstance(body["scores"], list)
+    assert isinstance(body["total_count"], int)
+
+
+def test_latest_too_many_game_modes_returns_422(client):
+    """The Query(max_length=10) cap on game_modes rejects 11+ entries."""
+    modes = "&".join(f"game_modes=mode_{i}" for i in range(11))
+    response = client.get(f"/api/leaderboard/latest?{modes}")
+    assert response.status_code == 422

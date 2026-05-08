@@ -69,6 +69,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 @limiter.limit("10/minute")
 def latest_scores(
     request: Request,
+    response: Response,
     limit: int = Query(100, ge=1, le=100),
     offset: int = Query(0, ge=0),
     game_modes: list[str] | None = Query(None, max_length=10),
@@ -83,7 +84,8 @@ def latest_scores(
                 )
         # Dedupe + sort: canonical form for cache-key stability and SQL hygiene.
         game_modes = sorted(set(game_modes))
-    cache_key = f"{CACHE_KEY_PREFIX}latest:{limit}:{offset}"
+    modes_key = ",".join(game_modes) if game_modes else "all"
+    cache_key = f"{CACHE_KEY_PREFIX}latest:{modes_key}:{limit}:{offset}"
     try:
         cache = get_cache()
         cached = cache.get(cache_key)
@@ -99,17 +101,31 @@ def latest_scores(
             # Unlike /scores this isn't filtered to a mode/period — the "latest"
             # feed is global. Worth knowing if the table grows large; the count
             # is cheap on indexed columns but not free.
-            cur.execute(
-                """
-                SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at,
-                       COUNT(*) OVER() AS total_count
-                FROM scores s
-                JOIN users u ON u.id = s.user_id
-                ORDER BY s.submitted_at DESC, s.id DESC
-                LIMIT %s OFFSET %s
-                """,
-                (limit, offset),
-            )
+            if game_modes:
+                cur.execute(
+                    """
+                    SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at,
+                        COUNT(*) OVER() AS total_count
+                    FROM scores s
+                    JOIN users u ON u.id = s.user_id
+                    WHERE s.game_mode = ANY(%s)
+                    ORDER BY s.submitted_at DESC, s.id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (game_modes, limit, offset),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at,
+                        COUNT(*) OVER() AS total_count
+                    FROM scores s
+                    JOIN users u ON u.id = s.user_id
+                    ORDER BY s.submitted_at DESC, s.id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (limit, offset),
+                )
             rows = cur.fetchall()
     except Exception as e:
         raise HTTPException(
@@ -154,6 +170,7 @@ def latest_scores(
 @limiter.limit("60/minute")
 def get_scores(
     request: Request,
+    response: Response,
     game_mode: str,
     period: str = "alltime",
     limit: int = Query(100, ge=1, le=100),
@@ -335,11 +352,17 @@ def submit_score(
 
     try:
         cache = get_cache()
-        for invalidate_period in PERIODS:
-            cache.delete(f"{CACHE_KEY_PREFIX}{submission.game_mode}:{invalidate_period}")
-        cache.delete(f"{CACHE_KEY_PREFIX}latest")
+        # Invalidate all paginated and unpaginated read variants for this mode.
+        # Cache keys for /scores have shape: leaderboard:{mode}:{period}:{limit}:{offset}
+        # so we delete by mode prefix to catch every page across every period.
+        cache.delete_prefix(f"{CACHE_KEY_PREFIX}{submission.game_mode}:")
+        # /latest cache keys have shape: leaderboard:latest:{modes_key}:{limit}:{offset}
+        # The `latest:` prefix catches all of them regardless of which mode subset
+        # they cover — the safe answer is to nuke every /latest cache entry on
+        # any score submission.
+        cache.delete_prefix(f"{CACHE_KEY_PREFIX}latest:")
     except Exception as e:
-        logger.warning("Redis cache invalidation failed, continuing: %s", e)
+        logger.warning("Cache invalidation failed, continuing: %s", e)
 
     result = _fetch_score_with_rank(user_id, submission.game_mode, "alltime")
     if result is None:
