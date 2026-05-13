@@ -104,7 +104,7 @@ def latest_scores(
             if game_modes:
                 cur.execute(
                     """
-                    SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at,
+                    SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
                         COUNT(*) OVER() AS total_count
                     FROM scores s
                     JOIN users u ON u.id = s.user_id
@@ -117,7 +117,7 @@ def latest_scores(
             else:
                 cur.execute(
                     """
-                    SELECT s.id, u.username, s.score, s.game_mode, s.submitted_at,
+                    SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
                         COUNT(*) OVER() AS total_count
                     FROM scores s
                     JOIN users u ON u.id = s.user_id
@@ -136,7 +136,7 @@ def latest_scores(
         release_conn(conn)
 
     if rows:
-        total_count = rows[0][5]
+        total_count = rows[0][6]
     elif offset > 0:
         total_count = _count_all_scores()
     else:
@@ -148,7 +148,8 @@ def latest_scores(
             player=row[1],
             score=row[2],
             game_mode=row[3],
-            submitted_at=row[4].astimezone(timezone.utc).isoformat(),
+            period=row[4],
+            submitted_at=row[5].astimezone(timezone.utc).isoformat(),
         )
         for row in rows
     ]
