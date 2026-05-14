@@ -34,7 +34,7 @@ namespace UBear.Leaderboard
     private const int TimeoutSeconds = 10;
 
     // PlayerPrefs keys — internal, not intended for callers to reference directly
-    private const string PrefAccessToken  = "leaderboard_access_token";
+    private const string PrefAccessToken = "leaderboard_access_token";
     private const string PrefRefreshToken = "leaderboard_refresh_token";
 
     #region  Token Access
@@ -55,12 +55,12 @@ namespace UBear.Leaderboard
       PlayerPrefs.Save();
     }
 
-    private string AccessToken  => PlayerPrefs.GetString(PrefAccessToken,  null);
+    private string AccessToken => PlayerPrefs.GetString(PrefAccessToken, null);
     private string RefreshToken => PlayerPrefs.GetString(PrefRefreshToken, null);
 
     private void StoreTokens(TokenResponse tokens)
     {
-      PlayerPrefs.SetString(PrefAccessToken,  tokens.AccessToken);
+      PlayerPrefs.SetString(PrefAccessToken, tokens.AccessToken);
       PlayerPrefs.SetString(PrefRefreshToken, tokens.RefreshToken);
       PlayerPrefs.Save();
     }
@@ -84,41 +84,130 @@ namespace UBear.Leaderboard
     }
 
     /// <summary>
-    /// Ensures the client has a valid access token before proceeding.
+    /// Ensures the client has a valid, unexpired access token before proceeding,
+    /// or signals that the user needs to log in.
     ///
-    /// If a token is already stored, the callback is invoked immediately with
-    /// a successful result — no network call is made. If no token exists, falls
-    /// through to GuestLogin() and forwards its outcome as ApiResult&lt;bool&gt;.
-    ///
-    /// Use this in Start() or any entry point where you need auth before making
-    /// game API calls, without caring whether the session is new or resumed.
+    /// On launch, the stored token may be hours or days old — well past the
+    /// 60-minute access-token lifetime — even though it's still sitting in
+    /// PlayerPrefs. 
     /// </summary>
+    /// 
+    /// Recovery order when the stored token isn't usable:
+    ///   1. If we have a refresh token, try to rotate it. This is the common
+    ///      case for a returning player whose access token aged out but whose
+    ///      refresh token (7-day lifetime) is still valid. Works for both
+    ///      guests and claimed users.
+    ///   2. If refresh fails (or isn't possible) and the session is a guest,
+    ///      create a new guest account. Guest identity is disposable; the
+    ///      player should never be blocked by it.
+    ///   3. If refresh fails for a CLAIMED user, do NOT silently demote them
+    ///      to a fresh guest — that would orphan their identity and their
+    ///      score history. Return a failed result with ErrorKind.Unauthorized
+    ///      so the caller can route to a login screen.
+    ///
+    /// Network calls happen only when needed: a player launching within the
+    /// access-token window still gets the immediate-success path.
     public IEnumerator EnsureAuthenticated(Action<ApiResult<bool>> callback)
     {
-      if (IsAuthenticated)
+      if (HasUsableAccessToken())
       {
         callback(ApiResult<bool>.Ok(true));
         yield break;
       }
 
+      // Try refresh first — preserves identity for both guests and claimed users.
+      if (!string.IsNullOrEmpty(RefreshToken))
+      {
+        bool refreshed = false;
+        yield return RefreshTokens(r => refreshed = r.Success);
+        if (refreshed)
+        {
+          callback(ApiResult<bool>.Ok(true));
+          yield break;
+        }
+        // Refresh failed. Don't ClearTokens() yet — we need IsGuestEligible()
+        // below to read the stored access token's is_guest claim to decide
+        // which recovery path applies. We clear later, only on the guest path.
+      }
+
+      // Refresh failed or wasn't possible. Branch on guest vs. claimed.
+      if (!IsGuestEligible())
+      {
+        // Claimed user with an unrecoverable session. The UI needs to prompt
+        // a real login — we deliberately do NOT clear tokens here, so a UI
+        // that wants to inspect the stale identity (e.g. to pre-fill a
+        // username field) still can. Logout/login flow is responsible for
+        // calling ClearTokens when the user actually re-authenticates.
+        callback(ApiResult<bool>.Fail(
+          "Session expired. Please log in again.",
+          ApiErrorKind.Unauthorized));
+        yield break;
+      }
+
+      // Guest path: wipe stale tokens and create a fresh guest account so the
+      // player can keep submitting scores without interruption.
+      ClearTokens();
       yield return GuestLogin(result =>
       {
         callback(result.Success
           ? ApiResult<bool>.Ok(true)
-          : ApiResult<bool>.Fail(result.Error));
+          : ApiResult<bool>.Fail(result.Error, result.ErrorKind, result.StatusCode));
       });
+    }
+
+    /// <summary>
+    /// Skew buffer for the JWT exp check. If a token expires within the next
+    /// 30 seconds, treat it as already expired to prevent timing edge cases.
+    /// </summary>
+    private const int TokenExpirySkewSeconds = 30;
+
+    /// <summary>
+    /// True if the stored access token exists and its exp claim is far enough
+    /// in the future to be safely usable for the next request. Returns false
+    /// for missing, expired, or unreadable tokens — all three are handled
+    /// identically by the recovery path in EnsureAuthenticated.
+    ///
+    /// This does NOT verify the JWT signature. A tampered token that
+    /// somehow passes this exp check will fail at the server, and the 401
+    /// recovery code in Post() handles that case.
+    /// </summary>
+    private bool HasUsableAccessToken()
+    {
+      string token = AccessToken;
+      if (string.IsNullOrEmpty(token)) return false;
+
+      JObject payload = TryDecodeJwtPayload(token);
+      if (payload == null) return false;
+
+      JToken expClaim = payload["exp"];
+      if (expClaim == null || expClaim.Type == JTokenType.Null) return false;
+
+      // JWT exp is seconds since Unix epoch (RFC 7519). Newtonsoft parses it
+      // as a long; anything else (string, object) means the token is malformed.
+      long expSeconds;
+      try
+      {
+        expSeconds = expClaim.Value<long>();
+      }
+      catch
+      {
+        return false;
+      }
+
+      long nowSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+      return expSeconds > nowSeconds + TokenExpirySkewSeconds;
     }
 
     /// <summary>
     /// Logs in with username and password. Stores the returned tokens.
     /// </summary>
     public IEnumerator Login(
-      string                            username,
-      string                            password,
-      Action<ApiResult<TokenResponse>>  callback)
+      string username,
+      string password,
+      Action<ApiResult<TokenResponse>> callback)
     {
-      string url  = $"{_config.BaseUrl}/api/auth/login";
-      var    body = new LoginRequest { Username = username, Password = password };
+      string url = $"{_config.BaseUrl}/api/auth/login";
+      var body = new LoginRequest { Username = username, Password = password };
       yield return Post<LoginRequest, TokenResponse>(url, body, result =>
       {
         if (result.Success) StoreTokens(result.Data);
@@ -130,13 +219,13 @@ namespace UBear.Leaderboard
     /// Registers a new claimed account. Stores the returned tokens.
     /// </summary>
     public IEnumerator Register(
-      string                           username,
-      string                           email,
-      string                           password,
+      string username,
+      string email,
+      string password,
       Action<ApiResult<TokenResponse>> callback)
     {
-      string url  = $"{_config.BaseUrl}/api/auth/register";
-      var    body = new RegisterRequest { Username = username, Email = email, Password = password };
+      string url = $"{_config.BaseUrl}/api/auth/register";
+      var body = new RegisterRequest { Username = username, Email = email, Password = password };
       yield return Post<RegisterRequest, TokenResponse>(url, body, result =>
       {
         if (result.Success) StoreTokens(result.Data);
@@ -158,8 +247,8 @@ namespace UBear.Leaderboard
         yield break;
       }
 
-      string url  = $"{_config.BaseUrl}/api/auth/refresh";
-      var    body = new RefreshRequest { RefreshToken = stored };
+      string url = $"{_config.BaseUrl}/api/auth/refresh";
+      var body = new RefreshRequest { RefreshToken = stored };
       yield return Post<RefreshRequest, TokenResponse>(url, body, result =>
       {
         if (result.Success) StoreTokens(result.Data);
@@ -180,12 +269,12 @@ namespace UBear.Leaderboard
         yield break;
       }
 
-      string url  = $"{_config.BaseUrl}/api/auth/logout";
+      string url = $"{_config.BaseUrl}/api/auth/logout";
       // Note: user token provided here in body instead of header like elsewhere.
-      var    body = new RefreshRequest { RefreshToken = stored };
+      var body = new RefreshRequest { RefreshToken = stored };
 
       // Logout returns 204 No Content — we parse success from the status code
-      // rather than deserializing a response body. Regardless of the network 
+      // rather than deserializing a response body. Regardless of the network
       // outcome, we clear local tokens to ensure local logout; degradation
       // means a refresh token remains valid until expiry - satisfactory here.
       yield return Post<RefreshRequest, bool>(url, body, result =>
@@ -200,11 +289,11 @@ namespace UBear.Leaderboard
     /// Requires a stored access token.
     /// </summary>
     public IEnumerator Rename(
-      string                   newUsername,
-      Action<ApiResult<bool>>  callback)
+      string newUsername,
+      Action<ApiResult<bool>> callback)
     {
-      string url  = $"{_config.BaseUrl}/api/auth/rename";
-      var    body = new RenameRequest { Username = newUsername };
+      string url = $"{_config.BaseUrl}/api/auth/rename";
+      var body = new RenameRequest { Username = newUsername };
       yield return Post<RenameRequest, bool>(url, body, callback, requiresAuth: true);
     }
 
@@ -214,36 +303,36 @@ namespace UBear.Leaderboard
     /// Requires a stored access token from a guest session.
     /// </summary>
     public IEnumerator Claim(
-      string                           email,
-      string                           password,
+      string email,
+      string password,
       Action<ApiResult<TokenResponse>> callback)
     {
-      string url  = $"{_config.BaseUrl}/api/auth/claim";
-      var    body = new ClaimRequest { Email = email, Password = password };
+      string url = $"{_config.BaseUrl}/api/auth/claim";
+      var body = new ClaimRequest { Email = email, Password = password };
       yield return Post<ClaimRequest, TokenResponse>(url, body, result =>
       {
-          if (result.Success) StoreTokens(result.Data);
-          callback(result);
+        if (result.Success) StoreTokens(result.Data);
+        callback(result);
       }, requiresAuth: true);
     }
 
     #endregion
     #region  Leaderboard Endpoints
 
-/// <summary>
-/// Fetches the leaderboard for a given game mode and period.
-/// Period is one of: "alltime", "daily", "weekly".
-/// limit is clamped client-side to 1..100; offset is clamped to >= 0.
-/// The server enforces these ranges and returns HTTP 422 for out-of-range values.
-/// </summary>
+    /// <summary>
+    /// Fetches the leaderboard for a given game mode and period.
+    /// Period is one of: "alltime", "daily", "weekly".
+    /// limit is clamped client-side to 1..100; offset is clamped to >= 0.
+    /// The server enforces these ranges and returns HTTP 422 for out-of-range values.
+    /// </summary>
     public IEnumerator GetScores(
-        string                                   gameMode,
-        Action<ApiResult<LeaderboardResponse>>   callback,
-        TimePeriod                               period = TimePeriod.Alltime,
-        int                                      limit  = 100,
-        int                                      offset = 0)
+        string gameMode,
+        Action<ApiResult<LeaderboardResponse>> callback,
+        TimePeriod period = TimePeriod.Alltime,
+        int limit = 100,
+        int offset = 0)
     {
-      limit  = Mathf.Clamp(limit, 1, 100);
+      limit = Mathf.Clamp(limit, 1, 100);
       offset = Mathf.Max(offset, 0);
       string url = $"{_config.BaseUrl}/api/leaderboard/scores"
                 + $"?game_mode={UnityWebRequest.EscapeURL(gameMode)}"
@@ -260,18 +349,18 @@ namespace UBear.Leaderboard
     /// The server enforces these ranges and returns HTTP 422 for out-of-range values.
     /// </summary>
     public IEnumerator GetLatestScores(
-      Action<ApiResult<LeaderboardResponse>>   callback,
-      int                                      limit     = 100,
-      int                                      offset    = 0,
-      string[]                                 gameModes = null)
+      Action<ApiResult<LeaderboardResponse>> callback,
+      int limit = 100,
+      int offset = 0,
+      string[] gameModes = null)
     {
-      limit  = Mathf.Clamp(limit, 1, 100);
+      limit = Mathf.Clamp(limit, 1, 100);
       offset = Mathf.Max(offset, 0);
       var sb = new StringBuilder($"{_config.BaseUrl}/api/leaderboard/latest?limit={limit}&offset={offset}");
       if (gameModes != null)
       {
-          foreach (string mode in gameModes)
-              sb.Append($"&game_modes={UnityWebRequest.EscapeURL(mode)}");
+        foreach (string mode in gameModes)
+          sb.Append($"&game_modes={UnityWebRequest.EscapeURL(mode)}");
       }
       yield return Get(sb.ToString(), callback);
     }
@@ -292,174 +381,323 @@ namespace UBear.Leaderboard
     /// their existing record is preserved and returned.
     /// Requires a stored access token.
     /// </summary>
-    public IEnumerator SubmitScore(
-      long                             score,
-      string                           gameMode,
-      Action<ApiResult<ScoreResponse>> callback)
+  public IEnumerator SubmitScore(
+    long                             score,
+    string                           gameMode,
+    Action<ApiResult<ScoreResponse>> callback)
+  {
+    string url  = $"{_config.BaseUrl}/api/leaderboard/scores";
+    var    body = new ScoreSubmission { Score = score, GameMode = gameMode };
+    // allowGuestFallback: true — for a guest, an unrecoverable 401 must not block
+    // a score submission. Falls through to a new guest account before retrying.
+    // For a claimed user, the fallback is skipped at runtime (we check is_guest
+    // in the JWT payload before regenerating), so claimed users still get a clean
+    // 401 they can handle with a re-login prompt.
+    yield return Post<ScoreSubmission, ScoreResponse>(
+      url, body, callback,
+      requiresAuth: true,
+      allowGuestFallback: true);
+  }
+
+  #endregion
+  #region  Private HTTP Helpers
+
+  /// <summary>
+  /// Generic GET — deserializes the response body into T.
+  /// </summary>
+  private IEnumerator Get<T>(string url, Action<ApiResult<T>> callback)
+  {
+    using UnityWebRequest request = UnityWebRequest.Get(url);
+    request.timeout = TimeoutSeconds;
+
+    yield return request.SendWebRequest();
+
+    callback(ParseResponse<T>(request));
+  }
+
+  /// <summary>
+  /// Generic POST — serializes body to JSON, deserializes response into T.
+  /// Pass requiresAuth: true to attach the stored Bearer token.
+  /// A null body sends an empty JSON object, which is correct for
+  /// endpoints like /guest that expect POST with no body.
+  /// </summary>
+  private IEnumerator Post<TBody, TResponse>(
+    string                       url,
+    TBody                        body,
+    Action<ApiResult<TResponse>> callback,
+    bool                         requiresAuth        = false,
+    bool                         allowGuestFallback  = false)
+  {
+    // First attempt
+    ApiResult<TResponse> firstResult = null;
+    yield return SendPostOnce<TBody, TResponse>(url, body, requiresAuth, r => firstResult = r);
+
+    if (firstResult.Success || firstResult.ErrorKind != ApiErrorKind.Unauthorized || !requiresAuth)
     {
-      string url  = $"{_config.BaseUrl}/api/leaderboard/scores";
-      var    body = new ScoreSubmission { Score = score, GameMode = gameMode };
-      yield return Post<ScoreSubmission, ScoreResponse>(url, body, callback, requiresAuth: true);
+      callback(firstResult);
+      yield break;
     }
 
-    #endregion
-    #region  Private HTTP Helpers
+    // 401 on an authenticated request. Attempt recovery, then retry once.
+    bool recovered = false;
+    yield return RecoverFromUnauthorized(allowGuestFallback, r => recovered = r);
 
-    /// <summary>
-    /// Generic GET — deserializes the response body into T.
-    /// </summary>
-    private IEnumerator Get<T>(string url, Action<ApiResult<T>> callback)
+    if (!recovered)
     {
-      using UnityWebRequest request = UnityWebRequest.Get(url);
-      request.timeout = TimeoutSeconds;
-
-      yield return request.SendWebRequest();
-
-      callback(ParseResponse<T>(request));
+      // Recovery failed. Surface the original 401 so the caller can prompt re-auth.
+      callback(firstResult);
+      yield break;
     }
 
-    /// <summary>
-    /// Generic POST — serializes body to JSON, deserializes response into T.
-    /// Pass requiresAuth: true to attach the stored Bearer token.
-    /// A null body sends an empty JSON object, which is correct for
-    /// endpoints like /guest that expect POST with no body.
-    /// </summary>
-    private IEnumerator Post<TBody, TResponse>(
-      string                       url,
-      TBody                        body,
-      Action<ApiResult<TResponse>> callback,
-      bool                         requiresAuth = false)
+    // One retry with the freshly obtained token. If this also 401s, we hand the
+    // result back as-is — no infinite loop, no exponential backoff. A second 401
+    // means something is genuinely wrong (clock skew, server key rotation, etc.).
+    ApiResult<TResponse> retryResult = null;
+    yield return SendPostOnce<TBody, TResponse>(url, body, requiresAuth, r => retryResult = r);
+    callback(retryResult);
+  }
+
+  /// <summary>
+  /// Single POST attempt — the existing Post body factored out so the retry
+  /// path can call it twice without duplicating the request construction.
+  /// </summary>
+  private IEnumerator SendPostOnce<TBody, TResponse>(
+    string                       url,
+    TBody                        body,
+    bool                         requiresAuth,
+    Action<ApiResult<TResponse>> callback)
+  {
+    string json    = body != null ? JsonConvert.SerializeObject(body) : "{}";
+    byte[] encoded = Encoding.UTF8.GetBytes(json);
+
+    using UnityWebRequest request = new UnityWebRequest(url, "POST");
+    request.uploadHandler   = new UploadHandlerRaw(encoded);
+    request.downloadHandler = new DownloadHandlerBuffer();
+    request.SetRequestHeader("Content-Type", "application/json");
+    request.timeout = TimeoutSeconds;
+
+    if (requiresAuth)
     {
-      string json    = body != null ? JsonConvert.SerializeObject(body) : "{}";
-      byte[] encoded = Encoding.UTF8.GetBytes(json);
-
-      using UnityWebRequest request = new UnityWebRequest(url, "POST");
-      request.uploadHandler   = new UploadHandlerRaw(encoded);
-      request.downloadHandler = new DownloadHandlerBuffer();
-      request.SetRequestHeader("Content-Type", "application/json");
-      request.timeout = TimeoutSeconds;
-
-      if (requiresAuth)
+      string token = AccessToken;
+      if (string.IsNullOrEmpty(token))
       {
-        string token = AccessToken;
-        if (string.IsNullOrEmpty(token))
-        {
-          callback(ApiResult<TResponse>.Fail("No access token stored. Call GuestLogin() or Login() first."));
-          yield break;
-        }
-        request.SetRequestHeader("Authorization", $"Bearer {token}");
+        callback(ApiResult<TResponse>.Fail(
+            "No access token stored. Call GuestLogin() or Login() first.",
+            ApiErrorKind.Unauthorized));
+        yield break;
       }
-
-      yield return request.SendWebRequest();
-
-      callback(ParseResponse<TResponse>(request));
+      request.SetRequestHeader("Authorization", $"Bearer {token}");
     }
 
-    /// <summary>
-    /// Interprets a completed UnityWebRequest as ApiResult<T>.
-    /// Network errors, HTTP errors (4xx/5xx), and JSON parse failures
-    /// all surface as ApiResult.Fail with a message rather than exceptions.
-    /// 204 No Content responses are treated as success with default(T).
-    /// </summary>
-    private static ApiResult<T> ParseResponse<T>(UnityWebRequest request)
+    yield return request.SendWebRequest();
+    callback(ParseResponse<TResponse>(request));
+  }
+
+  /// <summary>
+  /// Interprets a completed UnityWebRequest as ApiResult<T>.
+  /// Network errors, HTTP errors (4xx/5xx), and JSON parse failures
+  /// all surface as ApiResult.Fail with a message rather than exceptions.
+  /// 204 No Content responses are treated as success with default(T).
+  /// </summary>
+  private static ApiResult<T> ParseResponse<T>(UnityWebRequest request)
+  {
+    // Network-level failure: no HTTP response at all (DNS, timeout, connection refused)
+    if (request.result == UnityWebRequest.Result.ConnectionError)
     {
-      // Network-level failure: no HTTP response at all (DNS, timeout, connection refused)
-      if (request.result == UnityWebRequest.Result.ConnectionError)
-      {
-          return ApiResult<T>.Fail(
-              $"Network error: {request.error}",
-              ApiErrorKind.Network,
-              statusCode: null);
-      }
-
-      long status = request.responseCode;
-
-      // HTTP error (4xx/5xx) — UnityWebRequest reports these as ProtocolError
-      if (request.result == UnityWebRequest.Result.ProtocolError)
-      {
-          string detail = TryExtractDetail(request.downloadHandler?.text);
-          string message = string.IsNullOrEmpty(detail)
-              ? $"Request failed ({status}): {request.error}"
-              : $"Request failed ({status}): {detail}";
-
-          return ApiResult<T>.Fail(message, ClassifyStatus(status), (int)status);
-      }
-
-      // Other non-success result (DataProcessingError, etc.)
-      if (request.result != UnityWebRequest.Result.Success)
-      {
-        return ApiResult<T>.Fail(
-          $"Request failed: {request.error}",
+      return ApiResult<T>.Fail(
+          $"Network error: {request.error}",
           ApiErrorKind.Network,
           statusCode: null);
-      }
-
-      // 204 No Content — success with no body to deserialize
-      if (status == 204)
-        return ApiResult<T>.Ok(default);
-
-      string responseBody = request.downloadHandler.text;
-
-      try
-      {
-        T data = JsonConvert.DeserializeObject<T>(responseBody);
-        return ApiResult<T>.Ok(data);
-      }
-      catch (JsonException ex)
-      {
-        Debug.LogError($"[LeaderboardService] JSON parse error: {ex.Message}\nBody: {responseBody}");
-        return ApiResult<T>.Fail(
-          "Unexpected response format from server.",
-          ApiErrorKind.ParseError,
-          (int)status);
-      }
     }
 
-    private static ApiErrorKind ClassifyStatus(long status) => status switch
-    {
-      400 => ApiErrorKind.BadRequest,
-      401 => ApiErrorKind.Unauthorized,
-      403 => ApiErrorKind.Forbidden,
-      404 => ApiErrorKind.NotFound,
-      409 => ApiErrorKind.Conflict,
-      422 => ApiErrorKind.Validation,
-      429 => ApiErrorKind.RateLimited,
-      >= 500 and < 600 => ApiErrorKind.Server,
-      _ => ApiErrorKind.Server,
-    };
+    long status = request.responseCode;
 
-    /// <summary>
-    /// FastAPI wraps HTTPException errors as {"detail": "string"} and
-    /// Pydantic validation errors as {"detail": [{"loc": [...], "msg": "...", ...}]}.
-    /// Handle both shapes — string for HTTPException, joined msgs for validation.
-    /// </summary>
-    private static string TryExtractDetail(string json)
+    // HTTP error (4xx/5xx) — UnityWebRequest reports these as ProtocolError
+    if (request.result == UnityWebRequest.Result.ProtocolError)
     {
-      if (string.IsNullOrEmpty(json)) return null;
-      try
+      string detail = TryExtractDetail(request.downloadHandler?.text);
+      string message = string.IsNullOrEmpty(detail)
+          ? $"Request failed ({status}): {request.error}"
+          : $"Request failed ({status}): {detail}";
+
+      return ApiResult<T>.Fail(message, ClassifyStatus(status), (int)status);
+    }
+
+    // Other non-success result (DataProcessingError, etc.)
+    if (request.result != UnityWebRequest.Result.Success)
+    {
+      return ApiResult<T>.Fail(
+        $"Request failed: {request.error}",
+        ApiErrorKind.Network,
+        statusCode: null);
+    }
+
+    // 204 No Content — success with no body to deserialize
+    if (status == 204)
+      return ApiResult<T>.Ok(default);
+
+    string responseBody = request.downloadHandler.text;
+
+    try
+    {
+      T data = JsonConvert.DeserializeObject<T>(responseBody);
+      return ApiResult<T>.Ok(data);
+    }
+    catch (JsonException ex)
+    {
+      Debug.LogError($"[LeaderboardService] JSON parse error: {ex.Message}\nBody: {responseBody}");
+      return ApiResult<T>.Fail(
+        "Unexpected response format from server.",
+        ApiErrorKind.ParseError,
+        (int)status);
+    }
+  }
+
+  private static ApiErrorKind ClassifyStatus(long status) => status switch
+  {
+    400 => ApiErrorKind.BadRequest,
+    401 => ApiErrorKind.Unauthorized,
+    403 => ApiErrorKind.Forbidden,
+    404 => ApiErrorKind.NotFound,
+    409 => ApiErrorKind.Conflict,
+    422 => ApiErrorKind.Validation,
+    429 => ApiErrorKind.RateLimited,
+    >= 500 and < 600 => ApiErrorKind.Server,
+    _ => ApiErrorKind.Server,
+  };
+
+  /// <summary>
+  /// FastAPI wraps HTTPException errors as {"detail": "string"} and
+  /// Pydantic validation errors as {"detail": [{"loc": [...], "msg": "...", ...}]}.
+  /// Handle both shapes — string for HTTPException, joined msgs for validation.
+  /// </summary>
+  private static string TryExtractDetail(string json)
+  {
+    if (string.IsNullOrEmpty(json)) return null;
+    try
+    {
+      JToken root = JToken.Parse(json);
+      JToken detail = root["detail"];
+      if (detail == null) return null;
+
+      if (detail.Type == JTokenType.String)
+        return detail.Value<string>();
+
+      if (detail.Type == JTokenType.Array)
       {
-        JToken root = JToken.Parse(json);
-        JToken detail = root["detail"];
-        if (detail == null) return null;
-
-        if (detail.Type == JTokenType.String)
-          return detail.Value<string>();
-
-        if (detail.Type == JTokenType.Array)
+        var msgs = new List<string>();
+        foreach (JToken err in detail)
         {
-          var msgs = new List<string>();
-          foreach (JToken err in detail)
-          {
-            string msg = err["msg"]?.Value<string>();
-            if (!string.IsNullOrEmpty(msg)) msgs.Add(msg);
-          }
-          return msgs.Count > 0 ? string.Join("; ", msgs) : null;
+          string msg = err["msg"]?.Value<string>();
+          if (!string.IsNullOrEmpty(msg)) msgs.Add(msg);
         }
-
-        return detail.ToString();
+        return msgs.Count > 0 ? string.Join("; ", msgs) : null;
       }
-      catch { return null; }
+
+      return detail.ToString();
     }
+    catch { return null; }
+  }
+
+  /// <summary>
+  /// Attempts to obtain a fresh access token after a 401, in this order:
+  ///   1. Refresh using the stored refresh token (handles ordinary expiry).
+  ///   2. If refresh fails and the current session is a guest (or has no
+  ///      readable token at all), create a new guest account.
+  ///   3. Otherwise (claimed user with an unrecoverable token), give up.
+  ///
+  /// Calls callback(true) if a usable access token is now stored, false otherwise.
+  /// </summary>
+  private IEnumerator RecoverFromUnauthorized(
+    bool                    allowGuestFallback,
+    Action<bool>            callback)
+  {
+    // Step 1: try refresh, but only if we have a refresh token to try.
+    if (!string.IsNullOrEmpty(RefreshToken))
+    {
+      bool refreshed = false;
+      yield return RefreshTokens(r => refreshed = r.Success);
+      if (refreshed)
+      {
+        callback(true);
+        yield break;
+      }
+    }
+
+    // Step 2: refresh failed (or wasn't possible). Fall back to a new guest if
+    // the caller allowed it AND the existing session is guest-eligible.
+    // A claimed user with an expired token should NOT be silently demoted to a
+    // new guest — that would orphan their score history and identity.
+    if (!allowGuestFallback || !IsGuestEligible())
+    {
+      callback(false);
+      yield break;
+    }
+
+    // Wipe stale tokens so GuestLogin starts from a clean slate.
+    ClearTokens();
+
+    bool guestOk = false;
+    yield return GuestLogin(r => guestOk = r.Success);
+    callback(guestOk);
+  }
+
+  /// <summary>
+  /// True if the current stored session is a guest, or if the token is unreadable
+  /// enough that we can't tell — in which case "treat as guest" is the safe choice
+  /// (worst case is we create a guest account the player didn't need; best case is
+  /// we unstick someone whose PlayerPrefs got into a bad state).
+  ///
+  /// A claimed user with a valid-shape token returns false here, which means the
+  /// fallback won't fire and the 401 will surface to the UI for re-login.
+  /// </summary>
+  private bool IsGuestEligible()
+  {
+    string token = AccessToken;
+    if (string.IsNullOrEmpty(token)) return true;
+
+    JObject payload = TryDecodeJwtPayload(token);
+    if (payload == null) return true;
+
+    JToken claim = payload["is_guest"];
+    if (claim == null || claim.Type == JTokenType.Null) return true;
+
+    return claim.Value<bool>();
+  }
+
+  /// <summary>
+  /// Decodes the payload segment of a JWT without verifying the signature.
+  /// This is intentionally trust-free: the result is used only to choose a
+  /// recovery strategy on the client. The server re-verifies every token on
+  /// every request, so a forged payload here can only influence which fallback
+  /// the client attempts — not what the server accepts.
+  /// Returns null if the token is malformed.
+  /// </summary>
+  private static JObject TryDecodeJwtPayload(string token)
+  {
+    try
+    {
+      string[] parts = token.Split('.');
+      if (parts.Length < 2) return null;
+
+      string payload = parts[1];
+      // Base64url → Base64: swap chars and re-pad.
+      payload = payload.Replace('-', '+').Replace('_', '/');
+      switch (payload.Length % 4)
+      {
+        case 2: payload += "=="; break;
+        case 3: payload += "=";  break;
+      }
+
+      byte[] bytes = Convert.FromBase64String(payload);
+      string json  = Encoding.UTF8.GetString(bytes);
+      return JObject.Parse(json);
+    }
+    catch
+    {
+      return null;
+    }
+  }
   #endregion
   }
 }
