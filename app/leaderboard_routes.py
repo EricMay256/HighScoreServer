@@ -109,6 +109,7 @@ def latest_scores(
                     FROM scores s
                     JOIN users u ON u.id = s.user_id
                     WHERE s.game_mode = ANY(%s)
+                    AND s.period = 'alltime'
                     ORDER BY s.submitted_at DESC, s.id DESC
                     LIMIT %s OFFSET %s
                     """,
@@ -121,6 +122,7 @@ def latest_scores(
                         COUNT(*) OVER() AS total_count
                     FROM scores s
                     JOIN users u ON u.id = s.user_id
+                    WHERE s.period = 'alltime'
                     ORDER BY s.submitted_at DESC, s.id DESC
                     LIMIT %s OFFSET %s
                     """,
