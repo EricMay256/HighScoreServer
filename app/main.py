@@ -79,7 +79,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(CORS_ALLOWED_ORIGINS),
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "OPTIONS", "POST"],
         #With credentials off, allow_headers=["*"] is safe — there's no auth surface 
         # to leak through an over-permissive header policy.
         allow_headers=["*"],
