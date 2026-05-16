@@ -74,17 +74,22 @@ def create_app() -> FastAPI:
     app.add_middleware(SlowAPIMiddleware)
 
     # Register CORS after SlowAPI (Starlette uses reverse registration order)
-    # so it runs first on requests and handles preflight OPTIONS before rate 
-    # limiting. This keeps preflight out of the same budget as real API calls.
+    # so it runs first on requests and handles preflight OPTIONS before any
+    # global rate-limit accounting. Per-route limits are applied at the
+    # decorator, but ordering CORS outermost also ensures CORS headers are
+    # present on 429 and 5xx responses from inner middleware.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(CORS_ALLOWED_ORIGINS),
+        # OPTIONS not required but included for clarity
         allow_methods=["GET", "OPTIONS", "POST"],
-        #With credentials off, allow_headers=["*"] is safe — there's no auth surface 
-        # to leak through an over-permissive header policy.
+        # With allow_credentials=False the browser won't attach cookies on cross-origin
+        # requests, so a permissive allow_headers can't be combined with ambient auth
+        # to exfiltrate user data. Bearer tokens are sent only by clients that already
+        # possess them, so allowing "*" here is safe for this API.
         allow_headers=["*"],
-        # allow_credentials=False is intentional: the public read endpoints don't
-        # use cookies or auth headers from the browser. 
+        # allow_credentials=False is intentional: identity is provided, if needed,
+        # through bearer tokens. 
         allow_credentials=False,
         max_age=600,  # cache preflight for 10 min — keeps repeat fetches snappy
     )
