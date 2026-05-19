@@ -18,8 +18,7 @@ export default function App() {
   // Leaderboard (which displays scores for it) and SubmitPanel (which
   // submits to it) stay in sync — submitting a score always targets the
   // mode the user is currently viewing, which is what players expect.
-  // Change "classic" if your seed data uses a different default mode name.
-  const [gameMode, setGameMode] = useState<string>("classic");
+  const [gameMode, setGameMode] = useState<string>("blitz");
 
   const handleLogout = async () => {
     // logout() clears tokens in its finally block even if the network call
@@ -32,22 +31,24 @@ export default function App() {
       <header className="site-header">
         <div className="header-inner">
           <span className="site-title">HIGHSCORESERVER</span>
-          <nav>
-            {auth.isAuthenticated && (
-              <>
-                <span style={{ marginRight: "1rem", color: "var(--text-muted)" }}>
-                  {auth.username}{auth.isGuest ? " (guest)" : ""}
-                </span>
-                <button
-                  type="button"
-                  className="logout-btn"
-                  onClick={handleLogout}
-                >
-                  Logout
-                </button>
-              </>
-            )}
-          </nav>
+          <nav className="site-nav">
+          <a href="/" className="site-nav-link">
+            Home
+          </a>
+          <a href="/leaderboard?game_mode=blitz" className="site-nav-link">
+            Classic
+          </a>
+          {auth.isAuthenticated && (
+            <>
+              <span className="site-user-chip">
+                {auth.username}{auth.isGuest ? " (guest)" : ""}
+              </span>
+              <button type="button" className="logout-btn" onClick={handleLogout}>
+                Logout
+              </button>
+            </>
+          )}
+        </nav>
         </div>
       </header>
 
@@ -77,7 +78,9 @@ export default function App() {
         </div>
       </main>
 
-      <footer className="site-footer">HIGHSCORESERVER · PORTFOLIO BUILD</footer>
+      <footer className="site-footer">
+        HIGHSCORESERVER · PORTFOLIO BUILD · <a href="/docs">API Reference</a>
+      </footer>
     </>
   );
 }
