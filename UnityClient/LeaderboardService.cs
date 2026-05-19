@@ -33,41 +33,15 @@ namespace UBear.Leaderboard
 
     private const int TimeoutSeconds = 10;
 
-    // PlayerPrefs keys — internal, not intended for callers to reference directly
-    private const string PrefAccessToken = "leaderboard_access_token";
-    private const string PrefRefreshToken = "leaderboard_refresh_token";
+    // Public re-exports — keeps the existing call sites (UI scripts, etc.)
+    // working without forcing them to know about TokenStore.
+    public static string Username        => TokenStore.Username;
+    public static bool   IsAuthenticated => TokenStore.IsAuthenticated;
+    public static void   ClearTokens()   => TokenStore.Clear();
+    public static void UpdateCachedUsername(string username) =>
+      TokenStore.UpdateCachedUsername(username);
 
-    #region  Token Access
-
-    /// <summary>
-    /// Returns true if an access token is currently stored.
-    /// Does not validate whether the token is still unexpired.
-    /// </summary>
-    public bool IsAuthenticated => !string.IsNullOrEmpty(PlayerPrefs.GetString(PrefAccessToken, null));
-
-    /// <summary>
-    /// Clears all stored tokens. Does not call /logout — use Logout() for that.
-    /// </summary>
-    public void ClearTokens()
-    {
-      PlayerPrefs.DeleteKey(PrefAccessToken);
-      PlayerPrefs.DeleteKey(PrefRefreshToken);
-      PlayerPrefs.Save();
-    }
-
-    private string AccessToken => PlayerPrefs.GetString(PrefAccessToken, null);
-    private string RefreshToken => PlayerPrefs.GetString(PrefRefreshToken, null);
-
-    private void StoreTokens(TokenResponse tokens)
-    {
-      PlayerPrefs.SetString(PrefAccessToken, tokens.AccessToken);
-      PlayerPrefs.SetString(PrefRefreshToken, tokens.RefreshToken);
-      PlayerPrefs.Save();
-    }
-
-    #endregion
     #region  Auth Endpoints
-
     /// <summary>
     /// Creates a guest account and stores the returned tokens.
     /// Call this on first launch if no access token is stored.
@@ -78,7 +52,7 @@ namespace UBear.Leaderboard
       string url = $"{_config.BaseUrl}/api/auth/guest";
       yield return Post<object, TokenResponse>(url, null, result =>
       {
-        if (result.Success) StoreTokens(result.Data);
+        if (result.Success) TokenStore.Store(result.Data);
         callback(result);
       });
     }
@@ -109,14 +83,14 @@ namespace UBear.Leaderboard
     /// access-token window still gets the immediate-success path.
     public IEnumerator EnsureAuthenticated(Action<ApiResult<bool>> callback)
     {
-      if (HasUsableAccessToken())
+      if (TokenStore.HasUsableAccessToken())
       {
         callback(ApiResult<bool>.Ok(true));
         yield break;
       }
 
       // Try refresh first — preserves identity for both guests and claimed users.
-      if (!string.IsNullOrEmpty(RefreshToken))
+      if (!string.IsNullOrEmpty(TokenStore.RefreshToken))
       {
         bool refreshed = false;
         yield return RefreshTokens(r => refreshed = r.Success);
@@ -131,7 +105,7 @@ namespace UBear.Leaderboard
       }
 
       // Refresh failed or wasn't possible. Branch on guest vs. claimed.
-      if (!IsGuestEligible())
+      if (!TokenStore.IsGuestEligible())
       {
         // Claimed user with an unrecoverable session. The UI needs to prompt
         // a real login — we deliberately do NOT clear tokens here, so a UI
@@ -162,43 +136,6 @@ namespace UBear.Leaderboard
     private const int TokenExpirySkewSeconds = 30;
 
     /// <summary>
-    /// True if the stored access token exists and its exp claim is far enough
-    /// in the future to be safely usable for the next request. Returns false
-    /// for missing, expired, or unreadable tokens — all three are handled
-    /// identically by the recovery path in EnsureAuthenticated.
-    ///
-    /// This does NOT verify the JWT signature. A tampered token that
-    /// somehow passes this exp check will fail at the server, and the 401
-    /// recovery code in Post() handles that case.
-    /// </summary>
-    private bool HasUsableAccessToken()
-    {
-      string token = AccessToken;
-      if (string.IsNullOrEmpty(token)) return false;
-
-      JObject payload = TryDecodeJwtPayload(token);
-      if (payload == null) return false;
-
-      JToken expClaim = payload["exp"];
-      if (expClaim == null || expClaim.Type == JTokenType.Null) return false;
-
-      // JWT exp is seconds since Unix epoch (RFC 7519). Newtonsoft parses it
-      // as a long; anything else (string, object) means the token is malformed.
-      long expSeconds;
-      try
-      {
-        expSeconds = expClaim.Value<long>();
-      }
-      catch
-      {
-        return false;
-      }
-
-      long nowSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-      return expSeconds > nowSeconds + TokenExpirySkewSeconds;
-    }
-
-    /// <summary>
     /// Logs in with username and password. Stores the returned tokens.
     /// </summary>
     public IEnumerator Login(
@@ -210,7 +147,7 @@ namespace UBear.Leaderboard
       var body = new LoginRequest { Username = username, Password = password };
       yield return Post<LoginRequest, TokenResponse>(url, body, result =>
       {
-        if (result.Success) StoreTokens(result.Data);
+        if (result.Success) TokenStore.Store(result.Data);
         callback(result);
       });
     }
@@ -228,7 +165,7 @@ namespace UBear.Leaderboard
       var body = new RegisterRequest { Username = username, Email = email, Password = password };
       yield return Post<RegisterRequest, TokenResponse>(url, body, result =>
       {
-        if (result.Success) StoreTokens(result.Data);
+        if (result.Success) TokenStore.Store(result.Data);
         callback(result);
       });
     }
@@ -240,7 +177,7 @@ namespace UBear.Leaderboard
     /// </summary>
     public IEnumerator RefreshTokens(Action<ApiResult<TokenResponse>> callback)
     {
-      string stored = RefreshToken;
+      string stored = TokenStore.RefreshToken;
       if (string.IsNullOrEmpty(stored))
       {
         callback(ApiResult<TokenResponse>.Fail("No refresh token stored. Call GuestLogin() or Login() first."));
@@ -251,7 +188,7 @@ namespace UBear.Leaderboard
       var body = new RefreshRequest { RefreshToken = stored };
       yield return Post<RefreshRequest, TokenResponse>(url, body, result =>
       {
-        if (result.Success) StoreTokens(result.Data);
+        if (result.Success) TokenStore.Store(result.Data);
         callback(result);
       });
     }
@@ -261,10 +198,10 @@ namespace UBear.Leaderboard
     /// </summary>
     public IEnumerator Logout(Action<ApiResult<bool>> callback)
     {
-      string stored = RefreshToken;
+      string stored = TokenStore.RefreshToken;
       if (string.IsNullOrEmpty(stored))
       {
-        ClearTokens();
+        TokenStore.Clear();
         callback(ApiResult<bool>.Ok(true));
         yield break;
       }
@@ -279,7 +216,7 @@ namespace UBear.Leaderboard
       // means a refresh token remains valid until expiry - satisfactory here.
       yield return Post<RefreshRequest, bool>(url, body, result =>
       {
-        ClearTokens();
+        TokenStore.Clear();
         callback(ApiResult<bool>.Ok(true));
       }, requiresAuth: false);
     }
@@ -311,7 +248,7 @@ namespace UBear.Leaderboard
       var body = new ClaimRequest { Email = email, Password = password };
       yield return Post<ClaimRequest, TokenResponse>(url, body, result =>
       {
-        if (result.Success) StoreTokens(result.Data);
+        if (result.Success) TokenStore.Store(result.Data);
         callback(result);
       }, requiresAuth: true);
     }
@@ -405,7 +342,7 @@ namespace UBear.Leaderboard
   /// <summary>
   /// Generic GET — deserializes the response body into T.
   /// </summary>
-  private IEnumerator Get<T>(string url, Action<ApiResult<T>> callback)
+  private static IEnumerator Get<T>(string url, Action<ApiResult<T>> callback)
   {
     using UnityWebRequest request = UnityWebRequest.Get(url);
     request.timeout = TimeoutSeconds;
@@ -427,6 +364,7 @@ namespace UBear.Leaderboard
     Action<ApiResult<TResponse>> callback,
     bool                         requiresAuth        = false,
     bool                         allowGuestFallback  = false)
+    where TBody : class
   {
     // First attempt
     ApiResult<TResponse> firstResult = null;
@@ -461,11 +399,12 @@ namespace UBear.Leaderboard
   /// Single POST attempt — the existing Post body factored out so the retry
   /// path can call it twice without duplicating the request construction.
   /// </summary>
-  private IEnumerator SendPostOnce<TBody, TResponse>(
+  private static IEnumerator SendPostOnce<TBody, TResponse>(
     string                       url,
     TBody                        body,
     bool                         requiresAuth,
     Action<ApiResult<TResponse>> callback)
+    where TBody : class
   {
     string json    = body != null ? JsonConvert.SerializeObject(body) : "{}";
     byte[] encoded = Encoding.UTF8.GetBytes(json);
@@ -478,7 +417,7 @@ namespace UBear.Leaderboard
 
     if (requiresAuth)
     {
-      string token = AccessToken;
+      string token = TokenStore.AccessToken;
       if (string.IsNullOrEmpty(token))
       {
         callback(ApiResult<TResponse>.Fail(
@@ -613,7 +552,7 @@ namespace UBear.Leaderboard
     Action<bool>            callback)
   {
     // Step 1: try refresh, but only if we have a refresh token to try.
-    if (!string.IsNullOrEmpty(RefreshToken))
+    if (!string.IsNullOrEmpty(TokenStore.RefreshToken))
     {
       bool refreshed = false;
       yield return RefreshTokens(r => refreshed = r.Success);
@@ -628,7 +567,7 @@ namespace UBear.Leaderboard
     // the caller allowed it AND the existing session is guest-eligible.
     // A claimed user with an expired token should NOT be silently demoted to a
     // new guest — that would orphan their score history and identity.
-    if (!allowGuestFallback || !IsGuestEligible())
+    if (!allowGuestFallback || !TokenStore.IsGuestEligible())
     {
       callback(false);
       yield break;
@@ -640,63 +579,6 @@ namespace UBear.Leaderboard
     bool guestOk = false;
     yield return GuestLogin(r => guestOk = r.Success);
     callback(guestOk);
-  }
-
-  /// <summary>
-  /// True if the current stored session is a guest, or if the token is unreadable
-  /// enough that we can't tell — in which case "treat as guest" is the safe choice
-  /// (worst case is we create a guest account the player didn't need; best case is
-  /// we unstick someone whose PlayerPrefs got into a bad state).
-  ///
-  /// A claimed user with a valid-shape token returns false here, which means the
-  /// fallback won't fire and the 401 will surface to the UI for re-login.
-  /// </summary>
-  private bool IsGuestEligible()
-  {
-    string token = AccessToken;
-    if (string.IsNullOrEmpty(token)) return true;
-
-    JObject payload = TryDecodeJwtPayload(token);
-    if (payload == null) return true;
-
-    JToken claim = payload["is_guest"];
-    if (claim == null || claim.Type == JTokenType.Null) return true;
-
-    return claim.Value<bool>();
-  }
-
-  /// <summary>
-  /// Decodes the payload segment of a JWT without verifying the signature.
-  /// This is intentionally trust-free: the result is used only to choose a
-  /// recovery strategy on the client. The server re-verifies every token on
-  /// every request, so a forged payload here can only influence which fallback
-  /// the client attempts — not what the server accepts.
-  /// Returns null if the token is malformed.
-  /// </summary>
-  private static JObject TryDecodeJwtPayload(string token)
-  {
-    try
-    {
-      string[] parts = token.Split('.');
-      if (parts.Length < 2) return null;
-
-      string payload = parts[1];
-      // Base64url → Base64: swap chars and re-pad.
-      payload = payload.Replace('-', '+').Replace('_', '/');
-      switch (payload.Length % 4)
-      {
-        case 2: payload += "=="; break;
-        case 3: payload += "=";  break;
-      }
-
-      byte[] bytes = Convert.FromBase64String(payload);
-      string json  = Encoding.UTF8.GetString(bytes);
-      return JObject.Parse(json);
-    }
-    catch
-    {
-      return null;
-    }
   }
   #endregion
   }
