@@ -567,7 +567,7 @@ HighScoreServer/
 ├── public/
 │   ├── index.html            # Redirect to home
 │   └── style.css             # Leaderboard styles
-├── leaderboard-frontend/     # React 18 + Vite + TypeScript SPA (dev branch, not yet integrated)
+├── leaderboard-frontend/     # React 18 + Vite + TypeScript SPA
 ├── tests/
 │   ├── conftest.py           # Fixtures: test client, DB cleanup, cache disable
 │   ├── test_periods.py       # Unit tests for period bucketing
