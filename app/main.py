@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from app.db import init_db, close_db
 from app.cache import init_cache, close_cache
 from app.env import load_environment, validate_environment
-from app.leaderboard_routes import router as leaderboard_router
+from app.leaderboard_routes import router as leaderboard_router, CrossRouteError
 from app.view_routes import router as view_router
 from app.auth_routes import router as auth_router
 from app.limiter import limiter
@@ -42,6 +42,17 @@ async def _custom_rate_limit_handler(request: Request, exc: RateLimitExceeded) -
         headers=dict(exc.headers) if exc.headers else {},
     )
 
+
+async def _cross_route_handler(request: Request, exc: CrossRouteError) -> JSONResponse:
+    # 409 with `detail` as a human-readable string plus machine-routable `code`
+    # and `submit_to` as top-level siblings (not nested inside `detail`) — the
+    # shape the hss-unity client parses cleanly. A bare HTTPException can only
+    # emit `{"detail": ...}`, hence this dedicated handler.
+    return JSONResponse(
+        status_code=409,
+        content={"detail": exc.detail, "code": exc.code, "submit_to": exc.submit_to},
+    )
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_environment()
@@ -71,6 +82,7 @@ def create_app() -> FastAPI:
 
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
+    app.add_exception_handler(CrossRouteError, _cross_route_handler)
     app.add_middleware(SlowAPIMiddleware)
 
     # Register CORS after SlowAPI (Starlette uses reverse registration order)
