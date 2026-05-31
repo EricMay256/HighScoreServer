@@ -23,14 +23,26 @@ def list_game_modes(request: Request, response: Response) -> list[GameModeConfig
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT name, sort_order, label, requires_claimed_account FROM game_modes ORDER BY name")
+            cur.execute(
+                """
+                SELECT name, sort_order, label, requires_claimed_account,
+                       required_tier, scoring_strategy, game_key
+                FROM game_modes ORDER BY name
+                """
+            )
             rows = cur.fetchall()
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     finally:
         release_conn(conn)
 
-    return [GameModeConfig(name=r[0], sort_order=r[1], label=r[2], requires_claimed_account=r[3]) for r in rows]
+    return [
+        GameModeConfig(
+            name=r[0], sort_order=r[1], label=r[2], requires_claimed_account=r[3],
+            required_tier=r[4], scoring_strategy=r[5], game_key=r[6],
+        )
+        for r in rows
+    ]
 
 
 @router.post(
@@ -45,15 +57,23 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO game_modes (name, sort_order, label, requires_claimed_account)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO game_modes
+                    (name, sort_order, label, requires_claimed_account,
+                     required_tier, scoring_strategy, game_key)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                     sort_order = EXCLUDED.sort_order,
                     label      = EXCLUDED.label,
-                    requires_claimed_account = EXCLUDED.requires_claimed_account
-                RETURNING name, sort_order, label, requires_claimed_account
+                    requires_claimed_account = EXCLUDED.requires_claimed_account,
+                    required_tier    = EXCLUDED.required_tier,
+                    scoring_strategy = EXCLUDED.scoring_strategy,
+                    game_key         = EXCLUDED.game_key
+                RETURNING name, sort_order, label, requires_claimed_account,
+                          required_tier, scoring_strategy, game_key
                 """,
-                (config.name, config.sort_order, config.label, config.requires_claimed_account),
+                (config.name, config.sort_order, config.label,
+                 config.requires_claimed_account, config.required_tier,
+                 config.scoring_strategy, config.game_key),
             )
             row = cur.fetchone()
             conn.commit()
@@ -63,7 +83,10 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
     finally:
         release_conn(conn)
 
-    return GameModeConfig(name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3])
+    return GameModeConfig(
+        name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3],
+        required_tier=row[4], scoring_strategy=row[5], game_key=row[6],
+    )
 
 @router.get("/latest", response_model=LeaderboardResponse, responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
@@ -294,7 +317,10 @@ def submit_score(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT sort_order, requires_claimed_account FROM game_modes WHERE name = %s",
+                """
+                SELECT sort_order, requires_claimed_account, scoring_strategy
+                FROM game_modes WHERE name = %s
+                """,
                 (submission.game_mode,),
             )
             mode_row = cur.fetchone()
@@ -305,7 +331,7 @@ def submit_score(
                     detail=f"Unknown game mode: {submission.game_mode}",
                 )
 
-            sort_order, requires_claimed_account = mode_row
+            sort_order, requires_claimed_account, scoring_strategy = mode_row
 
             if requires_claimed_account and is_guest:
                 # Raises without rolling back transaction - OK since no modifications made.
@@ -314,27 +340,28 @@ def submit_score(
                     detail="This game mode requires a claimed account",
                 )
 
+            # Cumulative modes dedup increments by idempotency key, so the key
+            # is mandatory there. The requirement is data-dependent (it hinges
+            # on the looked-up mode), hence validated here, not in the model.
+            if scoring_strategy == "cumulative" and submission.idempotency_key is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="idempotency_key is required for cumulative game modes",
+                )
+
             order = "ASC" if sort_order == "ASC" else "DESC"
 
-            for period in PERIODS:
-                period_start = get_period_start(period, at=now)
-
-                # order is DB-sourced, CHECK-constrained to 'ASC'|'DESC'
-                cur.execute(
-                    f"""
-                    INSERT INTO scores
-                        (score, game_mode, period, period_start, submitted_at, user_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id, game_mode, period, period_start)
-                    DO UPDATE SET
-                        score        = EXCLUDED.score,
-                        submitted_at = NOW()
-                    WHERE { _is_improvement_predicate(order) }
-                    RETURNING id, score, game_mode, period, submitted_at
-                    """,
-                    (submission.score, submission.game_mode,
-                    period, period_start, now, user_id),
-                )
+            _apply_score_write(
+                cur,
+                user_id=user_id,
+                game_mode=submission.game_mode,
+                score=submission.score,
+                order=order,
+                scoring_strategy=scoring_strategy,
+                now=now,
+                run_id=None,
+                idempotency_key=submission.idempotency_key,
+            )
 
             conn.commit()
     except HTTPException:
@@ -457,6 +484,86 @@ def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime"
         rank=row[6],
         percentile=round((1 - (row[6] - 1) / total) * 100, 2) if total > 1 else 100.0,
     )
+
+def _apply_score_write(
+    cur,
+    *,
+    user_id: int,
+    game_mode: str,
+    score: int,
+    order: str,
+    scoring_strategy: str,
+    now: datetime,
+    run_id: int | None = None,
+    idempotency_key: str | None = None,
+) -> None:
+    """Per-period score write inside the caller's open transaction (no commit).
+
+    Single source of truth for write semantics, shared by /scores and (in a
+    later phase) /runs. The caller is responsible for the surrounding
+    transaction, mode validation, cache invalidation, and building the response.
+
+    - ``best``       — improvement-gated upsert; ``score`` replaces the stored
+      best when it beats it (per ``order``), else the row is left untouched.
+    - ``cumulative`` — additive upsert; ``score`` is the *increment* for this
+      submission, applied to every period bucket with no improvement gate.
+      Gated by an idempotency key so a client retry can't double-count: the
+      dedup marker is inserted first, and on conflict (duplicate) the whole
+      write is a no-op and existing totals stand.
+
+    ``order`` and ``scoring_strategy`` are DB-sourced / CHECK-constrained, never
+    raw user input — preserving the SQL-interpolation invariant.
+    """
+    if scoring_strategy == "cumulative":
+        # Idempotency gate: one marker per (user, mode, key) gates the increment
+        # across all period buckets atomically within this transaction.
+        cur.execute(
+            """
+            INSERT INTO submission_idempotency (user_id, game_mode, key)
+            VALUES (%s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (user_id, game_mode, idempotency_key),
+        )
+        if cur.rowcount == 0:
+            return  # duplicate submission — no-op, leave totals unchanged
+
+        for period in PERIODS:
+            period_start = get_period_start(period, at=now)
+            cur.execute(
+                """
+                INSERT INTO scores
+                    (score, game_mode, period, period_start, submitted_at, user_id, run_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, game_mode, period, period_start)
+                DO UPDATE SET
+                    score        = scores.score + EXCLUDED.score,
+                    submitted_at = NOW(),
+                    run_id       = EXCLUDED.run_id
+                """,
+                (score, game_mode, period, period_start, now, user_id, run_id),
+            )
+        return
+
+    # best (default): improvement-gated upsert.
+    for period in PERIODS:
+        period_start = get_period_start(period, at=now)
+        # order is DB-sourced, CHECK-constrained to 'ASC'|'DESC'.
+        cur.execute(
+            f"""
+            INSERT INTO scores
+                (score, game_mode, period, period_start, submitted_at, user_id, run_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, game_mode, period, period_start)
+            DO UPDATE SET
+                score        = EXCLUDED.score,
+                submitted_at = NOW(),
+                run_id       = EXCLUDED.run_id
+            WHERE { _is_improvement_predicate(order) }
+            """,
+            (score, game_mode, period, period_start, now, user_id, run_id),
+        )
+
 
 def _is_improvement_predicate(order: str) -> str:
     # Returns a SQL fragment: true when EXCLUDED.score is better than stored score

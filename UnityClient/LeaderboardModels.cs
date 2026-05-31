@@ -25,6 +25,12 @@ namespace UBear.Leaderboard
     [JsonProperty("submitted_at")] public string SubmittedAt { get; set; }
     [JsonProperty("rank")] public int? Rank { get; set; }
     [JsonProperty("percentile")] public double? Percentile { get; set; }
+    // Server-computed validation status. Raw and cumulative submissions return
+    // Validated=false, ValidationTier=0; a score from a validated run sets them.
+    // Non-breaking additions: older servers omit these keys and Newtonsoft
+    // leaves the defaults (false / 0).
+    [JsonProperty("validated")] public bool Validated { get; set; }
+    [JsonProperty("validation_tier")] public int ValidationTier { get; set; }
   }
 
   /// <summary>
@@ -47,6 +53,13 @@ namespace UBear.Leaderboard
     [JsonProperty("sort_order")] public SortOrder SortOrdering { get; set; }
     [JsonProperty("label")] public string Label { get; set; }
     [JsonProperty("requires_claimed_account")] public bool RequiresClaimedAccount { get; set; }
+    // Read-only mode metadata surfaced for clients that want it; the client does
+    // not send these. RequiredTier 0 = raw via /scores, >=1 = run via /runs.
+    // ScoringStrategy is "best" or "cumulative" (kept as string, not an enum, so
+    // a future strategy doesn't break deserialization). GameKey is nullable.
+    [JsonProperty("required_tier")] public int RequiredTier { get; set; }
+    [JsonProperty("scoring_strategy")] public string ScoringStrategy { get; set; }
+    [JsonProperty("game_key")] public string GameKey { get; set; }
   }
 
   /// <summary>
@@ -58,6 +71,11 @@ namespace UBear.Leaderboard
   {
     [JsonProperty("score")] public long Score { get; set; }
     [JsonProperty("game_mode")] public string GameMode { get; set; }
+    // Required only for cumulative modes (the server returns 422 without it
+    // there); leave null for raw/best modes. NullValueHandling.Ignore omits the
+    // key entirely when unset, keeping raw submissions byte-identical to before.
+    [JsonProperty("idempotency_key", NullValueHandling = NullValueHandling.Ignore)]
+    public string IdempotencyKey { get; set; }
   }
 
   #endregion
