@@ -36,3 +36,17 @@ GRANT USAGE, SELECT ON SEQUENCE users_id_seq TO leaderboard_app;
 GRANT SELECT, INSERT, DELETE ON TABLE refresh_tokens TO leaderboard_app;
 GRANT USAGE, SELECT ON SEQUENCE refresh_tokens_id_seq TO leaderboard_app;
 
+-- Validated runs (see specs.md Phase 1). The app inserts a pending run and
+-- later UPDATEs it with the server-computed canonical_score/tier/status, so it
+-- needs SELECT, INSERT, UPDATE — but not DELETE (runs are leaderboard history,
+-- never pruned). SERIAL id needs the sequence.
+GRANT SELECT, INSERT, UPDATE ON TABLE runs TO leaderboard_app;
+GRANT USAGE, SELECT ON SEQUENCE runs_id_seq TO leaderboard_app;
+
+-- Cumulative-submission dedup markers. Written once via
+-- INSERT ... ON CONFLICT DO NOTHING and read back; never UPDATEd. DELETE is
+-- granted only because scripts/prune_idempotency_keys.py reaps old rows
+-- (matching how prune_guests is privileged on users). No sequence: the table's
+-- primary key is the composite (user_id, game_mode, key), not a serial.
+GRANT SELECT, INSERT, DELETE ON TABLE submission_idempotency TO leaderboard_app;
+
