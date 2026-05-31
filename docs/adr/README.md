@@ -35,3 +35,4 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 | 0006 | [JWT plus opaque refresh tokens](0006-jwt-plus-opaque-refresh-tokens.md)               | Accepted |
 | 0007 | [In-process cache over Redis at single-dyno scale](0007-in-process-cache-over-redis.md) | Accepted |
 | 0008 | [Naming Audit: requires_claimed_account and client-side enums](0008-naming-audit-requires-claimed-account-and-client-enums.md) | Accepted |
+| 0009 | [Alembic adoption with raw-SQL migrations](0009-alembic-adoption-with-raw-sql-migrations.md) | Accepted |

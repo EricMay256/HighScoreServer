@@ -1,6 +1,20 @@
 -- schema.sql
--- Run locally:   psql -U postgres -d leaderboard -f db/schema.sql
--- Run on Heroku: cat db/schema.sql | heroku pg:psql --app high-score-server
+--
+-- ⚠️  BOOTSTRAP SNAPSHOT — NOT THE SOURCE OF TRUTH.
+--
+-- Schema changes go through Alembic revisions in `migrations/versions/`.
+-- This file is a labeled, human-readable snapshot of the schema as it
+-- looked at Alembic adoption (it predates migration `0002`, so it does
+-- NOT include `runs`, `submission_idempotency`, or the additive
+-- `game_modes`/`scores` columns from later revisions). It is kept only for
+-- quick orientation and is intentionally not updated for every migration.
+--
+-- To build or update a database, use Alembic — never apply this file to a
+-- database you intend to keep migrating:
+--   * Fresh/empty DB (CI, new clone):  alembic upgrade head
+--   * DB that predates Alembic:        alembic stamp 0001_baseline   (once)
+--                                       alembic upgrade head
+-- See the README "Database & migrations" section for details.
 
 -- If you are REALLY SURE you want to destroy all data, uncomment the 
 -- lines below and run this file. If you care about your data I hope 

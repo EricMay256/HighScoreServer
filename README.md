@@ -98,11 +98,13 @@ cp .env.example .env          # macOS/Linux
 At minimum you'll need `DATABASE_URL`, `JWT_SECRET`, and `API_KEY`.
 Redis and Sentry configuration is optional.
 
-3. Create the local database and apply the schema:
+3. Create the local database and build the schema with Alembic:
 ```bash
 psql -U postgres -c "CREATE DATABASE leaderboard;"
-psql -U postgres -d leaderboard -f db/schema.sql
+alembic upgrade head   # reads DATABASE_URL from .env; builds the whole schema
 ```
+Schema is managed by Alembic, not by applying `db/schema.sql` directly — see
+[Database & migrations](#database--migrations) below.
 
 4. Optionally load seed data:
 ```bash
@@ -115,6 +117,51 @@ uvicorn app.main:app --reload
 ```
 
 6. Visit `http://localhost:8000/docs` to explore the API.
+
+
+## Database & migrations
+
+The schema is managed by **Alembic** with raw-SQL migrations (`op.execute` with
+hand-written DDL — no SQLAlchemy models, no autogenerate). `db/schema.sql` is a
+labeled bootstrap snapshot for orientation, **not** the source of truth; every
+schema change lands as a revision in `migrations/versions/`.
+
+Alembic reads `DATABASE_URL` from the environment. `migrations/env.py` loads
+`.env` with `override=False`, so a `DATABASE_URL` already exported in the shell
+(e.g. for a one-off throwaway DB) wins over `.env` — handy for pointing a
+migration at a scratch database without editing config.
+
+**Fresh / empty database** (CI, a new clone, a throwaway test DB) — build the
+whole schema from scratch:
+```bash
+alembic upgrade head
+```
+
+**Database that predates Alembic** (objects already exist — e.g. a dev DB
+created before adoption) — stamp the baseline **once**, then apply later
+revisions. Do not `upgrade` from nothing here; the baseline objects already
+exist and `CREATE TABLE` would fail:
+```bash
+alembic stamp 0001_baseline   # one time only — marks the baseline as applied
+alembic upgrade head          # applies 0002 and onward
+```
+
+**Useful commands:**
+```bash
+alembic current               # show the revision a database is at
+alembic history               # list revisions
+alembic downgrade -1          # revert the most recent revision (local/test only)
+```
+
+> **Heroku auto-migrates on deploy.** The `Procfile` carries
+> `release: alembic upgrade head`, so every release applies pending migrations
+> before the new code goes live; a failed migration aborts the release. There is
+> no manual migration step on deploy.
+
+> **Grants are not in migrations.** Production runs as a single owner role, so a
+> `GRANT ... TO leaderboard_app` inside a revision would error there and abort
+> the release. Role grants live in `db/role.sql`, applied per-environment (see
+> [Deployment](#deployment)).
 
 
 ## Architecture Diagrams
@@ -554,8 +601,11 @@ HighScoreServer/
 │   ├── cache.py              # Pluggable cache interface (in-process TTL default, Redis optional)
 │   ├── dependencies.py       # Auth dependencies (require_user, require_api_key)
 │   └── env.py                # Environment variable loading and validation
+├── migrations/               # Alembic raw-SQL migrations (source of truth for schema)
+│   ├── env.py                # Reads DATABASE_URL; no ORM models, no autogenerate
+│   └── versions/             # Revisions (0001_baseline, 0002_…)
 ├── db/
-│   ├── schema.sql            # Database schema
+│   ├── schema.sql            # Bootstrap snapshot for orientation — NOT the source of truth
 │   ├── seed.sql              # Local development seed data
 │   └── role.sql              # Minimal-permission DB role for production
 ├── scripts/
@@ -579,6 +629,7 @@ HighScoreServer/
 │   ├── LeaderboardModels.cs
 │   ├── LeaderboardConfig.cs
 │   └── LeaderboardExample.cs
+├── alembic.ini
 ├── requirements.txt
 ├── Procfile
 ├── runtime.txt
@@ -599,13 +650,14 @@ heroku config:set JWT_SECRET=your-jwt-secret
 # heroku addons:create heroku-redis:mini
 # heroku config:set CACHE_BACKEND=redis
 
-# MacOS/Linux
-heroku pg:psql < db/schema.sql
-# Powershell
-Get-Content db\schema.sql | heroku pg:psql --app your-app-name
-
 git push heroku main
 ```
+
+The schema is **not** applied by hand on deploy. The `Procfile`'s
+`release: alembic upgrade head` phase runs on every release: on the first deploy
+it builds the whole schema against the fresh Postgres add-on, and on later
+deploys it applies any pending revisions. A failed migration aborts the release.
+See [Database & migrations](#database--migrations).
 
 ### Guest account cleanup
 ```bash

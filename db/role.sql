@@ -1,7 +1,17 @@
 -- role.sql
+--
+-- Source of truth for the least-privilege leaderboard_app role and its grants.
+-- Grants are deliberately NOT in Alembic migrations: migrations manage the
+-- production schema, but this role exists only where the platform can host a
+-- restricted credential (dev / CI / local). The production database is a
+-- single-dyno Heroku Essential-tier plan, which exposes only the default owner
+-- credential and cannot create additional roles, so it runs as the owner (which
+-- holds all privileges implicitly) and never executes this file. See ADR 0009.
+--
 -- Run locally:   psql -U postgres -d leaderboard -f db/role.sql
--- Heroku is currently using the default user for operations
--- TODO: add minimally permissioned user for deployed app
+-- This is dev-enforced (a missing grant fails loudly when the app connects as
+-- leaderboard_app) and prod-documentary (kept accurate for any future
+-- environment that can host the restricted role).
 
 -- You are encouraged to replace the password and role below.
 -- It is granted permission to read and write individual scores, but nothing too destructive.
