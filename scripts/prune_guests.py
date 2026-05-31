@@ -27,12 +27,15 @@ logger = logging.getLogger(__name__)
 
 def prune_guests(prune_days: int = 30) -> int:
     """
-    Deletes guest accounts with no scores older than prune_days.
+    Deletes guest accounts with no scores AND no runs older than prune_days.
     Returns the number of accounts deleted.
 
-    The NOT EXISTS subquery ensures we never touch a guest with scores.
-    The ON DELETE RESTRICT on scores is a secondary safety
-    net — the DB will refuse the delete if a score row exists regardless.
+    The NOT EXISTS subqueries ensure we never touch a guest with leaderboard
+    history. Both scores.user_id and runs.user_id are ON DELETE RESTRICT, so the
+    DB refuses the delete if either exists regardless — the subqueries make the
+    intent explicit and skip the doomed delete attempt rather than erroring on it.
+    A guest can own a run with no score (e.g. a rejected run), so the runs check
+    is not redundant with the scores check.
     """
     url = os.environ["DATABASE_URL"]
     if url.startswith("postgres://"):
@@ -50,6 +53,11 @@ def prune_guests(prune_days: int = 30) -> int:
                       SELECT 1
                       FROM scores s
                       WHERE s.user_id = users.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM runs r
+                      WHERE r.user_id = users.id
                   )
                 """,
                 (prune_days,),

@@ -609,7 +609,9 @@ HighScoreServer/
 │   ├── seed.sql              # Local development seed data
 │   └── role.sql              # Minimal-permission DB role for production
 ├── scripts/
-│   └── prune_guests.py       # Removes scoreless guest accounts older than GUEST_PRUNE_DAYS
+│   ├── prune_guests.py            # Removes score/run-less guest accounts older than GUEST_PRUNE_DAYS
+│   ├── prune_refresh_tokens.py    # Removes expired refresh tokens
+│   └── prune_idempotency_keys.py  # Removes cumulative dedup markers older than IDEMPOTENCY_PRUNE_DAYS
 ├── templates/
 │   ├── base.html             # Base template
 │   ├── home.html             # Home page
@@ -623,7 +625,11 @@ HighScoreServer/
 │   ├── test_periods.py       # Unit tests for period bucketing
 │   ├── test_api_scores.py    # Integration tests for leaderboard routes
 │   ├── test_api_auth.py      # Integration tests for auth routes
-│   └── test_prune_guests.py  # Integration tests for guest pruning
+│   ├── test_api_cumulative.py        # Cumulative scoring + idempotency dedup
+│   ├── test_api_runs.py              # Validated runs, cross-routing 409s, read enrichment
+│   ├── test_validation.py            # Tiered validator units
+│   ├── test_prune_guests.py          # Integration tests for guest pruning
+│   └── test_prune_idempotency_keys.py # Integration tests for idempotency-key pruning
 ├── UnityClient/
 │   ├── LeaderboardService.cs
 │   ├── LeaderboardModels.cs
@@ -659,15 +665,29 @@ it builds the whole schema against the fresh Postgres add-on, and on later
 deploys it applies any pending revisions. A failed migration aborts the release.
 See [Database & migrations](#database--migrations).
 
-### Guest account cleanup
+### Scheduled cleanup
+
+Three prune scripts keep unbounded tables in check; run them on the Heroku
+Scheduler (daily is fine for all three):
+
 ```bash
 heroku addons:create scheduler:standard
 heroku addons:open scheduler
-# Add job: python -m scripts.prune_guests — daily frequency
+# Add jobs (daily):
+#   python -m scripts.prune_guests
+#   python -m scripts.prune_refresh_tokens
+#   python -m scripts.prune_idempotency_keys
 ```
 
-Scoreless guest accounts older than `GUEST_PRUNE_DAYS` (default: 30) are pruned.
-Guest accounts with scores are intentionally preserved.
+- **`prune_guests`** — deletes guest accounts older than `GUEST_PRUNE_DAYS`
+  (default: 30) that own no scores **and no runs**. Guests with leaderboard
+  history (scores or runs) are intentionally preserved.
+- **`prune_refresh_tokens`** — deletes expired refresh tokens (no grace period;
+  an expired token is definitionally dead).
+- **`prune_idempotency_keys`** — deletes cumulative-submission dedup markers
+  older than `IDEMPOTENCY_PRUNE_DAYS` (default: 30). The tradeoff: a replayed
+  submission older than the window is no longer deduped and could double-count —
+  acceptable for a game leaderboard, and 30 days exceeds any legitimate retry.
 
 
 ## Known Limitations

@@ -151,11 +151,13 @@ def latest_scores(
             # Unlike /scores this isn't filtered to a mode/period — the "latest"
             # feed is global. Worth knowing if the table grows large; the count
             # is cheap on indexed columns but not free.
+            # validation_tier read straight off scores (denormalized) — no join.
             if game_modes:
                 cur.execute(
                     """
                     SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
-                        COUNT(*) OVER() AS total_count
+                        COUNT(*) OVER() AS total_count,
+                        s.validation_tier
                     FROM scores s
                     JOIN users u ON u.id = s.user_id
                     WHERE s.game_mode = ANY(%s)
@@ -169,7 +171,8 @@ def latest_scores(
                 cur.execute(
                     """
                     SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
-                        COUNT(*) OVER() AS total_count
+                        COUNT(*) OVER() AS total_count,
+                        s.validation_tier
                     FROM scores s
                     JOIN users u ON u.id = s.user_id
                     WHERE s.period = 'alltime'
@@ -202,6 +205,8 @@ def latest_scores(
             game_mode=row[3],
             period=row[4],
             submitted_at=row[5].astimezone(timezone.utc).isoformat(),
+            validated=row[7] > 0,
+            validation_tier=row[7],
         )
         for row in rows
     ]
@@ -266,11 +271,15 @@ def get_scores(
             # *before* LIMIT/OFFSET — so rank and total_count remain correct
             # regardless of the page being requested. This is the key reason
             # offset pagination composes cleanly with this query shape.
+            # validation_tier is denormalized onto scores at write time, so the
+            # hot read needs no join to runs — index-friendly. validated is
+            # derived from tier > 0.
             cur.execute(
                 f"""
                 SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
                 RANK() OVER (ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC) AS rank,
-                COUNT(*) OVER() AS total_count
+                COUNT(*) OVER() AS total_count,
+                s.validation_tier
                 FROM scores s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.game_mode = %s
@@ -307,6 +316,8 @@ def get_scores(
             submitted_at=row[5].astimezone(timezone.utc).isoformat(),
             rank=row[6],
             percentile=round((1 - (row[6] - 1) / row[7]) * 100, 2) if row[7] > 1 else 100.0,
+            validated=row[8] > 0,
+            validation_tier=row[8],
         )
         for row in rows
     ]
@@ -451,7 +462,6 @@ def submit_run(
 
     conn = get_conn()
     now  = datetime.now(timezone.utc)
-    validation_tier = 0
 
     try:
         with conn.cursor() as cur:
@@ -489,7 +499,7 @@ def submit_run(
             # without re-validating.
             cur.execute(
                 """
-                SELECT status, validation_tier FROM runs
+                SELECT status FROM runs
                 WHERE user_id = %s AND game_mode = %s AND client_run_id = %s
                 """,
                 (user_id, submission.game_mode, submission.client_run_id),
@@ -497,7 +507,7 @@ def submit_run(
             prior = cur.fetchone()
             if prior is not None:
                 conn.rollback()  # nothing to write; release the read transaction
-                return _existing_run_response(prior, user_id, submission.game_mode)
+                return _existing_run_response(prior[0], user_id, submission.game_mode)
 
             # Persist the run as pending. The action log is stored as a single
             # gzipped JSON blob (not a normalized table) per ADR/Heroku economics.
@@ -528,7 +538,6 @@ def submit_run(
                 claimed_score=submission.claimed_score,
             )
             result = default_validator.validate(record, required_tier)
-            validation_tier = result.tier_achieved
 
             if result.status == "rejected":
                 cur.execute(
@@ -560,6 +569,7 @@ def submit_run(
                 scoring_strategy=scoring_strategy,
                 now=now,
                 run_id=run_id,
+                validation_tier=result.tier_achieved,
                 # runs.client_run_id already gave anti-replay above, so don't
                 # double-write submission_idempotency for cumulative run modes.
                 record_idempotency=False,
@@ -570,9 +580,9 @@ def submit_run(
     except pg_errors.UniqueViolation:
         # Lost a race on client_run_id — treat as a duplicate submission.
         conn.rollback()
-        existing = _lookup_run(user_id, submission.game_mode, submission.client_run_id)
-        if existing is not None:
-            return _existing_run_response(existing, user_id, submission.game_mode)
+        existing_status = _lookup_run(user_id, submission.game_mode, submission.client_run_id)
+        if existing_status is not None:
+            return _existing_run_response(existing_status, user_id, submission.game_mode)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Duplicate run submission",
@@ -591,8 +601,8 @@ def submit_run(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Score not found after run validation, this should not happen",
         )
-    result_resp.validated = True
-    result_resp.validation_tier = validation_tier
+    # validated/validation_tier come from the denormalized scores column via
+    # _fetch — no manual override needed.
     return result_resp
 
 
@@ -611,31 +621,31 @@ def _invalidate_score_caches(game_mode: str) -> None:
         logger.warning("Cache invalidation failed, continuing: %s", e)
 
 
-def _lookup_run(user_id: int, game_mode: str, client_run_id: str):
-    """Fetch (status, validation_tier) for an existing run, or None."""
+def _lookup_run(user_id: int, game_mode: str, client_run_id: str) -> str | None:
+    """Fetch the status of an existing run, or None."""
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT status, validation_tier FROM runs
+                SELECT status FROM runs
                 WHERE user_id = %s AND game_mode = %s AND client_run_id = %s
                 """,
                 (user_id, game_mode, client_run_id),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            return row[0] if row is not None else None
     finally:
         release_conn(conn)
 
 
-def _existing_run_response(prior, user_id: int, game_mode: str) -> ScoreResponse:
+def _existing_run_response(prior_status: str, user_id: int, game_mode: str) -> ScoreResponse:
     """Return the prior result for a replayed run without re-validating.
 
-    ``prior`` is the (status, validation_tier) row. A validated run returns the
-    player's current standing flagged validated; a rejected/pending run can't
-    produce a score, so it surfaces the prior outcome as an error.
+    A validated run returns the player's current standing (validated/tier come
+    from the denormalized scores column via _fetch); a rejected/pending run
+    can't produce a score, so it surfaces the prior outcome as an error.
     """
-    prior_status, prior_tier = prior
     if prior_status == "validated":
         resp = _fetch_score_with_rank(user_id, game_mode, "alltime")
         if resp is None:
@@ -643,8 +653,6 @@ def _existing_run_response(prior, user_id: int, game_mode: str) -> ScoreResponse
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Score not found for prior validated run",
             )
-        resp.validated = True
-        resp.validation_tier = prior_tier if prior_tier is not None else 0
         return resp
     if prior_status == "rejected":
         raise HTTPException(
@@ -709,7 +717,7 @@ def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime"
                 WITH ranked AS (
                     SELECT
                         s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
-                        s.user_id,
+                        s.user_id, s.validation_tier,
                         RANK()  OVER (ORDER BY score {order}, s.submitted_at ASC, s.id ASC) AS rank,
                         COUNT(*) OVER ()                                                AS total_count
                     FROM scores s
@@ -718,7 +726,8 @@ def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime"
                       AND period       = %s
                       AND period_start = %s
                 )
-                SELECT id, username, score, game_mode, period, submitted_at, rank, total_count
+                SELECT id, username, score, game_mode, period, submitted_at, rank, total_count,
+                       validation_tier
                 FROM ranked
                 WHERE user_id = %s
                 LIMIT 1
@@ -739,6 +748,8 @@ def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime"
         submitted_at=row[5].astimezone(timezone.utc).isoformat(),
         rank=row[6],
         percentile=round((1 - (row[6] - 1) / total) * 100, 2) if total > 1 else 100.0,
+        validated=row[8] > 0,
+        validation_tier=row[8],
     )
 
 def _apply_score_write(
@@ -751,6 +762,7 @@ def _apply_score_write(
     scoring_strategy: str,
     now: datetime,
     run_id: int | None = None,
+    validation_tier: int = 0,
     idempotency_key: str | None = None,
     record_idempotency: bool = True,
 ) -> None:
@@ -796,15 +808,17 @@ def _apply_score_write(
             cur.execute(
                 """
                 INSERT INTO scores
-                    (score, game_mode, period, period_start, submitted_at, user_id, run_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (score, game_mode, period, period_start, submitted_at, user_id,
+                     run_id, validation_tier)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (user_id, game_mode, period, period_start)
                 DO UPDATE SET
-                    score        = scores.score + EXCLUDED.score,
-                    submitted_at = NOW(),
-                    run_id       = EXCLUDED.run_id
+                    score           = scores.score + EXCLUDED.score,
+                    submitted_at    = NOW(),
+                    run_id          = EXCLUDED.run_id,
+                    validation_tier = EXCLUDED.validation_tier
                 """,
-                (score, game_mode, period, period_start, now, user_id, run_id),
+                (score, game_mode, period, period_start, now, user_id, run_id, validation_tier),
             )
         return
 
@@ -815,16 +829,18 @@ def _apply_score_write(
         cur.execute(
             f"""
             INSERT INTO scores
-                (score, game_mode, period, period_start, submitted_at, user_id, run_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (score, game_mode, period, period_start, submitted_at, user_id,
+                 run_id, validation_tier)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id, game_mode, period, period_start)
             DO UPDATE SET
-                score        = EXCLUDED.score,
-                submitted_at = NOW(),
-                run_id       = EXCLUDED.run_id
+                score           = EXCLUDED.score,
+                submitted_at    = NOW(),
+                run_id          = EXCLUDED.run_id,
+                validation_tier = EXCLUDED.validation_tier
             WHERE { _is_improvement_predicate(order) }
             """,
-            (score, game_mode, period, period_start, now, user_id, run_id),
+            (score, game_mode, period, period_start, now, user_id, run_id, validation_tier),
         )
 
 

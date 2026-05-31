@@ -204,3 +204,36 @@ def test_duplicate_client_run_id_returns_prior_result(client, auth_headers, run_
             assert cur.fetchone()[0] == 1   # no second run row created
     finally:
         conn.close()
+
+
+# ── Read-path enrichment ─────────────────────────────────────────────────────
+
+def test_get_scores_surfaces_validation_for_validated_run(client, auth_headers, run_mode):
+    """A leaderboard row produced by a validated run reads back validated."""
+    client.post("/api/leaderboard/runs", json=_run_body(claimed_score=555), headers=auth_headers)
+    board = client.get(f"/api/leaderboard/scores?game_mode={run_mode}&period=alltime").json()
+    entry = board["scores"][0]
+    assert entry["validated"] is True
+    assert entry["validation_tier"] == 1
+
+
+def test_latest_surfaces_validation_for_validated_run(client, auth_headers, run_mode):
+    """/latest reflects validation status too (same join, separate query)."""
+    client.post("/api/leaderboard/runs", json=_run_body(claimed_score=321), headers=auth_headers)
+    latest = client.get(f"/api/leaderboard/latest?game_modes={run_mode}").json()
+    entry = next(e for e in latest["scores"] if e["game_mode"] == run_mode)
+    assert entry["validated"] is True
+    assert entry["validation_tier"] == 1
+
+
+def test_get_scores_unvalidated_for_raw_score(client, auth_headers, raw_mode):
+    """A raw (run_id NULL) leaderboard row reads back unvalidated."""
+    client.post(
+        "/api/leaderboard/scores",
+        json={"score": 100, "game_mode": raw_mode},
+        headers=auth_headers,
+    )
+    board = client.get(f"/api/leaderboard/scores?game_mode={raw_mode}&period=alltime").json()
+    entry = board["scores"][0]
+    assert entry["validated"] is False
+    assert entry["validation_tier"] == 0

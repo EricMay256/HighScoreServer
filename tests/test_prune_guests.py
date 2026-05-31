@@ -79,6 +79,25 @@ def ensure_game_mode(name: str = "classic") -> None:
         conn.close()
 
 
+def insert_run(user_id: int, game_mode: str = "classic") -> None:
+    """Inserts a (pending) run row for the given user."""
+    import secrets
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO runs
+                    (user_id, game_mode, scenario_version, seed, client_run_id, actions, status)
+                VALUES (%s, %s, 1, 1, %s, %s, 'pending')
+                """,
+                (user_id, game_mode, f"run-{secrets.token_hex(6)}", psycopg2.Binary(b"x")),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 def test_prune_deletes_old_scoreless_guest(client):
@@ -108,6 +127,23 @@ def test_prune_spares_guest_with_scores(client):
     old = datetime.now(timezone.utc) - timedelta(days=31)
     user_id = insert_guest(old)
     insert_score(user_id)
+
+    prune_guests(prune_days=30)
+
+    assert user_exists(user_id)
+
+
+def test_prune_spares_guest_with_runs(client):
+    """A guest with run history but no scores must not be pruned.
+
+    runs.user_id is ON DELETE RESTRICT, so pruning such a guest would error;
+    the runs NOT EXISTS clause skips it. A run with no score (e.g. rejected)
+    is exactly the case the scores check alone would miss.
+    """
+    ensure_game_mode()
+    old = datetime.now(timezone.utc) - timedelta(days=31)
+    user_id = insert_guest(old)
+    insert_run(user_id)
 
     prune_guests(prune_days=30)
 

@@ -1,34 +1,24 @@
 """
 Prunes old cumulative-submission dedup markers from submission_idempotency.
 
-STATUS: STUB — implementation deferred (see specs.md Phase 1). The table and
-its DELETE grant exist now; the reaper is scoped but intentionally not wired up
-until the cumulative write path (Phase 2) lands, so the retention policy gets a
-human decision before it runs against any real data.
+submission_idempotency grows unbounded — one row per distinct
+(user_id, game_mode, idempotency_key). Unlike refresh tokens it has no natural
+expiry, so it needs a time-based reap to keep the table (and the cheap Postgres
+tier) bounded — the same motivation as prune_refresh_tokens / prune_guests.
 
-Why a reaper is needed: submission_idempotency grows unbounded — one row per
-distinct (user_id, game_mode, idempotency_key). Unlike refresh tokens it has no
-natural expiry, so it needs a time-based reap to preserve the cheap Postgres
-tier (same motivation as prune_refresh_tokens / prune_guests).
+Retention: 30 days by default (override with IDEMPOTENCY_PRUNE_DAYS). The
+tradeoff: a replayed submission older than the window is no longer deduped and
+could double-count an increment. For a game leaderboard that is acceptable, and
+30 days comfortably exceeds any legitimate client-retry horizon.
 
-Retention decision (DEFAULT SUGGESTION — not final): 90 days. The tradeoff: a
-replayed submission older than the window is no longer deduped and could
-double-count an increment. For a game leaderboard that is acceptable; a far
-shorter window risks dropping a legitimate client retry after an outage.
-
-Intended implementation (mirrors prune_refresh_tokens):
-
-    DELETE FROM submission_idempotency
-    WHERE first_seen < NOW() - (%s * INTERVAL '1 day')
-
-Usage (once implemented):
+Usage:
     Local:          python -m scripts.prune_idempotency_keys
     Heroku:         heroku run python -m scripts.prune_idempotency_keys --app your-app-name
-    Scheduler:      python -m scripts.prune_idempotency_keys (Heroku Scheduler dashboard)
+    Scheduler:      python -m scripts.prune_idempotency_keys (set in Heroku Scheduler dashboard)
 
 Environment variables:
     DATABASE_URL            Required. Standard connection string.
-    IDEMPOTENCY_PRUNE_DAYS  Optional. Markers older than this are eligible. Default: 90.
+    IDEMPOTENCY_PRUNE_DAYS  Optional. Markers older than this are eligible. Default: 30.
 """
 
 import logging
@@ -37,24 +27,42 @@ import sys
 
 from app.env import load_environment
 
+import psycopg2
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_PRUNE_DAYS = 90
+DEFAULT_PRUNE_DAYS = 30
 
 
 def prune_idempotency_keys(prune_days: int = DEFAULT_PRUNE_DAYS) -> int:
     """
-    Deletes dedup markers older than prune_days. Returns the number deleted.
-
-    Deferred: the cumulative write path that populates this table does not
-    exist yet (Phase 2). Implement against the SQL sketched in the module
-    docstring, mirroring prune_refresh_tokens (connect, DELETE, commit,
-    rollback-on-error, return rowcount).
+    Deletes dedup markers whose first_seen is older than prune_days.
+    Returns the number of markers deleted.
     """
-    raise NotImplementedError(
-        "prune_idempotency_keys is a deferred stub — see module docstring "
-        "and specs.md Phase 1. Implement alongside the cumulative write path."
-    )
+    url = os.environ["DATABASE_URL"]
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+
+    conn = psycopg2.connect(url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM submission_idempotency
+                WHERE first_seen < NOW() - (%s * INTERVAL '1 day')
+                """,
+                (prune_days,),
+            )
+            deleted = cur.rowcount
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.error("Prune failed, transaction rolled back: %s", e)
+        raise
+    finally:
+        conn.close()
+
+    return deleted
 
 
 def main() -> None:
