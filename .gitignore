@@ -104,3 +104,13 @@ $RECYCLE.BIN/
 # =============================================================================
 # Heroku doesn't produce local artifacts typically, but if you use
 # `heroku local` with a .env, it's already covered above.
+
+# =============================================================================
+# Claude Code / agent state
+# =============================================================================
+# Per-machine agent state lives here: settings.local.json and, notably,
+# .claude/worktrees/ — each a full nested checkout of this repo. None of it
+# should be tracked. (CLAUDE.md lives at the repo root, not under .claude/, so
+# it stays committed.) If shared team config is ever wanted, force-add it
+# explicitly, e.g.: git add -f .claude/settings.json
+.claude/
