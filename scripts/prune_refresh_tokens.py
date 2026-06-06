@@ -20,7 +20,7 @@ import sys
 
 from app.env import load_environment
 
-import psycopg2
+import psycopg
 
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ def prune_refresh_tokens() -> int:
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
 
-    conn = psycopg2.connect(url)
+    conn = psycopg.connect(url)
     try:
         with conn.cursor() as cur:
             cur.execute(

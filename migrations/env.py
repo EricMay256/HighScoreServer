@@ -35,11 +35,13 @@ def _database_url() -> str:
         raise RuntimeError("DATABASE_URL is not set")
     # Heroku issues 'postgres://', which SQLAlchemy 1.4+/2.0 no longer accepts.
     # Normalize the scheme and pin the driver explicitly so behavior doesn't
-    # depend on SQLAlchemy's default-dialect resolution.
+    # depend on SQLAlchemy's default-dialect resolution. The driver is psycopg
+    # (psycopg3) — migrations run synchronously through SQLAlchemy's sync
+    # psycopg dialect; there is no async/asyncpg path here (see ADR 0014).
     if url.startswith("postgres://"):
-        url = "postgresql+psycopg2://" + url[len("postgres://"):]
+        url = "postgresql+psycopg://" + url[len("postgres://"):]
     elif url.startswith("postgresql://"):
-        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
     return url
 
 
