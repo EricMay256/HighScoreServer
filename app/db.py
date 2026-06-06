@@ -1,43 +1,48 @@
 import os
-import psycopg2
-from psycopg2 import pool
+from psycopg_pool import AsyncConnectionPool
 
 
-_connection_pool: pool.SimpleConnectionPool | None = None
+_pool: AsyncConnectionPool | None = None
 
 
-def init_db() -> None:
-    global _connection_pool
+async def init_db() -> None:
+    """Open the async connection pool. Called from main.py lifespan.
+
+    The pool is constructed with open=False and opened explicitly with
+    await pool.open() — psycopg_pool deprecates opening in the constructor,
+    and the pool must be opened on the running event loop.
+    """
+    global _pool
     url = os.environ["DATABASE_URL"]
 
-    # Heroku provides postgres:// but psycopg2 requires postgresql://
+    # Heroku provides postgres://; normalize to postgresql:// for clarity.
+    # (psycopg3 accepts both, but keep the invariant explicit.)
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
 
-    _connection_pool = pool.SimpleConnectionPool(
-        minconn=1,
-        maxconn=10,
-        dsn=url,
+    _pool = AsyncConnectionPool(
+        conninfo=url,
+        min_size=1,
+        max_size=10,
+        open=False,
     )
+    await _pool.open()
 
 
-def get_conn() -> psycopg2.extensions.connection:
-    if _connection_pool is None:
+def get_pool() -> AsyncConnectionPool:
+    """Return the open pool. Use as `async with get_pool().connection() as conn:`.
+
+    The connection context manager wraps a transaction: it commits on a clean
+    exit, rolls back on exception, and returns the connection to the pool either
+    way — so call sites do not manage commit/rollback/release by hand.
+    """
+    if _pool is None:
         raise RuntimeError("Connection pool not initialized")
-    return _connection_pool.getconn()
+    return _pool
 
 
-def release_conn(conn: psycopg2.extensions.connection) -> None:
-    if _connection_pool is None:
-        return
-    try:
-        conn.rollback()
-    except Exception:
-        # Connection is broken; allow pool to discard it on putconn.
-        pass
-    _connection_pool.putconn(conn)
-
-
-def close_db() -> None:
-    if _connection_pool is not None:
-        _connection_pool.closeall()
+async def close_db() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None

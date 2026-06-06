@@ -70,11 +70,11 @@ async def lifespan(app: FastAPI):
             send_default_pii=False,  # don't ship request headers/bodies by default
         )
 
-    init_db()
+    await init_db()
     init_cache()
     yield
-    close_db()
-    close_cache()
+    await close_db()
+    await close_cache()
 
 
 def create_app() -> FastAPI:
