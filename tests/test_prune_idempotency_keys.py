@@ -2,7 +2,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
-import psycopg2
+import psycopg
 
 from scripts.prune_idempotency_keys import prune_idempotency_keys
 
@@ -13,7 +13,7 @@ def get_conn():
     url = os.environ["DATABASE_URL"]
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-    return psycopg2.connect(url)
+    return psycopg.connect(url)
 
 
 def insert_user() -> int:

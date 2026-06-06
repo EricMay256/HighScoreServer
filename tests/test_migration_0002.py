@@ -15,8 +15,8 @@ teardown.
 import os
 import secrets
 
-import psycopg2
-import psycopg2.errors
+import psycopg
+import psycopg.errors
 import pytest
 
 
@@ -26,7 +26,7 @@ def get_conn():
     url = os.environ["DATABASE_URL"]
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-    return psycopg2.connect(url)
+    return psycopg.connect(url)
 
 
 def insert_user() -> int:
@@ -95,7 +95,7 @@ def insert_run(user_id: int, game_mode: str, **overrides) -> int:
         "scenario_version": 1,
         "seed": 42,
         "client_run_id": secrets.token_hex(8),
-        "actions": psycopg2.Binary(b"\x1f\x8b"),  # not real gzip; opaque here
+        "actions": b"\x1f\x8b",  # not real gzip; opaque here (psycopg3 adapts bytes → bytea)
     }
     cols.update(overrides)
     placeholders = ", ".join(["%s"] * len(cols))
@@ -136,12 +136,12 @@ def test_game_modes_additive_defaults(make_mode):
 
 
 def test_scoring_strategy_check_rejects_unknown(make_mode):
-    with pytest.raises(psycopg2.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation):
         make_mode(scoring_strategy="averaged")
 
 
 def test_required_tier_check_rejects_out_of_range(make_mode):
-    with pytest.raises(psycopg2.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation):
         make_mode(required_tier=4)
 
 
@@ -184,21 +184,21 @@ def test_runs_client_run_id_unique_per_user_mode(make_mode):
     user_id = insert_user()
     dup = "replay_abc123"
     insert_run(user_id, mode, client_run_id=dup)
-    with pytest.raises(psycopg2.errors.UniqueViolation):
+    with pytest.raises(psycopg.errors.UniqueViolation):
         insert_run(user_id, mode, client_run_id=dup)
 
 
 def test_runs_status_check_rejects_unknown(make_mode):
     mode = make_mode(required_tier=1)
     user_id = insert_user()
-    with pytest.raises(psycopg2.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation):
         insert_run(user_id, mode, status="approved")
 
 
 def test_runs_validation_tier_check_rejects_out_of_range(make_mode):
     mode = make_mode(required_tier=1)
     user_id = insert_user()
-    with pytest.raises(psycopg2.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation):
         insert_run(user_id, mode, validation_tier=9)
 
 

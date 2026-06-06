@@ -7,7 +7,7 @@ what the live default validator can do today, so these exercise that path.
 import os
 import secrets
 
-import psycopg2
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -74,7 +74,7 @@ def get_conn():
     url = os.environ["DATABASE_URL"]
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-    return psycopg2.connect(url)
+    return psycopg.connect(url)
 
 
 # ── Cross-routing 409s ───────────────────────────────────────────────────────

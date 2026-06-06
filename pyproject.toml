@@ -3,9 +3,19 @@
 # the buildpack reads those, not this file.
 
 [tool.pytest.ini_options]
+# Async-mode tests (e.g. the cache backend, which is now an async interface)
+# run without a per-test @pytest.mark.asyncio. API tests still use the sync
+# Starlette TestClient, which is unaffected by this setting.
+asyncio_mode = "auto"
 filterwarnings = [
     # slowapi 0.1.9 uses deprecated asyncio.iscoroutinefunction. Removal isn't
     # until Python 3.16; the warning is informational on 3.14. Filter scoped
     # to slowapi only so our own deprecations remain visible.
     "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:slowapi.*",
+    # conftest forces the SelectorEventLoop policy on Windows so psycopg3's async
+    # pool can run (ProactorEventLoop lacks add_reader/add_writer). Python 3.14
+    # deprecates the policy API (removal 3.16), but it remains the only lever that
+    # reaches the TestClient's anyio portal. Windows-dev-only; no-op on CI/Linux.
+    "ignore:'asyncio.WindowsSelectorEventLoopPolicy' is deprecated:DeprecationWarning",
+    "ignore:'asyncio.set_event_loop_policy' is deprecated:DeprecationWarning",
 ]

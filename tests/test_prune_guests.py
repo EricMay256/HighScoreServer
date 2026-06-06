@@ -1,6 +1,6 @@
 from scripts.prune_guests import prune_guests
 from datetime import datetime, timezone, timedelta
-import psycopg2
+import psycopg
 import os
 
 
@@ -10,7 +10,7 @@ def get_conn():
     url = os.environ["DATABASE_URL"]
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-    return psycopg2.connect(url)
+    return psycopg.connect(url)
 
 
 def insert_guest(created_at: datetime) -> int:
@@ -91,7 +91,7 @@ def insert_run(user_id: int, game_mode: str = "classic") -> None:
                     (user_id, game_mode, scenario_version, seed, client_run_id, actions, status)
                 VALUES (%s, %s, 1, 1, %s, %s, 'pending')
                 """,
-                (user_id, game_mode, f"run-{secrets.token_hex(6)}", psycopg2.Binary(b"x")),
+                (user_id, game_mode, f"run-{secrets.token_hex(6)}", b"x"),
             )
             conn.commit()
     finally:

@@ -1,6 +1,17 @@
+import asyncio
 import os
+import sys
+
+# psycopg3's async pool cannot run on Windows' default ProactorEventLoop — it
+# drives sockets with loop.add_reader/add_writer, which only SelectorEventLoop
+# implements. Force the Selector policy before any event loop is created so the
+# TestClient's anyio portal and pytest-asyncio both pick it up. No effect on
+# Linux/CI (Heroku), where SelectorEventLoop is already the default.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import pytest
-import psycopg2
+import psycopg
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from dotenv import load_dotenv
@@ -37,7 +48,7 @@ def clean_tables():
     CASCADE handles FK ordering automatically.
     """
     yield
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    conn = psycopg.connect(os.environ["DATABASE_URL"])
     try:
         with conn.cursor() as cur:
             cur.execute("""
