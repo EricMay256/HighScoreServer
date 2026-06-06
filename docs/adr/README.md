@@ -36,3 +36,7 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 | 0007 | [In-process cache over Redis at single-dyno scale](0007-in-process-cache-over-redis.md) | Accepted |
 | 0008 | [Naming Audit: requires_claimed_account and client-side enums](0008-naming-audit-requires-claimed-account-and-client-enums.md) | Accepted |
 | 0009 | [Alembic adoption with raw-SQL migrations](0009-alembic-adoption-with-raw-sql-migrations.md) | Accepted |
+| 0010 | [Two submission endpoints over a polymorphic one](0010-two-submission-endpoints-over-polymorphic.md) | Accepted |
+| 0011 | [Tiered validation with a mode-declared minimum tier](0011-tiered-validation-with-mode-declared-minimum.md) | Accepted |
+| 0012 | [Action log as a compressed blob over normalized rows](0012-action-log-as-compressed-blob.md) | Accepted |
+| 0013 | [Cumulative scoring via idempotency keys](0013-cumulative-scoring-via-idempotency-keys.md) | Accepted |
