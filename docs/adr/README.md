@@ -31,7 +31,7 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 | 0002 | [Raw SQL over ORM](0002-raw-sql-over-orm.md)                                           | Accepted |
 | 0003 | [Period bucketing via upsert](0003-period-bucketing-via-upsert.md)                     | Accepted |
 | 0004 | [Ascending and descending sort order as a first-class concept](0004-ascending-and-descending-sort-order.md) | Accepted |
-| 0005 | [Sync over async](0005-sync-over-async.md)                                             | Accepted |
+| 0005 | [Sync over async](0005-sync-over-async.md)                                             | Superseded by 0014 |
 | 0006 | [JWT plus opaque refresh tokens](0006-jwt-plus-opaque-refresh-tokens.md)               | Accepted |
 | 0007 | [In-process cache over Redis at single-dyno scale](0007-in-process-cache-over-redis.md) | Accepted |
 | 0008 | [Naming Audit: requires_claimed_account and client-side enums](0008-naming-audit-requires-claimed-account-and-client-enums.md) | Accepted |
@@ -40,3 +40,4 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 | 0011 | [Tiered validation with a mode-declared minimum tier](0011-tiered-validation-with-mode-declared-minimum.md) | Accepted |
 | 0012 | [Action log as a compressed blob over normalized rows](0012-action-log-as-compressed-blob.md) | Accepted |
 | 0013 | [Cumulative scoring via idempotency keys](0013-cumulative-scoring-via-idempotency-keys.md) | Accepted |
+| 0014 | [Async migration to psycopg3](0014-async-migration-psycopg3.md)                        | Accepted |

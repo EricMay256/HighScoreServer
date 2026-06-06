@@ -113,8 +113,16 @@ psql -U postgres -d leaderboard -f db/seed.sql
 
 5. Start the development server:
 ```bash
-uvicorn app.main:app --reload
+python run_dev.py          # Windows: required (see note)
+# uvicorn app.main:app --reload   # Linux/macOS: works directly
 ```
+
+> **Windows note:** psycopg3's async pool requires asyncio's `SelectorEventLoop`,
+> but Windows defaults to `ProactorEventLoop`, and uvicorn builds its loop before
+> importing the app. `run_dev.py` sets the Selector policy first (and survives
+> `--reload`); running `uvicorn app.main:app` directly on Windows fails to open a
+> DB connection. On Linux/macOS (and Heroku, via gunicorn's UvicornWorker) the
+> default loop already works, so the launcher isn't needed there.
 
 6. Visit `http://localhost:8000/docs` to explore the API.
 
@@ -597,7 +605,7 @@ HighScoreServer/
 │   ├── view_routes.py        # Server-rendered HTML endpoints
 │   ├── models.py             # Pydantic request/response schemas
 │   ├── periods.py            # Period bucketing logic
-│   ├── db.py                 # psycopg2 connection pool
+│   ├── db.py                 # psycopg3 async connection pool
 │   ├── cache.py              # Pluggable cache interface (in-process TTL default, Redis optional)
 │   ├── dependencies.py       # Auth dependencies (require_user, require_api_key)
 │   └── env.py                # Environment variable loading and validation
@@ -752,7 +760,7 @@ section is the summary.
     window between the handler reading the row and the `INSERT` firing. That window
     exists, but it doesn't open by accident — there's no normal application flow
     that deletes a `game_modes` row mid-game, and `users` rows can't be deleted while
-    they have scores (`ON DELETE RESTRICT`). The alternative is mocking psycopg2 to
+    they have scores (`ON DELETE RESTRICT`). The alternative is mocking psycopg3 to
     raise the exception, which would test the except block but not the scenario it
     exists to handle.
   - **Offset pagination over cursor pagination.** `/scores` and `/latest`
@@ -777,10 +785,6 @@ section is the summary.
 - **Access token revocation via JTI denylist.** Insertion points are marked
   with `# DENYLIST HOOK` comments. Requires a shared store that survives
   dyno restarts (Redis) and adds a per-request decode-time check.
-- **Async migration from psycopg2 to asyncpg.** Triggered by observable
-  concurrency pressure (threadpool queue depth, p95 latency under load,
-  Heroku `H12` timeouts), not speculation. Neither SQLAlchemy nor Alembic
-  are in scope for this migration — the path is raw SQL throughout.
 - **Retention policy for guest accounts with score history.** Scoreless
   guests are pruned automatically via `scripts/prune_guests.py`. Pruning
   guests with score history requires a separate retention policy decision
@@ -788,10 +792,6 @@ section is the summary.
 - **Password reset flow.** Requires token storage, email delivery, new
   endpoints, and reset UI. The `email` column is already nullable on the
   `users` table to keep the schema ready.
-- **Pluggable aggregation strategies.** Generalize game modes beyond
-  best-score: introduce a `score_events` table (append-only, idempotent via
-  client event IDs) and add `aggregation: best | sum` to `game_modes`. Sum
-  unlocks cumulative tracking; the event log unlocks audit and anti-cheat.
 - **Game-to-mode ownership** — `game_modes` is a flat list with no parent
   grouping. Clients filter `/latest` by passing the modes they care about 
   via `?game_modes=`. If a second distinct game ships against this backend, 

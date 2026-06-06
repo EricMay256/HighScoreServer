@@ -4,7 +4,13 @@ Date: 2026-04-12
 
 ## Status
 
-Accepted
+Superseded by [0014](0014-async-migration-psycopg3.md)
+
+The migration this ADR deferred has been executed: `def` handlers + psycopg2
+are replaced by `async def` handlers + psycopg3 async. The reasoning below for
+*why the app was sync* remains an accurate record of that period; ADR 0014
+records the move to async and why psycopg3 was chosen over the asyncpg path
+named in the Consequences section.
 
 ## Context
 

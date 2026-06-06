@@ -11,15 +11,15 @@ Dual purpose: a working game backend **and** a portfolio piece that must be defe
 
 ## Stack (settled — do not re-litigate)
 
-- **API:** FastAPI, synchronous.
-- **DB:** PostgreSQL via psycopg2, **raw SQL, no ORM**. Window functions, upserts, and dynamic `ORDER BY` are deliberately hand-written.
+- **API:** FastAPI, **async** (`async def` handlers throughout — see ADR 0014, which superseded the earlier sync-over-async ADR 0005).
+- **DB:** PostgreSQL via **psycopg3 (`psycopg`) in async mode**, **raw SQL, no ORM**. Connections come from `psycopg_pool.AsyncConnectionPool` via `async with get_pool().connection() as conn:` (the context manager owns the transaction: commit on clean exit, rollback on exception). Window functions, upserts, and dynamic `ORDER BY` are deliberately hand-written. psycopg3's sync API (`psycopg.connect`) is used in batch scripts and Alembic.
 - **Auth:** JWT (HS256) access tokens + opaque refresh tokens (SHA-256 hashed, rotated on refresh via `DELETE ... RETURNING`). Guest accounts created silently via `POST /api/auth/guest`; upgraded in place by `/claim`.
-- **Cache:** pluggable backend — in-process `cachetools` by default, Redis opt-in via `CACHE_BACKEND`. 120s TTL, graceful fallback when the cache is unavailable.
+- **Cache:** pluggable backend with an **async** interface — in-process `cachetools` by default, Redis (`redis.asyncio`) opt-in via `CACHE_BACKEND`. 120s TTL, graceful fallback when the cache is unavailable.
 - **Rate limiting:** slowapi.
 - **Migrations:** Alembic, **raw-SQL migrations** (`op.execute` with hand-written DDL — no SQLAlchemy models, no autogenerate). See `specs.md` Phase 0. Before Phase 0, schema lived in `db/schema.sql` as `CREATE TABLE IF NOT EXISTS`.
 - **Hosting:** Heroku. Prefer existing add-ons (Postgres, Redis). **Do not introduce new infrastructure** without explicit approval.
 
-Stack decisions (Python vs Node, FastAPI vs Flask, sync vs async, raw SQL vs ORM) are settled. Do not propose changing them unless explicitly asked.
+Stack decisions (Python vs Node, FastAPI vs Flask, async via psycopg3, raw SQL vs ORM) are settled. Do not propose changing them unless explicitly asked. The async/sync boundary is the likeliest source of subtle bugs: any blocking library call inside a handler must be offloaded (`asyncio.to_thread`, as bcrypt is) or use an async client (as the Redis cache does) — never call it directly on the event loop.
 
 ## Repo orientation
 
@@ -36,7 +36,7 @@ Stack decisions (Python vs Node, FastAPI vs Flask, sync vs async, raw SQL vs ORM
 
 - Type hints on **every** function signature.
 - Pydantic models for anything crossing an API boundary.
-- Explicit error handling with `HTTPException`. Never a bare `except` that swallows. Catch specific psycopg2 errors (e.g. `ForeignKeyViolation`, `UniqueViolation`/`23505`) and map them to clean HTTP statuses.
+- Explicit error handling with `HTTPException`. Never a bare `except` that swallows. Catch specific psycopg3 errors (`psycopg.errors.ForeignKeyViolation`, `UniqueViolation`; check `e.sqlstate == "23505"`) and map them to clean HTTP statuses.
 - Clarity over cleverness — this code is read in interviews.
 - **No module-level side effects.** `sys.exit`, `load_environment()`, `logging.basicConfig()` at import scope prevent safe import — guard under `if __name__ == "__main__"`.
 - `sort_order` / `period` are interpolated into SQL **only** from DB-sourced or validated-literal values, never raw user input. Preserve that invariant.
@@ -68,7 +68,7 @@ Stack decisions (Python vs Node, FastAPI vs Flask, sync vs async, raw SQL vs ORM
 ## How to run
 
 - Tests: `pytest`
-- Dev server: `uvicorn app.main:app --reload` (interactive docs at `/docs`)
+- Dev server: `python run_dev.py` (interactive docs at `/docs`). **On Windows, use `run_dev.py`, not `uvicorn app.main:app` directly** — psycopg3's async pool can't run on Windows' default ProactorEventLoop, and uvicorn builds its loop before importing the app, so the SelectorEventLoop policy has to be set in the launcher first. On Linux/macOS `uvicorn app.main:app --reload` works directly (Selector is the default). `conftest.py` sets the same policy for the test suite.
 - DB schema is managed by **Alembic** (raw-SQL migrations; baseline `0001_baseline` reflects the pre-Alembic schema). `db/schema.sql` is a labeled bootstrap snapshot, not the source of truth.
   - Fresh/empty DB (CI, new clone): `alembic upgrade head` builds the whole schema.
   - Existing DB that predates Alembic: `alembic stamp 0001_baseline` once (never `upgrade` — the objects already exist), then `upgrade head` for later revisions.
@@ -82,4 +82,4 @@ Stack decisions (Python vs Node, FastAPI vs Flask, sync vs async, raw SQL vs ORM
 
 ## Scope guardrails for current work
 
-See `specs.md` for the active feature spec. Deferred / out of scope unless explicitly raised: asyncpg / async migration; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs.
+See `specs.md` for the active feature spec. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs.
