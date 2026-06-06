@@ -7,13 +7,12 @@ from app.models import (
     LeaderboardResponse, ScoreSubmission, ScoreResponse, GameModeConfig,
     GameModeCreate, RunSubmission,
 )
-from app.db import get_conn, release_conn
+from app.db import get_pool
 from app.cache import get_cache
 from app.dependencies import require_api_key, require_user
 from app.periods import get_period_start, PERIODS
 from app.validation import RunRecord, default_validator
-import psycopg2
-from psycopg2 import errors as pg_errors
+from psycopg import errors as pg_errors
 from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
 
@@ -46,22 +45,20 @@ RUNS_RATE_LIMIT = "5/minute"
 
 @router.get("/game_modes", response_model=list[GameModeConfig], responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
-def list_game_modes(request: Request, response: Response) -> list[GameModeConfig]:
-    conn = get_conn()
+async def list_game_modes(request: Request, response: Response) -> list[GameModeConfig]:
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT name, sort_order, label, requires_claimed_account,
-                       required_tier, scoring_strategy, game_key
-                FROM game_modes ORDER BY name
-                """
-            )
-            rows = cur.fetchall()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT name, sort_order, label, requires_claimed_account,
+                           required_tier, scoring_strategy, game_key
+                    FROM game_modes ORDER BY name
+                    """
+                )
+                rows = await cur.fetchall()
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
     return [
         GameModeConfig(
@@ -78,37 +75,34 @@ def list_game_modes(request: Request, response: Response) -> list[GameModeConfig
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_api_key)],
 )
-def create_game_mode(config: GameModeCreate) -> GameModeConfig:
-    conn = get_conn()
+async def create_game_mode(config: GameModeCreate) -> GameModeConfig:
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO game_modes
-                    (name, sort_order, label, requires_claimed_account,
-                     required_tier, scoring_strategy, game_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (name) DO UPDATE SET
-                    sort_order = EXCLUDED.sort_order,
-                    label      = EXCLUDED.label,
-                    requires_claimed_account = EXCLUDED.requires_claimed_account,
-                    required_tier    = EXCLUDED.required_tier,
-                    scoring_strategy = EXCLUDED.scoring_strategy,
-                    game_key         = EXCLUDED.game_key
-                RETURNING name, sort_order, label, requires_claimed_account,
-                          required_tier, scoring_strategy, game_key
-                """,
-                (config.name, config.sort_order, config.label,
-                 config.requires_claimed_account, config.required_tier,
-                 config.scoring_strategy, config.game_key),
-            )
-            row = cur.fetchone()
-            conn.commit()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO game_modes
+                        (name, sort_order, label, requires_claimed_account,
+                         required_tier, scoring_strategy, game_key)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (name) DO UPDATE SET
+                        sort_order = EXCLUDED.sort_order,
+                        label      = EXCLUDED.label,
+                        requires_claimed_account = EXCLUDED.requires_claimed_account,
+                        required_tier    = EXCLUDED.required_tier,
+                        scoring_strategy = EXCLUDED.scoring_strategy,
+                        game_key         = EXCLUDED.game_key
+                    RETURNING name, sort_order, label, requires_claimed_account,
+                              required_tier, scoring_strategy, game_key
+                    """,
+                    (config.name, config.sort_order, config.label,
+                     config.requires_claimed_account, config.required_tier,
+                     config.scoring_strategy, config.game_key),
+                )
+                row = await cur.fetchone()
+            # connection context manager commits on clean exit
     except Exception as e:
-        conn.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
     return GameModeConfig(
         name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3],
@@ -117,7 +111,7 @@ def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 
 @router.get("/latest", response_model=LeaderboardResponse, responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
-def latest_scores(
+async def latest_scores(
     request: Request,
     response: Response,
     limit: int = Query(100, ge=1, le=100),
@@ -138,62 +132,60 @@ def latest_scores(
     cache_key = f"{CACHE_KEY_PREFIX}latest:{modes_key}:{limit}:{offset}"
     try:
         cache = get_cache()
-        cached = cache.get(cache_key)
+        cached = await cache.get(cache_key)
         if cached:
             return LeaderboardResponse(**json.loads(cached))
     except Exception as e:
         logger.warning("Redis read failed, falling back to DB: %s", e)
 
-    conn = get_conn()
     try:
-        with conn.cursor() as cur:
-            # COUNT(*) OVER () gives total scores across the whole table.
-            # Unlike /scores this isn't filtered to a mode/period — the "latest"
-            # feed is global. Worth knowing if the table grows large; the count
-            # is cheap on indexed columns but not free.
-            # validation_tier read straight off scores (denormalized) — no join.
-            if game_modes:
-                cur.execute(
-                    """
-                    SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
-                        COUNT(*) OVER() AS total_count,
-                        s.validation_tier
-                    FROM scores s
-                    JOIN users u ON u.id = s.user_id
-                    WHERE s.game_mode = ANY(%s)
-                    AND s.period = 'alltime'
-                    ORDER BY s.submitted_at DESC, s.id DESC
-                    LIMIT %s OFFSET %s
-                    """,
-                    (game_modes, limit, offset),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
-                        COUNT(*) OVER() AS total_count,
-                        s.validation_tier
-                    FROM scores s
-                    JOIN users u ON u.id = s.user_id
-                    WHERE s.period = 'alltime'
-                    ORDER BY s.submitted_at DESC, s.id DESC
-                    LIMIT %s OFFSET %s
-                    """,
-                    (limit, offset),
-                )
-            rows = cur.fetchall()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                # COUNT(*) OVER () gives total scores across the whole table.
+                # Unlike /scores this isn't filtered to a mode/period — the "latest"
+                # feed is global. Worth knowing if the table grows large; the count
+                # is cheap on indexed columns but not free.
+                # validation_tier read straight off scores (denormalized) — no join.
+                if game_modes:
+                    await cur.execute(
+                        """
+                        SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
+                            COUNT(*) OVER() AS total_count,
+                            s.validation_tier
+                        FROM scores s
+                        JOIN users u ON u.id = s.user_id
+                        WHERE s.game_mode = ANY(%s)
+                        AND s.period = 'alltime'
+                        ORDER BY s.submitted_at DESC, s.id DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (game_modes, limit, offset),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
+                            COUNT(*) OVER() AS total_count,
+                            s.validation_tier
+                        FROM scores s
+                        JOIN users u ON u.id = s.user_id
+                        WHERE s.period = 'alltime'
+                        ORDER BY s.submitted_at DESC, s.id DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (limit, offset),
+                    )
+                rows = await cur.fetchall()
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
-    finally:
-        release_conn(conn)
 
     if rows:
         total_count = rows[0][6]
     elif offset > 0:
-        total_count = _count_all_scores()
+        total_count = await _count_all_scores()
     else:
         total_count = 0
 
@@ -214,7 +206,7 @@ def latest_scores(
     response = LeaderboardResponse(scores=results, total_count=total_count)
 
     try:
-        get_cache().setex(
+        await get_cache().setex(
             cache_key,
             CACHE_TTL,
             json.dumps(response.model_dump()),
@@ -226,7 +218,7 @@ def latest_scores(
 
 @router.get("/scores", response_model=LeaderboardResponse, responses=rate_limited_responses("60 per minute"))
 @limiter.limit("60/minute")
-def get_scores(
+async def get_scores(
     request: Request,
     response: Response,
     game_mode: str,
@@ -237,7 +229,7 @@ def get_scores(
     cache_key = f"{CACHE_KEY_PREFIX}{game_mode}:{period}:{limit}:{offset}"
     try:
         cache = get_cache()
-        cached = cache.get(cache_key)
+        cached = await cache.get(cache_key)
         if cached:
             return LeaderboardResponse(**json.loads(cached))
     except Exception as e:
@@ -251,52 +243,50 @@ def get_scores(
         )
     period_start = get_period_start(period)
 
-    conn = get_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT sort_order FROM game_modes WHERE name = %s",
-                (game_mode,),
-            )
-            mode_row = cur.fetchone()
-            if mode_row is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Unknown game mode: {game_mode}",
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT sort_order FROM game_modes WHERE name = %s",
+                    (game_mode,),
                 )
+                mode_row = await cur.fetchone()
+                if mode_row is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Unknown game mode: {game_mode}",
+                    )
 
-            order = "ASC" if mode_row[0] == "ASC" else "DESC"
+                order = "ASC" if mode_row[0] == "ASC" else "DESC"
 
-            # RANK() and COUNT(*) OVER () are computed over the full filtered set
-            # *before* LIMIT/OFFSET — so rank and total_count remain correct
-            # regardless of the page being requested. This is the key reason
-            # offset pagination composes cleanly with this query shape.
-            # validation_tier is denormalized onto scores at write time, so the
-            # hot read needs no join to runs — index-friendly. validated is
-            # derived from tier > 0.
-            cur.execute(
-                f"""
-                SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
-                RANK() OVER (ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC) AS rank,
-                COUNT(*) OVER() AS total_count,
-                s.validation_tier
-                FROM scores s
-                JOIN users u ON u.id = s.user_id
-                WHERE s.game_mode = %s
-                  AND s.period = %s
-                  AND s.period_start = %s
-                ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC
-                LIMIT %s OFFSET %s
-                """,
-                (game_mode, period, period_start, limit, offset),
-            )
-            rows = cur.fetchall()
+                # RANK() and COUNT(*) OVER () are computed over the full filtered set
+                # *before* LIMIT/OFFSET — so rank and total_count remain correct
+                # regardless of the page being requested. This is the key reason
+                # offset pagination composes cleanly with this query shape.
+                # validation_tier is denormalized onto scores at write time, so the
+                # hot read needs no join to runs — index-friendly. validated is
+                # derived from tier > 0.
+                await cur.execute(
+                    f"""
+                    SELECT s.id, u.username, s.score, s.game_mode, s.period, s.submitted_at,
+                    RANK() OVER (ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC) AS rank,
+                    COUNT(*) OVER() AS total_count,
+                    s.validation_tier
+                    FROM scores s
+                    JOIN users u ON u.id = s.user_id
+                    WHERE s.game_mode = %s
+                      AND s.period = %s
+                      AND s.period_start = %s
+                    ORDER BY s.score {order}, s.submitted_at ASC, s.id ASC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (game_mode, period, period_start, limit, offset),
+                )
+                rows = await cur.fetchall()
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
     # total_count from the window function is only present on returned rows.
     # If the page is empty (offset past end, or no scores at all), fall back
@@ -305,7 +295,7 @@ def get_scores(
     if rows:
         total_count = rows[0][7]
     elif offset > 0:
-        total_count = _count_scores(game_mode, period, period_start)
+        total_count = await _count_scores(game_mode, period, period_start)
     else:
         total_count = 0
 
@@ -323,7 +313,7 @@ def get_scores(
     ]
 
     try:
-        get_cache().setex(
+        await get_cache().setex(
             cache_key,
             CACHE_TTL,
             json.dumps(LeaderboardResponse(scores=results, total_count=total_count).model_dump()),
@@ -340,7 +330,7 @@ def get_scores(
     responses=rate_limited_responses("10 per minute"),
 )
 @limiter.limit("10/minute")
-def submit_score(
+async def submit_score(
     request:    Request,
     response:   Response,
     submission: ScoreSubmission,
@@ -349,86 +339,82 @@ def submit_score(
     user_id  = int(payload["sub"])
     is_guest = payload["is_guest"]
 
-    conn = get_conn()
     now  = datetime.now(timezone.utc)
 
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT sort_order, requires_claimed_account, scoring_strategy, required_tier
-                FROM game_modes WHERE name = %s
-                """,
-                (submission.game_mode,),
-            )
-            mode_row = cur.fetchone()
-            if mode_row is None:
-                # Raises without rolling back transaction - OK since no modifications made.
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Unknown game mode: {submission.game_mode}",
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT sort_order, requires_claimed_account, scoring_strategy, required_tier
+                    FROM game_modes WHERE name = %s
+                    """,
+                    (submission.game_mode,),
                 )
+                mode_row = await cur.fetchone()
+                if mode_row is None:
+                    # Raises without writing; the connection CM rolls back the empty txn.
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Unknown game mode: {submission.game_mode}",
+                    )
 
-            sort_order, requires_claimed_account, scoring_strategy, required_tier = mode_row
+                sort_order, requires_claimed_account, scoring_strategy, required_tier = mode_row
 
-            # Run-required modes don't accept raw scores — guide the client to /runs.
-            if required_tier > 0:
-                raise CrossRouteError(
-                    code="RUN_REQUIRED",
-                    submit_to="/api/leaderboard/runs",
-                    detail="This game mode requires a validated run; submit to /api/leaderboard/runs",
+                # Run-required modes don't accept raw scores — guide the client to /runs.
+                if required_tier > 0:
+                    raise CrossRouteError(
+                        code="RUN_REQUIRED",
+                        submit_to="/api/leaderboard/runs",
+                        detail="This game mode requires a validated run; submit to /api/leaderboard/runs",
+                    )
+
+                if requires_claimed_account and is_guest:
+                    # Raises without writing; the connection CM rolls back the empty txn.
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="This game mode requires a claimed account",
+                    )
+
+                # Cumulative modes dedup increments by idempotency key, so the key
+                # is mandatory there. The requirement is data-dependent (it hinges
+                # on the looked-up mode), hence validated here, not in the model.
+                if scoring_strategy == "cumulative" and submission.idempotency_key is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail="idempotency_key is required for cumulative game modes",
+                    )
+
+                order = "ASC" if sort_order == "ASC" else "DESC"
+
+                await _apply_score_write(
+                    cur,
+                    user_id=user_id,
+                    game_mode=submission.game_mode,
+                    score=submission.score,
+                    order=order,
+                    scoring_strategy=scoring_strategy,
+                    now=now,
+                    run_id=None,
+                    idempotency_key=submission.idempotency_key,
                 )
-
-            if requires_claimed_account and is_guest:
-                # Raises without rolling back transaction - OK since no modifications made.
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="This game mode requires a claimed account",
-                )
-
-            # Cumulative modes dedup increments by idempotency key, so the key
-            # is mandatory there. The requirement is data-dependent (it hinges
-            # on the looked-up mode), hence validated here, not in the model.
-            if scoring_strategy == "cumulative" and submission.idempotency_key is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="idempotency_key is required for cumulative game modes",
-                )
-
-            order = "ASC" if sort_order == "ASC" else "DESC"
-
-            _apply_score_write(
-                cur,
-                user_id=user_id,
-                game_mode=submission.game_mode,
-                score=submission.score,
-                order=order,
-                scoring_strategy=scoring_strategy,
-                now=now,
-                run_id=None,
-                idempotency_key=submission.idempotency_key,
-            )
-
-            conn.commit()
+            # connection context manager commits on clean exit
     except (HTTPException, CrossRouteError):
         raise
     except pg_errors.ForeignKeyViolation:
         # Shouldn't be reachable: game_mode is validated prior to upsert,
         # and user_id comes from a verified JWT. Kept for redundancy.
-        conn.rollback()
+        # The connection CM has already rolled back.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid game mode: {submission.game_mode}",
         )
     except Exception as e:
-        conn.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
-    _invalidate_score_caches(submission.game_mode)
+    await _invalidate_score_caches(submission.game_mode)
 
-    result = _fetch_score_with_rank(user_id, submission.game_mode, "alltime")
+    result = await _fetch_score_with_rank(user_id, submission.game_mode, "alltime")
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -444,7 +430,7 @@ def submit_score(
     responses=rate_limited_responses(RUNS_RATE_LIMIT),
 )
 @limiter.limit(RUNS_RATE_LIMIT)
-def submit_run(
+async def submit_run(
     request:    Request,
     response:   Response,
     submission: RunSubmission,
@@ -460,142 +446,151 @@ def submit_run(
     user_id  = int(payload["sub"])
     is_guest = payload["is_guest"]
 
-    conn = get_conn()
     now  = datetime.now(timezone.utc)
 
+    # Set when an existing run is found inside the transaction; the prior-result
+    # response is built after the connection is released (it opens its own).
+    prior_status: str | None = None
+
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT sort_order, requires_claimed_account, scoring_strategy, required_tier
-                FROM game_modes WHERE name = %s
-                """,
-                (submission.game_mode,),
-            )
-            mode_row = cur.fetchone()
-            if mode_row is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Unknown game mode: {submission.game_mode}",
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT sort_order, requires_claimed_account, scoring_strategy, required_tier
+                    FROM game_modes WHERE name = %s
+                    """,
+                    (submission.game_mode,),
                 )
+                mode_row = await cur.fetchone()
+                if mode_row is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Unknown game mode: {submission.game_mode}",
+                    )
 
-            sort_order, requires_claimed_account, scoring_strategy, required_tier = mode_row
+                sort_order, requires_claimed_account, scoring_strategy, required_tier = mode_row
 
-            # Raw-only modes don't validate runs — guide the client to /scores.
-            if required_tier < 1:
-                raise CrossRouteError(
-                    code="RAW_ONLY",
-                    submit_to="/api/leaderboard/scores",
-                    detail="This game mode accepts raw scores; submit to /api/leaderboard/scores",
+                # Raw-only modes don't validate runs — guide the client to /scores.
+                if required_tier < 1:
+                    raise CrossRouteError(
+                        code="RAW_ONLY",
+                        submit_to="/api/leaderboard/scores",
+                        detail="This game mode accepts raw scores; submit to /api/leaderboard/scores",
+                    )
+
+                if requires_claimed_account and is_guest:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="This game mode requires a claimed account",
+                    )
+
+                # Anti-replay: a prior run with this client_run_id returns its result
+                # without re-validating.
+                await cur.execute(
+                    """
+                    SELECT status FROM runs
+                    WHERE user_id = %s AND game_mode = %s AND client_run_id = %s
+                    """,
+                    (user_id, submission.game_mode, submission.client_run_id),
                 )
+                prior = await cur.fetchone()
+                if prior is not None:
+                    # Nothing to write; the read txn is released by the CM. The
+                    # prior-result response is built after exiting this block.
+                    prior_status = prior[0]
+                else:
+                    # Persist the run as pending. The action log is stored as a single
+                    # gzipped JSON blob (not a normalized table) per ADR/Heroku economics.
+                    # psycopg3 adapts bytes to bytea directly — no Binary() wrapper.
+                    actions_blob = gzip.compress(json.dumps(submission.actions).encode("utf-8"))
+                    await cur.execute(
+                        """
+                        INSERT INTO runs
+                            (user_id, game_mode, scenario_version, seed, claimed_score,
+                             client_run_id, actions, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
+                        RETURNING id
+                        """,
+                        (user_id, submission.game_mode, submission.scenario_version,
+                         submission.seed, submission.claimed_score, submission.client_run_id,
+                         actions_blob),
+                    )
+                    run_id = (await cur.fetchone())[0]
 
-            if requires_claimed_account and is_guest:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="This game mode requires a claimed account",
-                )
+                    # Validate. The validator must achieve at least the mode's required
+                    # tier; it records the tier actually achieved.
+                    record = RunRecord(
+                        id=run_id,
+                        user_id=user_id,
+                        game_mode=submission.game_mode,
+                        scenario_version=submission.scenario_version,
+                        seed=submission.seed,
+                        actions=submission.actions,
+                        claimed_score=submission.claimed_score,
+                    )
+                    result = default_validator.validate(record, required_tier)
 
-            # Anti-replay: a prior run with this client_run_id returns its result
-            # without re-validating.
-            cur.execute(
-                """
-                SELECT status FROM runs
-                WHERE user_id = %s AND game_mode = %s AND client_run_id = %s
-                """,
-                (user_id, submission.game_mode, submission.client_run_id),
-            )
-            prior = cur.fetchone()
-            if prior is not None:
-                conn.rollback()  # nothing to write; release the read transaction
-                return _existing_run_response(prior[0], user_id, submission.game_mode)
+                    if result.status == "rejected":
+                        await cur.execute(
+                            "UPDATE runs SET status = 'rejected', validation_tier = %s WHERE id = %s",
+                            (result.tier_achieved, run_id),
+                        )
+                        # Persist the rejection explicitly before raising: raising
+                        # inside the connection CM triggers a rollback, so an
+                        # implicit commit would lose the 'rejected' status.
+                        await conn.commit()
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail=f"Run rejected: {result.reason}",
+                        )
 
-            # Persist the run as pending. The action log is stored as a single
-            # gzipped JSON blob (not a normalized table) per ADR/Heroku economics.
-            actions_blob = gzip.compress(json.dumps(submission.actions).encode("utf-8"))
-            cur.execute(
-                """
-                INSERT INTO runs
-                    (user_id, game_mode, scenario_version, seed, claimed_score,
-                     client_run_id, actions, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
-                RETURNING id
-                """,
-                (user_id, submission.game_mode, submission.scenario_version,
-                 submission.seed, submission.claimed_score, submission.client_run_id,
-                 psycopg2.Binary(actions_blob)),
-            )
-            run_id = cur.fetchone()[0]
-
-            # Validate. The validator must achieve at least the mode's required
-            # tier; it records the tier actually achieved.
-            record = RunRecord(
-                id=run_id,
-                user_id=user_id,
-                game_mode=submission.game_mode,
-                scenario_version=submission.scenario_version,
-                seed=submission.seed,
-                actions=submission.actions,
-                claimed_score=submission.claimed_score,
-            )
-            result = default_validator.validate(record, required_tier)
-
-            if result.status == "rejected":
-                cur.execute(
-                    "UPDATE runs SET status = 'rejected', validation_tier = %s WHERE id = %s",
-                    (result.tier_achieved, run_id),
-                )
-                conn.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail=f"Run rejected: {result.reason}",
-                )
-
-            # Validated: record the server-computed canonical score + tier, then
-            # write it to the leaderboard linked to this run.
-            cur.execute(
-                """
-                UPDATE runs SET status = 'validated', canonical_score = %s,
-                    validation_tier = %s WHERE id = %s
-                """,
-                (result.canonical_score, result.tier_achieved, run_id),
-            )
-            order = "ASC" if sort_order == "ASC" else "DESC"
-            _apply_score_write(
-                cur,
-                user_id=user_id,
-                game_mode=submission.game_mode,
-                score=result.canonical_score,
-                order=order,
-                scoring_strategy=scoring_strategy,
-                now=now,
-                run_id=run_id,
-                validation_tier=result.tier_achieved,
-                # runs.client_run_id already gave anti-replay above, so don't
-                # double-write submission_idempotency for cumulative run modes.
-                record_idempotency=False,
-            )
-            conn.commit()
+                    # Validated: record the server-computed canonical score + tier, then
+                    # write it to the leaderboard linked to this run.
+                    await cur.execute(
+                        """
+                        UPDATE runs SET status = 'validated', canonical_score = %s,
+                            validation_tier = %s WHERE id = %s
+                        """,
+                        (result.canonical_score, result.tier_achieved, run_id),
+                    )
+                    order = "ASC" if sort_order == "ASC" else "DESC"
+                    await _apply_score_write(
+                        cur,
+                        user_id=user_id,
+                        game_mode=submission.game_mode,
+                        score=result.canonical_score,
+                        order=order,
+                        scoring_strategy=scoring_strategy,
+                        now=now,
+                        run_id=run_id,
+                        validation_tier=result.tier_achieved,
+                        # runs.client_run_id already gave anti-replay above, so don't
+                        # double-write submission_idempotency for cumulative run modes.
+                        record_idempotency=False,
+                    )
+            # connection context manager commits the validated write on clean exit
     except (HTTPException, CrossRouteError):
         raise
     except pg_errors.UniqueViolation:
         # Lost a race on client_run_id — treat as a duplicate submission.
-        conn.rollback()
-        existing_status = _lookup_run(user_id, submission.game_mode, submission.client_run_id)
+        # The connection CM has already rolled back.
+        existing_status = await _lookup_run(user_id, submission.game_mode, submission.client_run_id)
         if existing_status is not None:
-            return _existing_run_response(existing_status, user_id, submission.game_mode)
+            return await _existing_run_response(existing_status, user_id, submission.game_mode)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Duplicate run submission",
         )
     except Exception as e:
-        conn.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
-    _invalidate_score_caches(submission.game_mode)
+    if prior_status is not None:
+        return await _existing_run_response(prior_status, user_id, submission.game_mode)
 
-    result_resp = _fetch_score_with_rank(user_id, submission.game_mode, "alltime")
+    await _invalidate_score_caches(submission.game_mode)
+
+    result_resp = await _fetch_score_with_rank(user_id, submission.game_mode, "alltime")
     if result_resp is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -606,7 +601,7 @@ def submit_run(
     return result_resp
 
 
-def _invalidate_score_caches(game_mode: str) -> None:
+async def _invalidate_score_caches(game_mode: str) -> None:
     """Invalidate every cached read variant touched by a write to ``game_mode``.
 
     /scores keys are ``leaderboard:{mode}:{period}:{limit}:{offset}`` (deleted by
@@ -615,31 +610,28 @@ def _invalidate_score_caches(game_mode: str) -> None:
     """
     try:
         cache = get_cache()
-        cache.delete_prefix(f"{CACHE_KEY_PREFIX}{game_mode}:")
-        cache.delete_prefix(f"{CACHE_KEY_PREFIX}latest:")
+        await cache.delete_prefix(f"{CACHE_KEY_PREFIX}{game_mode}:")
+        await cache.delete_prefix(f"{CACHE_KEY_PREFIX}latest:")
     except Exception as e:
         logger.warning("Cache invalidation failed, continuing: %s", e)
 
 
-def _lookup_run(user_id: int, game_mode: str, client_run_id: str) -> str | None:
+async def _lookup_run(user_id: int, game_mode: str, client_run_id: str) -> str | None:
     """Fetch the status of an existing run, or None."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
                 """
                 SELECT status FROM runs
                 WHERE user_id = %s AND game_mode = %s AND client_run_id = %s
                 """,
                 (user_id, game_mode, client_run_id),
             )
-            row = cur.fetchone()
+            row = await cur.fetchone()
             return row[0] if row is not None else None
-    finally:
-        release_conn(conn)
 
 
-def _existing_run_response(prior_status: str, user_id: int, game_mode: str) -> ScoreResponse:
+async def _existing_run_response(prior_status: str, user_id: int, game_mode: str) -> ScoreResponse:
     """Return the prior result for a replayed run without re-validating.
 
     A validated run returns the player's current standing (validated/tier come
@@ -647,7 +639,7 @@ def _existing_run_response(prior_status: str, user_id: int, game_mode: str) -> S
     can't produce a score, so it surfaces the prior outcome as an error.
     """
     if prior_status == "validated":
-        resp = _fetch_score_with_rank(user_id, game_mode, "alltime")
+        resp = await _fetch_score_with_rank(user_id, game_mode, "alltime")
         if resp is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -666,53 +658,46 @@ def _existing_run_response(prior_status: str, user_id: int, game_mode: str) -> S
     )
 
 
-def _count_scores(game_mode: str, period: str, period_start) -> int:
+async def _count_scores(game_mode: str, period: str, period_start) -> int:
     """Count scores for a given mode/period bucket. Used when a paginated
     response returns an empty page but the leaderboard isn't actually empty."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
                 """
                 SELECT COUNT(*) FROM scores
                 WHERE game_mode = %s AND period = %s AND period_start = %s
                 """,
                 (game_mode, period, period_start),
             )
-            return cur.fetchone()[0]
-    finally:
-        release_conn(conn)
+            return (await cur.fetchone())[0]
 
-def _count_all_scores() -> int:
+async def _count_all_scores() -> int:
     """Total row count for the scores table. Used by the /latest endpoint
     to report total_count when a paginated request lands on an empty page."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM scores")
-            return cur.fetchone()[0]
-    finally:
-        release_conn(conn)
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT COUNT(*) FROM scores")
+            return (await cur.fetchone())[0]
 
-def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
+async def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
     # 
     """Fetch a single player's score with rank and percentile computed server-side.
     
     period is assumed to be a valid PERIODS value; callers responsible for validation"""
     period_start = get_period_start(period)
 
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
                 "SELECT sort_order FROM game_modes WHERE name = %s", (game_mode,)
             )
-            mode_row = cur.fetchone()
+            mode_row = await cur.fetchone()
             if mode_row is None:
                 return None
             order = "ASC" if mode_row[0] == "ASC" else "DESC"
 
-            cur.execute(
+            await cur.execute(
                 f"""
                 WITH ranked AS (
                     SELECT
@@ -734,9 +719,7 @@ def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime"
                 """,
                 (game_mode, period, period_start, user_id),
             )
-            row = cur.fetchone()
-    finally:
-        release_conn(conn)
+            row = await cur.fetchone()
 
     if row is None:
         return None
@@ -752,7 +735,7 @@ def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime"
         validation_tier=row[8],
     )
 
-def _apply_score_write(
+async def _apply_score_write(
     cur,
     *,
     user_id: int,
@@ -792,7 +775,7 @@ def _apply_score_write(
         if record_idempotency:
             # Idempotency gate: one marker per (user, mode, key) gates the
             # increment across all period buckets atomically in this transaction.
-            cur.execute(
+            await cur.execute(
                 """
                 INSERT INTO submission_idempotency (user_id, game_mode, key)
                 VALUES (%s, %s, %s)
@@ -805,7 +788,7 @@ def _apply_score_write(
 
         for period in PERIODS:
             period_start = get_period_start(period, at=now)
-            cur.execute(
+            await cur.execute(
                 """
                 INSERT INTO scores
                     (score, game_mode, period, period_start, submitted_at, user_id,
@@ -826,7 +809,7 @@ def _apply_score_write(
     for period in PERIODS:
         period_start = get_period_start(period, at=now)
         # order is DB-sourced, CHECK-constrained to 'ASC'|'DESC'.
-        cur.execute(
+        await cur.execute(
             f"""
             INSERT INTO scores
                 (score, game_mode, period, period_start, submitted_at, user_id,

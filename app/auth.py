@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import secrets
@@ -6,15 +7,29 @@ from datetime import datetime, timezone, timedelta
 from jose import jwt
 import bcrypt
 
-from app.db import get_conn, release_conn
+from app.db import get_pool
 
 
 # ── Password hashing ───────────────────────────────────────────────────────
+#
+# bcrypt is CPU-bound by design (the cost factor is the security property) and
+# has no async variant. Inside an async handler a direct call would block the
+# event loop for the full hash duration, stalling every concurrent request on
+# the worker. asyncio.to_thread offloads it to the default threadpool — and
+# bcrypt's C implementation releases the GIL while hashing, so it runs on
+# another core rather than just yielding. This preserves the behavior of the
+# prior sync-handler-in-threadpool model.
 
-def hash_password(plain: str) -> str:
+async def hash_password(plain: str) -> str:
+    return await asyncio.to_thread(_hash_password_sync, plain)
+
+async def verify_password(plain: str, hashed: str) -> bool:
+    return await asyncio.to_thread(_verify_password_sync, plain, hashed)
+
+def _hash_password_sync(plain: str) -> str:
     return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 
-def verify_password(plain: str, hashed: str) -> bool:
+def _verify_password_sync(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 # ── Guest username generation ──────────────────────────────────────────────
@@ -81,39 +96,33 @@ def _hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def create_refresh_token(user_id: int) -> str:
+async def create_refresh_token(user_id: int) -> str:
     """
     Generates a cryptographically random opaque token, persists its hash
     to the DB, and returns the raw token to be sent to the client once.
     This currently runs in its own transaction - when the scale demands
-    stronger atomicity guarantees, add optional conn parameter to share 
+    stronger atomicity guarantees, add optional conn parameter to share
     caller's transaction with user creation / update.
     """
     raw = secrets.token_urlsafe(32)
     token_hash = _hash_token(raw)
     expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
                 """
                 INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
                 VALUES (%s, %s, %s)
                 """,
                 (user_id, token_hash, expires_at),
             )
-            conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_conn(conn)
+        # connection context manager commits on clean exit, rolls back on error
 
     return raw
 
 
-def rotate_refresh_token(raw: str) -> tuple[str, int]:
+async def rotate_refresh_token(raw: str) -> tuple[str, int]:
     """
     Validates an incoming refresh token, deletes it (one-time use),
     inserts its replacement, and returns the new raw token + user_id.
@@ -131,10 +140,9 @@ def rotate_refresh_token(raw: str) -> tuple[str, int]:
     new_hash    = _hash_token(new_raw)
     new_expires = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
                 """
                 DELETE FROM refresh_tokens
                 WHERE token_hash = %s AND expires_at > %s
@@ -142,42 +150,30 @@ def rotate_refresh_token(raw: str) -> tuple[str, int]:
                 """,
                 (token_hash, now),
             )
-            row = cur.fetchone()
+            row = await cur.fetchone()
             if row is None:
-                conn.rollback()
+                # Raising inside the CM rolls back the (delete-only) transaction.
                 raise ValueError("Invalid or expired refresh token")
 
             user_id = row[0]
-            cur.execute(
+            await cur.execute(
                 """
                 INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
                 VALUES (%s, %s, %s)
                 """,
                 (user_id, new_hash, new_expires),
             )
-            conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_conn(conn)
+        # DELETE + INSERT commit together when the connection CM exits cleanly
 
     return new_raw, user_id
 
 
-def revoke_refresh_token(raw: str) -> None:
+async def revoke_refresh_token(raw: str) -> None:
     """Deletes a specific refresh token. Called on logout."""
     token_hash = _hash_token(raw)
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
                 "DELETE FROM refresh_tokens WHERE token_hash = %s",
                 (token_hash,),
             )
-            conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_conn(conn)

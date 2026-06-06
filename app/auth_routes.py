@@ -13,7 +13,7 @@ from app.auth import (
     rotate_refresh_token,
     verify_password,
 )
-from app.db import get_conn, release_conn
+from app.db import get_pool
 from app.dependencies import require_user
 
 
@@ -53,7 +53,7 @@ class TokenResponse(BaseModel):
 @router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
              responses=rate_limited_responses("5 per minute"))
 @limiter.limit("5/minute")
-def guest_login(request: Request, response: Response) -> TokenResponse:
+async def guest_login(request: Request, response: Response) -> TokenResponse:
     """
     Creates a guest account with a generated username.
     Retries on the rare username collision (token_hex(4) = 4 billion combinations).
@@ -61,26 +61,22 @@ def guest_login(request: Request, response: Response) -> TokenResponse:
     """
     for _ in range(5):
         username = generate_guest_username()
-        conn     = get_conn()
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO users (username, is_guest)
-                    VALUES (%s, TRUE)
-                    ON CONFLICT (username) DO NOTHING
-                    RETURNING id, is_guest
-                    """,
-                    (username,),
-                )
-                row = cur.fetchone()
-                conn.commit()
+            async with get_pool().connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        INSERT INTO users (username, is_guest)
+                        VALUES (%s, TRUE)
+                        ON CONFLICT (username) DO NOTHING
+                        RETURNING id, is_guest
+                        """,
+                        (username,),
+                    )
+                    row = await cur.fetchone()
         except Exception as e:
-            conn.rollback()
             logger.error("Guest registration error: %s", e)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-        finally:
-            release_conn(conn)
 
         if row:
             return TokenResponse(
@@ -88,7 +84,7 @@ def guest_login(request: Request, response: Response) -> TokenResponse:
                 # Note: user INSERT and refresh token INSERT are separate transactions.
                 # A crash between them leaves an orphaned user row with no token.
                 # The client will receive an error and can retry. See auth.py for discussion.
-                refresh_token=create_refresh_token(row[0]),
+                refresh_token=await create_refresh_token(row[0]),
             )
 
     raise HTTPException(
@@ -100,60 +96,54 @@ def guest_login(request: Request, response: Response) -> TokenResponse:
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
              responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
-def register(request: Request, response: Response, body: RegisterRequest) -> TokenResponse:
-    password_hash = hash_password(body.password)
-    conn          = get_conn()
+async def register(request: Request, response: Response, body: RegisterRequest) -> TokenResponse:
+    password_hash = await hash_password(body.password)
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO users (username, email, password_hash, is_guest)
-                VALUES (%s, %s, %s, FALSE)
-                RETURNING id
-                """,
-                (body.username, body.email, password_hash),
-            )
-            row = cur.fetchone()
-            conn.commit()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO users (username, email, password_hash, is_guest)
+                    VALUES (%s, %s, %s, FALSE)
+                    RETURNING id
+                    """,
+                    (body.username, body.email, password_hash),
+                )
+                row = await cur.fetchone()
     except Exception as e:
-        conn.rollback()
-        if hasattr(e, "pgcode") and e.pgcode == "23505":
+        if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Username or email already registered",
             )
         logger.error("Registration error: %s", e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
     return TokenResponse(
         access_token=create_access_token(row[0], body.username, is_guest=False),
         # Note: user INSERT and refresh token INSERT are separate transactions.
         # A crash between them leaves an orphaned user row with no token.
         # The client will receive an error and can retry. See auth.py for discussion.
-        refresh_token=create_refresh_token(row[0]),
+        refresh_token=await create_refresh_token(row[0]),
     )
 
 
 @router.post("/login", response_model=TokenResponse, responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
-def login(request: Request, response: Response, body: LoginRequest) -> TokenResponse:
-    conn = get_conn()
+async def login(request: Request, response: Response, body: LoginRequest) -> TokenResponse:
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, password_hash, is_guest FROM users WHERE username = %s",
-                (body.username,),
-            )
-            row = cur.fetchone()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, password_hash, is_guest FROM users WHERE username = %s",
+                    (body.username,),
+                )
+                row = await cur.fetchone()
     except Exception as e:
         logger.error("Login error: %s", e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
-    if row is None or not row[1] or not verify_password(body.password, row[1]):
+    if row is None or not row[1] or not await verify_password(body.password, row[1]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
@@ -161,33 +151,31 @@ def login(request: Request, response: Response, body: LoginRequest) -> TokenResp
 
     return TokenResponse(
         access_token=create_access_token(row[0], body.username, is_guest=row[2]),
-        refresh_token=create_refresh_token(row[0]),
+        refresh_token=await create_refresh_token(row[0]),
     )
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(body: RefreshRequest) -> TokenResponse:
+async def refresh(body: RefreshRequest) -> TokenResponse:
     try:
-        new_refresh, user_id = rotate_refresh_token(body.refresh_token)
+        new_refresh, user_id = await rotate_refresh_token(body.refresh_token)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
         )
 
-    conn = get_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT username, is_guest FROM users WHERE id = %s",
-                (user_id,),
-            )
-            row = cur.fetchone()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT username, is_guest FROM users WHERE id = %s",
+                    (user_id,),
+                )
+                row = await cur.fetchone()
     except Exception as e:
         logger.error("Refresh error: %s", e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
@@ -199,46 +187,42 @@ def refresh(body: RefreshRequest) -> TokenResponse:
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(body: RefreshRequest) -> None:
+async def logout(body: RefreshRequest) -> None:
     """
     # DENYLIST HOOK: to immediately invalidate the access token on logout,
     # accept it in the request body, decode it, extract jti, write to Redis
     # with TTL = remaining expiry seconds.
     """
-    revoke_refresh_token(body.refresh_token)
+    await revoke_refresh_token(body.refresh_token)
 
 
 @router.post("/rename", status_code=status.HTTP_204_NO_CONTENT)
-def rename(
+async def rename(
     body:    RenameRequest,
     payload: dict = Depends(require_user),
 ) -> None:
     user_id      = int(payload["sub"])
     new_username = body.username
 
-    conn = get_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE users SET username = %s WHERE id = %s",
-                (new_username, user_id),
-            )
-            conn.commit()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE users SET username = %s WHERE id = %s",
+                    (new_username, user_id),
+                )
     except Exception as e:
-        conn.rollback()
-        if hasattr(e, "pgcode") and e.pgcode == "23505":
+        if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Username is already taken",
             )
         logger.error("Rename error: %s", e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
 
 @router.post("/claim", response_model=TokenResponse)
-def claim(
+async def claim(
     body:    ClaimRequest,
     payload: dict = Depends(require_user),
 ) -> TokenResponse:
@@ -254,39 +238,35 @@ def claim(
             detail="Account is already claimed",
         )
 
-    password_hash = hash_password(body.password)
-    conn          = get_conn()
+    password_hash = await hash_password(body.password)
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE users
-                SET email         = %s,
-                    password_hash = %s,
-                    is_guest      = FALSE
-                WHERE id = %s
-                RETURNING username
-                """,
-                (body.email, password_hash, user_id),
-            )
-            row = cur.fetchone()
-            conn.commit()
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE users
+                    SET email         = %s,
+                        password_hash = %s,
+                        is_guest      = FALSE
+                    WHERE id = %s
+                    RETURNING username
+                    """,
+                    (body.email, password_hash, user_id),
+                )
+                row = await cur.fetchone()
     except Exception as e:
-        conn.rollback()
-        if hasattr(e, "pgcode") and e.pgcode == "23505":
+        if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Email already registered",
             )
         logger.error("Claim error: %s", e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    finally:
-        release_conn(conn)
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     return TokenResponse(
         access_token=create_access_token(user_id, row[0], is_guest=False),
-        refresh_token=create_refresh_token(user_id),
+        refresh_token=await create_refresh_token(user_id),
     )
