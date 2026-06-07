@@ -33,7 +33,7 @@ This ADR records that migration being executed. The driver chosen is **psycopg3
   `postgresql+psycopg2://` to `postgresql+psycopg://` — a dialect string change,
   no new dependency.
 
-The migration is a coordinated single pass, as 0005 promised it must be: a
+The migration is a coordinated single pass, as 0005 promised it must not be a
 partial conversion (one blocking call left inside an `async def` handler) is
 strictly worse than the sync baseline, because it stalls the event loop for
 every concurrent request on the worker rather than just one threadpool slot.
