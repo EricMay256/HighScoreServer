@@ -76,15 +76,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      # ON_ERROR_STOP=1 makes psql exit non-zero on the first SQL error;
-      # without it, a broken schema would silently leave the test DB in a
-      # half-applied state and pytest would fail later with confusing errors.
-      # -w fails fast if PGPASSWORD somehow isn't set, instead of hanging
-      # on a password prompt.
-      - name: Apply database schema
+      # Build the schema with Alembic — the source of truth (ADR 0009). This is
+      # the documented fresh-DB path; db/schema.sql is only a 0001-era bootstrap
+      # snapshot and omits the 0002 objects (runs, submission_idempotency, the
+      # additive game_modes/scores columns), so applying it would leave the test
+      # DB under-built and the suite would fail with UndefinedColumn/Table.
+      # A failed migration exits non-zero and fails the job. env.py reads
+      # DATABASE_URL (not TEST_DATABASE_URL).
+      - name: Apply database schema (alembic upgrade head)
         env:
-          PGPASSWORD: postgres
-        run: psql -h localhost -U postgres -d highscore_test -w -v ON_ERROR_STOP=1 -f db/schema.sql
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/highscore_test
+        run: alembic upgrade head
 
       - name: Run pytest
         run: pytest -v
