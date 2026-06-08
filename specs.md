@@ -1,6 +1,7 @@
 # Spec: per-mode score ceiling (`game_modes.max_score`)
 
-A per-mode validation ceiling on the server-computed canonical score, plus the
+A per-mode score ceiling — applied to the raw submitted score on `/scores`
+(tier 0) and to the server-computed canonical score on `/runs` — plus the
 run-submission expectations it sits within. The surrounding validated-runs system
 — two endpoints, the tiered validator, the `game_modes` config columns — is
 already built and deployed. This spec adds the `max_score` ceiling (a nullable
@@ -36,8 +37,12 @@ Stated as the current state of the live system, so this spec reads on its own:
 
 ### Schema — new nullable column
 
-Add `max_score INTEGER NULL` to `game_modes`. `NULL` = inherit the global
-`MAX_SCORE`; non-`NULL` caps the canonical score for that mode.
+Add `max_score BIGINT NULL` to `game_modes`. `NULL` = inherit the global
+`MAX_SCORE`; non-`NULL` caps the score for that mode. **`BIGINT`, not
+`INTEGER`:** `MAX_SCORE` is ~1.8e11, well beyond int32's ~2.1e9, and the column
+is compared against the `BIGINT` score columns (`scores.score`,
+`runs.claimed_score`, `runs.canonical_score`) — an `INTEGER` ceiling near the
+global cap would overflow.
 
 > ⚠️ **Migration.** `game_modes` is already deployed, so this is a **new Alembic
 > revision** on top of the current head — not folded into the original
@@ -48,9 +53,11 @@ Add `max_score INTEGER NULL` to `game_modes`. `NULL` = inherit the global
 
 ### Scope — `/runs` and `/scores`
 
-`max_score` is a **validation rule**, enforced inside the validator on the
-validated path. `POST /scores` is not validated, but the `max_score` column
-easily fits in with existing logic, and exposes score sanity for the simple endpoint
+`max_score` is enforced on **both** submission paths. On the validated path
+(`/runs`) it is a **validation rule** inside the validator. `POST /scores` is
+not validated, but the same per-mode ceiling applies there too: the route
+compares the submitted score directly to `max_score`, extending score sanity to
+the simple endpoint with no validator involved.
 
 ### Carrier — `ModeBounds`
 
@@ -80,9 +87,11 @@ Tier 0 game modes using the scores endpoint can directly compare the submitted s
 
 ### Enforcement subject differs by tier
 
-One invariant on the canonical score, two subjects:
+One ceiling invariant, three subjects (the canonical score on the validated
+tiers; the raw submitted score at tier 0):
 
-- **tier 0** — rejects scores that do not comply with maximum score field with a 422 code
+- **tier 0** — the raw submitted score is compared directly to `max_score`;
+  over-ceiling is rejected with a 422.
 - **tier 1** — checked against `claimed_score` (which *becomes* canonical).
 - **tier 2** — checked against the RECOMPUTED canonical score. An over-ceiling
   recompute is a REJECTION, not a clamp: it signals a scorer bug or a too-low cap
@@ -151,6 +160,6 @@ above).
 
 ## Acceptance
 
-- a tier-0 run claiming above `max_score` → 422 `"Invalid Score"`
+- a tier-0 raw score above `max_score` (via `/scores`) → 422 `"Invalid Score"`
 - a tier-1 run claiming above `max_score` → 422 `"claimed_score exceeds maximum N"`;
 - a tier-2 recompute above `max_score` → 422 `"recomputed score exceeds maximum N"`;
