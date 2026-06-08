@@ -37,8 +37,34 @@ class ValidationResult(BaseModel):
     reason: str | None = None
 
 
+class ModeBounds(BaseModel):
+    """Per-mode plausibility bounds, passed into the validator by the route.
+
+    A pure value object: the route reads the mode's config columns and builds
+    this, so the validator never touches the DB. Nullable fields fall back to
+    the global ceilings, so an unconfigured mode behaves exactly as before.
+
+    Only ``max_score`` is enforced today; ``min_score`` (a floor) and
+    ``max_actions`` (a per-mode action cap) are accommodated but unenforced
+    beyond the global action ceiling — see specs.md "Deferred".
+    """
+    max_score:   int | None = None
+    min_score:   int = 0
+    max_actions: int | None = None
+
+    @property
+    def score_ceiling(self) -> int:
+        return self.max_score if self.max_score is not None else MAX_SCORE
+
+    @property
+    def action_ceiling(self) -> int:
+        return self.max_actions if self.max_actions is not None else MAX_RUN_ACTIONS
+
+
 class Validator(Protocol):
-    def validate(self, run: RunRecord, required_tier: int) -> ValidationResult: ...
+    def validate(
+        self, run: RunRecord, required_tier: int, bounds: ModeBounds | None = None
+    ) -> ValidationResult: ...
 
 
 # A tier-2 scorer recomputes the canonical score from a run's action log for a
@@ -63,11 +89,14 @@ class TieredValidator:
     def __init__(self, tier2_scorers: dict[int, ScenarioScorer] | None = None) -> None:
         self._tier2_scorers = dict(tier2_scorers or {})
 
-    def validate(self, run: RunRecord, required_tier: int) -> ValidationResult:
+    def validate(
+        self, run: RunRecord, required_tier: int, bounds: ModeBounds | None = None
+    ) -> ValidationResult:
+        bounds = bounds or ModeBounds()
         if required_tier <= 1:
-            return self._tier1(run)
+            return self._tier1(run, bounds)
         if required_tier == 2:
-            return self._tier2(run)
+            return self._tier2(run, bounds)
         if required_tier == 3:
             return self._tier3(run)
         return ValidationResult(
@@ -75,8 +104,8 @@ class TieredValidator:
             reason=f"unsupported required_tier {required_tier}",
         )
 
-    def _tier1(self, run: RunRecord) -> ValidationResult:
-        reason = self._bounds_reason(run, require_claim=True)
+    def _tier1(self, run: RunRecord, bounds: ModeBounds) -> ValidationResult:
+        reason = self._bounds_reason(run, bounds, require_claim=True)
         if reason is not None:
             return ValidationResult(
                 canonical_score=0, tier_achieved=1, status="rejected", reason=reason
@@ -86,8 +115,8 @@ class TieredValidator:
             canonical_score=run.claimed_score, tier_achieved=1, status="validated"
         )
 
-    def _tier2(self, run: RunRecord) -> ValidationResult:
-        reason = self._bounds_reason(run, require_claim=False)
+    def _tier2(self, run: RunRecord, bounds: ModeBounds) -> ValidationResult:
+        reason = self._bounds_reason(run, bounds, require_claim=False)
         if reason is not None:
             return ValidationResult(
                 canonical_score=0, tier_achieved=2, status="rejected", reason=reason
@@ -104,6 +133,15 @@ class TieredValidator:
             return ValidationResult(
                 canonical_score=0, tier_achieved=2, status="rejected",
                 reason=f"tier-2 recompute failed: {e}",
+            )
+        # An over-ceiling recompute is a REJECTION, not a clamp: it signals a
+        # scorer bug or a too-low cap and must surface, not be silently
+        # truncated. Checked here (not in _bounds_reason) because the subject is
+        # the recomputed value, which doesn't exist until now.
+        if canonical > bounds.score_ceiling:
+            return ValidationResult(
+                canonical_score=0, tier_achieved=2, status="rejected",
+                reason=f"recomputed score exceeds maximum {bounds.score_ceiling}",
             )
         # The claim is recorded on the runs row but not trusted; a mismatch is
         # not a rejection — the recomputed value is authoritative.
@@ -122,22 +160,28 @@ class TieredValidator:
         )
 
     @staticmethod
-    def _bounds_reason(run: RunRecord, *, require_claim: bool) -> str | None:
+    def _bounds_reason(
+        run: RunRecord, bounds: ModeBounds, *, require_claim: bool
+    ) -> str | None:
         """Scenario-agnostic plausibility checks; returns a rejection reason or None.
 
         Deliberately generic: per-scenario score ceilings and duration
         plausibility need the (deferred) action shape, so only universal bounds
-        are enforced here.
+        (now including the per-mode ``max_score``) are enforced here.
         """
         if not run.actions:
             return "empty action log"
-        if len(run.actions) > MAX_RUN_ACTIONS:
-            return f"action log exceeds {MAX_RUN_ACTIONS} elements"
+        if len(run.actions) > bounds.action_ceiling:
+            return f"action log exceeds {bounds.action_ceiling} elements"
         if require_claim:
+            # tier 1: the claim *becomes* canonical, so the ceiling check has the
+            # claimed score as its subject here.
             if run.claimed_score is None:
                 return "claimed_score required for tier-1 validation"
-            if not 0 <= run.claimed_score <= MAX_SCORE:
+            if run.claimed_score < bounds.min_score:
                 return "claimed_score out of bounds"
+            if run.claimed_score > bounds.score_ceiling:
+                return f"claimed_score exceeds maximum {bounds.score_ceiling}"
         return None
 
 

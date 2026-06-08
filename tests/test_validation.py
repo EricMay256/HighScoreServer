@@ -5,7 +5,7 @@ fake scorer (no real scenario scorer exists in-repo yet); tier 3 is a deferred
 stub that must reject.
 """
 from app.models import MAX_SCORE
-from app.validation import RunRecord, TieredValidator
+from app.validation import ModeBounds, RunRecord, TieredValidator
 
 
 def _run(**overrides) -> RunRecord:
@@ -76,6 +76,49 @@ def test_tier2_scorer_exception_becomes_rejection_not_crash():
     result = TieredValidator({1: boom}).validate(_run(scenario_version=1), 2)
     assert result.status == "rejected"
     assert "recompute failed" in result.reason
+
+
+# ── Per-mode ceiling via ModeBounds ──────────────────────────────────────────
+
+def test_modebounds_falls_back_to_globals_when_unset():
+    b = ModeBounds()
+    assert b.score_ceiling == MAX_SCORE
+
+
+def test_modebounds_max_score_overrides_global():
+    assert ModeBounds(max_score=1000).score_ceiling == 1000
+
+
+def test_tier1_rejects_claim_above_mode_max_score():
+    """A claim under the global cap but over the mode's max_score is rejected."""
+    result = TieredValidator().validate(
+        _run(claimed_score=1500), 1, ModeBounds(max_score=1000)
+    )
+    assert result.status == "rejected"
+    assert "claimed_score exceeds maximum 1000" in result.reason
+
+
+def test_tier1_accepts_claim_at_mode_max_score():
+    result = TieredValidator().validate(
+        _run(claimed_score=1000), 1, ModeBounds(max_score=1000)
+    )
+    assert result.status == "validated"
+    assert result.canonical_score == 1000
+
+
+def test_tier2_rejects_recompute_above_mode_max_score():
+    """An over-ceiling recompute is a rejection, not a clamp."""
+    v = TieredValidator({1: lambda run: 5000})
+    result = v.validate(_run(scenario_version=1), 2, ModeBounds(max_score=1000))
+    assert result.status == "rejected"
+    assert "recomputed score exceeds maximum 1000" in result.reason
+
+
+def test_tier2_accepts_recompute_within_mode_max_score():
+    v = TieredValidator({1: lambda run: 900})
+    result = v.validate(_run(scenario_version=1), 2, ModeBounds(max_score=1000))
+    assert result.status == "validated"
+    assert result.canonical_score == 900
 
 
 # ── Tier 3: deferred stub ────────────────────────────────────────────────────
