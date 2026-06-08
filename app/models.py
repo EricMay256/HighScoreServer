@@ -23,6 +23,10 @@ class GameModeConfig(BaseModel):
     required_tier:    int = 0
     scoring_strategy: str = "best"  # 'best' | 'cumulative'
     game_key:         str | None = None  # forward-provisioning; nothing reads it yet
+    # Per-mode score ceiling. None inherits the global MAX_SCORE; non-None caps
+    # the canonical/raw score for this mode (enforced at tier 0 on /scores and
+    # by the validator on /runs).
+    max_score:        int | None = None
 
 class GameModeCreate(BaseModel):
     name:         str = Field(..., min_length=1, max_length=32)
@@ -33,6 +37,9 @@ class GameModeCreate(BaseModel):
     required_tier:    int = Field(0, ge=0, le=3)
     scoring_strategy: str = Field("best", pattern="^(best|cumulative)$")
     game_key:         str | None = Field(None, max_length=64)
+    # Operator-settable per-mode ceiling. None inherits the global MAX_SCORE; a
+    # value above the global makes no sense, so it is capped there.
+    max_score:        int | None = Field(None, ge=0, le=MAX_SCORE)
 
 #Score models
 class ScoreSubmission(BaseModel):
@@ -72,6 +79,10 @@ class RunSubmission(BaseModel):
     actions:          list[Any] = Field(..., max_length=MAX_RUN_ACTIONS)
     claimed_score:    int | None = Field(None, ge=0, le=MAX_SCORE)
     client_run_id:    str = Field(..., min_length=8, max_length=128)
+    # The tier the client asserts its log supports. Recorded, never trusted:
+    # persisted on the run, but the validator records the achieved tier itself.
+    # When omitted, validation targets the mode's required_tier.
+    claimed_tier:     int | None = Field(None, ge=0, le=3)
 
 class LeaderboardResponse(BaseModel):
     scores:      list[ScoreResponse]

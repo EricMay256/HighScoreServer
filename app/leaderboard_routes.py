@@ -5,13 +5,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Response, Query, status
 from app.models import (
     LeaderboardResponse, ScoreSubmission, ScoreResponse, GameModeConfig,
-    GameModeCreate, RunSubmission,
+    GameModeCreate, RunSubmission, MAX_SCORE,
 )
 from app.db import get_pool
 from app.cache import get_cache
 from app.dependencies import require_api_key, require_user
 from app.periods import get_period_start, PERIODS
-from app.validation import RunRecord, default_validator
+from app.validation import RunRecord, ModeBounds, default_validator
 from psycopg import errors as pg_errors
 from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
@@ -52,7 +52,7 @@ async def list_game_modes(request: Request, response: Response) -> list[GameMode
                 await cur.execute(
                     """
                     SELECT name, sort_order, label, requires_claimed_account,
-                           required_tier, scoring_strategy, game_key
+                           required_tier, scoring_strategy, game_key, max_score
                     FROM game_modes ORDER BY name
                     """
                 )
@@ -63,7 +63,7 @@ async def list_game_modes(request: Request, response: Response) -> list[GameMode
     return [
         GameModeConfig(
             name=r[0], sort_order=r[1], label=r[2], requires_claimed_account=r[3],
-            required_tier=r[4], scoring_strategy=r[5], game_key=r[6],
+            required_tier=r[4], scoring_strategy=r[5], game_key=r[6], max_score=r[7],
         )
         for r in rows
     ]
@@ -83,21 +83,22 @@ async def create_game_mode(config: GameModeCreate) -> GameModeConfig:
                     """
                     INSERT INTO game_modes
                         (name, sort_order, label, requires_claimed_account,
-                         required_tier, scoring_strategy, game_key)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         required_tier, scoring_strategy, game_key, max_score)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (name) DO UPDATE SET
                         sort_order = EXCLUDED.sort_order,
                         label      = EXCLUDED.label,
                         requires_claimed_account = EXCLUDED.requires_claimed_account,
                         required_tier    = EXCLUDED.required_tier,
                         scoring_strategy = EXCLUDED.scoring_strategy,
-                        game_key         = EXCLUDED.game_key
+                        game_key         = EXCLUDED.game_key,
+                        max_score        = EXCLUDED.max_score
                     RETURNING name, sort_order, label, requires_claimed_account,
-                              required_tier, scoring_strategy, game_key
+                              required_tier, scoring_strategy, game_key, max_score
                     """,
                     (config.name, config.sort_order, config.label,
                      config.requires_claimed_account, config.required_tier,
-                     config.scoring_strategy, config.game_key),
+                     config.scoring_strategy, config.game_key, config.max_score),
                 )
                 row = await cur.fetchone()
             # connection context manager commits on clean exit
@@ -106,7 +107,7 @@ async def create_game_mode(config: GameModeCreate) -> GameModeConfig:
 
     return GameModeConfig(
         name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3],
-        required_tier=row[4], scoring_strategy=row[5], game_key=row[6],
+        required_tier=row[4], scoring_strategy=row[5], game_key=row[6], max_score=row[7],
     )
 
 @router.get("/latest", response_model=LeaderboardResponse, responses=rate_limited_responses("10 per minute"))
@@ -346,7 +347,8 @@ async def submit_score(
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT sort_order, requires_claimed_account, scoring_strategy, required_tier
+                    SELECT sort_order, requires_claimed_account, scoring_strategy,
+                           required_tier, max_score
                     FROM game_modes WHERE name = %s
                     """,
                     (submission.game_mode,),
@@ -359,7 +361,8 @@ async def submit_score(
                         detail=f"Unknown game mode: {submission.game_mode}",
                     )
 
-                sort_order, requires_claimed_account, scoring_strategy, required_tier = mode_row
+                (sort_order, requires_claimed_account, scoring_strategy,
+                 required_tier, max_score) = mode_row
 
                 # Run-required modes don't accept raw scores — guide the client to /runs.
                 if required_tier > 0:
@@ -367,6 +370,17 @@ async def submit_score(
                         code="RUN_REQUIRED",
                         submit_to="/api/leaderboard/runs",
                         detail="This game mode requires a validated run; submit to /api/leaderboard/runs",
+                    )
+
+                # Tier 0 is unvalidated, but the per-mode ceiling still applies:
+                # compare the submitted score directly to the mode's max_score
+                # (NULL inherits the global MAX_SCORE, which the model already
+                # enforces — so this only bites when a mode sets a tighter cap).
+                score_ceiling = max_score if max_score is not None else MAX_SCORE
+                if submission.score > score_ceiling:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail="Invalid Score",
                     )
 
                 if requires_claimed_account and is_guest:
@@ -457,7 +471,8 @@ async def submit_run(
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT sort_order, requires_claimed_account, scoring_strategy, required_tier
+                    SELECT sort_order, requires_claimed_account, scoring_strategy,
+                           required_tier, max_score
                     FROM game_modes WHERE name = %s
                     """,
                     (submission.game_mode,),
@@ -469,7 +484,8 @@ async def submit_run(
                         detail=f"Unknown game mode: {submission.game_mode}",
                     )
 
-                sort_order, requires_claimed_account, scoring_strategy, required_tier = mode_row
+                (sort_order, requires_claimed_account, scoring_strategy,
+                 required_tier, max_score) = mode_row
 
                 # Raw-only modes don't validate runs — guide the client to /scores.
                 if required_tier < 1:
@@ -508,13 +524,13 @@ async def submit_run(
                         """
                         INSERT INTO runs
                             (user_id, game_mode, scenario_version, seed, claimed_score,
-                             client_run_id, actions, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
+                             claimed_tier, client_run_id, actions, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
                         RETURNING id
                         """,
                         (user_id, submission.game_mode, submission.scenario_version,
-                         submission.seed, submission.claimed_score, submission.client_run_id,
-                         actions_blob),
+                         submission.seed, submission.claimed_score, submission.claimed_tier,
+                         submission.client_run_id, actions_blob),
                     )
                     run_id = (await cur.fetchone())[0]
 
@@ -529,7 +545,11 @@ async def submit_run(
                         actions=submission.actions,
                         claimed_score=submission.claimed_score,
                     )
-                    result = default_validator.validate(record, required_tier)
+                    # The route reads the mode's config and builds the bounds; the
+                    # validator never touches the DB. claimed_tier is recorded above
+                    # but not trusted — validation targets the mode's required_tier.
+                    bounds = ModeBounds(max_score=max_score)
+                    result = default_validator.validate(record, required_tier, bounds)
 
                     if result.status == "rejected":
                         await cur.execute(

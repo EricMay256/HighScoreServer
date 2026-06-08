@@ -897,3 +897,65 @@ def test_latest_too_many_game_modes_returns_422(client):
     modes = "&".join(f"game_modes=mode_{i}" for i in range(11))
     response = client.get(f"/api/leaderboard/latest?{modes}")
     assert response.status_code == 422
+
+
+# ── Per-mode max_score ceiling (tier 0) ─────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def capped_mode(client: TestClient, api_key: str) -> str:
+    """A tier-0 mode with a per-mode score ceiling well below the global cap."""
+    response = client.post(
+        "/api/leaderboard/game_modes",
+        json={"name": "capped", "sort_order": "DESC", "label": "Capped",
+              "max_score": 1000},
+        headers={"x-api-key": api_key},
+    )
+    assert response.status_code in (200, 201)
+    assert response.json()["max_score"] == 1000
+    return "capped"
+
+
+def test_score_above_mode_max_score_rejected_422(client, auth_headers, capped_mode):
+    response = client.post(
+        "/api/leaderboard/scores",
+        json={"score": 1001, "game_mode": capped_mode},
+        headers=auth_headers,
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Invalid Score"
+
+
+def test_score_at_mode_max_score_accepted(client, auth_headers, capped_mode):
+    response = client.post(
+        "/api/leaderboard/scores",
+        json={"score": 1000, "game_mode": capped_mode},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+    assert response.json()["score"] == 1000
+
+
+def test_uncapped_mode_still_allows_high_scores(client, auth_headers, classic_mode):
+    """A mode with max_score NULL inherits the global cap — no tighter ceiling."""
+    response = client.post(
+        "/api/leaderboard/scores",
+        json={"score": 5_000_000, "game_mode": classic_mode},
+        headers=auth_headers,
+    )
+    assert response.status_code == 201
+
+
+def test_max_score_round_trips_through_game_modes_admin(client, api_key):
+    """max_score is settable on create and surfaces on the list endpoint."""
+    resp = client.post(
+        "/api/leaderboard/game_modes",
+        json={"name": "capped_rt", "sort_order": "DESC", "max_score": 4242},
+        headers={"x-api-key": api_key},
+    )
+    assert resp.status_code in (200, 201)
+    assert resp.json()["max_score"] == 4242
+
+    listing = client.get("/api/leaderboard/game_modes").json()
+    entry = next(m for m in listing if m["name"] == "capped_rt")
+    assert entry["max_score"] == 4242

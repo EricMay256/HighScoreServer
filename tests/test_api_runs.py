@@ -34,6 +34,20 @@ def run_mode(client: TestClient, api_key: str) -> str:
 
 
 @pytest.fixture(scope="module")
+def capped_run_mode(client: TestClient, api_key: str) -> str:
+    """A run-required (tier 1) mode with a per-mode max_score below the global cap."""
+    resp = client.post(
+        "/api/leaderboard/game_modes",
+        json={"name": "validated_capped", "sort_order": "DESC",
+              "required_tier": 1, "max_score": 1000},
+        headers={"x-api-key": api_key},
+    )
+    assert resp.status_code in (200, 201)
+    assert resp.json()["max_score"] == 1000
+    return "validated_capped"
+
+
+@pytest.fixture(scope="module")
 def raw_mode(client: TestClient, api_key: str) -> str:
     """A plain raw (tier 0) mode."""
     resp = client.post(
@@ -172,6 +186,72 @@ def test_run_with_empty_actions_is_rejected_422(client, auth_headers, run_mode):
                 (body["client_run_id"],),
             )
             assert cur.fetchone()[0] == "rejected"
+    finally:
+        conn.close()
+
+
+# ── Per-mode max_score ceiling + claimed_tier ────────────────────────────────
+
+def test_tier1_run_above_mode_max_score_rejected_422(client, auth_headers, capped_run_mode):
+    """A claim under the global cap but over the mode's max_score is rejected."""
+    body = _run_body(game_mode=capped_run_mode, claimed_score=1500)
+    resp = client.post("/api/leaderboard/runs", json=body, headers=auth_headers)
+    assert resp.status_code == 422
+    assert "claimed_score exceeds maximum 1000" in resp.json()["detail"]
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM runs WHERE client_run_id = %s",
+                (body["client_run_id"],),
+            )
+            assert cur.fetchone()[0] == "rejected"
+    finally:
+        conn.close()
+
+
+def test_tier1_run_at_mode_max_score_accepted(client, auth_headers, capped_run_mode):
+    body = _run_body(game_mode=capped_run_mode, claimed_score=1000)
+    resp = client.post("/api/leaderboard/runs", json=body, headers=auth_headers)
+    assert resp.status_code == 201
+    assert resp.json()["score"] == 1000
+
+
+def test_claimed_tier_is_recorded_but_not_trusted(client, auth_headers, run_mode):
+    """claimed_tier is persisted on the run; validation still targets required_tier."""
+    body = _run_body(claimed_score=640, claimed_tier=2)
+    resp = client.post("/api/leaderboard/runs", json=body, headers=auth_headers)
+    assert resp.status_code == 201
+    # The mode is tier 1, so the achieved tier is 1 regardless of the claim.
+    assert resp.json()["validation_tier"] == 1
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT claimed_tier, validation_tier FROM runs WHERE client_run_id = %s",
+                (body["client_run_id"],),
+            )
+            claimed_tier, validation_tier = cur.fetchone()
+            assert claimed_tier == 2          # recorded
+            assert validation_tier == 1       # achieved, authoritative
+    finally:
+        conn.close()
+
+
+def test_claimed_tier_omitted_persists_null(client, auth_headers, run_mode):
+    body = _run_body(claimed_score=210)
+    assert "claimed_tier" not in body
+    client.post("/api/leaderboard/runs", json=body, headers=auth_headers)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT claimed_tier FROM runs WHERE client_run_id = %s",
+                (body["client_run_id"],),
+            )
+            assert cur.fetchone()[0] is None
     finally:
         conn.close()
 
