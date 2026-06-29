@@ -6,9 +6,16 @@ A production-deployed game leaderboard backend built with FastAPI and PostgreSQL
 
 Architectural decisions are captured as [ADRs](docs/adr/README.md), and Known Limitations documents the current tradeoffs.
 
-- **Live:** https://high-score-server-9db572197af4.herokuapp.com/
-- **API Docs:** https://high-score-server-9db572197af4.herokuapp.com/docs
+- **Live:** [https://high-score-server-9db572197af4.herokuapp.com/]
+- **API Docs:** [https://high-score-server-9db572197af4.herokuapp.com/docs]
 
+## Related Repositories
+
+There are multiple clients for the HighScoreServer, aimed at providing coverage for mainstream game engines.
+
+- **Unity:** [https://github.com/EricMay256/hss-unity]
+- **C++:** [https://github.com/EricMay256/hss-cpp]
+- **Unreal:** [https://github.com/EricMay256/hss-unreal] (wraps C++ adapter)
 
 ## Architecture Overview
 
