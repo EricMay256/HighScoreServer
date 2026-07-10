@@ -46,6 +46,12 @@ GRANT USAGE, SELECT ON SEQUENCE users_id_seq TO leaderboard_app;
 GRANT SELECT, INSERT, DELETE ON TABLE refresh_tokens TO leaderboard_app;
 GRANT USAGE, SELECT ON SEQUENCE refresh_tokens_id_seq TO leaderboard_app;
 
+-- Auth identities map provider-specific login subjects (ubear email, SteamID64,
+-- Epic account id, etc.) to the canonical users row. The app resolves and links
+-- identities, but does not update them in place.
+GRANT SELECT, INSERT ON TABLE auth_identities TO leaderboard_app;
+GRANT USAGE, SELECT ON SEQUENCE auth_identities_id_seq TO leaderboard_app;
+
 -- Validated runs (see specs.md Phase 1). The app inserts a pending run and
 -- later UPDATEs it with the server-computed canonical_score/tier/status, so it
 -- needs SELECT, INSERT, UPDATE — but not DELETE (runs are leaderboard history,

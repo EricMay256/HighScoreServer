@@ -41,3 +41,4 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 | 0012 | [Action log as a compressed blob over normalized rows](0012-action-log-as-compressed-blob.md) | Accepted |
 | 0013 | [Cumulative scoring via idempotency keys](0013-cumulative-scoring-via-idempotency-keys.md) | Accepted |
 | 0014 | [Async migration to psycopg3](0014-async-migration-psycopg3.md)                        | Accepted |
+| 0015 | [Auth identities over provider columns](0015-auth-identities-over-provider-columns.md)  | Accepted |

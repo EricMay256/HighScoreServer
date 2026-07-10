@@ -53,7 +53,7 @@ def clean_tables():
         with conn.cursor() as cur:
             cur.execute("""
                 TRUNCATE TABLE submission_idempotency, scores, runs,
-                               refresh_tokens, users
+                               refresh_tokens, auth_identities, users
                 RESTART IDENTITY CASCADE
             """)
         conn.commit()

@@ -13,8 +13,23 @@ from app.auth import (
     rotate_refresh_token,
     verify_password,
 )
+from app.auth_identities import NATIVE_AUTH_PROVIDER
+from app.auth_identities import (
+    AuthenticatedUser,
+    AuthIdentityConflict,
+    AuthIdentityUserNotFound,
+    attach_auth_identity_to_user,
+    resolve_auth_identity_login,
+)
 from app.db import get_pool
 from app.dependencies import require_user
+from app.steam_auth import (
+    STEAM_AUTH_PROVIDER,
+    SteamAuthConfigError,
+    SteamAuthInvalidTicket,
+    SteamAuthUpstreamError,
+    verify_steam_auth_ticket,
+)
 
 
 router = APIRouter(tags=["auth"])
@@ -42,10 +57,42 @@ class ClaimRequest(BaseModel):
     email:    EmailStr = Field(..., max_length=256)
     password: str      = Field(..., min_length=8)
 
+class SteamAuthRequest(BaseModel):
+    ticket: str = Field(..., min_length=1, max_length=8192)
+
 class TokenResponse(BaseModel):
     access_token:  str
     refresh_token: str
     token_type:    str = "bearer"
+
+
+async def token_response_for_user(user: AuthenticatedUser) -> TokenResponse:
+    return TokenResponse(
+        access_token=create_access_token(user.id, user.username, is_guest=user.is_guest),
+        refresh_token=await create_refresh_token(user.id),
+    )
+
+
+async def steam_id_from_ticket(ticket: str) -> str:
+    try:
+        return await verify_steam_auth_ticket(ticket)
+    except SteamAuthConfigError as e:
+        logger.error("Steam auth configuration error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Steam authentication is not configured",
+        )
+    except SteamAuthInvalidTicket:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Steam auth ticket",
+        )
+    except SteamAuthUpstreamError as e:
+        logger.error("Steam auth upstream error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Steam authentication is temporarily unavailable",
+        )
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
@@ -110,6 +157,13 @@ async def register(request: Request, response: Response, body: RegisterRequest) 
                     (body.username, body.email, password_hash),
                 )
                 row = await cur.fetchone()
+                await cur.execute(
+                    """
+                    INSERT INTO auth_identities (user_id, provider, provider_user_id)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (row[0], NATIVE_AUTH_PROVIDER, body.email),
+                )
     except Exception as e:
         if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
@@ -153,6 +207,50 @@ async def login(request: Request, response: Response, body: LoginRequest) -> Tok
         access_token=create_access_token(row[0], body.username, is_guest=row[2]),
         refresh_token=await create_refresh_token(row[0]),
     )
+
+
+@router.post(
+    "/steam/login",
+    response_model=TokenResponse,
+    responses=rate_limited_responses("10 per minute"),
+)
+@limiter.limit("10/minute")
+async def steam_login(
+    request: Request,
+    response: Response,
+    body: SteamAuthRequest,
+) -> TokenResponse:
+    steam_id = await steam_id_from_ticket(body.ticket)
+    user = await resolve_auth_identity_login(STEAM_AUTH_PROVIDER, steam_id)
+    return await token_response_for_user(user)
+
+
+@router.post(
+    "/steam/link",
+    response_model=TokenResponse,
+    responses=rate_limited_responses("10 per minute"),
+)
+@limiter.limit("10/minute")
+async def steam_link(
+    request: Request,
+    response: Response,
+    body: SteamAuthRequest,
+    payload: dict = Depends(require_user),
+) -> TokenResponse:
+    steam_id = await steam_id_from_ticket(body.ticket)
+    user_id = int(payload["sub"])
+
+    try:
+        user = await attach_auth_identity_to_user(user_id, STEAM_AUTH_PROVIDER, steam_id)
+    except AuthIdentityConflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Steam account is already linked",
+        )
+    except AuthIdentityUserNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    return await token_response_for_user(user)
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -254,6 +352,14 @@ async def claim(
                     (body.email, password_hash, user_id),
                 )
                 row = await cur.fetchone()
+                if row is not None:
+                    await cur.execute(
+                        """
+                        INSERT INTO auth_identities (user_id, provider, provider_user_id)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (user_id, NATIVE_AUTH_PROVIDER, body.email),
+                    )
     except Exception as e:
         if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
