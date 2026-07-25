@@ -79,6 +79,22 @@ flowchart LR
   without saturating the free tier. The DSN is treated as optional monitoring config 
   so the app starts cleanly in environments where Sentry isn't provisioned.
 
+### Planned knowledge-platform bounded context
+
+The cloud knowledge platform will initially be staged in this service as an isolated
+`app/vault/` package. It will expose authenticated HTTP and MCP adapters over one
+application-service layer, use SQLAlchemy Core (not the ORM) for new vault persistence,
+and keep all knowledge content in PostgreSQL rather than this public repository. The
+package boundary is also an extraction seam: the eventual target keeps HSS and the private
+knowledge runtime in focused repositories and lets private composition CI build the combined
+deployment. HSS never fetches the private repository.
+
+The initial deployment reuses the existing Postgres add-on but places vault objects in
+the explicitly qualified `vault` schema. Setting `VAULT_DATABASE_URL` to another Postgres
+add-on moves the same schema and migration lineage to a physically separate database.
+See [Vault architecture and integration](docs/vault-architecture.md) and
+[ADR 0016](docs/adr/0016-sqlalchemy-core-for-vault-bounded-context.md).
+
 
 ## Local Setup
 
@@ -140,6 +156,13 @@ The schema is managed by **Alembic** with raw-SQL migrations (`op.execute` with
 hand-written DDL — no SQLAlchemy models, no autogenerate). `db/schema.sql` is a
 labeled bootstrap snapshot for orientation, **not** the source of truth; every
 schema change lands as a revision in `migrations/versions/`.
+
+Vault schema changes use a separate Alembic lineage under `vault_migrations/` so they can
+target either the existing database or a separate vault database without running
+leaderboard migrations against it. `VAULT_DATABASE_URL` selects a separate database and
+falls back to `DATABASE_URL` for the initial colocated deployment. Vault tables remain in
+the `vault` PostgreSQL schema in both modes. Core `Table` definitions are query metadata,
+not a deployment mechanism: production code never calls `MetaData.create_all()`.
 
 Alembic reads `DATABASE_URL` from the environment. `migrations/env.py` loads
 `.env` with `override=False`, so a `DATABASE_URL` already exported in the shell

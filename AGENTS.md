@@ -5,25 +5,36 @@ If a `AGENTS.md` already exists in the repo, **merge** with it rather than clobb
 
 ## What this project is
 
-HighScoreServer (HSS): a leaderboard backend. FastAPI + PostgreSQL (raw SQL via psycopg3), deployed on Heroku (`high-score-server`). It serves a Unity C# client, a vanilla-JS Jinja2 web view, and a React SPA (`leaderboard-frontend/`, mounted at `/app`; Jinja2 views remain at `/`). Companion game: Flick Fest.
+HighScoreServer (HSS): a FastAPI + PostgreSQL service deployed on Heroku
+(`high-score-server`). Its established bounded context is the leaderboard, serving a Unity
+C# client, a vanilla-JS Jinja2 web view, and a React SPA (`leaderboard-frontend/`, mounted at
+`/app`; Jinja2 views remain at `/`). The planned `app/vault/` bounded context hosts the
+remote knowledge-platform interface. Companion game: Flick Fest.
 
 Prefer idiomatic solutions over clever hacky workarounds; document tradeoffs; every architectural decision should be explainable out loud.
 
 ## Stack (settled — do not re-litigate)
 
 - **API:** FastAPI, **async** (`async def` handlers throughout — see ADR 0014, which superseded the earlier sync-over-async ADR 0005).
-- **DB:** PostgreSQL via **psycopg3 (`psycopg`) in async mode**, **raw SQL, no ORM**. Connections come from `psycopg_pool.AsyncConnectionPool` via `async with get_pool().connection() as conn:` (the context manager owns the transaction: commit on clean exit, rollback on exception). Window functions, upserts, and dynamic `ORDER BY` are deliberately hand-written. psycopg3's sync API (`psycopg.connect`) is used in batch scripts and Alembic.
+- **DB, leaderboard:** PostgreSQL via **psycopg3 (`psycopg`) in async mode** and raw SQL. Connections come from `psycopg_pool.AsyncConnectionPool` via `async with get_pool().connection() as conn:` (commit on clean exit, rollback on exception). This remains the settled path for existing HSS functionality.
+- **DB, vault:** SQLAlchemy 2.x **Core**, not ORM, over the async psycopg dialect. Pydantic API models, domain records, Core tables, repositories, and services remain separate. See ADR 0016 and `docs/vault-architecture.md`.
 - **Auth:** JWT (HS256) access tokens + opaque refresh tokens (SHA-256 hashed, rotated on refresh via `DELETE ... RETURNING`). Guest accounts created silently via `POST /api/auth/guest`; upgraded in place by `/claim` or by linking a durable external identity. `users` is the canonical account; `auth_identities` stores authenticators such as native `ubear` email/password and Steam.
 - **Cache:** pluggable backend with an **async** interface — in-process `cachetools` by default, Redis (`redis.asyncio`) opt-in via `CACHE_BACKEND`. 120s TTL, graceful fallback when the cache is unavailable.
 - **Rate limiting:** slowapi.
-- **Migrations:** Alembic, **raw-SQL migrations** (`op.execute` with hand-written DDL — no SQLAlchemy models, no autogenerate). See `specs.md` Phase 0. Before Phase 0, schema lived in `db/schema.sql` as `CREATE TABLE IF NOT EXISTS`.
+- **Migrations:** Alembic with explicit reviewed migrations. The existing leaderboard lineage remains raw SQL with no metadata/autogenerate. Vault Core metadata supports queries and drift tests, but never replaces Alembic or invokes `create_all()` in production; PostgreSQL-specific vault DDL remains explicit SQL.
 - **Hosting:** Heroku. Prefer existing add-ons (Postgres, Redis). **Do not introduce new infrastructure** without explicit approval.
 
-Stack decisions (Python vs Node, FastAPI vs Flask, async via psycopg3, raw SQL vs ORM) are settled. Do not propose changing them unless explicitly asked. The async/sync boundary is the likeliest source of subtle bugs: any blocking library call inside a handler must be offloaded (`asyncio.to_thread`, as bcrypt is) or use an async client (as the Redis cache does) — never call it directly on the event loop.
+Stack decisions are settled per bounded context. Do not expand the vault Core decision into a
+leaderboard rewrite unless an ADR-0016 revisit trigger is present. Do not introduce the
+SQLAlchemy ORM. The async/sync boundary is the likeliest source of subtle bugs: any blocking
+library call inside a handler must be offloaded (`asyncio.to_thread`, as bcrypt is) or use an
+async client (as the Redis cache does) — never call it directly on the event loop.
 
 ## Repo orientation
 
 - `app/` — FastAPI app. Routes split by concern (`leaderboard_routes.py`, auth routes, `view_routes.py`). `models.py` holds Pydantic models. `periods.py` defines `PERIODS` and `get_period_start`. Connection-pool, cache, and limiter helpers live in their own modules.
+- `app/vault/` — planned cloud knowledge bounded context: its own API models, domain records, Core tables, repositories, services, auth, embeddings, HTTP routes, and MCP adapter. It does not contain vault data.
+- `app/vault/` is an initial staging location, not permanent repository ownership. Keep it free of imports from leaderboard domain modules so it can move to a private package and be composed with HSS by private CI when the extraction triggers in `docs/vault-architecture.md` become real.
 - `db/` — `schema.sql`, `role.sql` (grants for the `leaderboard_app` role), `seed.sql`.
 - `docs/adr/` — Architecture Decision Records, Nygard format (strict superseding from 0008 onward).
 - `scripts/` — operational scripts (`prune_guests.py`, `prune_refresh_tokens.py`).
@@ -83,4 +94,4 @@ Stack decisions (Python vs Node, FastAPI vs Flask, async via psycopg3, raw SQL v
 
 ## Scope guardrails for current work
 
-See `specs.md` for the validated-runs / cumulative-scoring spec, and ADR 0015 plus migration `0004_auth_identities` for the external-identity work. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs; additional external providers beyond Steam unless requested.
+See `specs.md` for the validated-runs / cumulative-scoring spec, ADR 0015 plus migration `0004_auth_identities` for external identities, and `docs/vault-architecture.md` plus ADR 0016 for planned vault work. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); SQLAlchemy ORM; automatic vault merges; converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs; additional external providers beyond Steam unless requested.

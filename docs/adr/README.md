@@ -42,3 +42,4 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 | 0013 | [Cumulative scoring via idempotency keys](0013-cumulative-scoring-via-idempotency-keys.md) | Accepted |
 | 0014 | [Async migration to psycopg3](0014-async-migration-psycopg3.md)                        | Accepted |
 | 0015 | [Auth identities over provider columns](0015-auth-identities-over-provider-columns.md)  | Accepted |
+| 0016 | [SQLAlchemy Core for the vault bounded context](0016-sqlalchemy-core-for-vault-bounded-context.md) | Accepted |
