@@ -8,6 +8,8 @@
 
 **Persistence decision:** [ADR 0016](adr/0016-sqlalchemy-core-for-vault-bounded-context.md)
 
+**Configuration runbook:** [Vault configuration and Heroku operations](vault-configuration.md)
+
 ## Repository boundary
 
 HSS initially hosts the deployed vault runtime: authentication, authorization, rate limits,

@@ -30,7 +30,10 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17-alpine
+        # Official pgvector image layered on PostgreSQL 17. The version is
+        # pinned to Heroku's documented pgvector version so migrations cannot
+        # accidentally rely on a newer extension feature.
+        image: pgvector/pgvector@sha256:40b404964359299eefdd5f8518facf1886c562848cf4de13b6eaf91cb70c2b87
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -49,6 +52,13 @@ jobs:
       # Credentials here are duplicated from the postgres service definition above.
       # If I change one, I have to change the other.
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/highscore_test
+      VAULT_ENABLED: "true"
+      HSS_DB_POOL_MAX_SIZE: "5"
+      HSS_PROCESS_COUNT: "2"
+      DATABASE_CONNECTION_LIMIT: "20"
+      DB_OPERATIONAL_CONNECTION_RESERVE: "2"
+      VAULT_DB_POOL_SIZE: "1"
+      VAULT_DB_POOL_TIMEOUT_SECONDS: "5"
       # API_KEY and JWT_SECRET are functional fixtures, not real secrets — the
       # test suite doesn't validate them against any external system, it just
       # needs them to be set. Inlining is intentional; promoting them to
@@ -86,7 +96,9 @@ jobs:
       - name: Apply database schema (alembic upgrade head)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/highscore_test
-        run: alembic upgrade head
+        run: |
+          alembic upgrade head
+          alembic -c alembic-vault.ini upgrade head
 
       - name: Run pytest
         run: pytest -v

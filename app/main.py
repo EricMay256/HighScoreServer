@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from app.db import init_db, close_db
 from app.cache import init_cache, close_cache
 from app.env import load_environment, validate_environment
+from app.vault.db import close_vault_db, init_vault_db
 from app.leaderboard_routes import router as leaderboard_router, CrossRouteError
 from app.view_routes import router as view_router
 from app.auth_routes import router as auth_router
@@ -71,10 +72,14 @@ async def lifespan(app: FastAPI):
         )
 
     await init_db()
-    init_cache()
-    yield
-    await close_db()
-    await close_cache()
+    try:
+        init_cache()
+        await init_vault_db()
+        yield
+    finally:
+        await close_vault_db()
+        await close_db()
+        await close_cache()
 
 
 def create_app() -> FastAPI:

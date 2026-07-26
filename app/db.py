@@ -20,10 +20,21 @@ async def init_db() -> None:
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
 
+    min_size = int(os.environ.get("HSS_DB_POOL_MIN_SIZE", "1"))
+    max_size = int(os.environ.get("HSS_DB_POOL_MAX_SIZE", "5"))
+    if min_size < 0:
+        raise RuntimeError("HSS_DB_POOL_MIN_SIZE must be zero or greater")
+    if max_size < 1:
+        raise RuntimeError("HSS_DB_POOL_MAX_SIZE must be one or greater")
+    if min_size > max_size:
+        raise RuntimeError(
+            "HSS_DB_POOL_MIN_SIZE cannot exceed HSS_DB_POOL_MAX_SIZE"
+        )
+
     _pool = AsyncConnectionPool(
         conninfo=url,
-        min_size=1,
-        max_size=10,
+        min_size=min_size,
+        max_size=max_size,
         open=False,
     )
     await _pool.open()
