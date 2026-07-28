@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from app.vault.db import VaultPoolObserver, acquire_vault_connection
+from .db import VaultPoolObserver, acquire_vault_connection
 
 
 class VaultTransactionService:

@@ -1,4 +1,4 @@
-# 16. SQLAlchemy Core for the vault bounded context
+# 1. SQLAlchemy Core for the vault bounded context
 
 Date: 2026-07-25
 

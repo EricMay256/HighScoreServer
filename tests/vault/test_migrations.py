@@ -10,6 +10,7 @@ VAULT_TABLES = {
     "vault_agent_credentials",
     "vault_audit_events",
     "vault_compile_runs",
+    "vault_document_embeddings",
     "vault_documents",
     "vault_review_cases",
     "vault_write_requests",

@@ -6,18 +6,32 @@ import logging
 from threading import Lock
 from time import perf_counter
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
     create_async_engine,
 )
 
-from app.vault.domain import PoolSnapshot
-from app.vault.settings import VaultSettings
+from .domain import PoolSnapshot
+from .settings import VaultSettings
 
 
 logger = logging.getLogger(__name__)
+
+# The generated column's expression is the only authority on which text search
+# configuration the corpus was actually indexed with; the environment variable
+# is merely what this process believes.
+_SEARCH_VECTOR_EXPRESSION_QUERY = text(
+    """
+    SELECT pg_get_expr(d.adbin, d.adrelid)
+    FROM pg_attribute a
+    JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+    WHERE a.attrelid = 'vault.vault_documents'::regclass
+      AND a.attname = 'search_vector'
+      AND a.attgenerated = 's'
+    """
+)
 
 
 class VaultPoolObserver:
@@ -102,6 +116,34 @@ def create_vault_engine(
     return engine, observer
 
 
+async def assert_text_search_config(engine: AsyncEngine, expected: str) -> None:
+    """Fail fast when the migrated ``search_vector`` disagrees with the environment.
+
+    A persisted generated column's expression is compiled into DDL at migration
+    time, so no environment change can move it. Without this check a mismatch is
+    silent: queries would be parsed with one configuration while the stored
+    vectors and their GIN index were built with another.
+    """
+
+    async with engine.connect() as connection:
+        result = await connection.execute(_SEARCH_VECTOR_EXPRESSION_QUERY)
+        expression = result.scalar_one_or_none()
+
+    if expression is None:
+        raise RuntimeError(
+            "vault.vault_documents.search_vector is not a stored generated "
+            "column. The vault schema is absent or out of date — run "
+            "'alembic -c alembic-vault.ini upgrade head'."
+        )
+    if f"'{expected}'::regconfig" not in expression:
+        raise RuntimeError(
+            f"VAULT_TEXT_SEARCH_CONFIG={expected!r} does not match the migrated "
+            f"search_vector expression ({expression}). Changing the text search "
+            "configuration requires a table rewrite and a GIN reindex, not a "
+            "restart."
+        )
+
+
 async def init_vault_db() -> None:
     """Initialize the worker-local vault engine when explicitly enabled."""
 
@@ -113,7 +155,13 @@ async def init_vault_db() -> None:
         raise RuntimeError("Vault database engine is already initialized")
 
     budget = settings.validate_connection_budget()
-    _engine, _observer = create_vault_engine(settings)
+    engine, observer = create_vault_engine(settings)
+    try:
+        await assert_text_search_config(engine, settings.text_search_config)
+    except Exception:
+        await engine.dispose()
+        raise
+    _engine, _observer = engine, observer
     logger.info(
         "Vault database engine initialized",
         extra={

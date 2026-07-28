@@ -5,10 +5,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import insert, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.vault.domain import (
+from .domain import (
+    DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
@@ -16,7 +18,7 @@ from app.vault.domain import (
     VaultDocument,
     VaultReviewCase,
 )
-from app.vault.tables import vault_documents, vault_review_cases
+from .tables import vault_document_embeddings, vault_documents, vault_review_cases
 
 
 def _document_from_row(row: RowMapping) -> VaultDocument:
@@ -36,11 +38,19 @@ def _document_from_row(row: RowMapping) -> VaultDocument:
         schema_version=row["schema_version"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
-        embedding_model=row["embedding_model"],
-        embedded_at=row["embedded_at"],
         compile_run_id=row["compile_run_id"],
         compiled_by=row["compiled_by"],
         compiled_at=row["compiled_at"],
+    )
+
+
+def _document_embedding_from_row(row: RowMapping) -> DocumentEmbedding:
+    return DocumentEmbedding(
+        document_id=row["document_id"],
+        profile_id=row["profile_id"],
+        # pgvector hands back a numpy array; the domain record holds plain floats.
+        vector=tuple(float(value) for value in row["embedding"]),
+        embedded_at=row["embedded_at"],
     )
 
 
@@ -77,8 +87,6 @@ class VaultDocumentRepository:
         vault_documents.c.schema_version,
         vault_documents.c.created_at,
         vault_documents.c.updated_at,
-        vault_documents.c.embedding_model,
-        vault_documents.c.embedded_at,
         vault_documents.c.compile_run_id,
         vault_documents.c.compiled_by,
         vault_documents.c.compiled_at,
@@ -105,11 +113,6 @@ class VaultDocumentRepository:
                 source_url=document.source_url,
                 provenance=document.provenance,
                 schema_version=document.schema_version,
-                embedding=(
-                    list(document.embedding) if document.embedding is not None else None
-                ),
-                embedding_model=document.embedding_model,
-                embedded_at=document.embedded_at,
                 compile_run_id=document.compile_run_id,
                 compiled_by=document.compiled_by,
                 compiled_at=document.compiled_at,
@@ -130,6 +133,58 @@ class VaultDocumentRepository:
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return _document_from_row(row) if row is not None else None
+
+
+class VaultDocumentEmbeddingRepository:
+    """Persistence operations for per-profile document embeddings."""
+
+    _domain_columns = (
+        vault_document_embeddings.c.document_id,
+        vault_document_embeddings.c.profile_id,
+        vault_document_embeddings.c.embedding,
+        vault_document_embeddings.c.embedded_at,
+    )
+
+    async def upsert(
+        self,
+        connection: AsyncConnection,
+        embedding: DocumentEmbedding,
+    ) -> DocumentEmbedding:
+        values: dict[str, Any] = {
+            "document_id": embedding.document_id,
+            "profile_id": embedding.profile_id,
+            "embedding": list(embedding.vector),
+        }
+        if embedding.embedded_at is not None:
+            values["embedded_at"] = embedding.embedded_at
+
+        statement = pg_insert(vault_document_embeddings).values(**values)
+        # Re-embedding a document under a profile it already has replaces the
+        # vector instead of conflicting, so an embed job is safe to re-run.
+        # EXCLUDED carries the column default when embedded_at was not supplied.
+        statement = statement.on_conflict_do_update(
+            constraint="vault_document_embeddings_pkey",
+            set_={
+                "embedding": statement.excluded.embedding,
+                "embedded_at": statement.excluded.embedded_at,
+            },
+        ).returning(*self._domain_columns)
+        result = await connection.execute(statement)
+        return _document_embedding_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        profile_id: str,
+    ) -> DocumentEmbedding | None:
+        statement = select(*self._domain_columns).where(
+            vault_document_embeddings.c.document_id == document_id,
+            vault_document_embeddings.c.profile_id == profile_id,
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _document_embedding_from_row(row) if row is not None else None
 
 
 class VaultReviewCaseRepository:

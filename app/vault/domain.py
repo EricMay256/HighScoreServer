@@ -56,8 +56,6 @@ class VaultDocument:
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     source_url: str | None = None
-    embedding_model: str | None = None
-    embedded_at: datetime | None = None
     compile_run_id: UUID | None = None
     compiled_by: str | None = None
     compiled_at: datetime | None = None
@@ -78,12 +76,24 @@ class NewVaultDocument:
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     source_url: str | None = None
-    embedding: tuple[float, ...] | None = None
-    embedding_model: str | None = None
-    embedded_at: datetime | None = None
     compile_run_id: UUID | None = None
     compiled_by: str | None = None
     compiled_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentEmbedding:
+    """One document's vector under one embedding profile.
+
+    A document with no row for a profile is simply not embedded under it, which
+    is why there is no "pending" state here.
+    """
+
+    document_id: str
+    profile_id: str
+    vector: tuple[float, ...]
+    # Unset on the way in so the column default applies; populated on read.
+    embedded_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

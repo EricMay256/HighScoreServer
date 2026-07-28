@@ -6,7 +6,7 @@
 
 **Knowledge/governance owner:** the private knowledge-platform repository
 
-**Persistence decision:** [ADR 0016](adr/0016-sqlalchemy-core-for-vault-bounded-context.md)
+**Persistence decision:** [vault ADR 0001](adr/0001-sqlalchemy-core-for-vault-bounded-context.md)
 
 **Configuration runbook:** [Vault configuration and Heroku operations](vault-configuration.md)
 
@@ -117,6 +117,12 @@ app/
     routes.py                /api/v1/vault HTTP adapter
     mcp.py                   /mcp/v1/vault thin MCP adapter
     export.py                consistent projector snapshot service
+    AGENTS.md                conventions that travel with the package
+    docs/
+      vault-architecture.md
+      vault-configuration.md
+      vault-extraction-manifest.md
+      adr/                   vault-owned ADR lineage, numbered from 0001
 vault_migrations/
   env.py                     VAULT_DATABASE_URL, falling back to DATABASE_URL
   versions/                  vault-only Alembic revisions
@@ -124,9 +130,11 @@ tests/
   vault/
     ...                      unit, contract, and Postgres/pgvector integration tests
 alembic-vault.ini            dedicated vault migration lineage
-docs/
-  vault-architecture.md
 ```
+
+Documentation lives under the package rather than in the host repository's `docs/`, so
+extraction moves it automatically. `vault_migrations/` and `alembic-vault.ini` sit at the
+repository root and are separate moves — see `vault-extraction-manifest.md`.
 
 Start with one `repository.py` and one `service.py`; split them by use case only when their
 size or independent change rate justifies it. This avoids both the current route-level SQL
@@ -154,6 +162,37 @@ columns. API responses map deliberate subsets of those records.
 `app.main` initializes and disposes the vault engine in the existing FastAPI lifespan and
 includes the vault HTTP/MCP routers before the SPA/static catch-all. The engine is created
 once per worker, never per request.
+
+### Identity and request correlation
+
+Credential identity, durable write identity, and request tracing serve different purposes:
+
+```mermaid
+flowchart LR
+    Credential["vault_agent_credentials.id"] --> Auth["Authenticate token"]
+    Auth --> Principal["principal_id (logical actor)"]
+    Principal -. "same actor" .-> Write["vault_write_requests<br/>(principal_id, idempotency_key)"]
+    Principal -. "same actor" .-> Audit["vault_audit_events.principal_id"]
+    Write -->|"composite foreign key"| Audit
+    Document["vault_documents.id"] -->|"document_id foreign key"| Write
+    Document -. "typed audit reference" .-> Target["target_type + target_id"]
+    Target --> Audit
+    Request["request_id (one inbound attempt)"] --> Audit
+    Trace["trace_id (distributed trace)"] --> Audit
+```
+
+- A credential ID selects one rotatable bearer credential. Its `principal_id` names the
+  stable logical actor, so multiple credentials may authenticate the same principal.
+- `(principal_id, idempotency_key)` names one logical write and remains stable across
+  retries. A write-related audit event repeats those columns and references that write
+  request; read and system events leave `idempotency_key` null.
+- `target_type` and `target_id` form a polymorphic audit reference. They are either both
+  present or both absent. They deliberately do not reference a target table because audit
+  history must survive target deletion and may describe several resource types.
+- `request_id` identifies one inbound attempt. A retry has a new request ID but can refer
+  to the same idempotent write.
+- `trace_id` comes from the distributed tracing context and may group multiple requests
+  and audit events. Request and trace IDs are correlation values, not database entities.
 
 ## Database topology
 
@@ -311,3 +350,38 @@ checked into HSS beside its code and contract tests.
 
 - [GitHub Actions checkout: multiple repositories and private-repository credentials](https://github.com/actions/checkout)
 - [Heroku Container Registry and CI/CD deployment](https://devcenter.heroku.com/articles/container-registry-and-runtime)
+
+## Deferred decisions
+
+Open questions surfaced during the persistence foundation. Each blocks the importer rather
+than the read-only slice, and none is resolved here.
+
+### 1. `vault_documents` has no path or policy-scope column
+
+`folders.yml` keys `ai_write` permissions on vault path. Rows currently carry `id`, `kind`,
+and `source_ids` — nothing that maps back to a folder — so the permission model cannot be
+evaluated against the database at all. Whatever the importer writes will have to carry this,
+and the shape of the column (literal path, policy scope identifier, or both) determines
+whether permission checks are a string prefix match or a join.
+
+### 2. `document_kind_enum('note','wiki')` has diverged from the governance Type Dictionary
+
+The Type Dictionary defines Project, Concept, Reference, Resource, Person, System, Decision,
+Meeting, Ideas, and Summary Notes. Human-layer notes will not fit a two-value enum.
+
+Proposed resolution, not yet accepted: keep `kind` as a coarse storage and lifecycle
+discriminator, and add a separate `doc_type TEXT` validated in application code against
+`types.yml`. The reasoning is that PostgreSQL enums require a migration to extend, whereas
+`types.yml` is explicitly meant to evolve without one — so encoding the type vocabulary as an
+enum would put the slower-moving mechanism in charge of the faster-moving concept.
+
+### 3. Governance artifacts split across the source/knowledge boundary
+
+`folders.yml`, `types.yml`, and `global.yml` are executable policy and belong in source:
+policy cannot live inside the store it governs, or it can rewrite its own rules.
+
+The doctrine prose (`Metadata Standard.md`, `Status Map.md`, `Type Dictionary.md`) stays
+vault-side, but should be generated from the YAML and CI-checked, following the `sync_skill.py`
+precedent. Governance prose then reaches the database the same way the wiki layer does — as a
+compiled read-only projection — rather than as a second source of truth that can silently
+contradict the YAML.

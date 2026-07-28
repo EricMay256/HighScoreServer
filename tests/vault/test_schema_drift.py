@@ -4,7 +4,8 @@ import psycopg
 from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, inspect
 
 from app.vault.settings import normalize_sqlalchemy_url
-from app.vault.tables import EMBEDDING_DIMENSIONS, metadata
+from app.vault.constants import EMBEDDING_DIMENSIONS
+from app.vault.tables import TEXT_SEARCH_CONFIG, metadata
 
 
 def test_core_metadata_matches_migrated_vault_schema(
@@ -123,7 +124,7 @@ def test_postgresql_specific_vault_ddl_matches_contract(
             JOIN pg_namespace schema_row
               ON schema_row.oid = table_row.relnamespace
             WHERE schema_row.nspname = 'vault'
-              AND table_row.relname = 'vault_documents'
+              AND table_row.relname = 'vault_document_embeddings'
               AND attribute.attname = 'embedding'
             """
         ).fetchone()
@@ -152,6 +153,9 @@ def test_postgresql_specific_vault_ddl_matches_contract(
         assert "title" in generated_row[1]
         assert "summary" in generated_row[1]
         assert "body" in generated_row[1]
+        # The configuration is baked in at migration time; CI pins the variable
+        # so this compares against a fixed target rather than the environment.
+        assert f"'{TEXT_SEARCH_CONFIG}'::regconfig" in generated_row[1]
 
         index_row = connection.execute(
             """
@@ -164,13 +168,15 @@ def test_postgresql_specific_vault_ddl_matches_contract(
               ON index_class.oid = index_row.indexrelid
             JOIN pg_am access_method
               ON access_method.oid = index_class.relam
-            WHERE index_class.relname = 'idx_vault_documents_embedding_hnsw'
+            WHERE index_class.relname = 'idx_vault_document_embeddings_hnsw'
             """
         ).fetchone()
         assert index_row is not None
         assert index_row[0] == "hnsw"
         assert "vector_cosine_ops" in index_row[1]
-        assert index_row[2] == "(embedding IS NOT NULL)"
+        # embedding is NOT NULL on the join table, so the index covers every row
+        # and carries no partial predicate.
+        assert index_row[2] is None
 
         enum_rows = connection.execute(
             """

@@ -28,9 +28,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ENUM, JSONB, TSVECTOR, UUID
 
+from .constants import EMBEDDING_DIMENSIONS, resolve_text_search_config
+
 
 VAULT_SCHEMA = "vault"
-EMBEDDING_DIMENSIONS = 1536
+
+# Resolved once at import so this metadata describes the same generated column
+# the migration emitted. The startup assertion compares it against the
+# expression actually stored in the catalog.
+TEXT_SEARCH_CONFIG = resolve_text_search_config()
 
 metadata = MetaData(schema=VAULT_SCHEMA)
 
@@ -172,18 +178,15 @@ vault_documents = Table(
         nullable=False,
         server_default=text("now()"),
     ),
-    Column("embedding", VECTOR(EMBEDDING_DIMENSIONS)),
-    Column("embedding_model", Text),
-    Column("embedded_at", DateTime(timezone=True)),
     Column(
         "search_vector",
         TSVECTOR,
         Computed(
-            "setweight(to_tsvector('english'::regconfig, "
+            f"setweight(to_tsvector('{TEXT_SEARCH_CONFIG}'::regconfig, "
             "coalesce(title, '')), 'A') || "
-            "setweight(to_tsvector('english'::regconfig, "
+            f"setweight(to_tsvector('{TEXT_SEARCH_CONFIG}'::regconfig, "
             "coalesce(summary, '')), 'B') || "
-            "setweight(to_tsvector('english'::regconfig, "
+            f"setweight(to_tsvector('{TEXT_SEARCH_CONFIG}'::regconfig, "
             "coalesce(body, '')), 'C')",
             persisted=True,
         ),
@@ -212,17 +215,46 @@ vault_documents = Table(
         name="vault_documents_schema_version_positive",
     ),
     CheckConstraint(
-        "(embedding IS NULL AND embedding_model IS NULL AND embedded_at IS NULL) "
-        "OR (embedding IS NOT NULL AND embedding_model IS NOT NULL "
-        "AND embedded_at IS NOT NULL)",
-        name="vault_documents_embedding_consistent",
-    ),
-    CheckConstraint(
         "(kind = 'note' AND compile_run_id IS NULL "
         "AND compiled_by IS NULL AND compiled_at IS NULL) "
         "OR (kind = 'wiki' AND compile_run_id IS NOT NULL "
         "AND compiled_by IS NOT NULL AND compiled_at IS NOT NULL)",
         name="vault_documents_compile_provenance_consistent",
+    ),
+)
+
+# Embeddings live beside the documents rather than on them so a corpus can hold
+# two profiles at once during a re-embed, and so "not yet embedded" is the
+# absence of a row rather than a nullable column.
+vault_document_embeddings = Table(
+    "vault_document_embeddings",
+    metadata,
+    Column(
+        "document_id",
+        Text,
+        ForeignKey(
+            "vault.vault_documents.id",
+            name="vault_document_embeddings_document_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    Column("profile_id", Text, nullable=False),
+    Column("embedding", VECTOR(EMBEDDING_DIMENSIONS), nullable=False),
+    Column(
+        "embedded_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    PrimaryKeyConstraint(
+        "document_id",
+        "profile_id",
+        name="vault_document_embeddings_pkey",
+    ),
+    CheckConstraint(
+        "profile_id ~ '^[A-Za-z0-9._:/-]{3,128}$'",
+        name="vault_document_embeddings_profile_id_format",
     ),
 )
 
@@ -380,20 +412,39 @@ vault_audit_events = Table(
     Column("id", BigInteger, Identity(), primary_key=True),
     Column("principal_id", Text),
     Column("operation", Text, nullable=False),
+    Column("target_type", Text),
     Column("target_id", Text),
+    Column("idempotency_key", Text),
     Column("outcome", Text, nullable=False),
     Column("request_id", Text, nullable=False),
     Column("trace_id", Text),
-    Column("latency_ms", Double, nullable=False),
+    # Nullable: lifecycle and system-generated events have no meaningful
+    # latency, and NOT NULL would force a fabricated zero.
+    Column("latency_ms", Double),
     Column(
         "occurred_at",
         DateTime(timezone=True),
         nullable=False,
         server_default=text("now()"),
     ),
+    # principal_id and idempotency_key are correlation identifiers, deliberately
+    # not a foreign key: an audit insert must never fail on a referential
+    # constraint, events for rejected or unauthenticated writes must keep their
+    # key, and vault_write_requests must stay prunable. See vault ADR 0002.
     CheckConstraint(
         "btrim(operation) <> ''",
         name="vault_audit_events_operation_nonempty",
+    ),
+    CheckConstraint(
+        "(target_type IS NULL AND target_id IS NULL) OR "
+        "(target_type IS NOT NULL AND btrim(target_type) <> '' "
+        "AND target_id IS NOT NULL AND btrim(target_id) <> '')",
+        name="vault_audit_events_target_consistent",
+    ),
+    CheckConstraint(
+        "idempotency_key IS NULL "
+        "OR idempotency_key ~ '^[A-Za-z0-9._:-]{8,128}$'",
+        name="vault_audit_events_idempotency_key_format",
     ),
     CheckConstraint(
         "btrim(outcome) <> ''",
@@ -416,17 +467,24 @@ Index(
 )
 Index("idx_vault_documents_tags", vault_documents.c.tags, postgresql_using="gin")
 Index(
-    "idx_vault_documents_embedding_hnsw",
-    vault_documents.c.embedding,
-    postgresql_using="hnsw",
-    postgresql_ops={"embedding": "vector_cosine_ops"},
-    postgresql_where=vault_documents.c.embedding.is_not(None),
-)
-Index(
     "idx_vault_documents_kind_status_updated",
     vault_documents.c.kind,
     vault_documents.c.status,
     vault_documents.c.updated_at.desc(),
+)
+# No partial predicate: embedding is NOT NULL, so every row is indexable. With a
+# single unpartitioned index, profile filtering is a post-filter; once a second
+# profile is populated the remedy is a partial HNSW index per profile, added by
+# a migration at that time. See vault ADR 0003.
+Index(
+    "idx_vault_document_embeddings_hnsw",
+    vault_document_embeddings.c.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
+)
+Index(
+    "idx_vault_document_embeddings_profile",
+    vault_document_embeddings.c.profile_id,
 )
 Index(
     "idx_vault_review_cases_state_created",
@@ -445,6 +503,20 @@ Index(
     "idx_vault_audit_events_principal_occurred",
     vault_audit_events.c.principal_id,
     vault_audit_events.c.occurred_at.desc(),
+)
+Index("idx_vault_audit_events_request", vault_audit_events.c.request_id)
+Index(
+    "idx_vault_audit_events_trace",
+    vault_audit_events.c.trace_id,
+    postgresql_where=vault_audit_events.c.trace_id.is_not(None),
+)
+# Replaces the index the dropped composite foreign key used to provide, keeping
+# "which audit events belong to this write request" a cheap lookup.
+Index(
+    "idx_vault_audit_events_principal_idempotency",
+    vault_audit_events.c.principal_id,
+    vault_audit_events.c.idempotency_key,
+    postgresql_where=vault_audit_events.c.idempotency_key.is_not(None),
 )
 Index(
     "idx_vault_compile_runs_state_started",

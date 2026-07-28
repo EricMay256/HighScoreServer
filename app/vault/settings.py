@@ -6,6 +6,8 @@ import os
 
 from sqlalchemy.engine import make_url
 
+from .constants import EMBEDDING_DIMENSIONS, resolve_text_search_config
+
 
 def _parse_bool(value: str) -> bool:
     normalized = value.strip().lower()
@@ -23,6 +25,16 @@ def _positive_int(name: str, value: str) -> int:
         raise RuntimeError(f"{name} must be an integer") from exc
     if parsed < 1:
         raise RuntimeError(f"{name} must be one or greater")
+    return parsed
+
+
+def _positive_float(name: str, value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
     return parsed
 
 
@@ -54,6 +66,70 @@ class ConnectionBudget:
 
 
 @dataclass(frozen=True, slots=True)
+class EmbeddingSettings:
+    provider: str
+    api_key: str | None
+    base_url: str
+    model: str
+    profile_id: str
+    embedding_dimensions: int
+    timeout_seconds: float
+
+    @classmethod
+    def from_environment(cls) -> "EmbeddingSettings":
+        provider = os.environ.get("VAULT_EMBEDDING_PROVIDER", "openai").strip()
+        if provider != "openai":
+            raise RuntimeError(
+                "Unsupported VAULT_EMBEDDING_PROVIDER. The provider-neutral "
+                "interface currently has only the 'openai' adapter."
+            )
+
+        embedding_dimensions = _positive_int(
+            "VAULT_EMBEDDING_DIMENSIONS",
+            os.environ.get(
+                "VAULT_EMBEDDING_DIMENSIONS",
+                str(EMBEDDING_DIMENSIONS),
+            ),
+        )
+        if embedding_dimensions != EMBEDDING_DIMENSIONS:
+            raise RuntimeError(
+                "VAULT_EMBEDDING_DIMENSIONS does not match the migrated "
+                f"vector({EMBEDDING_DIMENSIONS}) schema. Changing dimensions "
+                "requires an Alembic migration and controlled re-embedding."
+            )
+
+        model = os.environ.get(
+            "VAULT_EMBEDDING_MODEL",
+            "text-embedding-3-small",
+        ).strip()
+        if not model:
+            raise RuntimeError("VAULT_EMBEDDING_MODEL must not be empty")
+
+        profile_id = os.environ.get(
+            "VAULT_EMBEDDING_PROFILE_ID",
+            f"openai/{model}:{embedding_dimensions}",
+        ).strip()
+        if not profile_id:
+            raise RuntimeError("VAULT_EMBEDDING_PROFILE_ID must not be empty")
+
+        return cls(
+            provider=provider,
+            api_key=os.environ.get("VAULT_EMBEDDING_API_KEY"),
+            base_url=os.environ.get(
+                "VAULT_EMBEDDING_BASE_URL",
+                "https://api.openai.com/v1",
+            ).rstrip("/"),
+            model=model,
+            profile_id=profile_id,
+            embedding_dimensions=embedding_dimensions,
+            timeout_seconds=_positive_float(
+                "VAULT_EMBEDDING_TIMEOUT_SECONDS",
+                os.environ.get("VAULT_EMBEDDING_TIMEOUT_SECONDS", "10"),
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class VaultSettings:
     enabled: bool
     database_url: str
@@ -65,6 +141,7 @@ class VaultSettings:
     hss_connection_limit: int
     vault_connection_limit: int
     operational_connection_reserve: int
+    text_search_config: str
 
     @classmethod
     def from_environment(cls) -> "VaultSettings":
@@ -109,6 +186,7 @@ class VaultSettings:
                 "DB_OPERATIONAL_CONNECTION_RESERVE",
                 os.environ.get("DB_OPERATIONAL_CONNECTION_RESERVE", "2"),
             ),
+            text_search_config=resolve_text_search_config(),
         )
 
     @property

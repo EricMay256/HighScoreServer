@@ -9,7 +9,10 @@ Revises:
 Create Date: 2026-07-25
 """
 
+import sqlalchemy as sa
 from alembic import op
+
+from app.vault.constants import resolve_text_search_config
 
 
 revision = "0001_vault_foundation"
@@ -18,9 +21,49 @@ branch_labels = None
 depends_on = None
 
 
+def _text_search_config() -> str:
+    """Resolve the text search configuration baked into ``search_vector``.
+
+    The name is interpolated into DDL, so it is validated twice: against an
+    identifier-shaped pattern in ``resolve_text_search_config``, and against the
+    live catalog here. A configuration PostgreSQL does not know is rejected
+    rather than passed through to CREATE TABLE.
+
+    A persisted generated column's expression is compiled into DDL at migration
+    time and must be IMMUTABLE, so this is a migration-time choice. Changing the
+    environment variable afterwards requires a table rewrite and a GIN reindex,
+    not a restart.
+    """
+
+    config = resolve_text_search_config()
+    existing = (
+        op.get_bind()
+        .execute(
+            sa.text("SELECT 1 FROM pg_catalog.pg_ts_config WHERE cfgname = :name"),
+            {"name": config},
+        )
+        .scalar()
+    )
+    if existing is None:
+        raise RuntimeError(
+            f"VAULT_TEXT_SEARCH_CONFIG={config!r} is not a text search "
+            "configuration in this database. Valid names are listed in "
+            "pg_catalog.pg_ts_config."
+        )
+    return config
+
+
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     op.execute("CREATE SCHEMA IF NOT EXISTS vault")
+
+    config = _text_search_config()
+    search_vector_expression = (
+        f"setweight(to_tsvector('{config}'::regconfig, coalesce(title, '')), 'A')"
+        f" || setweight("
+        f"to_tsvector('{config}'::regconfig, coalesce(summary, '')), 'B')"
+        f" || setweight(to_tsvector('{config}'::regconfig, coalesce(body, '')), 'C')"
+    )
 
     op.execute(
         """
@@ -56,7 +99,13 @@ def upgrade() -> None:
                 OR (state <> 'running' AND completed_at IS NOT NULL)
             )
         );
+        """
+    )
 
+    # Built by concatenation rather than as an f-string: this statement contains
+    # '{}'::jsonb and '{}'::text[] literals that brace-formatting would mangle.
+    op.execute(
+        """
         CREATE TABLE vault.vault_documents (
             id text NOT NULL,
             kind vault.vault_document_kind DEFAULT 'note' NOT NULL,
@@ -73,22 +122,10 @@ def upgrade() -> None:
             schema_version integer NOT NULL,
             created_at timestamptz DEFAULT now() NOT NULL,
             updated_at timestamptz DEFAULT now() NOT NULL,
-            embedding vector(1536),
-            embedding_model text,
-            embedded_at timestamptz,
             search_vector tsvector GENERATED ALWAYS AS (
-                setweight(
-                    to_tsvector('english'::regconfig, coalesce(title, '')),
-                    'A'
-                )
-                || setweight(
-                    to_tsvector('english'::regconfig, coalesce(summary, '')),
-                    'B'
-                )
-                || setweight(
-                    to_tsvector('english'::regconfig, coalesce(body, '')),
-                    'C'
-                )
+        """
+        + search_vector_expression
+        + """
             ) STORED NOT NULL,
             compile_run_id uuid,
             compiled_by text,
@@ -107,18 +144,6 @@ def upgrade() -> None:
                 CHECK (btrim(contributed_by) <> ''),
             CONSTRAINT vault_documents_schema_version_positive
                 CHECK (schema_version > 0),
-            CONSTRAINT vault_documents_embedding_consistent CHECK (
-                (
-                    embedding IS NULL
-                    AND embedding_model IS NULL
-                    AND embedded_at IS NULL
-                )
-                OR (
-                    embedding IS NOT NULL
-                    AND embedding_model IS NOT NULL
-                    AND embedded_at IS NOT NULL
-                )
-            ),
             CONSTRAINT vault_documents_compile_provenance_consistent CHECK (
                 (
                     kind = 'note'
@@ -133,6 +158,24 @@ def upgrade() -> None:
                     AND compiled_at IS NOT NULL
                 )
             )
+        );
+        """
+    )
+
+    op.execute(
+        """
+        CREATE TABLE vault.vault_document_embeddings (
+            document_id text NOT NULL,
+            profile_id text NOT NULL,
+            embedding vector(1536) NOT NULL,
+            embedded_at timestamptz DEFAULT now() NOT NULL,
+            CONSTRAINT vault_document_embeddings_pkey
+                PRIMARY KEY (document_id, profile_id),
+            CONSTRAINT vault_document_embeddings_document_id_fkey
+                FOREIGN KEY (document_id)
+                REFERENCES vault.vault_documents(id) ON DELETE CASCADE,
+            CONSTRAINT vault_document_embeddings_profile_id_format
+                CHECK (profile_id ~ '^[A-Za-z0-9._:/-]{3,128}$')
         );
 
         CREATE TABLE vault.vault_review_cases (
@@ -228,15 +271,30 @@ def upgrade() -> None:
             id bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL,
             principal_id text,
             operation text NOT NULL,
+            target_type text,
             target_id text,
+            idempotency_key text,
             outcome text NOT NULL,
             request_id text NOT NULL,
             trace_id text,
-            latency_ms double precision NOT NULL,
+            latency_ms double precision,
             occurred_at timestamptz DEFAULT now() NOT NULL,
             CONSTRAINT vault_audit_events_pkey PRIMARY KEY (id),
             CONSTRAINT vault_audit_events_operation_nonempty
                 CHECK (btrim(operation) <> ''),
+            CONSTRAINT vault_audit_events_target_consistent CHECK (
+                (target_type IS NULL AND target_id IS NULL)
+                OR (
+                    target_type IS NOT NULL
+                    AND btrim(target_type) <> ''
+                    AND target_id IS NOT NULL
+                    AND btrim(target_id) <> ''
+                )
+            ),
+            CONSTRAINT vault_audit_events_idempotency_key_format CHECK (
+                idempotency_key IS NULL
+                OR idempotency_key ~ '^[A-Za-z0-9._:-]{8,128}$'
+            ),
             CONSTRAINT vault_audit_events_outcome_nonempty
                 CHECK (btrim(outcome) <> ''),
             CONSTRAINT vault_audit_events_request_id_nonempty
@@ -253,13 +311,14 @@ def upgrade() -> None:
             ON vault.vault_documents USING gin (search_vector);
         CREATE INDEX idx_vault_documents_tags
             ON vault.vault_documents USING gin (tags);
-        CREATE INDEX idx_vault_documents_embedding_hnsw
-            ON vault.vault_documents
-            USING hnsw (embedding vector_cosine_ops)
-            WHERE embedding IS NOT NULL;
         CREATE INDEX idx_vault_documents_kind_status_updated
             ON vault.vault_documents
             USING btree (kind, status, updated_at DESC);
+        CREATE INDEX idx_vault_document_embeddings_hnsw
+            ON vault.vault_document_embeddings
+            USING hnsw (embedding vector_cosine_ops);
+        CREATE INDEX idx_vault_document_embeddings_profile
+            ON vault.vault_document_embeddings USING btree (profile_id);
         CREATE INDEX idx_vault_review_cases_state_created
             ON vault.vault_review_cases USING btree (state, created_at);
         CREATE INDEX idx_vault_write_requests_created
@@ -269,6 +328,15 @@ def upgrade() -> None:
         CREATE INDEX idx_vault_audit_events_principal_occurred
             ON vault.vault_audit_events
             USING btree (principal_id, occurred_at DESC);
+        CREATE INDEX idx_vault_audit_events_request
+            ON vault.vault_audit_events USING btree (request_id);
+        CREATE INDEX idx_vault_audit_events_trace
+            ON vault.vault_audit_events USING btree (trace_id)
+            WHERE trace_id IS NOT NULL;
+        CREATE INDEX idx_vault_audit_events_principal_idempotency
+            ON vault.vault_audit_events
+            USING btree (principal_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
         CREATE INDEX idx_vault_compile_runs_state_started
             ON vault.vault_compile_runs
             USING btree (state, started_at DESC);
@@ -285,6 +353,7 @@ def downgrade() -> None:
         DROP TABLE IF EXISTS vault.vault_agent_credentials;
         DROP TABLE IF EXISTS vault.vault_write_requests;
         DROP TABLE IF EXISTS vault.vault_review_cases;
+        DROP TABLE IF EXISTS vault.vault_document_embeddings;
         DROP TABLE IF EXISTS vault.vault_documents;
         DROP TABLE IF EXISTS vault.vault_compile_runs;
 

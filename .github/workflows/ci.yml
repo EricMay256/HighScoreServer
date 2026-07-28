@@ -59,6 +59,10 @@ jobs:
       DB_OPERATIONAL_CONNECTION_RESERVE: "2"
       VAULT_DB_POOL_SIZE: "1"
       VAULT_DB_POOL_TIMEOUT_SECONDS: "5"
+      # Pinned explicitly rather than left to the default: this value is compiled
+      # into the search_vector generated column at migration time, so the schema
+      # drift test needs a fixed target to compare against.
+      VAULT_TEXT_SEARCH_CONFIG: english
       # API_KEY and JWT_SECRET are functional fixtures, not real secrets — the
       # test suite doesn't validate them against any external system, it just
       # needs them to be set. Inlining is intentional; promoting them to

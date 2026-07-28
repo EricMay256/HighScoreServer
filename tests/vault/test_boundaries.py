@@ -50,6 +50,28 @@ def test_vault_package_has_no_leaderboard_domain_imports() -> None:
     assert violations == []
 
 
+def test_vault_package_imports_siblings_relatively() -> None:
+    # Extraction must be a directory move, not a find-and-replace. An absolute
+    # self-reference is what turns the former into the latter.
+    violations: list[str] = []
+    for path in VAULT_PACKAGE.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                violations.extend(
+                    f"{path.name}:{node.lineno}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name == "app" or alias.name.startswith("app.")
+                )
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                module = node.module or ""
+                if module == "app" or module.startswith("app."):
+                    violations.append(f"{path.name}:{node.lineno}: from {module}")
+
+    assert violations == []
+
+
 def test_vault_package_does_not_introduce_sqlalchemy_orm() -> None:
     violations: list[str] = []
     for path in VAULT_PACKAGE.glob("*.py"):

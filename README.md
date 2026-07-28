@@ -92,8 +92,8 @@ deployment. HSS never fetches the private repository.
 The initial deployment reuses the existing Postgres add-on but places vault objects in
 the explicitly qualified `vault` schema. Setting `VAULT_DATABASE_URL` to another Postgres
 add-on moves the same schema and migration lineage to a physically separate database.
-See [Vault architecture and integration](docs/vault-architecture.md) and
-[ADR 0016](docs/adr/0016-sqlalchemy-core-for-vault-bounded-context.md).
+Its documentation and decision records live with the package, in
+[`app/vault/docs/`](app/vault/docs/vault-architecture.md), so they leave with it.
 
 
 ## Local Setup

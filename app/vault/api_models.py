@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
-from app.vault.domain import DocumentStatus
+from .domain import DocumentStatus
 
 
 class VaultContributionRequest(BaseModel):
