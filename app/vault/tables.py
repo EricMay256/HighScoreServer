@@ -130,6 +130,11 @@ vault_documents = Table(
         nullable=False,
         server_default=text("'note'"),
     ),
+    # The governance Type Dictionary value. Deliberately TEXT rather than a
+    # second enum: types.yml is meant to evolve without a migration, and an
+    # enum would put the slower mechanism in charge of the faster concept.
+    # Nullable because untyped is a real state. See ADR 0009.
+    Column("doc_type", Text),
     Column(
         "status",
         document_status_enum,
@@ -213,6 +218,13 @@ vault_documents = Table(
     CheckConstraint(
         "schema_version > 0",
         name="vault_documents_schema_version_positive",
+    ),
+    # Shape only, never vocabulary: which names are legal belongs to types.yml
+    # and is checked in application code, so that adding a type stays a data
+    # change rather than a migration.
+    CheckConstraint(
+        "doc_type IS NULL OR doc_type ~ '^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$'",
+        name="vault_documents_doc_type_format",
     ),
     CheckConstraint(
         "(kind = 'note' AND compile_run_id IS NULL "

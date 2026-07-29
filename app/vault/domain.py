@@ -69,6 +69,10 @@ class VaultDocument:
     schema_version: int
     created_at: datetime
     updated_at: datetime
+    # Governance Type Dictionary value, validated against types.yml at the
+    # write boundary rather than here. None means untyped, which is a real
+    # state rather than missing data. See ADR 0009.
+    doc_type: str | None = None
     summary: str | None = None
     tags: tuple[str, ...] = ()
     related_ids: tuple[str, ...] = ()
@@ -89,6 +93,7 @@ class NewVaultDocument:
     contributed_by: str
     provenance: dict[str, Any]
     schema_version: int = 1
+    doc_type: str | None = None
     summary: str | None = None
     tags: tuple[str, ...] = ()
     related_ids: tuple[str, ...] = ()

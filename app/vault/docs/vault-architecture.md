@@ -353,38 +353,32 @@ checked into HSS beside its code and contract tests.
 
 ## Deferred decisions
 
-Open questions surfaced during the persistence foundation and the read-only slice, none of them
-resolved here. Items 1 and 2 block the importer. Item 3 is a boundary question with no deadline.
-Item 4 is shipped, working, and deliberately provisional — it is listed because the values were
-chosen by reasoning rather than measurement, and should not be mistaken for settled.
+Open questions surfaced during the persistence foundation and the read-only slice. Item 1 blocks
+the importer. Item 2 is a boundary question with no deadline. Item 3 is shipped, working, and
+deliberately provisional — it is listed because the values were chosen by reasoning rather than
+measurement, and should not be mistaken for settled.
 
-Two questions that were open after Phase 1 have since been settled and are no longer listed
-below: the embedding provider and `profile_id` identity (vault ADR 0005) and how the two
-retrieval arms combine (vault ADR 0006). Still open, and unchanged by the read-only slice:
-the **partial HNSW index per profile**, which becomes necessary only when a second profile is
-populated, and the **dimension-change DDL shape**, which is deliberately left until a dimension
-change is actually proposed. Both are described in `vault-configuration.md`.
+Three questions that were open after Phase 1 have since been settled and are no longer listed
+below: the embedding provider and `profile_id` identity (vault ADR 0005), how the two retrieval
+arms combine (vault ADR 0006), and the divergence between `document_kind_enum` and the governance
+Type Dictionary (vault ADR 0009, which keeps `kind` coarse and adds a nullable `doc_type TEXT`
+validated in application code against `types.yml`; migration `0002_document_doc_type`). Still open,
+and unchanged by the read-only slice: the **partial HNSW index per profile**, which becomes
+necessary only when a second profile is populated, and the **dimension-change DDL shape**, which is
+deliberately left until a dimension change is actually proposed. Both are described in
+`vault-configuration.md`.
 
 ### 1. `vault_documents` has no path or policy-scope column
 
 `folders.yml` keys `ai_write` permissions on vault path. Rows currently carry `id`, `kind`,
-and `source_ids` — nothing that maps back to a folder — so the permission model cannot be
-evaluated against the database at all. Whatever the importer writes will have to carry this,
+`doc_type`, and `source_ids` — nothing that maps back to a folder — so the permission model cannot
+be evaluated against the database at all. Whatever the importer writes will have to carry this,
 and the shape of the column (literal path, policy scope identifier, or both) determines
 whether permission checks are a string prefix match or a join.
 
-### 2. `document_kind_enum('note','wiki')` has diverged from the governance Type Dictionary
+This is the last remaining importer blocker.
 
-The Type Dictionary defines Project, Concept, Reference, Resource, Person, System, Decision,
-Meeting, Ideas, and Summary Notes. Human-layer notes will not fit a two-value enum.
-
-Proposed resolution, not yet accepted: keep `kind` as a coarse storage and lifecycle
-discriminator, and add a separate `doc_type TEXT` validated in application code against
-`types.yml`. The reasoning is that PostgreSQL enums require a migration to extend, whereas
-`types.yml` is explicitly meant to evolve without one — so encoding the type vocabulary as an
-enum would put the slower-moving mechanism in charge of the faster-moving concept.
-
-### 3. Governance artifacts split across the source/knowledge boundary
+### 2. Governance artifacts split across the source/knowledge boundary
 
 `folders.yml`, `types.yml`, and `global.yml` are executable policy and belong in source:
 policy cannot live inside the store it governs, or it can rewrite its own rules.
@@ -395,7 +389,7 @@ precedent. Governance prose then reaches the database the same way the wiki laye
 compiled read-only projection — rather than as a second source of truth that can silently
 contradict the YAML.
 
-### 4. The embedding request budget is provisional — active consideration
+### 3. The embedding request budget is provisional — active consideration
 
 **Status: shipped and working. Revisit with usage data, not before.**
 

@@ -13,3 +13,4 @@ repository's `docs/adr/`, and moves with `app/vault/` when the package is extrac
 | 0006 | [Hybrid retrieval fused by reciprocal rank](0006-hybrid-retrieval-fused-by-reciprocal-rank.md) | Accepted (amended by 0007) |
 | 0007 | [The lexical arm disjoins query terms](0007-lexical-arm-disjoins-query-terms.md) | Accepted |
 | 0008 | [The read surface resolves archived documents and withholds flagged ones](0008-read-surface-resolves-archived-withholds-flagged.md) | Accepted |
+| 0009 | [`doc_type` is text validated against `types.yml`, not a second enum](0009-doc-type-is-text-validated-against-types-yml.md) | Accepted |

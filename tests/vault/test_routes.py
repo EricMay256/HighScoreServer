@@ -3,8 +3,12 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
 
+from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
+from app.vault.repository import VaultDocumentRepository
 from app.vault.settings import vault_enabled
+from app.vault.tables import vault_documents
 from tests.vault.test_search import clear_corpus, seed_corpus, vault_service
 
 
@@ -275,3 +279,70 @@ def test_document_fetch_requires_credentials(
     response = client.get("/api/vault/documents/anything")
 
     assert response.status_code == 401
+
+
+def test_read_surface_carries_doc_type_including_when_untyped(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    configure_test_env: None,
+) -> None:
+    """The Type Dictionary value reaches the agent, and null is explicit.
+
+    The consumer is an agent choosing what to read, so the type has to be on
+    the response rather than inferrable only from the body. An untyped
+    document reports null instead of omitting the field, so "untyped" and
+    "this deployment predates doc_type" do not look the same.
+    """
+
+    monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
+    service, engine = vault_service()
+    documents = VaultDocumentRepository()
+    typed_id = f"route-doctype-{uuid4().hex}"
+    untyped_id = f"route-doctype-{uuid4().hex}"
+
+    async def seed() -> None:
+        async with service.transaction() as connection:
+            for document_id, doc_type in ((typed_id, "Decision"), (untyped_id, None)):
+                await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=document_id,
+                        kind=DocumentKind.NOTE,
+                        doc_type=doc_type,
+                        status=DocumentStatus.ACTIVE,
+                        title="Type Dictionary fixture",
+                        body="Exercises doc_type on the read surface.",
+                        contributed_by="test:doc-type",
+                        provenance={"fixture": True},
+                    ),
+                )
+
+    async def clear() -> None:
+        async with service.transaction() as connection:
+            await connection.execute(
+                delete(vault_documents).where(
+                    vault_documents.c.id.in_([typed_id, untyped_id])
+                )
+            )
+
+    asyncio.run(seed())
+    try:
+        typed = client.get(
+            f"/api/vault/documents/{typed_id}",
+            headers={"Authorization": f"Bearer {READ_KEY}"},
+        )
+        untyped = client.get(
+            f"/api/vault/documents/{untyped_id}",
+            headers={"Authorization": f"Bearer {READ_KEY}"},
+        )
+    finally:
+        asyncio.run(clear())
+        asyncio.run(engine.dispose())
+
+    assert typed.status_code == 200
+    assert typed.json()["doc_type"] == "Decision"
+
+    assert untyped.status_code == 200
+    untyped_body = untyped.json()
+    assert "doc_type" in untyped_body
+    assert untyped_body["doc_type"] is None

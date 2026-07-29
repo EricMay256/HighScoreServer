@@ -2,7 +2,9 @@ import asyncio
 from dataclasses import replace
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.vault.constants import EMBEDDING_DIMENSIONS
 from app.vault.db import acquire_vault_connection, create_vault_engine
@@ -243,6 +245,141 @@ def test_embeddings_are_per_profile_and_re_embedding_is_idempotent(
                     .where(vault_document_embeddings.c.document_id == document_id)
                 )
                 assert remaining == 0
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_doc_type_round_trips_and_defaults_to_untyped(
+    configure_test_env: None,
+) -> None:
+    """doc_type survives a write/read cycle, and absence means untyped.
+
+    The Type Dictionary value is carried as text rather than an enum so the
+    vocabulary can grow without a migration (ADR 0009); what the database
+    guarantees is only that a present value is non-blank and bounded.
+    """
+
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+        typed_id = f"doctype-{uuid4().hex}"
+        untyped_id = f"doctype-{uuid4().hex}"
+
+        try:
+            async with service.transaction() as connection:
+                typed = await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=typed_id,
+                        kind=DocumentKind.NOTE,
+                        # A multi-word Type Dictionary name: the shape
+                        # constraint has to admit the interior space.
+                        doc_type="Summary Notes",
+                        status=DocumentStatus.ACTIVE,
+                        title="A typed note",
+                        body="Carries a governance type.",
+                        contributed_by="test:doc-type",
+                        provenance={"fixture": True},
+                    ),
+                )
+                untyped = await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=untyped_id,
+                        kind=DocumentKind.NOTE,
+                        status=DocumentStatus.ACTIVE,
+                        title="An untyped note",
+                        body="Carries no governance type.",
+                        contributed_by="test:doc-type",
+                        provenance={"fixture": True},
+                    ),
+                )
+
+                assert typed.doc_type == "Summary Notes"
+                # Untyped is the absence of a value, not a sentinel string.
+                assert untyped.doc_type is None
+
+            async with service.transaction() as connection:
+                reloaded = await documents.get_by_id(connection, typed_id)
+                assert reloaded is not None
+                assert reloaded.doc_type == "Summary Notes"
+
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id.in_([typed_id, untyped_id])
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_database_rejects_malformed_doc_type_without_ruling_on_vocabulary(
+    configure_test_env: None,
+) -> None:
+    """The CHECK constrains shape only; types.yml owns the vocabulary.
+
+    An unknown-but-well-formed type is accepted by the database on purpose —
+    rejecting it is application-level validation at the write boundary, which
+    is what keeps adding a type out of the migration lineage.
+    """
+
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+
+        def candidate(document_id: str, doc_type: str) -> NewVaultDocument:
+            return NewVaultDocument(
+                id=document_id,
+                kind=DocumentKind.NOTE,
+                doc_type=doc_type,
+                status=DocumentStatus.ACTIVE,
+                title="Shape check fixture",
+                body="Only the shape of doc_type is enforced here.",
+                contributed_by="test:doc-type",
+                provenance={"fixture": True},
+            )
+
+        malformed = (
+            "",
+            "   ",
+            " LeadingSpace",
+            "Has\nNewline",
+            "x" * 65,
+        )
+
+        try:
+            for index, value in enumerate(malformed):
+                document_id = f"doctype-bad-{index}-{uuid4().hex}"
+                with pytest.raises(IntegrityError) as caught:
+                    async with service.transaction() as connection:
+                        await documents.insert(
+                            connection,
+                            candidate(document_id, value),
+                        )
+                assert "vault_documents_doc_type_format" in str(caught.value)
+
+            # Well-formed but not in any Type Dictionary: the database's job
+            # ends at shape, so this is stored rather than refused.
+            unknown_id = f"doctype-unknown-{uuid4().hex}"
+            async with service.transaction() as connection:
+                stored = await documents.insert(
+                    connection,
+                    candidate(unknown_id, "Totally-Invented_Type"),
+                )
+                assert stored.doc_type == "Totally-Invented_Type"
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id == unknown_id
+                    )
+                )
         finally:
             await engine.dispose()
 

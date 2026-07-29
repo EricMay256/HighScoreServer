@@ -50,6 +50,15 @@ be edited when it does.
 - **Embeddings live in `vault_document_embeddings`, keyed by `(document_id, profile_id)`** —
   not as columns on `vault_documents`. "Not embedded" is the absence of a row. Re-embedding a
   profile is an upsert. See ADR 0003.
+- **`kind` is lifecycle; `doc_type` is taxonomy.** `document_kind_enum('note','wiki')` stays a
+  coarse storage and lifecycle discriminator and keeps its role in
+  `vault_documents_compile_provenance_consistent`. The governance Type Dictionary value lives in
+  a separate nullable `doc_type TEXT`. The database CHECK constrains **shape only** — non-blank,
+  ≤64 characters, printable, interior spaces allowed for names like "Summary Notes". Which names
+  are legal is `types.yml`'s business, enforced in application code at the write boundary, so
+  that adding a type stays a data change rather than a migration. Do not "tighten" that CHECK
+  into a vocabulary list and do not widen the `kind` enum. Null means untyped, which is a real
+  state. See ADR 0009.
 - **`VAULT_TEXT_SEARCH_CONFIG` is a migration-time choice.** It is compiled into the
   persisted `search_vector` generated column, so changing it later requires a table rewrite
   and a GIN reindex, not a restart. A startup assertion compares the environment against the

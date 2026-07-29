@@ -90,6 +90,7 @@ def _to_detail(document: VaultDocument) -> VaultDocumentDetail:
     return VaultDocumentDetail(
         note_id=document.id,
         kind=document.kind,
+        doc_type=document.doc_type,
         status=document.status,
         title=document.title,
         summary=document.summary,

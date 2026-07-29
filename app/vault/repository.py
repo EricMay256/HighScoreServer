@@ -26,6 +26,7 @@ from .tables import vault_document_embeddings, vault_documents, vault_review_cas
 DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.id,
     vault_documents.c.kind,
+    vault_documents.c.doc_type,
     vault_documents.c.status,
     vault_documents.c.title,
     vault_documents.c.summary,
@@ -49,6 +50,7 @@ def document_from_row(row: RowMapping) -> VaultDocument:
     return VaultDocument(
         id=row["id"],
         kind=DocumentKind(row["kind"]),
+        doc_type=row["doc_type"],
         status=DocumentStatus(row["status"]),
         title=row["title"],
         summary=row["summary"],
@@ -107,6 +109,7 @@ class VaultDocumentRepository:
             .values(
                 id=document.id,
                 kind=document.kind.value,
+                doc_type=document.doc_type,
                 status=document.status.value,
                 title=document.title,
                 summary=document.summary,

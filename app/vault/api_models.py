@@ -69,6 +69,14 @@ class VaultDocumentDetail(BaseModel):
 
     note_id: str
     kind: DocumentKind
+    doc_type: str | None = Field(
+        default=None,
+        description=(
+            "Governance Type Dictionary value, or null for an untyped "
+            "document. Free text rather than an enum because the type "
+            "vocabulary evolves without a schema change."
+        ),
+    )
     status: DocumentStatus
     title: str
     summary: str | None
