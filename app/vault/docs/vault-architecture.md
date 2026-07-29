@@ -356,6 +356,13 @@ checked into HSS beside its code and contract tests.
 Open questions surfaced during the persistence foundation. Each blocks the importer rather
 than the read-only slice, and none is resolved here.
 
+Two questions that were open after Phase 1 have since been settled and are no longer listed
+below: the embedding provider and `profile_id` identity (vault ADR 0005) and how the two
+retrieval arms combine (vault ADR 0006). Still open, and unchanged by the read-only slice:
+the **partial HNSW index per profile**, which becomes necessary only when a second profile is
+populated, and the **dimension-change DDL shape**, which is deliberately left until a dimension
+change is actually proposed. Both are described in `vault-configuration.md`.
+
 ### 1. `vault_documents` has no path or policy-scope column
 
 `folders.yml` keys `ai_write` permissions on vault path. Rows currently carry `id`, `kind`,

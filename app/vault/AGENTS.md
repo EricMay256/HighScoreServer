@@ -59,6 +59,28 @@ be edited when it does.
   phase. `vault_contrib.core.decide()` and `vault_contrib.models.Policy` remain normative and
   will be ported verbatim with their tests at switchover. See ADR 0004.
 
+## Retrieval and embeddings
+
+- The embedding **port** (`embeddings.py`) names no vendor. Adapters live in their own modules
+  (`embeddings_openai.py`), and `embedding_runtime.py` is the only place that maps a provider
+  name to an adapter. Nothing may import an adapter from the port.
+- `settings.py` deliberately does **not** validate that an adapter exists for the configured
+  provider. That separation keeps the Alembic environment free of transport imports; the
+  registry raises instead.
+- The embedding provider is **optional at runtime**. Without a credential the vault serves
+  lexical-only search and says so in the response. Do not turn a missing key back into a
+  startup failure — CI depends on this.
+- `vector_status` distinguishes `used` / `not_configured` / `failed`. Keep those three
+  separate: a broken provider must never be reportable as a deliberate lexical-only
+  deployment. `failed` also logs at ERROR; `not_configured` logs nothing per request.
+- Never log the query text or an embedding exception's message — both can carry user content.
+  Log the exception *type* instead. `tests/vault/test_search.py` asserts this.
+- Search must pass the text search configuration as a bound parameter —
+  `websearch_to_tsquery(:config, :query)` — never the database default, never interpolation.
+- The first profile is `openai/text-embedding-3-small:1536` (ADR 0005); the two arms combine
+  by Reciprocal Rank Fusion (ADR 0006). Changing provider or model is a controlled re-embed,
+  never a credentials-only config change.
+
 ## Working agreements
 
 - Type hints on every function signature; no module-level side effects.

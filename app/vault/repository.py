@@ -21,7 +21,31 @@ from .domain import (
 from .tables import vault_document_embeddings, vault_documents, vault_review_cases
 
 
-def _document_from_row(row: RowMapping) -> VaultDocument:
+# The public projection of a document. Shared with the retrieval module so the
+# two read paths cannot drift into returning different shapes.
+DOCUMENT_DOMAIN_COLUMNS = (
+    vault_documents.c.id,
+    vault_documents.c.kind,
+    vault_documents.c.status,
+    vault_documents.c.title,
+    vault_documents.c.summary,
+    vault_documents.c.body,
+    vault_documents.c.tags,
+    vault_documents.c.related_ids,
+    vault_documents.c.source_ids,
+    vault_documents.c.contributed_by,
+    vault_documents.c.source_url,
+    vault_documents.c.provenance,
+    vault_documents.c.schema_version,
+    vault_documents.c.created_at,
+    vault_documents.c.updated_at,
+    vault_documents.c.compile_run_id,
+    vault_documents.c.compiled_by,
+    vault_documents.c.compiled_at,
+)
+
+
+def document_from_row(row: RowMapping) -> VaultDocument:
     return VaultDocument(
         id=row["id"],
         kind=DocumentKind(row["kind"]),
@@ -71,26 +95,7 @@ def _review_case_from_row(row: RowMapping) -> VaultReviewCase:
 class VaultDocumentRepository:
     """Persistence operations for vault documents."""
 
-    _domain_columns = (
-        vault_documents.c.id,
-        vault_documents.c.kind,
-        vault_documents.c.status,
-        vault_documents.c.title,
-        vault_documents.c.summary,
-        vault_documents.c.body,
-        vault_documents.c.tags,
-        vault_documents.c.related_ids,
-        vault_documents.c.source_ids,
-        vault_documents.c.contributed_by,
-        vault_documents.c.source_url,
-        vault_documents.c.provenance,
-        vault_documents.c.schema_version,
-        vault_documents.c.created_at,
-        vault_documents.c.updated_at,
-        vault_documents.c.compile_run_id,
-        vault_documents.c.compiled_by,
-        vault_documents.c.compiled_at,
-    )
+    _domain_columns = DOCUMENT_DOMAIN_COLUMNS
 
     async def insert(
         self,
@@ -120,7 +125,7 @@ class VaultDocumentRepository:
             .returning(*self._domain_columns)
         )
         result = await connection.execute(statement)
-        return _document_from_row(result.mappings().one())
+        return document_from_row(result.mappings().one())
 
     async def get_by_id(
         self,
@@ -132,7 +137,7 @@ class VaultDocumentRepository:
         )
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
-        return _document_from_row(row) if row is not None else None
+        return document_from_row(row) if row is not None else None
 
 
 class VaultDocumentEmbeddingRepository:

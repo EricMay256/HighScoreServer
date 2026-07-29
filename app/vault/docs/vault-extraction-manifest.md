@@ -35,14 +35,18 @@ easy to overlook:
 `SQLAlchemy` is shared: the vault uses Core directly, and HSS needs it as Alembic's engine
 layer. It stays in both.
 
-An embedding provider client is **not** listed here — the provider decision is still open and
-no adapter exists. When one is added it belongs in this table.
+`httpx` is shared: the vault's embedding adapter uses it, and HSS uses it for Steam ticket
+validation. It stays in both.
+
+**No embedding client appears here.** Vault ADR 0005 selected OpenAI and deliberately called the
+REST endpoint through `httpx` rather than the `openai` SDK, so the adapter added no package. If
+a future provider needs a vendor SDK, it belongs in this table.
 
 ## HSS files that need editing at extraction
 
 | File | Change |
 | ---- | ------ |
-| `app/main.py` | Remove vault lifespan wiring and any mounted vault routes. |
+| `app/main.py` | Remove vault lifespan wiring (`init_vault_db`, `init_vault_embeddings` and their `close_*` counterparts), the `vault_enabled()` route gate, and the `/api/vault` router registration. The `load_environment()` call at the top of `create_app` exists so that gate can be evaluated — check whether anything else came to depend on it before removing it. |
 | `app/env.py` | Remove vault environment handling. |
 | `.github/workflows/ci.yml` | Remove `alembic -c alembic-vault.ini upgrade head`, `VAULT_*` environment variables, and the pgvector-layered Postgres image if HSS no longer needs the extension. |
 | `requirements.txt` | Remove `pgvector`. |

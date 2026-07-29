@@ -3,10 +3,21 @@
 from dataclasses import dataclass
 import math
 import os
+import re
 
 from sqlalchemy.engine import make_url
 
 from .constants import EMBEDDING_DIMENSIONS, resolve_text_search_config
+
+
+# Mirrors the vault_document_embeddings_profile_id_format check constraint.
+# Validating here turns a typo into a startup error instead of an integrity
+# error on the first write, long after the value was chosen.
+_PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:/-]{3,128}$")
+
+# The provider name is a registry key and a component of the default
+# profile_id, so it is constrained to the same alphabet the profile allows.
+_PROVIDER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _parse_bool(value: str) -> bool:
@@ -38,6 +49,16 @@ def _positive_float(name: str, value: str) -> float:
     return parsed
 
 
+def vault_enabled() -> bool:
+    """Whether the vault runtime is switched on for this process.
+
+    Separate from ``VaultSettings.from_environment`` so route registration can
+    ask the question without requiring a database URL to be present.
+    """
+
+    return _parse_bool(os.environ.get("VAULT_ENABLED", "false"))
+
+
 def normalize_sqlalchemy_url(url: str) -> str:
     """Normalize a PostgreSQL URL for SQLAlchemy's psycopg dialect."""
 
@@ -67,9 +88,18 @@ class ConnectionBudget:
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingSettings:
+    """Parsed embedding configuration, with no knowledge of which adapters exist.
+
+    Whether an adapter is registered for ``provider`` is settled in
+    ``embedding_runtime``. Keeping that check out of here is what lets the
+    Alembic environment import settings without pulling in a transport client.
+    ``base_url`` is ``None`` when unset so each adapter supplies its own
+    default rather than this module favouring one vendor's endpoint.
+    """
+
     provider: str
     api_key: str | None
-    base_url: str
+    base_url: str | None
     model: str
     profile_id: str
     embedding_dimensions: int
@@ -78,10 +108,10 @@ class EmbeddingSettings:
     @classmethod
     def from_environment(cls) -> "EmbeddingSettings":
         provider = os.environ.get("VAULT_EMBEDDING_PROVIDER", "openai").strip()
-        if provider != "openai":
+        if not _PROVIDER_PATTERN.fullmatch(provider):
             raise RuntimeError(
-                "Unsupported VAULT_EMBEDDING_PROVIDER. The provider-neutral "
-                "interface currently has only the 'openai' adapter."
+                "VAULT_EMBEDDING_PROVIDER must match "
+                f"{_PROVIDER_PATTERN.pattern}; got {provider!r}"
             )
 
         embedding_dimensions = _positive_int(
@@ -105,20 +135,24 @@ class EmbeddingSettings:
         if not model:
             raise RuntimeError("VAULT_EMBEDDING_MODEL must not be empty")
 
+        # Provider, model, and dimensionality named together: two vectors are
+        # comparable only when their profiles match.
         profile_id = os.environ.get(
             "VAULT_EMBEDDING_PROFILE_ID",
-            f"openai/{model}:{embedding_dimensions}",
+            f"{provider}/{model}:{embedding_dimensions}",
         ).strip()
-        if not profile_id:
-            raise RuntimeError("VAULT_EMBEDDING_PROFILE_ID must not be empty")
+        if not _PROFILE_ID_PATTERN.fullmatch(profile_id):
+            raise RuntimeError(
+                "VAULT_EMBEDDING_PROFILE_ID must match "
+                f"{_PROFILE_ID_PATTERN.pattern}; got {profile_id!r}"
+            )
+
+        base_url = os.environ.get("VAULT_EMBEDDING_BASE_URL", "").strip()
 
         return cls(
             provider=provider,
             api_key=os.environ.get("VAULT_EMBEDDING_API_KEY"),
-            base_url=os.environ.get(
-                "VAULT_EMBEDDING_BASE_URL",
-                "https://api.openai.com/v1",
-            ).rstrip("/"),
+            base_url=base_url.rstrip("/") or None,
             model=model,
             profile_id=profile_id,
             embedding_dimensions=embedding_dimensions,
@@ -149,7 +183,7 @@ class VaultSettings:
         if not hss_database_url:
             raise RuntimeError("DATABASE_URL is not set")
 
-        enabled = _parse_bool(os.environ.get("VAULT_ENABLED", "false"))
+        enabled = vault_enabled()
         database_url = os.environ.get("VAULT_DATABASE_URL") or hss_database_url
         hss_limit = _positive_int(
             "DATABASE_CONNECTION_LIMIT",

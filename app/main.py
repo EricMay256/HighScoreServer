@@ -6,6 +6,9 @@ from app.db import init_db, close_db
 from app.cache import init_cache, close_cache
 from app.env import load_environment, validate_environment
 from app.vault.db import close_vault_db, init_vault_db
+from app.vault.embedding_runtime import close_vault_embeddings, init_vault_embeddings
+from app.vault.routes import router as vault_router
+from app.vault.settings import vault_enabled
 from app.leaderboard_routes import router as leaderboard_router, CrossRouteError
 from app.view_routes import router as view_router
 from app.auth_routes import router as auth_router
@@ -75,14 +78,25 @@ async def lifespan(app: FastAPI):
     try:
         init_cache()
         await init_vault_db()
+        if vault_enabled():
+            # Only after the engine is up: a provider with no corpus to search
+            # is not a useful thing to have running.
+            await init_vault_embeddings()
         yield
     finally:
+        await close_vault_embeddings()
         await close_vault_db()
         await close_db()
         await close_cache()
 
 
 def create_app() -> FastAPI:
+    # Route registration is decided here, before lifespan runs, so .env has to
+    # be loaded now for VAULT_ENABLED to be visible. load_environment is cached
+    # and uses override=False, so the later lifespan call is a no-op and the
+    # process environment still wins over .env.
+    load_environment()
+
     app = FastAPI(title="Leaderboard API", lifespan=lifespan)
 
     app.state.limiter = limiter
@@ -117,11 +131,15 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard_router, prefix="/api/leaderboard")
     # 3. Authentication routes
     app.include_router(auth_router, prefix="/api/auth")
-    # 4. SPA assets mount — MUST come before the SPA catch-all router below.
+    # 4. Vault read-only routes — registered only when the vault runtime is on,
+    #    so a disabled vault publishes no schema and no endpoints.
+    if vault_enabled():
+        app.include_router(vault_router, prefix="/api/vault")
+    # 5. SPA assets mount — MUST come before the SPA catch-all router below.
     spa_routes.mount_spa_assets(app)
-    # 5. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.
+    # 6. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.
     app.include_router(spa_routes.router)
-    # 6. Static files (served at root, so this goes last to avoid shadowing API and view routes)
+    # 7. Static files (served at root, so this goes last to avoid shadowing API and view routes)
     app.mount("/", StaticFiles(directory="public", html=True), name="public")
     return app
 

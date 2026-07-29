@@ -105,13 +105,17 @@ DATABASE_URL` into a tracked file.
 
 ## Secrets
 
-Phase 1 introduces no new application secret.
+Phase 1 introduced no new application secret. The read-only slice introduces
+two, both listed below.
 
 - `DATABASE_URL` already contains a credential and remains managed by Heroku.
 - `API_KEY` and `JWT_SECRET` remain existing HSS secrets.
-- Agent bearer-token secrets and embedding-provider keys belong to later
-  reviewed phases. Store them only in Heroku config when those phases define
-  their exact names and rotation procedures.
+- `VAULT_EMBEDDING_API_KEY` and `VAULT_READ_API_KEY` are introduced by the
+  read-only slice. Store them only in Heroku config, never in a tracked file,
+  and never echo them in CI logs. Neither is logged by the application: the
+  embedding adapter logs status codes only, and request bodies are never logged
+  because they carry note content.
+- Durable per-agent credentials belong to a later reviewed phase.
 - Never use `heroku config` output in CI logs or documentation.
 
 Local secrets belong in `.env`, which is already ignored by Git. `.env.example`
@@ -191,8 +195,10 @@ runtime moves into the private knowledge-platform package, move that dependency
 with it and remove it from HSS's manifest. Existing leaderboard code must not
 import it.
 
-The `mcp` and embedding-provider dependencies are also vault-only dependencies.
-Move them with the package during extraction and remove them from HSS.
+The embedding adapter adds no package: it uses `httpx`, which HSS already
+depends on for Steam ticket validation, so `httpx` stays in both manifests. An
+`mcp` dependency is not present — the read-only transport is HTTP only, and MCP
+remains unapproved.
 
 ## Changing embedding model or dimensions
 
@@ -249,20 +255,68 @@ For a small local or disposable database, dropping the rows and re-embedding is
 acceptable. Production must use the additive path so a model change never
 requires an irreversible release migration.
 
-## Follow-up: alternative embedding providers
+## Embedding provider
 
-Before the read-only production rollout, evaluate at least one managed
-alternative and one open-weight/self-hostable option against the same fixed
-retrieval corpus. Compare retrieval quality, 1536-dimension support, query vs
-document modes, latency, batch limits, data-retention terms, regional
-availability, cost, rate limits, and operational burden.
+The provider evaluation is complete and the decision is recorded in vault ADR
+0005. The first profile is **`openai/text-embedding-3-small:1536`**, reached
+through the REST endpoint over `httpx` rather than the vendor SDK, so no new
+package was added.
 
-No provider adapter ships yet, and the provider decision is still open. When one
-is added, the application-facing `EmbeddingProvider` protocol must live in a
-separate module from any vendor adapter, so the vendor import is removable
-without touching the port. Provider-specific request fields belong in adapters,
-and `vault_document_embeddings.profile_id` carries the stable profile identity
-(provider, model, and dimensionality together).
+```
+VAULT_EMBEDDING_PROVIDER=openai
+VAULT_EMBEDDING_MODEL=text-embedding-3-small
+VAULT_EMBEDDING_PROFILE_ID=openai/text-embedding-3-small:1536
+VAULT_EMBEDDING_DIMENSIONS=1536
+VAULT_EMBEDDING_TIMEOUT_SECONDS=10
+# VAULT_EMBEDDING_BASE_URL=   # unset: each adapter supplies its own default
+# VAULT_EMBEDDING_API_KEY=    # secret; Heroku config only, never a tracked file
+```
+
+`VAULT_EMBEDDING_PROFILE_ID` defaults to `{provider}/{model}:{dimensions}` and
+is validated at startup against the same pattern as the
+`vault_document_embeddings_profile_id_format` check constraint, so a typo fails
+the boot rather than the first insert.
+
+**`VAULT_EMBEDDING_API_KEY` is optional by design.** Without it the vault runs
+lexical-only: startup logs a warning, `profile_id` is reported as null, and
+every response carries `vector_status: "not_configured"`. CI and local
+development run this way. Setting `VAULT_EMBEDDING_PROVIDER` to a name with no
+adapter is a different case and fails loudly.
+
+A configured provider that then fails is a third case and is reported as
+`vector_status: "failed"`, with an ERROR logged carrying the exception type and
+the profile — never the query text or the exception message, both of which can
+quote note content. **Treat `"failed"` as an alert condition:** results are
+silently narrower than they should be, and nothing else will tell you.
+
+Layering choice is separate from configuration: `settings.py` parses these
+variables and deliberately does **not** know which adapters exist, which is what
+lets the Alembic environment import it without pulling in an HTTP client. The
+registry in `embedding_runtime.py` is the only module that maps a provider name
+to a concrete adapter.
 
 Changing provider or model requires controlled re-embedding; it must never be
-treated as a credentials-only configuration change.
+treated as a credentials-only configuration change. The procedure is above under
+"Changing embedding model or dimensions".
+
+## Read-only access
+
+The read surface is gated on one shared secret:
+
+```
+VAULT_READ_API_KEY=   # secret; sent as "Authorization: Bearer <value>"
+```
+
+The vault cannot reuse HighScoreServer's authentication — importing it would
+breach the isolation rule that keeps extraction a directory move — so the
+minimum a private corpus needs is implemented inside the package and nothing
+more. **An unset key returns 503 rather than serving anonymously.** When the
+vault gains real agent credentials this is the seam they replace.
+
+Routes are registered only when `VAULT_ENABLED` is true, so a disabled vault
+publishes no endpoints and no OpenAPI schema. They are mounted under
+`/api/vault`, ahead of the SPA catch-all and the static-file mount.
+
+This slice adds no rate limiting: slowapi's limiter lives in the host package
+and is not importable from here. Add it at the reverse proxy, or with a
+vault-local limiter, before exposing the surface to anything untrusted.

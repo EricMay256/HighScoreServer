@@ -39,6 +39,24 @@ class CompileRunState(str, Enum):
     FAILED = "failed"
 
 
+class VectorSearchStatus(str, Enum):
+    """Whether the vector arm contributed to a search, and if not, why.
+
+    A plain "did it run" boolean conflates two very different situations: a
+    deployment that never configured embeddings, which is a supported mode, and
+    a configured provider that just failed, which is a fault someone needs to
+    see. Callers get lexical results either way, so the distinction has to be
+    carried in the response rather than inferred from a shorter result list.
+    """
+
+    USED = "used"
+    # No provider configured for this process. Expected in CI and local runs.
+    NOT_CONFIGURED = "not_configured"
+    # A provider is configured and the query embedding failed. Degraded, and
+    # not on purpose.
+    FAILED = "failed"
+
+
 @dataclass(frozen=True, slots=True)
 class VaultDocument:
     id: str

@@ -1,6 +1,7 @@
-"""Pydantic models for the future vault transport boundary.
+"""Pydantic models for the vault transport boundary.
 
-Phase 1 defines the stable value shapes but does not expose HTTP or MCP routes.
+The read-only slice exposes search and document retrieval over HTTP. The
+contribution models below describe the write path, which is still unbuilt.
 Persistence records and SQLAlchemy table definitions intentionally live in
 separate modules.
 """
@@ -10,7 +11,7 @@ from typing import Any
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
-from .domain import DocumentStatus
+from .domain import DocumentKind, DocumentStatus, VectorSearchStatus
 
 
 class VaultContributionRequest(BaseModel):
@@ -53,3 +54,64 @@ class VaultDocumentResponse(BaseModel):
     canonical_url: AnyUrl
     created_at: datetime
     updated_at: datetime
+
+
+class VaultDocumentDetail(BaseModel):
+    """A document as returned by the read-only surface.
+
+    Deliberately not ``VaultDocumentResponse``: that model carries
+    ``canonical_url``, which needs a public base-URL setting the read-only slice
+    does not define. Kept separate rather than making the field optional, so the
+    write path's contract is not weakened to suit a different caller.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    kind: DocumentKind
+    status: DocumentStatus
+    title: str
+    summary: str | None
+    body: str
+    tags: list[str]
+    related_ids: list[str]
+    source_ids: list[str]
+    source_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class VaultSearchHit(VaultDocumentDetail):
+    """A document plus why it surfaced for this query."""
+
+    score: float = Field(description="Reciprocal rank fusion score.")
+    lexical_rank: int | None = Field(
+        default=None,
+        description="1-based position in the full-text ranking, if it matched.",
+    )
+    vector_rank: int | None = Field(
+        default=None,
+        description="1-based position in the vector ranking, if it matched.",
+    )
+
+
+class VaultSearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str
+    profile_id: str | None = Field(
+        default=None,
+        description=(
+            "Embedding profile the vector arm searched under, or null when no "
+            "embedding provider is configured."
+        ),
+    )
+    vector_status: VectorSearchStatus = Field(
+        description=(
+            "'used' when the vector arm contributed. 'not_configured' when no "
+            "embedding provider is set up, which is a supported lexical-only "
+            "deployment. 'failed' when a configured provider errored — these "
+            "results are degraded and something is wrong."
+        )
+    )
+    hits: list[VaultSearchHit]
