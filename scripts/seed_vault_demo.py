@@ -194,14 +194,14 @@ async def run(clean_only: bool) -> int:
             print_results(outcome)
 
             if all(result.lexical_rank is None for result in outcome.results):
-                # websearch_to_tsquery ANDs every term, so a question-shaped
-                # query usually matches nothing and the fusion is vector-only.
+                # Uncommon since ADR 0007 made the arm disjunctive: it now
+                # takes a query sharing no stemmed term with any document.
                 # Saying so beats letting the empty column pass for agreement.
                 print(
-                    "\nNote: no lexical matches. websearch_to_tsquery requires "
-                    "ALL terms\n      to be present, so natural-language "
-                    "questions rarely match.\n      Try a keyword query like "
-                    "'HNSW' to see the lexical arm rank."
+                    "\nNote: no lexical matches - the fusion below is "
+                    "vector-only.\n      The lexical arm ORs the query's terms "
+                    "(ADR 0007), so this means\n      the query shares no "
+                    "stemmed word with any document."
                 )
 
             print("\nRe-run with --clean to remove these documents.")

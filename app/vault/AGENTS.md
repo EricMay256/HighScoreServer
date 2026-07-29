@@ -77,9 +77,14 @@ be edited when it does.
   Log the exception *type* instead. `tests/vault/test_search.py` asserts this.
 - Search must pass the text search configuration as a bound parameter —
   `websearch_to_tsquery(:config, :query)` — never the database default, never interpolation.
+- The lexical arm **disjoins** the parsed query's terms (ADR 0007), rewriting ` & ` to ` | ` in
+  `websearch_to_tsquery`'s output. Quoted phrases keep their `<->` operator, and a query whose
+  parsed form contains `!` stays conjunctive — disjoining a negation inverts it. Do not
+  "simplify" this back to a plain `websearch_to_tsquery`, and do not re-lex the raw query
+  string with `to_tsvector`; that silently drops phrase support.
 - The first profile is `openai/text-embedding-3-small:1536` (ADR 0005); the two arms combine
-  by Reciprocal Rank Fusion (ADR 0006). Changing provider or model is a controlled re-embed,
-  never a credentials-only config change.
+  by Reciprocal Rank Fusion (ADR 0006, amended by 0007). Changing provider or model is a
+  controlled re-embed, never a credentials-only config change.
 
 ## Working agreements
 

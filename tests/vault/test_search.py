@@ -259,6 +259,112 @@ def test_lexical_search_excludes_documents_that_are_not_active(
     asyncio.run(exercise())
 
 
+def test_lexical_search_disjoins_terms_so_long_queries_still_match(
+    configure_test_env: None,
+) -> None:
+    """The behaviour vault ADR 0007 changed.
+
+    No document contains all of gin/index/hnsw/graph, so websearch's
+    conjunctive reading matched nothing at all. Disjoined, the query finds
+    both documents that share vocabulary with it.
+    """
+
+    async def exercise() -> None:
+        service, engine = vault_service()
+        repository = VaultSearchRepository()
+        run_id = uuid4().hex
+        ids = await seed_corpus(service, run_id)
+
+        try:
+            async with service.transaction() as connection:
+                hits = await repository.lexical_search(
+                    connection,
+                    query="GIN indexes and HNSW graphs",
+                    text_search_config="english",
+                    limit=10,
+                )
+
+            assert {hit.document_id for hit in hits} == {ids["alpha"], ids["beta"]}
+        finally:
+            await clear_corpus(service, ids)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_lexical_search_keeps_quoted_phrases_intact(
+    configure_test_env: None,
+) -> None:
+    """Disjunction rewrites conjunctions only; phrase distance survives.
+
+    The reversed phrase is the discriminating half: were the phrase operator
+    disjoined along with the conjunctions, word order would stop mattering and
+    "neighbours nearest" would match too.
+    """
+
+    async def exercise() -> None:
+        service, engine = vault_service()
+        repository = VaultSearchRepository()
+        run_id = uuid4().hex
+        ids = await seed_corpus(service, run_id)
+
+        try:
+            async with service.transaction() as connection:
+                in_order = await repository.lexical_search(
+                    connection,
+                    query='"nearest neighbours"',
+                    text_search_config="english",
+                    limit=10,
+                )
+                reversed_order = await repository.lexical_search(
+                    connection,
+                    query='"neighbours nearest"',
+                    text_search_config="english",
+                    limit=10,
+                )
+
+            assert [hit.document_id for hit in in_order] == [ids["beta"]]
+            assert reversed_order == []
+        finally:
+            await clear_corpus(service, ids)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_lexical_search_keeps_negation_conjunctive(
+    configure_test_env: None,
+) -> None:
+    """A negating query opts out of disjunction.
+
+    "indexes -GIN" excludes the one document holding both terms. Disjoined to
+    'index' | !'gin' it would instead match every document lacking "GIN" —
+    here, "beta" — which inverts what the caller asked for.
+    """
+
+    async def exercise() -> None:
+        service, engine = vault_service()
+        repository = VaultSearchRepository()
+        run_id = uuid4().hex
+        ids = await seed_corpus(service, run_id)
+
+        try:
+            async with service.transaction() as connection:
+                hits = await repository.lexical_search(
+                    connection,
+                    query="indexes -GIN",
+                    text_search_config="english",
+                    limit=10,
+                )
+
+            assert hits == []
+        finally:
+            await clear_corpus(service, ids)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 def test_vector_search_orders_by_cosine_proximity(
     configure_test_env: None,
 ) -> None:

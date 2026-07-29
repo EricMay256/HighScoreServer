@@ -14,8 +14,8 @@ judgements exist to tune against.
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import Text, bindparam, cast, func, select
-from sqlalchemy.dialects.postgresql import REGCONFIG
+from sqlalchemy import Text, bindparam, case, cast, func, select
+from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .constants import EMBEDDING_DIMENSIONS
@@ -115,9 +115,35 @@ class VaultSearchRepository:
     # Bound, never interpolated: the configuration must be the same one the
     # generated column was built with, and a bind parameter cannot be a SQL
     # injection surface the way an f-string could.
-    _tsquery = func.websearch_to_tsquery(
+    _websearch = func.websearch_to_tsquery(
         cast(bindparam("text_search_config", type_=Text), REGCONFIG),
         bindparam("query", type_=Text),
+    )
+
+    # websearch_to_tsquery conjoins every term, so a document must contain all
+    # of them to match at all. Recall therefore falls away as the query gets
+    # longer, and questions — what this corpus is asked — are long. Disjoining
+    # the terms makes the lexical arm answer "which documents share vocabulary
+    # with this query", and ts_rank_cd plus RRF's position-based scoring sort
+    # out how much each one is worth. See vault ADR 0007.
+    #
+    # Rewriting the parsed query's text rather than re-lexing the raw string is
+    # what preserves quoted phrases: websearch renders those with <-> , which
+    # is left untouched. Only the top-level conjunctions become disjunctions.
+    # This is safe because the text-search parser never puts a space inside a
+    # lexeme, so the literal " & " separator cannot occur within one.
+    _disjoined = cast(
+        func.regexp_replace(cast(_websearch, Text), " & ", " | ", "g"),
+        TSQUERY,
+    )
+
+    # Negation is the exception. "!'a' | 'b'" matches every document lacking
+    # "a", which is close to the whole corpus — disjoining an exclusion inverts
+    # what the caller asked for. A query that negates keeps websearch's own
+    # conjunctive reading.
+    _tsquery = case(
+        (func.strpos(cast(_websearch, Text), "!") > 0, _websearch),
+        else_=_disjoined,
     )
 
     async def lexical_search(

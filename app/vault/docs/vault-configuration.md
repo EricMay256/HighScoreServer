@@ -85,7 +85,9 @@ explicitly so the schema-drift test compares against a fixed target.
 
 Query paths must use the same configuration —
 `websearch_to_tsquery(:config, :query)` — rather than relying on the database's
-`default_text_search_config`.
+`default_text_search_config`. The lexical arm then disjoins that query's terms
+before matching, so a long query does not require every term to be present; see
+[ADR 0007](adr/0007-lexical-arm-disjoins-query-terms.md).
 
 ## Shared-database URL
 

@@ -4,7 +4,13 @@ Date: 2026-07-28
 
 ## Status
 
-Accepted
+Accepted, amended by [ADR 0007](0007-lexical-arm-disjoins-query-terms.md).
+
+Everything below stands except the construction of the lexical `tsquery`. This ADR left the
+lexical arm conjunctive, which made its recall fall away as queries lengthened — so on the long,
+question-shaped queries this corpus exists to answer, the arm contributed far less than the text
+below assumes. ADR 0007 disjoins the terms. Fusion, `k`, oversampling, and the degradation policy
+are unaffected.
 
 ## Context
 
@@ -51,7 +57,8 @@ carry user content; the exception type is recorded instead.
 
 Both arms filter to `status = 'active'`, and the lexical arm passes the text search
 configuration as a **bound parameter** to `websearch_to_tsquery`, never the database's
-`default_text_search_config` and never string interpolation.
+`default_text_search_config` and never string interpolation. (ADR 0007 rewrites that query's
+conjunctions into disjunctions; the bound-parameter rule is unchanged.)
 
 ## Consequences
 
@@ -67,7 +74,9 @@ changing the fusion semantics.
 Vector search has **no relevance floor**: kNN returns the nearest *k* documents whether or not
 any of them are close. A document can therefore appear in results on vector evidence alone while
 being only loosely related. RRF damps this — a weak vector-only hit sits below anything both
-arms agree on — but it does not eliminate it. Introducing a distance threshold is deferred until
+arms agree on — but it does not eliminate it. (ADR 0007 notes that agreement between the arms is
+a weaker signal than this framing implies, once the lexical arm is disjunctive.) Introducing a
+distance threshold is deferred until
 there is evidence about what threshold would be right, since a badly chosen one silently removes
 correct answers.
 
