@@ -77,8 +77,8 @@ be edited when it does.
   Log the exception *type* instead. `tests/vault/test_search.py` asserts this.
 - Search must pass the text search configuration as a bound parameter —
   `websearch_to_tsquery(:config, :query)` — never the database default, never interpolation.
-- **Search returns `active` only; fetch-by-ID also resolves `archived`, never `flagged`.**
-  `routes.READABLE_STATUSES` is the single statement of that rule. Archived content is retired
+- **Search returns `active` only; fetch-by-ID also resolves `archived`, never `flagged`** (ADR
+  0008). `routes.READABLE_STATUSES` is the single statement of that rule. Archived content is retired
   but legitimate, so a `related_ids`/`source_ids` reference still resolves; `flagged` means the
   write path declined to endorse it, and the consumer is an agent that will not check the
   `status` field. `VaultDocumentRepository.get_by_id` stays **unfiltered by default** — review

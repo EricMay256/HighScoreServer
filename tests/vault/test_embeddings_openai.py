@@ -174,9 +174,42 @@ def test_large_inputs_are_split_into_batches() -> None:
     assert len(vectors) == 5
 
 
+def test_retries_are_disabled_by_default() -> None:
+    """The shipped budget is a single attempt.
+
+    A query embedding is inside a search someone is waiting on, and running out
+    of budget means falling back to lexical results rather than failing — worth
+    doing promptly. Retrying is machinery for a backfill, not this path.
+    """
+
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(429, headers={"retry-after": "1"})
+
+    async def exercise() -> None:
+        provider = make_provider(handler)
+        try:
+            await provider.embed(["hello"], EmbeddingInputKind.QUERY)
+        finally:
+            await provider.aclose()
+
+    assert _MAX_ATTEMPTS == 1
+    with pytest.raises(EmbeddingUnavailable, match="HTTP 429"):
+        asyncio.run(exercise())
+
+    # Retryable status, but nothing to retry with: one request, no waiting.
+    assert len(attempts) == 1
+
+
 def test_rate_limiting_is_retried_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The retry machinery is dormant at the shipped attempt count. It is kept
+    # for a backfill, so it stays under test at a raised count — otherwise
+    # raising the constant later would be an untested change.
+    monkeypatch.setattr("app.vault.embeddings_openai._MAX_ATTEMPTS", 2)
     monkeypatch.setattr(
         "app.vault.embeddings_openai.asyncio.sleep",
         _no_sleep,
@@ -205,6 +238,7 @@ def test_rate_limiting_is_retried_then_succeeds(
 def test_persistent_rate_limiting_raises_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("app.vault.embeddings_openai._MAX_ATTEMPTS", 2)
     monkeypatch.setattr(
         "app.vault.embeddings_openai.asyncio.sleep",
         _no_sleep,
@@ -268,7 +302,8 @@ def test_transport_failure_becomes_embedding_unavailable(
         finally:
             await provider.aclose()
 
-    with pytest.raises(EmbeddingUnavailable, match="after 2 attempts"):
+    # Singular at the shipped attempt count: no retry happened.
+    with pytest.raises(EmbeddingUnavailable, match="after 1 attempt"):
         asyncio.run(exercise())
 
 
@@ -319,11 +354,10 @@ def test_empty_input_makes_no_request() -> None:
 def test_retry_after_is_honoured_but_capped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wait tracks Retry-After only up to the request-path ceiling.
+    """The wait tracks Retry-After only up to the configured ceiling.
 
-    Exceeding it is deliberate: a query embedding is inside a search someone is
-    waiting on, and falling back to lexical results late is worse than falling
-    back promptly. A backfill would want the opposite trade.
+    Covers machinery that is dormant at the shipped attempt count, so that
+    raising _MAX_ATTEMPTS for a backfill is not an untested change.
     """
 
     slept: list[float] = []
@@ -346,10 +380,14 @@ def test_retry_after_is_honoured_but_capped(
 
 
 def test_worst_case_retry_budget_fits_inside_the_router_timeout() -> None:
-    # Two request timeouts plus one capped wait. Heroku's router gives up at
-    # 30s, and a degraded answer that never gets returned is worth nothing.
+    # Every attempt can burn a full request timeout, and a wait separates each
+    # pair of them — so N attempts means N timeouts and N-1 waits. Heroku's
+    # router gives up at 30s, and a degraded answer that never gets returned is
+    # worth nothing. Guards the constants against being raised past the budget.
     timeout_seconds = 10.0
-    worst_case = _MAX_ATTEMPTS * timeout_seconds + _MAX_BACKOFF_SECONDS
+    worst_case = _MAX_ATTEMPTS * timeout_seconds + (
+        (_MAX_ATTEMPTS - 1) * _MAX_BACKOFF_SECONDS
+    )
 
     assert worst_case <= 30.0
 

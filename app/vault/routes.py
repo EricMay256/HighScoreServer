@@ -43,7 +43,11 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # caller that will not think to check the status field before using what it
 # was handed. Discovery and reference-resolution therefore differ by one
 # status, deliberately, rather than by whichever predicate each query happened
-# to carry.
+# to carry. See vault ADR 0008, which also records why the restriction lives
+# here rather than in the repository.
+#
+# Not configuration: a deployment must not be able to opt into serving
+# unendorsed content.
 READABLE_STATUSES = (DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED)
 
 
