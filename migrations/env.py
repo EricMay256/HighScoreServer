@@ -23,7 +23,11 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which switches off every
+    # logger created before Alembic ran — including the application's. Harmless
+    # for the CLI, which exits, but destructive when migrations run in-process
+    # and the process keeps going, as the test suite does.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # No models to diff against — these migrations are hand-written raw SQL.
 target_metadata = None
