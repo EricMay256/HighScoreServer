@@ -8,22 +8,56 @@ Accepted
 
 ## Context
 
-`vault_documents.kind` is `document_kind_enum('note', 'wiki')`. The governance Type Dictionary
-defines ten types — Project, Concept, Reference, Resource, Person, System, Decision, Meeting,
-Ideas, and Summary Notes. Human-layer notes do not fit a two-value enum, so the corpus cannot be
-imported without somewhere to put the type.
+`vault_documents.kind` is `document_kind_enum('note', 'wiki')`. `types.yml` defines sixteen
+types — Daily, Project, Area, MoC, Note, Decision, Reference, Person, Resource, System, Meeting,
+Concept, Summary Note, Idea, Agent Note, and Wiki Page — and the corpus cannot be imported
+without somewhere to put the type.
+
+`Type` is a **required universal property** in `global.yml`. The projector's job is to render the
+database back into Markdown that the validator accepts, so a type the database does not store is
+a type the export cannot emit. That is the load-bearing reason for this column, and it holds
+regardless of which layers ever reach the database.
 
 The tempting move is to widen `kind`. It does not survive contact with what `kind` already does:
 
 - `kind` is **load-bearing in a constraint**. `vault_documents_compile_provenance_consistent`
   reads `kind = 'note'` versus `kind = 'wiki'` to require that compiled documents carry
   `compile_run_id`, `compiled_by`, and `compiled_at`, and that authored ones carry none of them.
-  Adding eight taxonomy values to that enum means every one of them has to be classified as
-  authored-or-compiled inside a CHECK constraint, which is a lifecycle question the Type
-  Dictionary is not answering.
+  Folding the other fourteen `types.yml` values into that enum means every one of them has to be
+  classified as authored-or-compiled inside a CHECK constraint, which is a lifecycle question
+  `types.yml` is not answering.
 - The two columns **change for different reasons**. `note` versus `wiki` is a fact about how a row
   got here and what may write it. "Decision" versus "Meeting" is a fact about what the content is.
   Nothing suggests they will move together.
+
+### How much `doc_type` actually adds, stated honestly
+
+This ADR was first written before `types.yml` and `folders.yml` were available, and one of its
+arguments was weaker than it looked. For the Agent layer — the corpus the importer is actually
+scoped to — `kind` and `doc_type` are close to isomorphic:
+
+| Folder | `allowed_types` | `kind` |
+| ------ | --------------- | ------ |
+| `Agent/notes/**`, `Agent/review/**` | `Agent Note` | `note` |
+| `Agent/wiki/**` | `Wiki Page`, `MoC` | `wiki` |
+
+So on the corpus in hand, `doc_type` adds exactly one bit: `Wiki Page` versus `MoC`. Anyone
+reading the "they change for different reasons" argument alone would over-estimate the column.
+
+Three things keep it justified anyway, in descending order of strength:
+
+1. **The projector needs `Type` to round-trip.** It is required frontmatter. `kind` cannot
+   reconstruct it, because it cannot separate `Wiki Page` from `MoC`.
+2. **`MoC` and `Note` are universal types** — `folder_globs: ["**"]` in `types.yml` — so they are
+   permitted in any folder, including the Agent layer, and are exempt from a folder's
+   `allowed_types`. A pure-Agent corpus can therefore already carry types that `kind` does not
+   encode.
+3. Whether Human-layer material ever reaches the database is **open**, not settled — see
+   deferred decision 1. `Agent/Promotion Candidates/**` and `Human/01 Inbox/AI/**` are both
+   `ai_write: allowed`, so they are the plausible places where an agent-written document carries
+   a human type such as `Project` or `Concept`.
+
+Point 1 alone is sufficient. The others are why the column is unlikely to stay one bit wide.
 
 That leaves where the vocabulary is enforced. A PostgreSQL enum requires a migration to extend.
 `types.yml` is explicitly designed to evolve without one — it is the faster-moving artifact of the
@@ -45,7 +79,8 @@ purely additive migration, and this ADR does not foreclose it.
 
 The database constrains **shape only** — `CHECK (doc_type IS NULL OR doc_type ~
 '^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$')`. Non-blank, bounded at 64 characters, no control
-characters, and an interior space is allowed because "Summary Notes" is a real type name.
+characters, and an interior space is allowed because "Agent Note", "Wiki Page", and "Summary Note" are real
+type names.
 
 The split of responsibility is the point:
 
@@ -58,12 +93,17 @@ A well-formed name that is in no Type Dictionary is therefore accepted by the da
 rejected at the write boundary. That is deliberate, and it is pinned by a test so nobody later
 "fixes" the constraint into a vocabulary check.
 
-**The column is nullable, and null means untyped.** Untyped is a real state rather than missing
-data: wiki-layer documents are compiled rather than authored and may carry no Type Dictionary
-type, and every row that predates the importer has none. `NOT NULL` would have to be backfilled
-with an invented default, which would make "we chose this type" and "we had to write something"
-indistinguishable. This is the same reasoning as ADR 0003, where absence of a row in
-`vault_document_embeddings` means unembedded rather than a nullable column on the document.
+**The column is nullable, and null means untyped.** Every row written before this migration has
+no type, and nothing can retroactively discover what it should have been. `NOT NULL` would have
+to be backfilled with an invented default, which would make "we chose this type" and "we had to
+write something" indistinguishable. This is the same reasoning as ADR 0003, where absence of a
+row in `vault_document_embeddings` means unembedded rather than a nullable column on the
+document.
+
+Whether the *importer* may write a null is a separate and stricter question, and this ADR does
+not license it: `Type` is required frontmatter, so an imported document that reaches the database
+without one has already failed validation upstream. Nullable here is about history, not about
+relaxing the write path.
 
 ## Consequences
 

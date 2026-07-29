@@ -54,7 +54,7 @@ be edited when it does.
   coarse storage and lifecycle discriminator and keeps its role in
   `vault_documents_compile_provenance_consistent`. The governance Type Dictionary value lives in
   a separate nullable `doc_type TEXT`. The database CHECK constrains **shape only** — non-blank,
-  ≤64 characters, printable, interior spaces allowed for names like "Summary Notes". Which names
+  ≤64 characters, printable, interior spaces allowed for names like "Agent Note" and "Wiki Page". Which names
   are legal is `types.yml`'s business, enforced in application code at the write boundary, so
   that adding a type stays a data change rather than a migration. Do not "tighten" that CHECK
   into a vocabulary list and do not widen the `kind` enum. Null means untyped, which is a real

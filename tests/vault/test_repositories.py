@@ -276,9 +276,11 @@ def test_doc_type_round_trips_and_defaults_to_untyped(
                     NewVaultDocument(
                         id=typed_id,
                         kind=DocumentKind.NOTE,
-                        # A multi-word Type Dictionary name: the shape
-                        # constraint has to admit the interior space.
-                        doc_type="Summary Notes",
+                        # A real multi-word types.yml name: the shape
+                        # constraint has to admit the interior space. "Agent
+                        # Note" and "Wiki Page" are the two that actually reach
+                        # this table today.
+                        doc_type="Agent Note",
                         status=DocumentStatus.ACTIVE,
                         title="A typed note",
                         body="Carries a governance type.",
@@ -299,14 +301,14 @@ def test_doc_type_round_trips_and_defaults_to_untyped(
                     ),
                 )
 
-                assert typed.doc_type == "Summary Notes"
+                assert typed.doc_type == "Agent Note"
                 # Untyped is the absence of a value, not a sentinel string.
                 assert untyped.doc_type is None
 
             async with service.transaction() as connection:
                 reloaded = await documents.get_by_id(connection, typed_id)
                 assert reloaded is not None
-                assert reloaded.doc_type == "Summary Notes"
+                assert reloaded.doc_type == "Agent Note"
 
                 await connection.execute(
                     delete(vault_documents).where(
