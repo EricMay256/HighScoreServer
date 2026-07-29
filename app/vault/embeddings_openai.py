@@ -51,6 +51,13 @@ _RETRY_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
 # _MAX_ATTEMPTS re-enables it, and a batch backfill will want exactly that,
 # along with a far longer wait than a request path can afford. It stays under
 # test at a patched attempt count so raising the constant is safe.
+#
+# These values are PROVISIONAL and under active consideration. They were chosen
+# by reasoning about the router budget, not by measuring this deployment. Three
+# attempts at a 5s timeout is the leading alternative and also fits. Before
+# changing them, read "Deferred decisions" item 4 in docs/vault-architecture.md,
+# which records what to measure first and why the arithmetic here is an upper
+# bound rather than a guarantee.
 _MAX_ATTEMPTS = 1
 _BACKOFF_BASE_SECONDS = 0.5
 # Caps any Retry-After the provider sends. Only consulted when retries are

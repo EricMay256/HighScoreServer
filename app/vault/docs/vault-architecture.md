@@ -353,8 +353,10 @@ checked into HSS beside its code and contract tests.
 
 ## Deferred decisions
 
-Open questions surfaced during the persistence foundation. Each blocks the importer rather
-than the read-only slice, and none is resolved here.
+Open questions surfaced during the persistence foundation and the read-only slice, none of them
+resolved here. Items 1 and 2 block the importer. Item 3 is a boundary question with no deadline.
+Item 4 is shipped, working, and deliberately provisional — it is listed because the values were
+chosen by reasoning rather than measurement, and should not be mistaken for settled.
 
 Two questions that were open after Phase 1 have since been settled and are no longer listed
 below: the embedding provider and `profile_id` identity (vault ADR 0005) and how the two
@@ -392,3 +394,43 @@ vault-side, but should be generated from the YAML and CI-checked, following the 
 precedent. Governance prose then reaches the database the same way the wiki layer does — as a
 compiled read-only projection — rather than as a second source of truth that can silently
 contradict the YAML.
+
+### 4. The embedding request budget is provisional — active consideration
+
+**Status: shipped and working. Revisit with usage data, not before.**
+
+The query path currently allows **one attempt at a 10s timeout** and no retry
+(`_MAX_ATTEMPTS`, `_MAX_BACKOFF_SECONDS` in `embeddings_openai.py`;
+`VAULT_EMBEDDING_TIMEOUT_SECONDS` for the timeout). The budget exists because running out of it
+is not a failure — it is the fall back to lexical results — and that is only worth anything if it
+happens while a caller is still waiting. Heroku's router gives up at 30s, so the whole budget
+must fit inside that with room for the search itself.
+
+The main alternative considered was **three attempts at a 5s timeout**: 16.5s in the ordinary
+worst case, 23s if a `Retry-After` maxes the 4s cap twice, so it also fits. Its appeal is that
+the realistic failure is a transient 429 or 502 rather than genuine slowness, and today a single
+blip costs the vector arm entirely. It was not adopted because the argument for it rests on
+`text-embedding-3-small` returning a single short embedding in well under a second, which is
+general knowledge about the model rather than anything measured against this deployment.
+
+What would settle it, in rough order of value:
+
+1. **p50/p99 latency of a single query embedding** against the real API. If p99 is comfortably
+   under 5s, three attempts at 5s is the better configuration. If it is near 5s, a short timeout
+   converts slow-but-successful calls into failures and then retries into the same wall — the one
+   genuinely bad outcome available here.
+2. **How often embedding actually fails in practice**, from the `vector_status="failed"` rate.
+   Retries are worth adding only if transient failure is real; if the rate is ~0, the current
+   single attempt is correct and simpler.
+3. **Batch latency at realistic sizes.** `VAULT_EMBEDDING_TIMEOUT_SECONDS` is one setting shared
+   by the single-query path and the batch path, where `DEFAULT_BATCH_SIZE` is 128. A value chosen
+   for queries may be too tight for a full batch of long documents. The importer will likely need
+   its own value — it is already configuration, so a separate process can set it — and at that
+   point the default should be documented as the query-path default rather than a general one.
+
+Two known imprecisions in the arithmetic above, so nobody re-derives them from scratch: httpx's
+read timeout is **per-chunk, not total request duration**, so `attempts × timeout` is an upper
+bound for well-behaved responses rather than a hard guarantee; and
+`test_worst_case_retry_budget_fits_inside_the_router_timeout` hardcodes the 10s timeout instead
+of reading it from configuration, so changing the default without touching that test would leave
+it modelling something that is no longer true.
