@@ -25,6 +25,7 @@ easy to overlook:
 | ---- | ---- |
 | `vault_migrations/` | The vault Alembic lineage, versioned in `vault.vault_alembic_version`. `env.py` imports `app.vault.settings`; that import needs repointing. |
 | `alembic-vault.ini` | Points at `vault_migrations/`. |
+| `scripts/seed_vault_demo.py` | Onboarding fixture loader. Lives in the host's `scripts/` by convention and imports `app.env` and `app.vault.*` absolutely; both imports need repointing on the move. |
 
 ## Dependencies that leave
 
