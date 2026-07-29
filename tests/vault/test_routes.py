@@ -122,6 +122,78 @@ def test_search_validates_its_query_parameters(
     )
 
 
+def test_search_rejects_a_whitespace_only_query(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # min_length=1 admits " ". The embedding port raises ValueError on a blank
+    # input, which is not an EmbeddingError and so escapes the service's
+    # lexical-fallback path — a 500 for a request that is simply invalid. No
+    # embedding provider is configured here, so this asserts the boundary
+    # check rather than the failure it prevents downstream.
+    monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
+
+    response = client.get(
+        "/api/vault/search",
+        params={"q": "   "},
+        headers={"Authorization": f"Bearer {READ_KEY}"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_search_strips_surrounding_whitespace(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    seeded_corpus: dict[str, str],
+) -> None:
+    monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
+
+    response = client.get(
+        "/api/vault/search",
+        params={"q": "  running  ", "limit": 5},
+        headers={"Authorization": f"Bearer {READ_KEY}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # The response echoes what was searched, not what was typed.
+    assert body["query"] == "running"
+    assert [hit["note_id"] for hit in body["hits"]] == [seeded_corpus["alpha"]]
+
+
+def test_search_rejects_a_non_ascii_key_without_erroring(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # hmac.compare_digest refuses a str holding non-ASCII. The bearer token is
+    # attacker-controlled and Starlette decodes headers as latin-1, so a raw
+    # high byte must produce a clean 401 rather than an unhandled TypeError.
+    monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
+
+    response = client.get(
+        "/api/vault/search",
+        params={"q": "running"},
+        headers={b"Authorization": b"Bearer n\xf6pe"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_document_fetch_rejects_a_non_ascii_key_without_erroring(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
+
+    response = client.get(
+        "/api/vault/documents/anything",
+        headers={b"Authorization": b"Bearer n\xf6pe"},
+    )
+
+    assert response.status_code == 401
+
+
 def test_document_is_fetchable_by_id(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

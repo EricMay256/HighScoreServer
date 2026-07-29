@@ -48,10 +48,12 @@ def _require_read_key(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Vault read access is not configured",
         )
-    if credentials is None or not hmac.compare_digest(
-        credentials.credentials,
-        expected,
-    ):
+    # Compared as bytes, not str: compare_digest raises TypeError on a str
+    # holding non-ASCII, and the token is attacker-controlled — Starlette
+    # decodes headers as latin-1, so a raw high byte reaches here and would
+    # turn a failed authorization into a 500.
+    provided = credentials.credentials.encode("utf-8") if credentials else b""
+    if not hmac.compare_digest(provided, expected.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid vault credentials",
@@ -94,9 +96,23 @@ async def search_vault(
     q: str = Query(min_length=1, max_length=500, description="Search query."),
     limit: int = Query(default=10, ge=1, le=50),
 ) -> VaultSearchResponse:
-    outcome = await _search_service().search(q, limit)
+    # min_length alone admits an all-whitespace query, which the embedding port
+    # rejects with ValueError — not an EmbeddingError, so the service's
+    # degradation path does not catch it and the request would 500. A query
+    # with no searchable content is a bad request; refuse it at the boundary
+    # where user input is validated.
+    query = q.strip()
+    if not query:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Search query must contain at least one non-whitespace character",
+        )
+
+    outcome = await _search_service().search(query, limit)
     return VaultSearchResponse(
-        query=q,
+        # The stripped query is what was actually searched, so it is what the
+        # response reports.
+        query=query,
         profile_id=outcome.profile_id,
         vector_status=outcome.vector_status,
         hits=[
