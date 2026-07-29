@@ -216,6 +216,42 @@ def test_document_is_fetchable_by_id(
     assert "canonical_url" not in body
 
 
+def test_archived_document_is_still_resolvable_by_id(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    seeded_corpus: dict[str, str],
+) -> None:
+    # Search excludes it, but a related_ids or source_ids reference pointing at
+    # retired history should resolve rather than dead-end.
+    monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
+
+    response = client.get(
+        f"/api/vault/documents/{seeded_corpus['gamma']}",
+        headers={"Authorization": f"Bearer {READ_KEY}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "archived"
+
+
+def test_flagged_document_is_not_served_by_id(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    seeded_corpus: dict[str, str],
+) -> None:
+    # "flagged" means the write path's policy declined to endorse the content.
+    # The read surface withholds it rather than handing it to an agent that
+    # will not think to check the status field.
+    monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
+
+    response = client.get(
+        f"/api/vault/documents/{seeded_corpus['delta']}",
+        headers={"Authorization": f"Bearer {READ_KEY}"},
+    )
+
+    assert response.status_code == 404
+
+
 def test_unknown_document_is_a_404(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -77,6 +77,13 @@ be edited when it does.
   Log the exception *type* instead. `tests/vault/test_search.py` asserts this.
 - Search must pass the text search configuration as a bound parameter —
   `websearch_to_tsquery(:config, :query)` — never the database default, never interpolation.
+- **Search returns `active` only; fetch-by-ID also resolves `archived`, never `flagged`.**
+  `routes.READABLE_STATUSES` is the single statement of that rule. Archived content is retired
+  but legitimate, so a `related_ids`/`source_ids` reference still resolves; `flagged` means the
+  write path declined to endorse it, and the consumer is an agent that will not check the
+  `status` field. `VaultDocumentRepository.get_by_id` stays **unfiltered by default** — review
+  tooling must be able to load a flagged document precisely because it is flagged — so the
+  restriction belongs at the calling surface, not in persistence.
 - The lexical arm **disjoins** the parsed query's terms (ADR 0007), rewriting ` & ` to ` | ` in
   `websearch_to_tsquery`'s output. Quoted phrases keep their `<->` operator, and a query whose
   parsed form contains `!` stays conjunctive — disjoining a negation inverts it. Do not

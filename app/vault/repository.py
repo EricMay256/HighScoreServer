@@ -131,10 +131,23 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         document_id: str,
+        statuses: Sequence[DocumentStatus] | None = None,
     ) -> VaultDocument | None:
+        """Fetch one document, optionally restricted to certain statuses.
+
+        Unfiltered by default: which statuses a caller may see is a policy of
+        that surface, not of persistence. Review tooling has to be able to load
+        a flagged document precisely because it is flagged, so the restriction
+        belongs at the caller. ``routes.py`` states the read surface's rule.
+        """
+
         statement = select(*self._domain_columns).where(
             vault_documents.c.id == document_id
         )
+        if statuses is not None:
+            statement = statement.where(
+                vault_documents.c.status.in_([status.value for status in statuses])
+            )
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None

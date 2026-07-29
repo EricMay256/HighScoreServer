@@ -140,6 +140,7 @@ CORPUS = (
     ("alpha", "Postgres indexing", "GIN indexes accelerate running queries.", 0, DocumentStatus.ACTIVE),
     ("beta", "Vector similarity", "HNSW graphs approximate nearest neighbours.", 1, DocumentStatus.ACTIVE),
     ("gamma", "Archived note", "GIN indexes are mentioned here too.", 2, DocumentStatus.ARCHIVED),
+    ("delta", "Flagged draft", "GIN indexes are discussed in this unreviewed draft.", 3, DocumentStatus.FLAGGED),
 )
 
 
@@ -358,6 +359,41 @@ def test_lexical_search_keeps_negation_conjunctive(
                 )
 
             assert hits == []
+        finally:
+            await clear_corpus(service, ids)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_get_by_id_filters_only_when_the_caller_asks(
+    configure_test_env: None,
+) -> None:
+    """Which statuses are visible is the surface's policy, not persistence's.
+
+    Review tooling has to load a flagged document precisely because it is
+    flagged, so the repository stays unfiltered by default and the read surface
+    passes its own restriction.
+    """
+
+    async def exercise() -> None:
+        service, engine = vault_service()
+        documents = VaultDocumentRepository()
+        run_id = uuid4().hex
+        ids = await seed_corpus(service, run_id)
+
+        try:
+            async with service.transaction() as connection:
+                unfiltered = await documents.get_by_id(connection, ids["delta"])
+                restricted = await documents.get_by_id(
+                    connection,
+                    ids["delta"],
+                    statuses=(DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED),
+                )
+
+            assert unfiltered is not None
+            assert unfiltered.status is DocumentStatus.FLAGGED
+            assert restricted is None
         finally:
             await clear_corpus(service, ids)
             await engine.dispose()

@@ -3,6 +3,11 @@ from pathlib import Path
 
 
 VAULT_PACKAGE = Path(__file__).resolve().parents[2] / "app" / "vault"
+
+# rglob, not glob: the package is flat today, so the two are equivalent and the
+# distinction looks academic. It stops being academic the moment anyone adds a
+# subpackage, at which point a non-recursive walk would quietly stop enforcing
+# every rule below on the newest code — the failure mode being silence.
 FORBIDDEN_IMPORT_PREFIXES = (
     "app.auth",
     "app.auth_identities",
@@ -41,7 +46,7 @@ def imported_names(tree: ast.AST) -> list[tuple[str, set[str]]]:
 
 def test_vault_package_has_no_leaderboard_domain_imports() -> None:
     violations: list[str] = []
-    for path in VAULT_PACKAGE.glob("*.py"):
+    for path in VAULT_PACKAGE.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for module, _names in imported_names(tree):
             if module.startswith(FORBIDDEN_IMPORT_PREFIXES):
@@ -54,7 +59,7 @@ def test_vault_package_imports_siblings_relatively() -> None:
     # Extraction must be a directory move, not a find-and-replace. An absolute
     # self-reference is what turns the former into the latter.
     violations: list[str] = []
-    for path in VAULT_PACKAGE.glob("*.py"):
+    for path in VAULT_PACKAGE.rglob("*.py"):
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):
@@ -74,7 +79,7 @@ def test_vault_package_imports_siblings_relatively() -> None:
 
 def test_vault_package_does_not_introduce_sqlalchemy_orm() -> None:
     violations: list[str] = []
-    for path in VAULT_PACKAGE.glob("*.py"):
+    for path in VAULT_PACKAGE.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for module, names in imported_names(tree):
             forbidden_names = names & FORBIDDEN_SQLALCHEMY_NAMES
@@ -86,7 +91,7 @@ def test_vault_package_does_not_introduce_sqlalchemy_orm() -> None:
 
 def test_vault_package_has_no_create_all_call() -> None:
     violations: list[str] = []
-    for path in VAULT_PACKAGE.glob("*.py"):
+    for path in VAULT_PACKAGE.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if (

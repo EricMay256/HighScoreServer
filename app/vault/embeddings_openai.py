@@ -37,9 +37,24 @@ DEFAULT_BATCH_SIZE = 128
 MAX_BATCH_SIZE = 2048
 
 _RETRY_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
-_MAX_ATTEMPTS = 3
+
+# One attempt and one retry, with any wait capped at four seconds.
+#
+# These are bounded by the request the caller is waiting on, not by what would
+# most likely eventually succeed. A query embedding sits in the middle of a
+# search: exhausting the budget is not a failure but a fall back to lexical
+# results, which is only useful if it happens while someone is still waiting.
+# The worst case is two request timeouts plus one wait — 2 * 10s + 4s = 24s —
+# which stays inside Heroku's 30s router timeout, so the degraded answer is
+# actually returned instead of the router killing the request first.
+#
+# The cap can therefore expire sooner than a Retry-After the provider sent. That
+# is deliberate on a request path: waiting out a long rate-limit window helps
+# nobody once the caller has gone. A batch backfill wants the opposite trade and
+# should not reuse these values.
+_MAX_ATTEMPTS = 2
 _BACKOFF_BASE_SECONDS = 0.5
-_MAX_BACKOFF_SECONDS = 8.0
+_MAX_BACKOFF_SECONDS = 4.0
 
 
 class OpenAIEmbeddingProvider:

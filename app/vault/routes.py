@@ -21,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .api_models import VaultDocumentDetail, VaultSearchHit, VaultSearchResponse
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
-from .domain import VaultDocument
+from .domain import DocumentStatus, VaultDocument
 from .embedding_runtime import get_embedding_provider
 from .repository import VaultDocumentRepository
 from .service import VaultSearchService, VaultTransactionService
@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["vault"])
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+# What the read surface will resolve by ID. Search returns active documents
+# only; fetching by ID additionally resolves archived ones, because an archived
+# document is retired but legitimate history and a related_ids or source_ids
+# reference pointing at one should still resolve rather than dead-end.
+#
+# "flagged" is withheld. It means the write path's policy declined to endorse
+# the content, and the vault's consumer is an agent, which is exactly the
+# caller that will not think to check the status field before using what it
+# was handed. Discovery and reference-resolution therefore differ by one
+# status, deliberately, rather than by whichever predicate each query happened
+# to carry.
+READABLE_STATUSES = (DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED)
 
 
 def _require_read_key(
@@ -140,7 +153,11 @@ async def get_vault_document(
     documents = VaultDocumentRepository()
 
     async with transactions.transaction() as connection:
-        document = await documents.get_by_id(connection, document_id)
+        document = await documents.get_by_id(
+            connection,
+            document_id,
+            statuses=READABLE_STATUSES,
+        )
 
     if document is None:
         raise HTTPException(

@@ -11,7 +11,12 @@ from app.vault.embeddings import (
     EmbeddingUnavailable,
     embed_one,
 )
-from app.vault.embeddings_openai import OpenAIEmbeddingProvider
+from app.vault.embeddings_openai import (
+    _BACKOFF_BASE_SECONDS,
+    _MAX_ATTEMPTS,
+    _MAX_BACKOFF_SECONDS,
+    OpenAIEmbeddingProvider,
+)
 
 
 PROFILE_ID = "openai/text-embedding-3-small:1536"
@@ -220,7 +225,9 @@ def test_persistent_rate_limiting_raises_unavailable(
     with pytest.raises(EmbeddingUnavailable):
         asyncio.run(exercise())
 
-    assert len(attempts) == 3
+    # One attempt and one retry. The budget is bounded by the request the
+    # caller is waiting on, not by what would eventually succeed.
+    assert len(attempts) == 2
 
 
 def test_client_error_is_not_retried() -> None:
@@ -261,7 +268,7 @@ def test_transport_failure_becomes_embedding_unavailable(
         finally:
             await provider.aclose()
 
-    with pytest.raises(EmbeddingUnavailable, match="after 3 attempts"):
+    with pytest.raises(EmbeddingUnavailable, match="after 2 attempts"):
         asyncio.run(exercise())
 
 
@@ -307,6 +314,44 @@ def test_empty_input_makes_no_request() -> None:
             await provider.aclose()
 
     assert asyncio.run(exercise()) == ()
+
+
+def test_retry_after_is_honoured_but_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wait tracks Retry-After only up to the request-path ceiling.
+
+    Exceeding it is deliberate: a query embedding is inside a search someone is
+    waiting on, and falling back to lexical results late is worse than falling
+    back promptly. A backfill would want the opposite trade.
+    """
+
+    slept: list[float] = []
+
+    async def record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("app.vault.embeddings_openai.asyncio.sleep", record)
+
+    for retry_after, expected in (
+        (None, _BACKOFF_BASE_SECONDS),  # plain exponential backoff
+        ("2", 2.0),  # longer than the base wait, so it wins
+        ("0", _BACKOFF_BASE_SECONDS),  # shorter, so the base wait wins
+        ("3600", _MAX_BACKOFF_SECONDS),  # capped, not obeyed
+        ("Wed, 21 Oct 2026 07:28:00 GMT", _BACKOFF_BASE_SECONDS),  # HTTP-date
+    ):
+        slept.clear()
+        asyncio.run(OpenAIEmbeddingProvider._sleep_before_retry(1, retry_after))
+        assert slept == [expected], f"retry_after={retry_after!r}"
+
+
+def test_worst_case_retry_budget_fits_inside_the_router_timeout() -> None:
+    # Two request timeouts plus one capped wait. Heroku's router gives up at
+    # 30s, and a degraded answer that never gets returned is worth nothing.
+    timeout_seconds = 10.0
+    worst_case = _MAX_ATTEMPTS * timeout_seconds + _MAX_BACKOFF_SECONDS
+
+    assert worst_case <= 30.0
 
 
 async def _no_sleep(_seconds: float) -> None:

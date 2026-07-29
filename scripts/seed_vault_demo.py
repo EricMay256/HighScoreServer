@@ -156,7 +156,9 @@ async def run(clean_only: bool) -> int:
             documents = VaultDocumentRepository()
             embeddings = VaultDocumentEmbeddingRepository()
             async with transactions.transaction() as connection:
-                for (suffix, title, body), vector in zip(CORPUS, vectors):
+                for (suffix, title, body), vector in zip(
+                    CORPUS, vectors, strict=True
+                ):
                     document_id = f"{ID_PREFIX}{suffix}"
                     await documents.insert(
                         connection,
