@@ -138,7 +138,7 @@ def create_app() -> FastAPI:
     # 4. Vault read-only routes — registered only when the vault runtime is on,
     #    so a disabled vault publishes no schema and no endpoints.
     if vault_enabled():
-        app.include_router(vault_router, prefix="/api/vault")
+        app.include_router(vault_router, prefix="/api/v1/vault")
     # 5. SPA assets mount — MUST come before the SPA catch-all router below.
     spa_routes.mount_spa_assets(app)
     # 6. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.

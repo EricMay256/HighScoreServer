@@ -149,13 +149,13 @@ async def search_vault(
 
 
 @router.get(
-    "/documents/{document_id}",
+    "/notes/{note_id}",
     response_model=VaultDocumentDetail,
     dependencies=[Depends(_require_read_key)],
-    summary="Fetch one vault document by ID",
+    summary="Fetch one vault note by ID",
 )
 async def get_vault_document(
-    document_id: str = Path(min_length=1, max_length=256),
+    note_id: str = Path(min_length=1, max_length=256),
 ) -> VaultDocumentDetail:
     transactions = VaultTransactionService(get_vault_engine())
     documents = VaultDocumentRepository()
@@ -163,7 +163,7 @@ async def get_vault_document(
     async with transactions.transaction() as connection:
         document = await documents.get_by_id(
             connection,
-            document_id,
+            note_id,
             statuses=READABLE_STATUSES,
             readable_only=True,
         )
@@ -171,6 +171,6 @@ async def get_vault_document(
     if document is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found",
+            detail="Note not found",
         )
     return _to_detail(document)

@@ -317,7 +317,7 @@ vault gains real agent credentials this is the seam they replace.
 
 Routes are registered only when `VAULT_ENABLED` is true, so a disabled vault
 publishes no endpoints and no OpenAPI schema. They are mounted under
-`/api/vault`, ahead of the SPA catch-all and the static-file mount.
+`/api/v1/vault`, ahead of the SPA catch-all and the static-file mount.
 
 This slice adds no rate limiting: slowapi's limiter lives in the host package
 and is not importable from here. Add it at the reverse proxy, or with a

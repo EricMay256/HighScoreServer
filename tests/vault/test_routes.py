@@ -39,7 +39,7 @@ def test_search_requires_credentials(
 ) -> None:
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
-    response = client.get("/api/vault/search", params={"q": "running"})
+    response = client.get("/api/v1/vault/search", params={"q": "running"})
 
     assert response.status_code == 401
 
@@ -51,7 +51,7 @@ def test_search_rejects_a_wrong_key(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        "/api/vault/search",
+        "/api/v1/vault/search",
         params={"q": "running"},
         headers={"Authorization": "Bearer not-the-key"},
     )
@@ -67,7 +67,7 @@ def test_search_refuses_to_serve_when_no_key_is_configured(
     monkeypatch.delenv("VAULT_READ_API_KEY", raising=False)
 
     response = client.get(
-        "/api/vault/search",
+        "/api/v1/vault/search",
         params={"q": "running"},
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
@@ -83,7 +83,7 @@ def test_search_returns_lexical_hits(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        "/api/vault/search",
+        "/api/v1/vault/search",
         params={"q": "running", "limit": 5},
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
@@ -107,10 +107,10 @@ def test_search_validates_its_query_parameters(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
     headers = {"Authorization": f"Bearer {READ_KEY}"}
 
-    assert client.get("/api/vault/search", headers=headers).status_code == 422
+    assert client.get("/api/v1/vault/search", headers=headers).status_code == 422
     assert (
         client.get(
-            "/api/vault/search",
+            "/api/v1/vault/search",
             params={"q": "x", "limit": 0},
             headers=headers,
         ).status_code
@@ -118,7 +118,7 @@ def test_search_validates_its_query_parameters(
     )
     assert (
         client.get(
-            "/api/vault/search",
+            "/api/v1/vault/search",
             params={"q": "x", "limit": 500},
             headers=headers,
         ).status_code
@@ -138,7 +138,7 @@ def test_search_rejects_a_whitespace_only_query(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        "/api/vault/search",
+        "/api/v1/vault/search",
         params={"q": "   "},
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
@@ -154,7 +154,7 @@ def test_search_strips_surrounding_whitespace(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        "/api/vault/search",
+        "/api/v1/vault/search",
         params={"q": "  running  ", "limit": 5},
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
@@ -176,7 +176,7 @@ def test_search_rejects_a_non_ascii_key_without_erroring(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        "/api/vault/search",
+        "/api/v1/vault/search",
         params={"q": "running"},
         headers={b"Authorization": b"Bearer n\xf6pe"},
     )
@@ -191,7 +191,7 @@ def test_document_fetch_rejects_a_non_ascii_key_without_erroring(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        "/api/vault/documents/anything",
+        "/api/v1/vault/notes/anything",
         headers={b"Authorization": b"Bearer n\xf6pe"},
     )
 
@@ -206,7 +206,7 @@ def test_document_is_fetchable_by_id(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        f"/api/vault/documents/{seeded_corpus['alpha']}",
+        f"/api/v1/vault/notes/{seeded_corpus['alpha']}",
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
 
@@ -230,7 +230,7 @@ def test_archived_document_is_still_resolvable_by_id(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        f"/api/vault/documents/{seeded_corpus['gamma']}",
+        f"/api/v1/vault/notes/{seeded_corpus['gamma']}",
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
 
@@ -249,7 +249,7 @@ def test_flagged_document_is_not_served_by_id(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        f"/api/vault/documents/{seeded_corpus['delta']}",
+        f"/api/v1/vault/notes/{seeded_corpus['delta']}",
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
 
@@ -263,7 +263,7 @@ def test_unknown_document_is_a_404(
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
     response = client.get(
-        "/api/vault/documents/does-not-exist",
+        "/api/v1/vault/notes/does-not-exist",
         headers={"Authorization": f"Bearer {READ_KEY}"},
     )
 
@@ -276,7 +276,7 @@ def test_document_fetch_requires_credentials(
 ) -> None:
     monkeypatch.setenv("VAULT_READ_API_KEY", READ_KEY)
 
-    response = client.get("/api/vault/documents/anything")
+    response = client.get("/api/v1/vault/notes/anything")
 
     assert response.status_code == 401
 
@@ -333,11 +333,11 @@ def test_read_surface_carries_doc_type_including_when_untyped(
     asyncio.run(seed())
     try:
         typed = client.get(
-            f"/api/vault/documents/{typed_id}",
+            f"/api/v1/vault/notes/{typed_id}",
             headers={"Authorization": f"Bearer {READ_KEY}"},
         )
         untyped = client.get(
-            f"/api/vault/documents/{untyped_id}",
+            f"/api/v1/vault/notes/{untyped_id}",
             headers={"Authorization": f"Bearer {READ_KEY}"},
         )
     finally:
