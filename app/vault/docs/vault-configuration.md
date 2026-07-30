@@ -112,12 +112,14 @@ two, both listed below.
 
 - `DATABASE_URL` already contains a credential and remains managed by Heroku.
 - `API_KEY` and `JWT_SECRET` remain existing HSS secrets.
-- `VAULT_EMBEDDING_API_KEY` and `VAULT_READ_API_KEY` are introduced by the
-  read-only slice. Store them only in Heroku config, never in a tracked file,
-  and never echo them in CI logs. Neither is logged by the application: the
-  embedding adapter logs status codes only, and request bodies are never logged
-  because they carry note content.
-- Durable per-agent credentials belong to a later reviewed phase.
+- `VAULT_EMBEDDING_API_KEY` is introduced by the read-only slice. Store it only
+  in Heroku config, never in a tracked file, and never echo it in CI logs. It is
+  not logged by the application: the embedding adapter logs status codes only,
+  and request bodies are never logged because they carry note content.
+- Read access needs **no** environment secret. Agent credentials live in
+  `vault.vault_agent_credentials` and are issued with
+  `scripts/issue_vault_credential.py`; only the SHA-256 of each secret is
+  stored. See vault ADR 0015.
 - Never use `heroku config` output in CI logs or documentation.
 
 Local secrets belong in `.env`, which is already ignored by Git. `.env.example`
@@ -303,17 +305,26 @@ treated as a credentials-only configuration change. The procedure is above under
 
 ## Read-only access
 
-The read surface is gated on one shared secret:
+The read surface is gated on operator-issued agent credentials, sent as
+`Authorization: Bearer hssv1_<credential-id>_<secret>`:
 
+```bash
+python -m scripts.issue_vault_credential issue --name claude-code --scopes vault:read
+python -m scripts.issue_vault_credential list
+python -m scripts.issue_vault_credential revoke --id <credential-id>
 ```
-VAULT_READ_API_KEY=   # secret; sent as "Authorization: Bearer <value>"
-```
+
+Only the SHA-256 of each secret is stored, so the token is printed once and a
+lost one is revoked and reissued rather than recovered. Issuing against
+production means setting `DATABASE_URL` explicitly for the command — writing a
+credential into the wrong database is silent.
 
 The vault cannot reuse HighScoreServer's authentication — importing it would
-breach the isolation rule that keeps extraction a directory move — so the
-minimum a private corpus needs is implemented inside the package and nothing
-more. **An unset key returns 503 rather than serving anonymously.** When the
-vault gains real agent credentials this is the seam they replace.
+breach the isolation rule that keeps extraction a directory move — and the
+integration spec is explicit that player JWTs and the leaderboard `API_KEY` are
+not vault credentials. A request with no credential, an unknown credential, or
+a revoked or expired one is `401`; one that authenticates but lacks
+`vault:read` is `403`. See vault ADR 0015.
 
 Routes are registered only when `VAULT_ENABLED` is true, so a disabled vault
 publishes no endpoints and no OpenAPI schema. They are mounted under

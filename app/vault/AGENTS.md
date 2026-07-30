@@ -139,6 +139,23 @@ be edited when it does.
   by Reciprocal Rank Fusion (ADR 0006, amended by 0007). Changing provider or model is a
   controlled re-embed, never a credentials-only config change.
 
+## Authentication
+
+- **Agents authenticate with `hssv1_<credential-id>_<secret>`**, verified against
+  `vault_agent_credentials`; only `sha256(secret)` is stored. `VAULT_READ_API_KEY` is gone and
+  there is no global on/off secret — a credential verifies or it does not. See ADR 0015.
+- The token is split **from the right**: credential IDs may contain `_`, secrets are hex so the
+  last `_` is unambiguously the separator. Do not "simplify" this to a left split.
+- A lookup miss still runs a comparison against a dummy hash. Removing that lets response
+  timing enumerate valid credential IDs.
+- Plain SHA-256 is correct **here** because secrets are machine-generated with full entropy.
+  Do not carry that reasoning to human-chosen passwords.
+- `last_used_at` is written only on success — it means "last used", not "last attempted".
+- `401` for a bad or inactive credential, `403` for a valid one missing a scope. Neither
+  response says which check failed.
+- Scopes are verbs. *What* a credential may read is ADR 0014's path policy, a property of the
+  folder rather than of the credential.
+
 ## Working agreements
 
 - Type hints on every function signature; no module-level side effects.

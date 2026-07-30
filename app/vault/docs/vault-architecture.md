@@ -378,7 +378,7 @@ what gets embedded (ADR 0013). The database is a **replica** of `Human/**` and t
 record** for `Agent/**`; `source_sha256 IS NULL` is a row saying it has no upstream file.
 
 What remains open is access. **`folders.yml` governs `ai_write` and has no `ai_read` at all.** With
-the whole vault behind one shared `VAULT_READ_API_KEY`, any holder of that key reads everything,
+the whole vault readable by any credential holding `vault:read`, one scope reads everything,
 including `Human/07 People/**` — notes about real people. ADR 0008's remark that archived is a
 visibility state rather than a privacy one was written for an agent-authored corpus and does not
 carry to whole-vault scope.

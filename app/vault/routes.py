@@ -3,27 +3,26 @@
 Search and document retrieval only. Contribution, review, and compile endpoints
 belong to later phases and are deliberately absent.
 
-Access is gated on a single shared secret, ``VAULT_READ_API_KEY``. The vault
-cannot reuse HighScoreServer's auth — importing it would breach the isolation
-rule that keeps extraction a directory move — and a private corpus must not be
-served to anonymous callers, so the minimum a read surface needs is implemented
-here and nothing more. When the vault gains real agent credentials, this is the
-seam they replace.
+Access is gated on operator-issued agent credentials
+(``hssv1_<credential-id>_<secret>``), verified against
+``vault_agent_credentials``. The vault cannot reuse HighScoreServer's auth —
+importing it would breach the isolation rule that keeps extraction a directory
+move — and the integration spec is explicit that player JWTs and the global
+leaderboard ``API_KEY`` are not vault credentials.
 """
 
-import hmac
 import logging
-import os
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api_models import VaultDocumentDetail, VaultSearchHit, VaultSearchResponse
+from .auth import VaultCredential, VaultScope, authorize, parse_token
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
 from .domain import DocumentStatus, VaultDocument
 from .embedding_runtime import get_embedding_provider
-from .repository import VaultDocumentRepository
+from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
 from .service import VaultSearchService, VaultTransactionService
 
 
@@ -51,31 +50,62 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 READABLE_STATUSES = (DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED)
 
 
-def _require_read_key(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-) -> None:
-    """Authorize a read request against the configured shared secret."""
+async def _authenticated(
+    required_scopes: tuple[str, ...],
+    credentials: HTTPAuthorizationCredentials | None,
+) -> VaultCredential:
+    """Verify a bearer token and its scopes, or raise.
 
-    expected = os.environ.get("VAULT_READ_API_KEY", "")
-    if not expected:
-        # Refusing to serve is the safe failure. Serving an unauthenticated
-        # corpus because a variable is missing is not.
-        logger.error("VAULT_READ_API_KEY is not set; refusing vault read request")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vault read access is not configured",
+    401 and 403 are distinguished because they mean different things to an
+    operator: a bad token is a client that cannot talk to us, a missing scope
+    is a client we deliberately did not grant something. Neither response says
+    which check failed.
+    """
+
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid vault credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    parsed = parse_token(credentials.credentials) if credentials else None
+    if parsed is None:
+        raise unauthorized
+
+    repository = VaultAgentCredentialRepository()
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        credential = await repository.get(connection, parsed.credential_id)
+        failure = authorize(credential, parsed.secret, required_scopes)
+        if failure is None and credential is not None:
+            await repository.touch(connection, credential.id)
+
+    if failure == "scope" and credential is not None:
+        # Never log the token; the credential ID is the non-secret half and is
+        # what an operator needs to find the row.
+        logger.warning(
+            "Vault credential lacks a required scope",
+            extra={
+                "credential_id": credential.id,
+                "principal_id": credential.principal_id,
+                "required_scopes": list(required_scopes),
+            },
         )
-    # Compared as bytes, not str: compare_digest raises TypeError on a str
-    # holding non-ASCII, and the token is attacker-controlled — Starlette
-    # decodes headers as latin-1, so a raw high byte reaches here and would
-    # turn a failed authorization into a 500.
-    provided = credentials.credentials.encode("utf-8") if credentials else b""
-    if not hmac.compare_digest(provided, expected.encode("utf-8")):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid vault credentials",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Credential lacks the required scope",
         )
+    if failure is not None:
+        raise unauthorized
+    if credential is None:  # unreachable; authorize() returns "invalid" first
+        raise unauthorized
+    return credential
+
+
+async def require_read_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.READ,), credentials)
 
 
 def _search_service() -> VaultSearchService:
@@ -110,7 +140,7 @@ def _to_detail(document: VaultDocument) -> VaultDocumentDetail:
 @router.get(
     "/search",
     response_model=VaultSearchResponse,
-    dependencies=[Depends(_require_read_key)],
+    dependencies=[Depends(require_read_scope)],
     summary="Hybrid lexical and vector search over the vault corpus",
 )
 async def search_vault(
@@ -151,7 +181,7 @@ async def search_vault(
 @router.get(
     "/notes/{note_id}",
     response_model=VaultDocumentDetail,
-    dependencies=[Depends(_require_read_key)],
+    dependencies=[Depends(require_read_scope)],
     summary="Fetch one vault note by ID",
 )
 async def get_vault_document(

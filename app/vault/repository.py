@@ -4,11 +4,12 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from .auth import VaultCredential
 from .domain import (
     DocumentEmbedding,
     DocumentKind,
@@ -19,7 +20,12 @@ from .domain import (
     VaultReviewCase,
 )
 from .read_policy import readable_path_predicate
-from .tables import vault_document_embeddings, vault_documents, vault_review_cases
+from .tables import (
+    vault_agent_credentials,
+    vault_document_embeddings,
+    vault_documents,
+    vault_review_cases,
+)
 
 
 # The public projection of a document. Shared with the retrieval module so the
@@ -262,3 +268,69 @@ class VaultReviewCaseRepository:
         )
         result = await connection.execute(statement)
         return _review_case_from_row(result.mappings().one())
+
+
+class VaultAgentCredentialRepository:
+    """Lookup and last-used tracking for operator-issued agent credentials."""
+
+    _columns = (
+        vault_agent_credentials.c.id,
+        vault_agent_credentials.c.principal_id,
+        vault_agent_credentials.c.display_name,
+        vault_agent_credentials.c.secret_sha256,
+        vault_agent_credentials.c.scopes,
+        vault_agent_credentials.c.created_at,
+        vault_agent_credentials.c.expires_at,
+        vault_agent_credentials.c.revoked_at,
+        vault_agent_credentials.c.last_used_at,
+    )
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        credential_id: str,
+    ) -> VaultCredential | None:
+        """Load a credential by its non-secret ID.
+
+        Returns expired and revoked rows too. Whether a credential may be used
+        is ``auth.authorize``'s decision, and filtering here would make a
+        revoked credential indistinguishable from a nonexistent one in the
+        logs — which is exactly the distinction an operator needs.
+        """
+
+        statement = select(*self._columns).where(
+            vault_agent_credentials.c.id == credential_id
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        if row is None:
+            return None
+        return VaultCredential(
+            id=row["id"],
+            principal_id=row["principal_id"],
+            display_name=row["display_name"],
+            secret_sha256=bytes(row["secret_sha256"]),
+            scopes=tuple(row["scopes"]),
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            revoked_at=row["revoked_at"],
+            last_used_at=row["last_used_at"],
+        )
+
+    async def touch(
+        self,
+        connection: AsyncConnection,
+        credential_id: str,
+    ) -> None:
+        """Record a successful use.
+
+        Only on success: the column means "last used", not "last attempted", so
+        a failed secret must not let an attacker keep a revoked-looking
+        credential looking live.
+        """
+
+        await connection.execute(
+            update(vault_agent_credentials)
+            .where(vault_agent_credentials.c.id == credential_id)
+            .values(last_used_at=func.now())
+        )
