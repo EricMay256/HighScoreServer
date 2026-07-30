@@ -1,6 +1,6 @@
 import pytest
 
-from app.vault.constants import EMBEDDING_DIMENSIONS
+from app.vault.constants import DEFAULT_EMBEDDING_TIMEOUT_SECONDS, EMBEDDING_DIMENSIONS
 from app.vault.embedding_runtime import (
     UnknownEmbeddingProviderError,
     create_embedding_provider,
@@ -28,6 +28,24 @@ def test_default_profile_names_provider_model_and_dimensions(
     assert settings.profile_id == (
         f"openai/text-embedding-3-small:{EMBEDDING_DIMENSIONS}"
     )
+
+
+def test_unset_timeout_falls_back_to_the_shared_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closes the loop on the retry-budget test.
+
+    ``test_worst_case_retry_budget_fits_inside_the_router_timeout`` models the
+    worst case using ``DEFAULT_EMBEDDING_TIMEOUT_SECONDS``. That is only
+    meaningful if the value a real process ends up with is the same one, so
+    this pins settings to the shared constant rather than to a literal.
+    """
+
+    monkeypatch.delenv("VAULT_EMBEDDING_TIMEOUT_SECONDS", raising=False)
+
+    settings = EmbeddingSettings.from_environment()
+
+    assert settings.timeout_seconds == DEFAULT_EMBEDDING_TIMEOUT_SECONDS
 
 
 def test_default_profile_follows_the_configured_provider(

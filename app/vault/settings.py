@@ -7,7 +7,11 @@ import re
 
 from sqlalchemy.engine import make_url
 
-from .constants import EMBEDDING_DIMENSIONS, resolve_text_search_config
+from .constants import (
+    DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+    EMBEDDING_DIMENSIONS,
+    resolve_text_search_config,
+)
 
 
 # Mirrors the vault_document_embeddings_profile_id_format check constraint.
@@ -158,7 +162,10 @@ class EmbeddingSettings:
             embedding_dimensions=embedding_dimensions,
             timeout_seconds=_positive_float(
                 "VAULT_EMBEDDING_TIMEOUT_SECONDS",
-                os.environ.get("VAULT_EMBEDDING_TIMEOUT_SECONDS", "10"),
+                os.environ.get(
+                    "VAULT_EMBEDDING_TIMEOUT_SECONDS",
+                    str(DEFAULT_EMBEDDING_TIMEOUT_SECONDS),
+                ),
             ),
         )
 

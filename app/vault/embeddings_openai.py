@@ -16,6 +16,7 @@ import logging
 
 import httpx
 
+from .constants import DEFAULT_EMBEDDING_TIMEOUT_SECONDS
 from .embeddings import (
     EmbeddingDimensionMismatch,
     EmbeddingInputKind,
@@ -82,7 +83,7 @@ class OpenAIEmbeddingProvider:
         profile_id: str,
         dimensions: int,
         base_url: str | None = None,
-        timeout_seconds: float = 10.0,
+        timeout_seconds: float = DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
         batch_size: int = DEFAULT_BATCH_SIZE,
         client: httpx.AsyncClient | None = None,
     ) -> None:

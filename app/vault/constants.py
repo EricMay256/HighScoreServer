@@ -1,4 +1,8 @@
-"""Stable persistence contracts shared across the vault package."""
+"""Stable contracts shared across the vault package.
+
+Mostly persistence contracts. Anything here must be importable by the Alembic
+environment, so this module never imports a transport client.
+"""
 
 import os
 import re
@@ -10,6 +14,19 @@ import re
 EMBEDDING_DIMENSIONS = 1536
 
 DEFAULT_TEXT_SEARCH_CONFIG = "english"
+
+# The default per-request embedding timeout, in seconds.
+#
+# Not a persistence contract like the two above, but it lives here for the same
+# reason: three places have to agree on it — the environment default in
+# settings, the adapter's parameter default, and the test that proves the retry
+# budget fits inside Heroku's 30s router timeout. This module is the only one
+# all three can import without pulling a transport client into the Alembic
+# environment.
+#
+# Changing this changes the worst case that test models. See "Deferred
+# decisions" item 3 in docs/vault-architecture.md before touching it.
+DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 10.0
 
 # The configuration name is interpolated into DDL as a literal, so it is
 # constrained to the shape of an unquoted PostgreSQL identifier before it can

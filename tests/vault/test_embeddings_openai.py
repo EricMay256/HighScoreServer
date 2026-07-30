@@ -4,6 +4,7 @@ import json
 import httpx
 import pytest
 
+from app.vault.constants import DEFAULT_EMBEDDING_TIMEOUT_SECONDS
 from app.vault.embeddings import (
     EmbeddingDimensionMismatch,
     EmbeddingInputKind,
@@ -384,8 +385,11 @@ def test_worst_case_retry_budget_fits_inside_the_router_timeout() -> None:
     # pair of them — so N attempts means N timeouts and N-1 waits. Heroku's
     # router gives up at 30s, and a degraded answer that never gets returned is
     # worth nothing. Guards the constants against being raised past the budget.
-    timeout_seconds = 10.0
-    worst_case = _MAX_ATTEMPTS * timeout_seconds + (
+    #
+    # Read from configuration rather than restated here: a hardcoded 10.0 would
+    # keep passing after the configured default moved, leaving this modelling a
+    # budget nothing actually runs under.
+    worst_case = _MAX_ATTEMPTS * DEFAULT_EMBEDDING_TIMEOUT_SECONDS + (
         (_MAX_ATTEMPTS - 1) * _MAX_BACKOFF_SECONDS
     )
 
