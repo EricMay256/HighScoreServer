@@ -312,8 +312,9 @@ The existing `migrations/` lineage continues to own `public` leaderboard objects
 `DATABASE_URL`. The new `vault_migrations/` lineage owns only `vault.*` objects and reads
 `VAULT_DATABASE_URL`, falling back to `DATABASE_URL`.
 
-The Heroku release command must eventually run both upgrades and abort the release if either
-fails. Importing Markdown and generating embeddings are resumable operational jobs, not
+The Heroku release command runs both upgrades and aborts the release if either fails
+(`scripts/release.sh`); the vault lineage is gated on `VAULT_ENABLED` so an unverified
+pgvector plan cannot abort unrelated deploys. Importing Markdown and generating embeddings are resumable operational jobs, not
 Alembic migrations. A release migration never reads the private repository or calls an
 embedding provider.
 

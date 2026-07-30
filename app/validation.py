@@ -4,7 +4,7 @@ Defines the Validator interface and a tiered default implementation. The seam
 isolates the rest of the system from the (deferred) deterministic replay core:
 tiers 1-2 are real here; tier 3 exists as a marked integration point only — its
 binding (in-process port / subprocess / sidecar) and the replay core itself are
-intentionally undecided (see specs.md, "OPEN - tier-3 binding").
+intentionally undecided (see docs/specs.md, "OPEN - tier-3 binding").
 
 The mode's required_tier is the *minimum*; the validator achieves at least that
 and records the tier actually achieved, so old runs can be re-validated at a
@@ -47,7 +47,7 @@ class ModeBounds(BaseModel):
 
     Only ``max_score`` is enforced today; ``min_score`` (a floor) and
     ``max_actions`` (a per-mode action cap) are accommodated but unenforced
-    beyond the global action ceiling — see specs.md "Deferred".
+    beyond the global action ceiling — see docs/specs.md "Deferred".
     """
     max_score:   int | None = None
     min_score:   int = 0
@@ -71,7 +71,7 @@ class Validator(Protocol):
 # A tier-2 scorer recomputes the canonical score from a run's action log for a
 # specific scenario_version. None are registered in-repo: the action shape and
 # scoring rules are pinned per scenario when a real run producer lands (see
-# specs.md "Deferred: typed action shape"). The registry is the seam; tests
+# docs/specs.md "Deferred: typed action shape"). The registry is the seam; tests
 # inject a fake to exercise the recompute path.
 ScenarioScorer = Callable[["RunRecord"], int]
 
@@ -153,7 +153,7 @@ class TieredValidator:
     def _tier3(self, run: RunRecord) -> ValidationResult:
         # DEFERRED — tier 3 exists as a concept and an integration point only.
         # The binding (in-process port / subprocess / sidecar) and the replay
-        # core are intentionally not decided here (see specs.md OPEN tier-3).
+        # core are intentionally not decided here (see docs/specs.md OPEN tier-3).
         # A real Tier3Validator plugs in at this seam.
         return ValidationResult(
             canonical_score=0, tier_achieved=0, status="rejected",

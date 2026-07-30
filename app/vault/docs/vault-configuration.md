@@ -141,9 +141,20 @@ The vault lineage owns `vault.*` and records its revision in
 alembic -c alembic-vault.ini upgrade head
 ```
 
-Phase 1 does not change the Heroku release command. Before the first vault
-deployment, update the release phase in a separately reviewed deployment slice
-so it runs both commands sequentially and aborts if either fails.
+The Heroku release phase is `bash scripts/release.sh`. It runs the leaderboard
+lineage unconditionally, then the vault lineage **only when `VAULT_ENABLED` is
+`true`**, and aborts the release if either fails.
+
+The gate is deliberate. `0001_vault_foundation` runs `CREATE EXTENSION vector`;
+if pgvector is unavailable on the attached plan, an ungated release phase would
+abort *every* deploy, including ones unrelated to the vault. Because setting
+`VAULT_ENABLED=true` itself triggers a release, the cutover is exactly when the
+vault schema is built and a failure aborts that release rather than an
+unrelated one. **Verify pgvector on the target plan before flipping the flag:**
+
+```bash
+heroku pg:psql --app <app> -c   "SELECT name, installed_version FROM pg_available_extensions WHERE name='vector';"
+```
 
 Vault migrations may enable the database-wide `vector` extension, but they
 never import Markdown, generate embeddings, or read the private

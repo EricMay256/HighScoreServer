@@ -79,7 +79,7 @@ async client (as the Redis cache does) — never call it directly on the event l
   - Existing DB that predates Alembic: `alembic stamp 0001_baseline` once (never `upgrade` — the objects already exist), then `upgrade head` for later revisions.
   - `env.py` reads `DATABASE_URL`, loading `.env` with `override=False` — so a process-env URL (a throwaway DB, or prod) overrides `.env`. Always `echo $env:DATABASE_URL` before a stamp/upgrade against a non-default target.
   - For local migration tests, remember that pytest points the app at `TEST_DATABASE_URL`, but Alembic reads `DATABASE_URL`. Override `DATABASE_URL` to the test URL before `alembic upgrade head` when preparing the test database.
-- Deploy (Heroku): migrations run automatically via the Procfile `release: alembic upgrade head` phase; a failed migration aborts the release. No manual migration step on deploy.
+- Deploy (Heroku): migrations run automatically via the Procfile `release: bash scripts/release.sh` phase; a failed migration aborts the release. No manual migration step on deploy. The script runs the leaderboard lineage always and the vault lineage only when `VAULT_ENABLED=true` — the vault's first migration runs `CREATE EXTENSION vector`, so running it unconditionally would make every deploy depend on pgvector being available on the plan.
 - DB ad-hoc, Heroku: `cat file.sql | heroku pg:psql --app high-score-server`, or `heroku run alembic current --app high-score-server`.
 - Steam auth is optional and configured through `STEAM_WEB_API_KEY`, `STEAM_APP_ID`, and `STEAM_AUTH_IDENTITY`. `STEAM_WEB_API_KEY` must stay server-side only; never log or expose this.
 - **Windows / PowerShell** is the primary dev environment:
@@ -89,7 +89,7 @@ async client (as the Redis cache does) — never call it directly on the event l
 
 ## Scope guardrails for current work
 
-See `specs.md` for the validated-runs / cumulative-scoring spec, and ADR 0015 plus migration `0004_auth_identities` for external identities. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); SQLAlchemy ORM; converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs; additional external providers beyond Steam unless requested.
+See `docs/specs.md` for the validated-runs / cumulative-scoring spec, and ADR 0015 plus migration `0004_auth_identities` for external identities. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); SQLAlchemy ORM; converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs; additional external providers beyond Steam unless requested.
 
 <!-- BEGIN vault-context — delete this block when app/vault/ is extracted -->
 ### `app/vault/`

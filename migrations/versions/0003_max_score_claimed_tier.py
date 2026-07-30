@@ -1,6 +1,6 @@
 """game_modes.max_score ceiling and runs.claimed_tier
 
-Phase 2 of validated runs (see specs.md "per-mode score ceiling"). Two
+Phase 2 of validated runs (see docs/specs.md "per-mode score ceiling"). Two
 not-yet-shipped, additive nullable columns bundled into a SINGLE revision
 (legitimate because neither has shipped — distinct from folding into 0002's
 already-deployed game_modes ALTER):
@@ -17,7 +17,7 @@ already-deployed game_modes ALTER):
 
 Both are additive (nullable, default NULL, no backfill) and inherit the tables'
 existing privileges, so NO new grant is needed. Structural DDL only — grants
-live in db/role.sql (see 0002's note and specs.md grant split).
+live in db/role.sql (see 0002's note and docs/specs.md grant split).
 
 Revision ID: 0003_max_score_claimed_tier
 Revises: 0002_runs_cumulative_validation
