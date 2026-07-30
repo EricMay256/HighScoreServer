@@ -9,6 +9,7 @@ from sqlalchemy import delete as sql_delete
 
 from app.vault.auth import TOKEN_PREFIX, VaultScope, hash_secret
 from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
+from app.vault.rate_limit import LIMITS
 from app.vault.repository import VaultDocumentRepository
 from app.vault.settings import vault_enabled
 from app.vault.tables import vault_agent_credentials, vault_documents
@@ -459,3 +460,50 @@ def test_read_surface_carries_doc_type_including_when_untyped(
         assert untyped_body[field] is None
     # vault_path is NOT NULL, so it is present even on an otherwise bare row.
     assert untyped_body["vault_path"] == f"Agent/notes/{untyped_id}.md"
+
+
+def test_search_returns_429_with_retry_after_once_the_burst_is_spent(
+    client: TestClient,
+    read_token: str,
+) -> None:
+    """The quota is per principal, and the response says when to come back.
+
+    A fresh credential means a fresh bucket, so this does not depend on what
+    other tests spent.
+    """
+
+    headers = {"Authorization": f"Bearer {read_token}"}
+    limit = LIMITS["search"]
+
+    for _ in range(limit.burst):
+        allowed = client.get(
+            "/api/v1/vault/search", params={"q": "running"}, headers=headers
+        )
+        assert allowed.status_code == 200
+
+    refused = client.get(
+        "/api/v1/vault/search", params={"q": "running"}, headers=headers
+    )
+
+    assert refused.status_code == 429
+    # Integer seconds, and never 0 — a 0 invites an immediate retry that is
+    # refused again.
+    assert int(refused.headers["Retry-After"]) >= 1
+
+
+def test_the_quota_is_charged_per_operation_not_per_credential(
+    client: TestClient,
+    read_token: str,
+) -> None:
+    """Exhausting search must not lock the caller out of fetching notes."""
+
+    headers = {"Authorization": f"Bearer {read_token}"}
+
+    for _ in range(LIMITS["search"].burst + 1):
+        client.get("/api/v1/vault/search", params={"q": "running"}, headers=headers)
+
+    # Search is spent; get_note has its own, larger bucket. 404 rather than
+    # 429 is the point — the request was allowed through.
+    response = client.get("/api/v1/vault/notes/does-not-exist", headers=headers)
+
+    assert response.status_code == 404

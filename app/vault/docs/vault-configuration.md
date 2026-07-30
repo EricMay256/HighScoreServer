@@ -330,6 +330,14 @@ Routes are registered only when `VAULT_ENABLED` is true, so a disabled vault
 publishes no endpoints and no OpenAPI schema. They are mounted under
 `/api/v1/vault`, ahead of the SPA catch-all and the static-file mount.
 
-This slice adds no rate limiting: slowapi's limiter lives in the host package
-and is not importable from here. Add it at the reverse proxy, or with a
-vault-local limiter, before exposing the surface to anything untrusted.
+Rate limits are enforced per authenticated principal by a vault-local token
+bucket (`app/vault/rate_limit.py`); slowapi lives in the host package and is not
+importable from here. The limits match the integration spec: search 30/min
+burst 10, note fetch 120/min burst 30. Exceeding one returns `429` with
+`Retry-After` in whole seconds.
+
+**The buckets are per process.** Each Gunicorn worker holds its own, so the
+effective ceiling is the stated limit times the worker count — two, currently.
+That is a known factor on a single host. Across hosts it stops being a limit at
+all, which is the point at which a shared backend becomes necessary rather than
+tidier.

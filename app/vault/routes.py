@@ -22,6 +22,7 @@ from .constants import resolve_text_search_config
 from .db import get_vault_engine
 from .domain import DocumentStatus, VaultDocument
 from .embedding_runtime import get_embedding_provider
+from .rate_limit import get_limiter
 from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
 from .service import VaultSearchService, VaultTransactionService
 
@@ -102,10 +103,47 @@ async def _authenticated(
     return credential
 
 
+async def _enforce_quota(credential: VaultCredential, operation: str) -> None:
+    """Charge one request against the principal's quota for this operation."""
+
+    retry_after = await get_limiter().check(credential.principal_id, operation)
+    if retry_after is None:
+        return
+    logger.warning(
+        "Vault rate limit exceeded",
+        extra={
+            "principal_id": credential.principal_id,
+            "operation": operation,
+            "retry_after": retry_after,
+        },
+    )
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Rate limit exceeded",
+        # Integer seconds: Retry-After has no fractional form, and rounding
+        # down would invite a retry that is refused again.
+        headers={"Retry-After": str(int(retry_after + 0.999))},
+    )
+
+
 async def require_read_scope(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> VaultCredential:
     return await _authenticated((VaultScope.READ,), credentials)
+
+
+async def search_quota(
+    credential: VaultCredential = Depends(require_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "search")
+    return credential
+
+
+async def note_quota(
+    credential: VaultCredential = Depends(require_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "get_note")
+    return credential
 
 
 def _search_service() -> VaultSearchService:
@@ -140,7 +178,7 @@ def _to_detail(document: VaultDocument) -> VaultDocumentDetail:
 @router.get(
     "/search",
     response_model=VaultSearchResponse,
-    dependencies=[Depends(require_read_scope)],
+    dependencies=[Depends(search_quota)],
     summary="Hybrid lexical and vector search over the vault corpus",
 )
 async def search_vault(
@@ -181,7 +219,7 @@ async def search_vault(
 @router.get(
     "/notes/{note_id}",
     response_model=VaultDocumentDetail,
-    dependencies=[Depends(require_read_scope)],
+    dependencies=[Depends(note_quota)],
     summary="Fetch one vault note by ID",
 )
 async def get_vault_document(

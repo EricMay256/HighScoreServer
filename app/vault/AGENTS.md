@@ -156,6 +156,18 @@ be edited when it does.
 - Scopes are verbs. *What* a credential may read is ADR 0014's path policy, a property of the
   folder rather than of the credential.
 
+## Rate limiting
+
+- **Per authenticated principal, never per IP** — agents share egress addresses and a
+  credential is what an operator can revoke. `app/vault/rate_limit.py` carries a token bucket
+  because slowapi lives in the host package and importing it would breach the isolation rule.
+- Limits mirror the integration spec's table; `LIMITS` is the single statement of them.
+- **Buckets are per process**, so the real ceiling is the limit times the worker count. Do not
+  describe this as a hard limit in operator docs, and do not "fix" it in-process — the fix is a
+  shared backend, and it only matters across hosts.
+- A bucket may be pruned **only** when elapsed time proves it would have refilled. Dropping a
+  partly-drained bucket silently refunds requests already charged.
+
 ## Working agreements
 
 - Type hints on every function signature; no module-level side effects.
