@@ -3,6 +3,7 @@ from functools import lru_cache
 
 from dotenv import find_dotenv, load_dotenv
 
+
 REQUIRED_ENV_VARS = (
     "DATABASE_URL",
     "API_KEY",

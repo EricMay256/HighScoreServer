@@ -29,8 +29,8 @@ Environment variables:
 
 import argparse
 import asyncio
-from dataclasses import replace
 import sys
+from dataclasses import replace
 
 from sqlalchemy import delete
 from sqlalchemy.engine import make_url

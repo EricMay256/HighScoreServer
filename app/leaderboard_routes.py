@@ -1,20 +1,28 @@
 import gzip
 import json
 import logging
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Response, Query, status
-from app.models import (
-    LeaderboardResponse, ScoreSubmission, ScoreResponse, GameModeConfig,
-    GameModeCreate, RunSubmission, MAX_SCORE,
-)
-from app.db import get_pool
-from app.cache import get_cache
-from app.dependencies import require_api_key, require_user
-from app.periods import get_period_start, PERIODS
-from app.validation import RunRecord, ModeBounds, default_validator
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from psycopg import errors as pg_errors
-from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
+
+from app.cache import get_cache
+from app.db import get_pool
+from app.dependencies import require_api_key, require_user
+from app.limiter import limiter, rate_limited_responses
+from app.models import (
+    MAX_SCORE,
+    GameModeConfig,
+    GameModeCreate,
+    LeaderboardResponse,
+    RunSubmission,
+    ScoreResponse,
+    ScoreSubmission,
+)
+from app.periods import PERIODS, get_period_start
+from app.validation import ModeBounds, RunRecord, default_validator
+
 
 router = APIRouter(tags=["leaderboard"])
 logger = logging.getLogger(__name__)
@@ -58,7 +66,7 @@ async def list_game_modes(request: Request, response: Response) -> list[GameMode
                 )
                 rows = await cur.fetchall()
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     return [
         GameModeConfig(
@@ -103,7 +111,7 @@ async def create_game_mode(config: GameModeCreate) -> GameModeConfig:
                 row = await cur.fetchone()
             # connection context manager commits on clean exit
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     return GameModeConfig(
         name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3],
@@ -181,7 +189,7 @@ async def latest_scores(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
-        )
+        ) from e
 
     if rows:
         total_count = rows[0][6]
@@ -197,7 +205,7 @@ async def latest_scores(
             score=row[2],
             game_mode=row[3],
             period=row[4],
-            submitted_at=row[5].astimezone(timezone.utc).isoformat(),
+            submitted_at=row[5].astimezone(UTC).isoformat(),
             validated=row[7] > 0,
             validation_tier=row[7],
         )
@@ -287,7 +295,7 @@ async def get_scores(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     # total_count from the window function is only present on returned rows.
     # If the page is empty (offset past end, or no scores at all), fall back
@@ -304,7 +312,7 @@ async def get_scores(
         ScoreResponse(
             id=row[0], player=row[1], score=row[2],
             game_mode=row[3], period=row[4],
-            submitted_at=row[5].astimezone(timezone.utc).isoformat(),
+            submitted_at=row[5].astimezone(UTC).isoformat(),
             rank=row[6],
             percentile=round((1 - (row[6] - 1) / row[7]) * 100, 2) if row[7] > 1 else 100.0,
             validated=row[8] > 0,
@@ -340,7 +348,7 @@ async def submit_score(
     user_id  = int(payload["sub"])
     is_guest = payload["is_guest"]
 
-    now  = datetime.now(timezone.utc)
+    now  = datetime.now(UTC)
 
     try:
         async with get_pool().connection() as conn:
@@ -422,9 +430,9 @@ async def submit_score(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid game mode: {submission.game_mode}",
-        )
+        ) from None
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     await _invalidate_score_caches(submission.game_mode)
 
@@ -460,7 +468,7 @@ async def submit_run(
     user_id  = int(payload["sub"])
     is_guest = payload["is_guest"]
 
-    now  = datetime.now(timezone.utc)
+    now  = datetime.now(UTC)
 
     # Set when an existing run is found inside the transaction; the prior-result
     # response is built after the connection is released (it opens its own).
@@ -601,9 +609,9 @@ async def submit_run(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Duplicate run submission",
-        )
+        ) from None
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     if prior_status is not None:
         return await _existing_run_response(prior_status, user_id, submission.game_mode)
@@ -701,9 +709,9 @@ async def _count_all_scores() -> int:
             return (await cur.fetchone())[0]
 
 async def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
-    # 
+    #
     """Fetch a single player's score with rank and percentile computed server-side.
-    
+
     period is assumed to be a valid PERIODS value; callers responsible for validation"""
     period_start = get_period_start(period)
 
@@ -748,7 +756,7 @@ async def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "al
     return ScoreResponse(
         id=row[0], player=row[1], score=row[2],
         game_mode=row[3], period=row[4],
-        submitted_at=row[5].astimezone(timezone.utc).isoformat(),
+        submitted_at=row[5].astimezone(UTC).isoformat(),
         rank=row[6],
         percentile=round((1 - (row[6] - 1) / total) * 100, 2) if total > 1 else 100.0,
         validated=row[8] > 0,
@@ -851,9 +859,8 @@ def _is_improvement_predicate(order: str) -> str:
     # Returns a SQL fragment: true when EXCLUDED.score is better than stored score
     # ASC = lower score is better (ie race time)
     # DESC = higher score is better (ie points).
-    # Update scores when new score "beats" old score 
+    # Update scores when new score "beats" old score
     # (new < stored for ASC, new > stored for DESC)
     if order == "ASC":
         return "EXCLUDED.score < scores.score"
-    else:
-        return "EXCLUDED.score > scores.score"
+    return "EXCLUDED.score > scores.score"

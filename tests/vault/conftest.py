@@ -1,5 +1,5 @@
-from collections.abc import Iterator
 import os
+from collections.abc import Iterator
 
 import pytest
 

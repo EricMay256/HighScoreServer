@@ -15,7 +15,11 @@ from app.vault.domain import (
     NewVaultDocument,
     VectorSearchStatus,
 )
-from app.vault.embeddings import EmbeddingInputKind, EmbeddingUnavailable, EmbeddingVector
+from app.vault.embeddings import (
+    EmbeddingInputKind,
+    EmbeddingUnavailable,
+    EmbeddingVector,
+)
 from app.vault.repository import (
     VaultDocumentEmbeddingRepository,
     VaultDocumentRepository,

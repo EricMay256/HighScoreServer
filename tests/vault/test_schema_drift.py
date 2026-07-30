@@ -3,8 +3,8 @@ import os
 import psycopg
 from sqlalchemy import CheckConstraint, UniqueConstraint, create_engine, inspect
 
-from app.vault.settings import normalize_sqlalchemy_url
 from app.vault.constants import EMBEDDING_DIMENSIONS
+from app.vault.settings import normalize_sqlalchemy_url
 from app.vault.tables import TEXT_SEARCH_CONFIG, metadata
 
 

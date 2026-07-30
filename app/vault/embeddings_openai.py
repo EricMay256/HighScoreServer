@@ -11,8 +11,8 @@ retry rules — stops here. The rest of the vault sees only the port in
 """
 
 import asyncio
-from collections.abc import Sequence
 import logging
+from collections.abc import Sequence
 
 import httpx
 

@@ -2,10 +2,10 @@ import asyncio
 import hashlib
 import os
 import secrets
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
-from jose import jwt
 import bcrypt
+from jose import jwt
 
 from app.db import get_pool
 
@@ -64,7 +64,7 @@ def create_access_token(user_id: int, username: str, is_guest: bool) -> str:
     # Then write jti → Redis with TTL = ACCESS_TOKEN_EXPIRE_MINUTES * 60
     # on logout / password change.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "username": username,
@@ -106,7 +106,7 @@ async def create_refresh_token(user_id: int) -> str:
     """
     raw = secrets.token_urlsafe(32)
     token_hash = _hash_token(raw)
-    expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    expires_at = datetime.now(UTC) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
     async with get_pool().connection() as conn:
         async with conn.cursor() as cur:
@@ -135,7 +135,7 @@ async def rotate_refresh_token(raw: str) -> tuple[str, int]:
     Raises ValueError if the token is invalid or expired.
     """
     token_hash  = _hash_token(raw)
-    now         = datetime.now(timezone.utc)
+    now         = datetime.now(UTC)
     new_raw     = secrets.token_urlsafe(32)
     new_hash    = _hash_token(new_raw)
     new_expires = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)

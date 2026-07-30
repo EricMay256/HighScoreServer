@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 
+
 # psycopg3's async pool cannot run on Windows' default ProactorEventLoop — it
 # drives sockets with loop.add_reader/add_writer, which only SelectorEventLoop
 # implements. Force the Selector policy before any event loop is created so the
@@ -10,11 +11,14 @@ import sys
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-import pytest
-import psycopg
 from unittest.mock import patch
-from fastapi.testclient import TestClient
+
+import psycopg
+import pytest
 from dotenv import load_dotenv
+from fastapi.testclient import TestClient
+
+
 load_dotenv()  # load .env before any os.environ reads
 os.environ["RATE_LIMITER_ENABLED"] = "false"  # disable rate limiter for tests
 from app.main import app  # noqa: E402 Must import after overriding env var

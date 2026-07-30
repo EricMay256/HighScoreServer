@@ -1,13 +1,15 @@
+from datetime import UTC, datetime
+
 import pytest
-from datetime import datetime, timezone
-from app.periods import get_period_start, PERIODS
+
+from app.periods import PERIODS, get_period_start
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def utc(year, month, day, hour=0, minute=0, second=0) -> datetime:
     """Convenience constructor for UTC datetimes."""
-    return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+    return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
 
 
 # ── alltime ────────────────────────────────────────────────────────────────
@@ -38,7 +40,7 @@ def test_daily_already_at_midnight():
 
 
 def test_daily_strips_microseconds():
-    at = datetime(2024, 6, 15, 14, 30, 45, 123456, tzinfo=timezone.utc)
+    at = datetime(2024, 6, 15, 14, 30, 45, 123456, tzinfo=UTC)
     result = get_period_start("daily", at=at)
     assert result.microsecond == 0
 
@@ -83,7 +85,7 @@ def test_weekly_floors_to_midnight():
 
 
 def test_weekly_strips_microseconds():
-    at = datetime(2024, 6, 19, 14, 30, 45, 999999, tzinfo=timezone.utc)
+    at = datetime(2024, 6, 19, 14, 30, 45, 999999, tzinfo=UTC)
     result = get_period_start("weekly", at=at)
     assert result.microsecond == 0
 
@@ -99,7 +101,7 @@ def test_weekly_boundary_changes_at_monday_midnight():
     assert get_period_start("weekly", at=sunday_late) == utc(2024, 6, 17)   # Mon 6/17
     assert get_period_start("weekly", at=monday_early) == utc(2024, 6, 24)  # Mon 6/24
     assert get_period_start("weekly", at=sunday_late) != get_period_start("weekly", at=monday_early)
-    
+
 
 # ── return type ────────────────────────────────────────────────────────────
 

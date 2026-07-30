@@ -1,9 +1,9 @@
 """Vault configuration and database connection-budget validation."""
 
-from dataclasses import dataclass
 import math
 import os
 import re
+from dataclasses import dataclass
 
 from sqlalchemy.engine import make_url
 
@@ -110,7 +110,7 @@ class EmbeddingSettings:
     timeout_seconds: float
 
     @classmethod
-    def from_environment(cls) -> "EmbeddingSettings":
+    def from_environment(cls) -> EmbeddingSettings:
         provider = os.environ.get("VAULT_EMBEDDING_PROVIDER", "openai").strip()
         if not _PROVIDER_PATTERN.fullmatch(provider):
             raise RuntimeError(
@@ -185,7 +185,7 @@ class VaultSettings:
     text_search_config: str
 
     @classmethod
-    def from_environment(cls) -> "VaultSettings":
+    def from_environment(cls) -> VaultSettings:
         hss_database_url = os.environ.get("DATABASE_URL")
         if not hss_database_url:
             raise RuntimeError("DATABASE_URL is not set")

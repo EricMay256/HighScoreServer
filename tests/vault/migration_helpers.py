@@ -1,14 +1,14 @@
 """Helpers for migration-topology tests against disposable databases."""
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
-import os
 from pathlib import Path
 from uuid import uuid4
 
+import psycopg
 from alembic import command
 from alembic.config import Config
-import psycopg
 from psycopg import sql
 from sqlalchemy.engine import make_url
 

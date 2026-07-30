@@ -7,7 +7,6 @@ from slowapi import Limiter
 from starlette.requests import Request
 
 
-
 logger = logging.getLogger(__name__)
 
 

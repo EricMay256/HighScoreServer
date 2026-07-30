@@ -1,8 +1,8 @@
 """Async SQLAlchemy engine lifecycle for vault persistence."""
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-import logging
 from threading import Lock
 from time import perf_counter
 

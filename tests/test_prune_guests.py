@@ -1,7 +1,9 @@
-from scripts.prune_guests import prune_guests
-from datetime import datetime, timezone, timedelta
-import psycopg
 import os
+from datetime import UTC, datetime, timedelta
+
+import psycopg
+
+from scripts.prune_guests import prune_guests
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -102,7 +104,7 @@ def insert_run(user_id: int, game_mode: str = "classic") -> None:
 
 def test_prune_deletes_old_scoreless_guest(client):
     """A guest with no scores older than the threshold should be deleted."""
-    old = datetime.now(timezone.utc) - timedelta(days=31)
+    old = datetime.now(UTC) - timedelta(days=31)
     user_id = insert_guest(old)
 
     deleted = prune_guests(prune_days=30)
@@ -113,7 +115,7 @@ def test_prune_deletes_old_scoreless_guest(client):
 
 def test_prune_spares_recent_guest(client):
     """A guest created within the threshold window should not be deleted."""
-    recent = datetime.now(timezone.utc) - timedelta(days=1)
+    recent = datetime.now(UTC) - timedelta(days=1)
     user_id = insert_guest(recent)
 
     prune_guests(prune_days=30)
@@ -124,7 +126,7 @@ def test_prune_spares_recent_guest(client):
 def test_prune_spares_guest_with_scores(client):
     """A guest older than the threshold but with scores should not be deleted."""
     ensure_game_mode()
-    old = datetime.now(timezone.utc) - timedelta(days=31)
+    old = datetime.now(UTC) - timedelta(days=31)
     user_id = insert_guest(old)
     insert_score(user_id)
 
@@ -141,7 +143,7 @@ def test_prune_spares_guest_with_runs(client):
     is exactly the case the scores check alone would miss.
     """
     ensure_game_mode()
-    old = datetime.now(timezone.utc) - timedelta(days=31)
+    old = datetime.now(UTC) - timedelta(days=31)
     user_id = insert_guest(old)
     insert_run(user_id)
 
@@ -153,7 +155,7 @@ def test_prune_spares_guest_with_runs(client):
 def test_prune_spares_claimed_accounts(client):
     """Claimed accounts should never be pruned regardless of age or scores."""
     conn = get_conn()
-    old = datetime.now(timezone.utc) - timedelta(days=31)
+    old = datetime.now(UTC) - timedelta(days=31)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -182,7 +184,7 @@ def test_prune_returns_zero_when_nothing_eligible(client):
 
 def test_prune_deletes_multiple_eligible_guests(client):
     """Should delete all eligible guests in a single pass."""
-    old = datetime.now(timezone.utc) - timedelta(days=31)
+    old = datetime.now(UTC) - timedelta(days=31)
     ids = [insert_guest(old) for _ in range(3)]
 
     deleted = prune_guests(prune_days=30)

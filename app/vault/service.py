@@ -1,9 +1,9 @@
 """Application-service transaction boundary for vault use cases."""
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-import logging
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 

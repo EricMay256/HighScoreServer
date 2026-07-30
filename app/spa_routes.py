@@ -1,8 +1,10 @@
 # app/spa_routes.py
 from pathlib import Path
+
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
 
 # Resolve the SPA build directory relative to THIS file, not the CWD.
 # Without this, `uvicorn app.main:app` works from the repo root but breaks

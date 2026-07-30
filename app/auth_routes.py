@@ -1,7 +1,7 @@
 import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
-from app.limiter import limiter, rate_limited_responses
 from starlette.requests import Request
 
 from app.auth import (
@@ -13,8 +13,8 @@ from app.auth import (
     rotate_refresh_token,
     verify_password,
 )
-from app.auth_identities import NATIVE_AUTH_PROVIDER
 from app.auth_identities import (
+    NATIVE_AUTH_PROVIDER,
     AuthenticatedUser,
     AuthIdentityConflict,
     AuthIdentityUserNotFound,
@@ -23,6 +23,7 @@ from app.auth_identities import (
 )
 from app.db import get_pool
 from app.dependencies import require_user
+from app.limiter import limiter, rate_limited_responses
 from app.steam_auth import (
     STEAM_AUTH_PROVIDER,
     SteamAuthConfigError,
@@ -81,23 +82,23 @@ async def steam_id_from_ticket(ticket: str) -> str:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Steam authentication is not configured",
-        )
+        ) from e
     except SteamAuthInvalidTicket:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid Steam auth ticket",
-        )
+        ) from None
     except SteamAuthUpstreamError as e:
         logger.error("Steam auth upstream error: %s", e)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Steam authentication is temporarily unavailable",
-        )
+        ) from e
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
-@router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
+@router.post("/guest", response_model=TokenResponse, status_code=status.HTTP_201_CREATED,
              responses=rate_limited_responses("5 per minute"))
 @limiter.limit("5/minute")
 async def guest_login(request: Request, response: Response) -> TokenResponse:
@@ -123,7 +124,7 @@ async def guest_login(request: Request, response: Response) -> TokenResponse:
                     row = await cur.fetchone()
         except Exception as e:
             logger.error("Guest registration error: %s", e)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
         if row:
             return TokenResponse(
@@ -140,7 +141,7 @@ async def guest_login(request: Request, response: Response) -> TokenResponse:
     )
 
 
-@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, 
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED,
              responses=rate_limited_responses("10 per minute"))
 @limiter.limit("10/minute")
 async def register(request: Request, response: Response, body: RegisterRequest) -> TokenResponse:
@@ -169,9 +170,9 @@ async def register(request: Request, response: Response, body: RegisterRequest) 
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Username or email already registered",
-            )
+            ) from e
         logger.error("Registration error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     return TokenResponse(
         access_token=create_access_token(row[0], body.username, is_guest=False),
@@ -195,7 +196,7 @@ async def login(request: Request, response: Response, body: LoginRequest) -> Tok
                 row = await cur.fetchone()
     except Exception as e:
         logger.error("Login error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     if row is None or not row[1] or not await verify_password(body.password, row[1]):
         raise HTTPException(
@@ -246,9 +247,9 @@ async def steam_link(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Steam account is already linked",
-        )
+        ) from None
     except AuthIdentityUserNotFound:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found") from None
 
     return await token_response_for_user(user)
 
@@ -261,7 +262,7 @@ async def refresh(body: RefreshRequest) -> TokenResponse:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
-        )
+        ) from None
 
     try:
         async with get_pool().connection() as conn:
@@ -273,7 +274,7 @@ async def refresh(body: RefreshRequest) -> TokenResponse:
                 row = await cur.fetchone()
     except Exception as e:
         logger.error("Refresh error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
@@ -314,9 +315,9 @@ async def rename(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Username is already taken",
-            )
+            ) from e
         logger.error("Rename error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
 
 @router.post("/claim", response_model=TokenResponse)
@@ -365,9 +366,9 @@ async def claim(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Email already registered",
-            )
+            ) from e
         logger.error("Claim error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")

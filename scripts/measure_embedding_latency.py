@@ -51,7 +51,7 @@ import time
 
 from app.env import load_environment
 from app.vault.embedding_runtime import create_embedding_provider
-from app.vault.embeddings import EmbeddingInputKind, EmbeddingError
+from app.vault.embeddings import EmbeddingError, EmbeddingInputKind
 from app.vault.settings import EmbeddingSettings
 
 

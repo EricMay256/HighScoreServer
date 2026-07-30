@@ -9,8 +9,8 @@ Lifecycle mirrors ``db.py``: one provider per worker process, created during
 startup and closed during shutdown.
 """
 
-from collections.abc import Callable
 import logging
+from collections.abc import Callable
 
 from .embeddings import EmbeddingProvider, EmbeddingProviderNotConfigured
 from .embeddings_openai import OpenAIEmbeddingProvider

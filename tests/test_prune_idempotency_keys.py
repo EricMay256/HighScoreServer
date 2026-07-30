@@ -1,6 +1,6 @@
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 
@@ -86,7 +86,7 @@ def test_prune_deletes_old_marker(client):
     """A marker older than the retention window is deleted."""
     ensure_game_mode()
     user_id = insert_user()
-    old = datetime.now(timezone.utc) - timedelta(days=31)
+    old = datetime.now(UTC) - timedelta(days=31)
     insert_marker(user_id, "old-key-001", old)
 
     deleted = prune_idempotency_keys(prune_days=30)
@@ -99,7 +99,7 @@ def test_prune_spares_recent_marker(client):
     """A marker within the window is kept."""
     ensure_game_mode()
     user_id = insert_user()
-    recent = datetime.now(timezone.utc) - timedelta(days=1)
+    recent = datetime.now(UTC) - timedelta(days=1)
     insert_marker(user_id, "recent-key-001", recent)
 
     prune_idempotency_keys(prune_days=30)
@@ -111,8 +111,8 @@ def test_prune_mixed_batch(client):
     """Old markers go, recent ones stay, in a single pass."""
     ensure_game_mode()
     user_id = insert_user()
-    old = datetime.now(timezone.utc) - timedelta(days=45)
-    recent = datetime.now(timezone.utc) - timedelta(days=5)
+    old = datetime.now(UTC) - timedelta(days=45)
+    recent = datetime.now(UTC) - timedelta(days=5)
     insert_marker(user_id, "old-a", old)
     insert_marker(user_id, "old-b", old)
     insert_marker(user_id, "recent-a", recent)
@@ -129,8 +129,8 @@ def test_prune_default_is_30_days(client):
     """The default retention is 30 days: a 29-day-old marker survives, 31 doesn't."""
     ensure_game_mode()
     user_id = insert_user()
-    insert_marker(user_id, "day-29", datetime.now(timezone.utc) - timedelta(days=29))
-    insert_marker(user_id, "day-31", datetime.now(timezone.utc) - timedelta(days=31))
+    insert_marker(user_id, "day-29", datetime.now(UTC) - timedelta(days=29))
+    insert_marker(user_id, "day-31", datetime.now(UTC) - timedelta(days=31))
 
     prune_idempotency_keys()  # no arg → DEFAULT_PRUNE_DAYS (30)
 

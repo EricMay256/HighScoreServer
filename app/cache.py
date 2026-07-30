@@ -13,13 +13,13 @@ event loop; the in-memory backend's methods are async only for interface parity
 from __future__ import annotations
 
 import os
-from typing import Optional, Protocol
+from typing import Protocol
 
 from cachetools import TTLCache
 
 
 class CacheBackend(Protocol):
-    async def get(self, key: str) -> Optional[str]: ...
+    async def get(self, key: str) -> str | None: ...
     async def setex(self, key: str, ttl_seconds: int, value: str) -> None: ...
     async def delete(self, key: str) -> None: ...
     async def delete_prefix(self, prefix: str) -> int: ...
@@ -50,7 +50,7 @@ class MemoryCache:
             kwargs["timer"] = timer
         self._cache: TTLCache[str, str] = TTLCache(**kwargs)
 
-    async def get(self, key: str) -> Optional[str]:
+    async def get(self, key: str) -> str | None:
         return self._cache.get(key)
 
     async def setex(self, key: str, ttl_seconds: int, value: str) -> None:
@@ -87,7 +87,7 @@ class RedisCache:
         from redis.asyncio import from_url
         self._client = from_url(url, decode_responses=True)
 
-    async def get(self, key: str) -> Optional[str]:
+    async def get(self, key: str) -> str | None:
         return await self._client.get(key)
 
     async def setex(self, key: str, ttl_seconds: int, value: str) -> None:

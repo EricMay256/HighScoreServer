@@ -1,8 +1,9 @@
 import os
 import secrets
-from jose import jwt
-from fastapi.testclient import TestClient
+
 import psycopg
+from fastapi.testclient import TestClient
+from jose import jwt
 
 from app.auth_identities import NATIVE_AUTH_PROVIDER
 from app.steam_auth import (
@@ -494,7 +495,7 @@ def test_rename_to_guest_username_returns_409(client):
     """Guest usernames should be protected from rename collision."""
     guest_tokens = guest(client)
     guest_username = decode_token(guest_tokens["access_token"])["username"]
-    
+
     other_tokens = register(client)
     response = client.post(
         "/api/auth/rename",

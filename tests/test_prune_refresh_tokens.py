@@ -1,6 +1,6 @@
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 
@@ -73,7 +73,7 @@ def token_exists(token_hash: str) -> bool:
 def test_prune_deletes_expired_token(client):
     """A token with expires_at in the past should be deleted."""
     user_id = insert_user()
-    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    past = datetime.now(UTC) - timedelta(hours=1)
     token_hash = insert_token(user_id, past)
 
     deleted = prune_refresh_tokens()
@@ -85,7 +85,7 @@ def test_prune_deletes_expired_token(client):
 def test_prune_spares_active_token(client):
     """A token with expires_at in the future should not be deleted."""
     user_id = insert_user()
-    future = datetime.now(timezone.utc) + timedelta(days=7)
+    future = datetime.now(UTC) + timedelta(days=7)
     token_hash = insert_token(user_id, future)
 
     prune_refresh_tokens()
@@ -96,7 +96,7 @@ def test_prune_spares_active_token(client):
 def test_prune_deletes_multiple_expired_tokens(client):
     """Should delete all expired tokens in a single pass."""
     user_id = insert_user()
-    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    past = datetime.now(UTC) - timedelta(hours=1)
     hashes = [insert_token(user_id, past) for _ in range(3)]
 
     deleted = prune_refresh_tokens()
@@ -109,8 +109,8 @@ def test_prune_deletes_multiple_expired_tokens(client):
 def test_prune_mixed_batch(client):
     """Expired tokens go, active tokens stay, in the same run."""
     user_id = insert_user()
-    past = datetime.now(timezone.utc) - timedelta(hours=1)
-    future = datetime.now(timezone.utc) + timedelta(days=7)
+    past = datetime.now(UTC) - timedelta(hours=1)
+    future = datetime.now(UTC) + timedelta(days=7)
 
     expired_hashes = [insert_token(user_id, past) for _ in range(2)]
     active_hash = insert_token(user_id, future)
@@ -126,7 +126,7 @@ def test_prune_mixed_batch(client):
 def test_prune_returns_zero_when_nothing_expired(client):
     """Should return 0 when there's nothing to prune."""
     user_id = insert_user()
-    future = datetime.now(timezone.utc) + timedelta(days=7)
+    future = datetime.now(UTC) + timedelta(days=7)
     insert_token(user_id, future)
 
     deleted = prune_refresh_tokens()

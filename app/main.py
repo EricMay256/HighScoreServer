@@ -1,29 +1,33 @@
+import logging
+import os
 from contextlib import asynccontextmanager
+
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.db import init_db, close_db
-from app.cache import init_cache, close_cache
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+from app import spa_routes
+from app.auth_routes import router as auth_router
+from app.cache import close_cache, init_cache
+from app.db import close_db, init_db
 from app.env import load_environment, validate_environment
+from app.leaderboard_routes import CrossRouteError
+from app.leaderboard_routes import router as leaderboard_router
+from app.limiter import limiter
 from app.vault.db import close_vault_db, init_vault_db
 from app.vault.embedding_runtime import close_vault_embeddings, init_vault_embeddings
 from app.vault.routes import router as vault_router
 from app.vault.settings import vault_enabled
-from app.leaderboard_routes import router as leaderboard_router, CrossRouteError
 from app.view_routes import router as view_router
-from app.auth_routes import router as auth_router
-from app.limiter import limiter
-from app import spa_routes
-import os
-import sentry_sdk
-from sentry_sdk.integrations.fastapi import FastApiIntegration
-from sentry_sdk.integrations.starlette import StarletteIntegration
-from slowapi.errors import RateLimitExceeded
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from slowapi.middleware import SlowAPIMiddleware
 
-import logging
+
 logger = logging.getLogger(__name__)
 
 # Browser origins allowed to call public leaderboard GET endpoints.
@@ -120,7 +124,7 @@ def create_app() -> FastAPI:
         # possess them, so allowing "*" here is safe for this API.
         allow_headers=["*"],
         # allow_credentials=False is intentional: identity is provided, if needed,
-        # through bearer tokens. 
+        # through bearer tokens.
         allow_credentials=False,
         max_age=600,  # cache preflight for 10 min — keeps repeat fetches snappy
     )

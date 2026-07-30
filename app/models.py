@@ -1,5 +1,7 @@
-from pydantic import BaseModel, Field
 from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
 
 # Shared bounds
 # Arbitrary upper limit to prevent abuse; the C# client's score field (long)

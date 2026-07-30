@@ -1,8 +1,11 @@
 import os
-from fastapi import Header, HTTPException, status, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from fastapi import Depends, Header, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
+
 from app.auth import decode_access_token
+
 
 # existing
 async def require_api_key(x_api_key: str = Header(...)) -> None:
@@ -37,5 +40,5 @@ async def require_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
     return payload
