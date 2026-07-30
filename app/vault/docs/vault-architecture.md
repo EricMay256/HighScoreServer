@@ -362,21 +362,33 @@ Three questions that were open after Phase 1 have since been settled and are no 
 below: the embedding provider and `profile_id` identity (vault ADR 0005), how the two retrieval
 arms combine (vault ADR 0006), and the divergence between `document_kind_enum` and the governance
 Type Dictionary (vault ADR 0009, which keeps `kind` coarse and adds a nullable `doc_type TEXT`
-validated in application code against `types.yml`; migration `0002_document_doc_type`). Still open,
+validated in application code against `types.yml`; migration `0002_document_doc_type`). The missing
+path column is settled too: vault ADR 0010 adds `vault_path TEXT NOT NULL UNIQUE` and rules out a
+resolved `policy_scope` column, and vault ADR 0011 adds `doc_status TEXT` for the Status Map values
+`status` cannot represent — both in migration `0003_vault_path_doc_status`. Still open,
 and unchanged by the read-only slice: the **partial HNSW index per profile**, which becomes
 necessary only when a second profile is populated, and the **dimension-change DDL shape**, which is
 deliberately left until a dimension change is actually proposed. Both are described in
 `vault-configuration.md`.
 
-### 1. `vault_documents` has no path or policy-scope column
+### 1. Import direction and reconciliation per layer
 
-`folders.yml` keys `ai_write` permissions on vault path. Rows currently carry `id`, `kind`,
-`doc_type`, and `source_ids` — nothing that maps back to a folder — so the permission model cannot
-be evaluated against the database at all. Whatever the importer writes will have to carry this,
-and the shape of the column (literal path, policy scope identifier, or both) determines
-whether permission checks are a string prefix match or a join.
+Settled: `vault_documents.vault_path` exists (ADR 0010), so `folders.yml` can be evaluated against
+the database. What is **not** settled is which layers the table holds and which way truth flows.
 
-This is the last remaining importer blocker.
+The intended model is that human notes always exist firstly as Markdown, so the database is a
+**replica** of `Human/**` and the **system of record** for `Agent/**`. That asymmetry raises three
+things the importer cannot be built without:
+
+- **Staleness.** A replica needs a content hash or mtime per row to detect that the file moved on.
+- **Deletion.** A removed Markdown file must lose its row; one-way import does not do this by
+  itself, so reconciliation needs either tombstones or a full sweep.
+- **Read permission.** `folders.yml` governs `ai_write` and has no `ai_read`. With the whole vault
+  behind one shared `VAULT_READ_API_KEY`, any holder reads everything, including
+  `Human/07 People/**`. ADR 0008's note that archived is a visibility state and not a privacy one
+  was written for an agent-authored corpus and does not carry to whole-vault scope.
+
+The third is the one to settle before anything imports the human layer.
 
 ### 2. Governance artifacts split across the source/knowledge boundary
 

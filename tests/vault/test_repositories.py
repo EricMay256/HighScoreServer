@@ -50,6 +50,7 @@ def test_document_and_review_repositories_share_one_transaction(
                     NewVaultDocument(
                         id=document_id,
                         kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{document_id}.md",
                         status=DocumentStatus.FLAGGED,
                         title="Connection-injected repositories",
                         body="One service transaction supplies one connection.",
@@ -121,6 +122,7 @@ def test_service_exception_rolls_back_all_repository_writes(
                         NewVaultDocument(
                             id=document_id,
                             kind=DocumentKind.NOTE,
+                            vault_path=f"Agent/notes/{document_id}.md",
                             status=DocumentStatus.FLAGGED,
                             title="Rollback fixture",
                             body="Neither row should survive.",
@@ -172,6 +174,7 @@ def test_embeddings_are_per_profile_and_re_embedding_is_idempotent(
                     NewVaultDocument(
                         id=document_id,
                         kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{document_id}.md",
                         status=DocumentStatus.ACTIVE,
                         title="Embeddings live beside documents",
                         body="One row per document per profile.",
@@ -276,6 +279,7 @@ def test_doc_type_round_trips_and_defaults_to_untyped(
                     NewVaultDocument(
                         id=typed_id,
                         kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{typed_id}.md",
                         # A real multi-word types.yml name: the shape
                         # constraint has to admit the interior space. "Agent
                         # Note" and "Wiki Page" are the two that actually reach
@@ -293,6 +297,7 @@ def test_doc_type_round_trips_and_defaults_to_untyped(
                     NewVaultDocument(
                         id=untyped_id,
                         kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{untyped_id}.md",
                         status=DocumentStatus.ACTIVE,
                         title="An untyped note",
                         body="Carries no governance type.",
@@ -341,6 +346,7 @@ def test_database_rejects_malformed_doc_type_without_ruling_on_vocabulary(
             return NewVaultDocument(
                 id=document_id,
                 kind=DocumentKind.NOTE,
+                vault_path=f"Agent/notes/{document_id}.md",
                 doc_type=doc_type,
                 status=DocumentStatus.ACTIVE,
                 title="Shape check fixture",
@@ -380,6 +386,182 @@ def test_database_rejects_malformed_doc_type_without_ruling_on_vocabulary(
                 await connection.execute(
                     delete(vault_documents).where(
                         vault_documents.c.id == unknown_id
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_vault_path_is_unique_across_documents(
+    configure_test_env: None,
+) -> None:
+    """One path, one document.
+
+    The path is what ties a row to its file, so two rows claiming the same
+    path is a state the projector cannot resolve. See ADR 0010.
+    """
+
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+        shared_path = f"Agent/notes/collision-{uuid4().hex}.md"
+        first_id = f"path-{uuid4().hex}"
+        second_id = f"path-{uuid4().hex}"
+
+        def candidate(document_id: str) -> NewVaultDocument:
+            return NewVaultDocument(
+                id=document_id,
+                kind=DocumentKind.NOTE,
+                vault_path=shared_path,
+                status=DocumentStatus.ACTIVE,
+                title="Path collision fixture",
+                body="Two documents must not claim one path.",
+                contributed_by="test:vault-path",
+                provenance={"fixture": True},
+            )
+
+        try:
+            async with service.transaction() as connection:
+                await documents.insert(connection, candidate(first_id))
+
+            # Distinct primary key, same path: the UNIQUE constraint is what
+            # refuses this, not the primary key.
+            with pytest.raises(IntegrityError) as caught:
+                async with service.transaction() as connection:
+                    await documents.insert(connection, candidate(second_id))
+            assert "vault_documents_vault_path_key" in str(caught.value)
+
+            async with service.transaction() as connection:
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id == first_id
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_database_rejects_malformed_vault_paths(
+    configure_test_env: None,
+) -> None:
+    """Shape only: vault-root-relative posix, no traversal, no backslash.
+
+    Which folders exist is folders.yml's business, so a well-formed path
+    naming no real folder is accepted here on purpose.
+    """
+
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+
+        def candidate(document_id: str, vault_path: str) -> NewVaultDocument:
+            return NewVaultDocument(
+                id=document_id,
+                kind=DocumentKind.NOTE,
+                vault_path=vault_path,
+                status=DocumentStatus.ACTIVE,
+                title="Path shape fixture",
+                body="Only the shape of vault_path is enforced here.",
+                contributed_by="test:vault-path",
+                provenance={"fixture": True},
+            )
+
+        malformed = (
+            "",
+            "   ",
+            "/Agent/notes/leading-slash.md",
+            "Agent/notes/trailing-slash/",
+            "Agent//notes/empty-segment.md",
+            "Agent/../secrets.md",
+            "Agent/./same-dir.md",
+            "..",
+            "Agent\\notes\\backslash.md",
+            "Agent/notes/" + "x" * 1024 + ".md",
+        )
+
+        try:
+            for index, value in enumerate(malformed):
+                with pytest.raises(IntegrityError) as caught:
+                    async with service.transaction() as connection:
+                        await documents.insert(
+                            connection,
+                            candidate(f"badpath-{index}-{uuid4().hex}", value),
+                        )
+                assert "vault_documents_vault_path_format" in str(caught.value)
+
+            # A dot inside a filename is not a traversal segment.
+            ordinary_id = f"okpath-{uuid4().hex}"
+            async with service.transaction() as connection:
+                stored = await documents.insert(
+                    connection,
+                    candidate(
+                        ordinary_id,
+                        f"Human/17 Concepts/note.with.dots-{ordinary_id}.md",
+                    ),
+                )
+                assert stored.vault_path.endswith(".md")
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id == ordinary_id
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_doc_status_is_independent_of_the_visibility_status(
+    configure_test_env: None,
+) -> None:
+    """`doc_status` carries the Status Map value; `status` gates visibility.
+
+    A Wiki Page is "Stub" or "Current" in types.yml, neither of which exists
+    in document_status_enum, which is exactly why the two are separate
+    columns. See ADR 0011.
+    """
+
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+        document_id = f"docstatus-{uuid4().hex}"
+
+        try:
+            async with service.transaction() as connection:
+                stored = await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=document_id,
+                        kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{document_id}.md",
+                        doc_type="Agent Note",
+                        # Visible to the read surface...
+                        status=DocumentStatus.ACTIVE,
+                        # ...while the governance lifecycle says otherwise.
+                        doc_status="Stub",
+                        title="Status divergence fixture",
+                        body="The two status columns answer different questions.",
+                        contributed_by="test:doc-status",
+                        provenance={"fixture": True},
+                    ),
+                )
+
+                assert stored.status is DocumentStatus.ACTIVE
+                assert stored.doc_status == "Stub"
+
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id == document_id
                     )
                 )
         finally:

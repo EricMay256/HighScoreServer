@@ -302,14 +302,19 @@ def test_read_surface_carries_doc_type_including_when_untyped(
 
     async def seed() -> None:
         async with service.transaction() as connection:
-            for document_id, doc_type in ((typed_id, "Decision"), (untyped_id, None)):
+            for document_id, doc_type, doc_status in (
+                (typed_id, "Decision", "Accepted"),
+                (untyped_id, None, None),
+            ):
                 await documents.insert(
                     connection,
                     NewVaultDocument(
                         id=document_id,
                         kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{document_id}.md",
                         doc_type=doc_type,
                         status=DocumentStatus.ACTIVE,
+                        doc_status=doc_status,
                         title="Type Dictionary fixture",
                         body="Exercises doc_type on the read surface.",
                         contributed_by="test:doc-type",
@@ -340,9 +345,18 @@ def test_read_surface_carries_doc_type_including_when_untyped(
         asyncio.run(engine.dispose())
 
     assert typed.status_code == 200
-    assert typed.json()["doc_type"] == "Decision"
+    typed_body = typed.json()
+    assert typed_body["doc_type"] == "Decision"
+    # doc_status is the governance lifecycle; status is the vault's own
+    # visibility state. Both reach the caller, separately.
+    assert typed_body["doc_status"] == "Accepted"
+    assert typed_body["status"] == "active"
+    assert typed_body["vault_path"] == f"Agent/notes/{typed_id}.md"
 
     assert untyped.status_code == 200
     untyped_body = untyped.json()
-    assert "doc_type" in untyped_body
-    assert untyped_body["doc_type"] is None
+    for field in ("doc_type", "doc_status"):
+        assert field in untyped_body
+        assert untyped_body[field] is None
+    # vault_path is NOT NULL, so it is present even on an otherwise bare row.
+    assert untyped_body["vault_path"] == f"Agent/notes/{untyped_id}.md"

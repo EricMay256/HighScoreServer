@@ -165,6 +165,7 @@ async def run(clean_only: bool) -> int:
                         NewVaultDocument(
                             id=document_id,
                             kind=DocumentKind.NOTE,
+                            vault_path=f"Agent/notes/{document_id}.md",
                             status=DocumentStatus.ACTIVE,
                             title=title,
                             body=body,

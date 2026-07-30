@@ -135,12 +135,20 @@ vault_documents = Table(
     # enum would put the slower mechanism in charge of the faster concept.
     # Nullable because untyped is a real state. See ADR 0009.
     Column("doc_type", Text),
+    # Vault-root-relative posix path, extension included -- the same rel_path
+    # the governance engine matches folder rules against, and the key tying a
+    # row to its file. See ADR 0010.
+    Column("vault_path", Text, nullable=False),
     Column(
         "status",
         document_status_enum,
         nullable=False,
         server_default=text("'active'"),
     ),
+    # The Status Map value from types.yml. Distinct from `status`, which is the
+    # read surface's visibility gate and cannot represent a Wiki Page's
+    # Current/Stub. See ADR 0011.
+    Column("doc_status", Text),
     Column("title", Text, nullable=False),
     Column("summary", Text),
     Column("body", Text, nullable=False),
@@ -226,6 +234,24 @@ vault_documents = Table(
         "doc_type IS NULL OR doc_type ~ '^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$'",
         name="vault_documents_doc_type_format",
     ),
+    CheckConstraint(
+        "doc_status IS NULL "
+        "OR doc_status ~ '^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$'",
+        name="vault_documents_doc_status_format",
+    ),
+    # Shape only. See the migration for why '[.]' and chr(92) are spelled this
+    # way rather than with backslash escapes.
+    CheckConstraint(
+        "btrim(vault_path) <> '' "
+        "AND vault_path !~ '^/' "
+        "AND vault_path !~ '/$' "
+        "AND vault_path !~ '//' "
+        "AND vault_path !~ '(^|/)[.][.]?(/|$)' "
+        "AND strpos(vault_path, chr(92)) = 0 "
+        "AND length(vault_path) <= 1024",
+        name="vault_documents_vault_path_format",
+    ),
+    UniqueConstraint("vault_path", name="vault_documents_vault_path_key"),
     CheckConstraint(
         "(kind = 'note' AND compile_run_id IS NULL "
         "AND compiled_by IS NULL AND compiled_at IS NULL) "
@@ -478,6 +504,15 @@ Index(
     postgresql_using="gin",
 )
 Index("idx_vault_documents_tags", vault_documents.c.tags, postgresql_using="gin")
+# Every folders.yml glob is a literal prefix plus '/**', so resolving a
+# document's policy context is a longest-prefix match. The UNIQUE index uses
+# the default collation and cannot serve LIKE 'prefix%' unless the database is
+# C-collated; text_pattern_ops always can.
+Index(
+    "idx_vault_documents_vault_path_prefix",
+    vault_documents.c.vault_path,
+    postgresql_ops={"vault_path": "text_pattern_ops"},
+)
 Index(
     "idx_vault_documents_kind_status_updated",
     vault_documents.c.kind,

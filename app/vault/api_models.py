@@ -78,6 +78,20 @@ class VaultDocumentDetail(BaseModel):
         ),
     )
     status: DocumentStatus
+    doc_status: str | None = Field(
+        default=None,
+        description=(
+            "Status Map value from types.yml (for example 'Evergreen' or "
+            "'Stub'), or null. Distinct from `status`, which is the vault's "
+            "own visibility state."
+        ),
+    )
+    vault_path: str = Field(
+        description=(
+            "Vault-root-relative posix path of the source document, extension "
+            "included."
+        ),
+    )
     title: str
     summary: str | None
     body: str

@@ -62,6 +62,9 @@ class VaultDocument:
     id: str
     kind: DocumentKind
     status: DocumentStatus
+    # Vault-root-relative posix path. Required: it is the key tying this row
+    # to its file, so a document without one cannot be projected. See ADR 0010.
+    vault_path: str
     title: str
     body: str
     contributed_by: str
@@ -73,6 +76,8 @@ class VaultDocument:
     # write boundary rather than here. None means untyped, which is a real
     # state rather than missing data. See ADR 0009.
     doc_type: str | None = None
+    # Status Map value from types.yml, distinct from `status`. See ADR 0011.
+    doc_status: str | None = None
     summary: str | None = None
     tags: tuple[str, ...] = ()
     related_ids: tuple[str, ...] = ()
@@ -88,12 +93,14 @@ class NewVaultDocument:
     id: str
     kind: DocumentKind
     status: DocumentStatus
+    vault_path: str
     title: str
     body: str
     contributed_by: str
     provenance: dict[str, Any]
     schema_version: int = 1
     doc_type: str | None = None
+    doc_status: str | None = None
     summary: str | None = None
     tags: tuple[str, ...] = ()
     related_ids: tuple[str, ...] = ()

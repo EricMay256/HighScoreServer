@@ -158,6 +158,7 @@ async def seed_corpus(service: VaultTransactionService, run_id: str) -> dict[str
                 NewVaultDocument(
                     id=document_id,
                     kind=DocumentKind.NOTE,
+                    vault_path=f"Agent/notes/{document_id}.md",
                     status=status,
                     title=title,
                     body=body,

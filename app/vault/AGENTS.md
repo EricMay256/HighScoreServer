@@ -59,6 +59,20 @@ be edited when it does.
   that adding a type stays a data change rather than a migration. Do not "tighten" that CHECK
   into a vocabulary list and do not widen the `kind` enum. Null means untyped, which is a real
   state. See ADR 0009.
+- **`vault_path` is the only policy key.** `vault_documents.vault_path` is the vault-root-relative
+  posix path with extension, `NOT NULL UNIQUE`, byte-identical to the governance scanner's
+  `rel_path`. There is deliberately **no** `policy_scope` column: a document's context is a fold
+  over every matching `folders.yml` rule, not one winning rule, and five of the eight fields
+  overlay unconditionally while `default_type`/`allowed_types`/`purpose` fall back to a
+  less-specific ancestor. Port `vault_governance.inheritance.resolve_context`; do not
+  reimplement prefix matching by eye. Every glob is a literal prefix plus `/**`, which is why
+  the `text_pattern_ops` index exists. See ADR 0010.
+- **`status` and `doc_status` are different things.** `status` is the vault's own visibility
+  state and the thing `routes.READABLE_STATUSES` gates on — a closed enum on purpose.
+  `doc_status` is the `types.yml` Status Map value (`Evergreen`, `Stub`, `Proposed`), free text
+  with a shape-only CHECK, validated per-type at the write boundary. Neither derives from the
+  other. Do not gate reads on `doc_status`; that would move a security boundary into a file that
+  changes without review. See ADR 0011.
 - **`VAULT_TEXT_SEARCH_CONFIG` is a migration-time choice.** It is compiled into the
   persisted `search_vector` generated column, so changing it later requires a table rewrite
   and a GIN reindex, not a restart. A startup assertion compares the environment against the
