@@ -88,6 +88,14 @@ be edited when it does.
   PostgreSQL rejects it in a generated column; `array_to_tsvector` is IMMUTABLE but emits
   unstemmed lexemes that silently never match a stemmed query. Aliases are weighted 'A'; tags are
   deliberately absent, being already served exactly by their GIN index.
+- **`ai_read` is enforced twice, and fails closed.** `read_policy.READABLE_PATH_PREFIXES`
+  mirrors the `ai_read: allowed` rules in the private `folders.yml`. Excluded folders are
+  never imported; both search arms, the fusion hydration step, and fetch-by-ID filter again
+  anyway, because the two layers cover different failures. A path matching no prefix is
+  unreadable — never add a fallback that serves the unclassified. Not configuration, for
+  ADR 0008's reason. `get_by_id(readable_only=...)` defaults **off** because reconciliation
+  must load an excluded row in order to delete it. Reading leaves no diff, so unlike
+  `ai_write` this can never be a CI gate. See ADR 0014.
 - **`VAULT_TEXT_SEARCH_CONFIG` is a migration-time choice.** It is compiled into the
   persisted `search_vector` generated column, so changing it later requires a table rewrite
   and a GIN reindex, not a restart. A startup assertion compares the environment against the

@@ -18,6 +18,7 @@ from .domain import (
     VaultDocument,
     VaultReviewCase,
 )
+from .read_policy import readable_path_predicate
 from .tables import vault_document_embeddings, vault_documents, vault_review_cases
 
 
@@ -151,6 +152,7 @@ class VaultDocumentRepository:
         connection: AsyncConnection,
         document_id: str,
         statuses: Sequence[DocumentStatus] | None = None,
+        readable_only: bool = False,
     ) -> VaultDocument | None:
         """Fetch one document, optionally restricted to certain statuses.
 
@@ -158,6 +160,10 @@ class VaultDocumentRepository:
         that surface, not of persistence. Review tooling has to be able to load
         a flagged document precisely because it is flagged, so the restriction
         belongs at the caller. ``routes.py`` states the read surface's rule.
+
+        ``readable_only`` applies the ``ai_read`` path policy, and defaults
+        off for the same reason: review, export, and reconciliation tooling
+        must be able to load a row the public read surface withholds.
         """
 
         statement = select(*self._domain_columns).where(
@@ -167,6 +173,8 @@ class VaultDocumentRepository:
             statement = statement.where(
                 vault_documents.c.status.in_([status.value for status in statuses])
             )
+        if readable_only:
+            statement = statement.where(readable_path_predicate())
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None

@@ -165,6 +165,7 @@ async def get_vault_document(
             connection,
             document_id,
             statuses=READABLE_STATUSES,
+            readable_only=True,
         )
 
     if document is None:

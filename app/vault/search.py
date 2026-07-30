@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .constants import EMBEDDING_DIMENSIONS
 from .domain import DocumentStatus, VaultDocument
 from .embeddings import EmbeddingVector
+from .read_policy import readable_path_predicate
 from .repository import DOCUMENT_DOMAIN_COLUMNS, document_from_row
 from .tables import vault_document_embeddings, vault_documents
 
@@ -162,6 +163,7 @@ class VaultSearchRepository:
             .where(
                 vault_documents.c.search_vector.op("@@")(self._tsquery),
                 vault_documents.c.status == DocumentStatus.ACTIVE.value,
+                readable_path_predicate(),
             )
             .order_by(rank.desc(), vault_documents.c.id)
             .limit(bindparam("row_limit"))
@@ -218,6 +220,7 @@ class VaultSearchRepository:
             .where(
                 vault_document_embeddings.c.profile_id == profile_id,
                 vault_documents.c.status == DocumentStatus.ACTIVE.value,
+                readable_path_predicate(),
             )
             .order_by(distance, vault_document_embeddings.c.document_id)
             .limit(limit)
@@ -244,7 +247,8 @@ class VaultSearchRepository:
             return {}
 
         statement = select(*DOCUMENT_DOMAIN_COLUMNS).where(
-            vault_documents.c.id.in_(list(document_ids))
+            vault_documents.c.id.in_(list(document_ids)),
+            readable_path_predicate(),
         )
         result = await connection.execute(statement)
         return {row["id"]: document_from_row(row) for row in result.mappings()}

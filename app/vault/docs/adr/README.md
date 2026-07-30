@@ -18,3 +18,4 @@ repository's `docs/adr/`, and moves with `app/vault/` when the package is extrac
 | 0011 | [`doc_status` carries the Status Map; `status` stays the visibility gate](0011-doc-status-carries-the-status-map.md) | Accepted |
 | 0012 | [Markdown-authored layers reconcile by mark-and-sweep over a content hash](0012-markdown-layers-reconcile-by-mark-and-sweep.md) | Accepted |
 | 0013 | [The embedding text carries semantic frontmatter, not bookkeeping](0013-embedding-text-is-semantic-fields-only.md) | Accepted |
+| 0014 | [`ai_read` excludes at import and again at query time](0014-ai-read-excludes-at-import-and-at-query.md) | Accepted |
