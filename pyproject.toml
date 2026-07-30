@@ -4,8 +4,13 @@
 
 [tool.ruff]
 # There is no [project] table, so ruff cannot infer the Python version from
-# requires-python and has to be told.
-target-version = "py314"
+# requires-python and has to be told. This MUST be the oldest interpreter the
+# code runs on -- CI and Heroku are 3.12 -- not whatever is installed locally.
+# Setting it to a newer version makes ruff "modernize" code into syntax the
+# real runtime rejects: UP037 stripped the quotes from three forward
+# references, which 3.14 tolerates (PEP 649 defers annotation evaluation) and
+# 3.12 raises NameError on at import time.
+target-version = "py312"
 line-length = 88
 
 [tool.ruff.lint]
