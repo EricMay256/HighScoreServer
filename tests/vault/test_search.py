@@ -236,6 +236,69 @@ def test_lexical_search_uses_the_stored_configurations_stemming(
     asyncio.run(exercise())
 
 
+def test_an_alias_makes_a_document_lexically_findable(
+    configure_test_env: None,
+) -> None:
+    """An alias is searchable, and it is stemmed like the title.
+
+    This is the whole payoff of putting aliases in ``search_vector``: a note
+    titled "PostgreSQL" has to be findable by someone who types "Postgres".
+
+    It also pins the reason ``vault.text_array_to_string`` exists.
+    ``array_to_string`` is STABLE and PostgreSQL rejects it in a generated
+    column outright; ``array_to_tsvector`` is IMMUTABLE but emits raw lexemes
+    ('Postgres'), which never match a stemmed query side ('postgr') — so it
+    would compile and then silently fail to match. That failure would look
+    exactly like this test passing on the title alone, which is why the query
+    below appears in no other field.
+    """
+
+    async def exercise() -> None:
+        service, engine = vault_service()
+        documents = VaultDocumentRepository()
+        repository = VaultSearchRepository()
+        document_id = f"alias-{uuid4().hex}"
+
+        try:
+            async with service.transaction() as connection:
+                await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=document_id,
+                        kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{document_id}.md",
+                        status=DocumentStatus.ACTIVE,
+                        title="Relational database engines",
+                        # The only place "Postgres" appears.
+                        aliases=("Postgres", "Postgres DB"),
+                        body="An overview of storage engines and their tradeoffs.",
+                        contributed_by="test:aliases",
+                        provenance={"fixture": True},
+                    ),
+                )
+
+            async with service.transaction() as connection:
+                hits = await repository.lexical_search(
+                    connection,
+                    query="postgres",
+                    text_search_config="english",
+                    limit=10,
+                )
+
+            assert [hit.document_id for hit in hits] == [document_id]
+
+            async with service.transaction() as connection:
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id == document_id
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 def test_lexical_search_excludes_documents_that_are_not_active(
     configure_test_env: None,
 ) -> None:

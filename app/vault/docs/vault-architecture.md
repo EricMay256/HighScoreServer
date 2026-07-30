@@ -371,24 +371,20 @@ necessary only when a second profile is populated, and the **dimension-change DD
 deliberately left until a dimension change is actually proposed. Both are described in
 `vault-configuration.md`.
 
-### 1. Import direction and reconciliation per layer
+### 1. No read-permission model for whole-vault scope
 
-Settled: `vault_documents.vault_path` exists (ADR 0010), so `folders.yml` can be evaluated against
-the database. What is **not** settled is which layers the table holds and which way truth flows.
+Staleness and deletion are settled — mark-and-sweep over `source_sha256` (ADR 0012) — and so is
+what gets embedded (ADR 0013). The database is a **replica** of `Human/**` and the **system of
+record** for `Agent/**`; `source_sha256 IS NULL` is a row saying it has no upstream file.
 
-The intended model is that human notes always exist firstly as Markdown, so the database is a
-**replica** of `Human/**` and the **system of record** for `Agent/**`. That asymmetry raises three
-things the importer cannot be built without:
+What remains open is access. **`folders.yml` governs `ai_write` and has no `ai_read` at all.** With
+the whole vault behind one shared `VAULT_READ_API_KEY`, any holder of that key reads everything,
+including `Human/07 People/**` — notes about real people. ADR 0008's remark that archived is a
+visibility state rather than a privacy one was written for an agent-authored corpus and does not
+carry to whole-vault scope.
 
-- **Staleness.** A replica needs a content hash or mtime per row to detect that the file moved on.
-- **Deletion.** A removed Markdown file must lose its row; one-way import does not do this by
-  itself, so reconciliation needs either tombstones or a full sweep.
-- **Read permission.** `folders.yml` governs `ai_write` and has no `ai_read`. With the whole vault
-  behind one shared `VAULT_READ_API_KEY`, any holder reads everything, including
-  `Human/07 People/**`. ADR 0008's note that archived is a visibility state and not a privacy one
-  was written for an agent-authored corpus and does not carry to whole-vault scope.
-
-The third is the one to settle before anything imports the human layer.
+Nothing in the schema blocks on this; the columns are the same either way. It should be settled
+before anything imports the human layer, not after.
 
 ### 2. Governance artifacts split across the source/knowledge boundary
 

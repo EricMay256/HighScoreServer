@@ -96,6 +96,10 @@ class VaultDocumentDetail(BaseModel):
     summary: str | None
     body: str
     tags: list[str]
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Alternative titles, also indexed for lexical search.",
+    )
     related_ids: list[str]
     source_ids: list[str]
     source_url: str | None

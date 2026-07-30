@@ -16,3 +16,5 @@ repository's `docs/adr/`, and moves with `app/vault/` when the package is extrac
 | 0009 | [`doc_type` is text validated against `types.yml`, not a second enum](0009-doc-type-is-text-validated-against-types-yml.md) | Accepted |
 | 0010 | [`vault_path` is the only policy key; there is no resolved scope column](0010-vault-path-is-the-only-policy-key.md) | Accepted |
 | 0011 | [`doc_status` carries the Status Map; `status` stays the visibility gate](0011-doc-status-carries-the-status-map.md) | Accepted |
+| 0012 | [Markdown-authored layers reconcile by mark-and-sweep over a content hash](0012-markdown-layers-reconcile-by-mark-and-sweep.md) | Accepted |
+| 0013 | [The embedding text carries semantic frontmatter, not bookkeeping](0013-embedding-text-is-semantic-fields-only.md) | Accepted |

@@ -98,6 +98,7 @@ def _to_detail(document: VaultDocument) -> VaultDocumentDetail:
         summary=document.summary,
         body=document.body,
         tags=list(document.tags),
+        aliases=list(document.aliases),
         related_ids=list(document.related_ids),
         source_ids=list(document.source_ids),
         source_url=document.source_url,

@@ -158,6 +158,27 @@ vault_documents = Table(
         nullable=False,
         server_default=text("'{}'::text[]"),
     ),
+    # Alternative titles. Weighted 'A' in search_vector alongside the title,
+    # because an alias is exactly the term a searcher types. See ADR 0013.
+    Column(
+        "aliases",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    # Frontmatter keys the schema does not model. The projector has to re-emit
+    # notes the validator accepts, and global.yml's known_extra_keys makes a
+    # column-per-key impossible. Distinct from `provenance`, which records how
+    # the row got here rather than what the note said.
+    Column(
+        "frontmatter",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+    # SHA-256 of the upstream file. NULL means there is no upstream file: the
+    # row was authored here, so nothing on disk governs it. See ADR 0012.
+    Column("source_sha256", LargeBinary),
     Column(
         "related_ids",
         ARRAY(Text),
@@ -197,6 +218,8 @@ vault_documents = Table(
         Computed(
             f"setweight(to_tsvector('{TEXT_SEARCH_CONFIG}'::regconfig, "
             "coalesce(title, '')), 'A') || "
+            f"setweight(to_tsvector('{TEXT_SEARCH_CONFIG}'::regconfig, "
+            "coalesce(vault.text_array_to_string(aliases, ' '), '')), 'A') || "
             f"setweight(to_tsvector('{TEXT_SEARCH_CONFIG}'::regconfig, "
             "coalesce(summary, '')), 'B') || "
             f"setweight(to_tsvector('{TEXT_SEARCH_CONFIG}'::regconfig, "
@@ -251,6 +274,10 @@ vault_documents = Table(
         "AND length(vault_path) <= 1024",
         name="vault_documents_vault_path_format",
     ),
+    CheckConstraint(
+        "source_sha256 IS NULL OR octet_length(source_sha256) = 32",
+        name="vault_documents_source_sha256_length",
+    ),
     UniqueConstraint("vault_path", name="vault_documents_vault_path_key"),
     CheckConstraint(
         "(kind = 'note' AND compile_run_id IS NULL "
@@ -285,10 +312,19 @@ vault_document_embeddings = Table(
         nullable=False,
         server_default=text("now()"),
     ),
+    # SHA-256 of the text this vector was built from. NULL means unknown, which
+    # a re-embed job must treat as stale. Lives here rather than on the
+    # document because staleness is per profile. See ADR 0013.
+    Column("embedded_text_sha256", LargeBinary),
     PrimaryKeyConstraint(
         "document_id",
         "profile_id",
         name="vault_document_embeddings_pkey",
+    ),
+    CheckConstraint(
+        "embedded_text_sha256 IS NULL "
+        "OR octet_length(embedded_text_sha256) = 32",
+        name="vault_document_embeddings_text_sha256_length",
     ),
     CheckConstraint(
         "profile_id ~ '^[A-Za-z0-9._:/-]{3,128}$'",

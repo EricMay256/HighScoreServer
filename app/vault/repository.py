@@ -34,6 +34,9 @@ DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.summary,
     vault_documents.c.body,
     vault_documents.c.tags,
+    vault_documents.c.aliases,
+    vault_documents.c.frontmatter,
+    vault_documents.c.source_sha256,
     vault_documents.c.related_ids,
     vault_documents.c.source_ids,
     vault_documents.c.contributed_by,
@@ -60,6 +63,9 @@ def document_from_row(row: RowMapping) -> VaultDocument:
         summary=row["summary"],
         body=row["body"],
         tags=tuple(row["tags"]),
+        aliases=tuple(row["aliases"]),
+        frontmatter=dict(row["frontmatter"]),
+        source_sha256=row["source_sha256"],
         related_ids=tuple(row["related_ids"]),
         source_ids=tuple(row["source_ids"]),
         contributed_by=row["contributed_by"],
@@ -81,6 +87,7 @@ def _document_embedding_from_row(row: RowMapping) -> DocumentEmbedding:
         # pgvector hands back a numpy array; the domain record holds plain floats.
         vector=tuple(float(value) for value in row["embedding"]),
         embedded_at=row["embedded_at"],
+        text_sha256=row["embedded_text_sha256"],
     )
 
 
@@ -121,6 +128,9 @@ class VaultDocumentRepository:
                 summary=document.summary,
                 body=document.body,
                 tags=list(document.tags),
+                aliases=list(document.aliases),
+                frontmatter=document.frontmatter,
+                source_sha256=document.source_sha256,
                 related_ids=list(document.related_ids),
                 source_ids=list(document.source_ids),
                 contributed_by=document.contributed_by,
@@ -170,6 +180,7 @@ class VaultDocumentEmbeddingRepository:
         vault_document_embeddings.c.profile_id,
         vault_document_embeddings.c.embedding,
         vault_document_embeddings.c.embedded_at,
+        vault_document_embeddings.c.embedded_text_sha256,
     )
 
     async def upsert(
@@ -181,6 +192,7 @@ class VaultDocumentEmbeddingRepository:
             "document_id": embedding.document_id,
             "profile_id": embedding.profile_id,
             "embedding": list(embedding.vector),
+            "embedded_text_sha256": embedding.text_sha256,
         }
         if embedding.embedded_at is not None:
             values["embedded_at"] = embedding.embedded_at
@@ -194,6 +206,9 @@ class VaultDocumentEmbeddingRepository:
             set_={
                 "embedding": statement.excluded.embedding,
                 "embedded_at": statement.excluded.embedded_at,
+                "embedded_text_sha256": (
+                    statement.excluded.embedded_text_sha256
+                ),
             },
         ).returning(*self._domain_columns)
         result = await connection.execute(statement)

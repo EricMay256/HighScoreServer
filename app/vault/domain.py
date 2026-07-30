@@ -80,6 +80,13 @@ class VaultDocument:
     doc_status: str | None = None
     summary: str | None = None
     tags: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    # Frontmatter keys the schema does not model, kept so the projector can
+    # re-emit a note the validator accepts. See ADR 0013.
+    frontmatter: dict[str, Any] = field(default_factory=dict)
+    # SHA-256 of the upstream file; None when the row has no upstream file
+    # because it was authored here. See ADR 0012.
+    source_sha256: bytes | None = None
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     source_url: str | None = None
@@ -103,6 +110,9 @@ class NewVaultDocument:
     doc_status: str | None = None
     summary: str | None = None
     tags: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    frontmatter: dict[str, Any] = field(default_factory=dict)
+    source_sha256: bytes | None = None
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     source_url: str | None = None
@@ -124,6 +134,9 @@ class DocumentEmbedding:
     vector: tuple[float, ...]
     # Unset on the way in so the column default applies; populated on read.
     embedded_at: datetime | None = None
+    # SHA-256 of the text this vector was built from. None means unknown, which
+    # a re-embed job treats as stale. See ADR 0013.
+    text_sha256: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -73,6 +73,21 @@ be edited when it does.
   with a shape-only CHECK, validated per-type at the write boundary. Neither derives from the
   other. Do not gate reads on `doc_status`; that would move a security boundary into a file that
   changes without review. See ADR 0011.
+- **`source_sha256` NULL means "no upstream file".** It is the SHA-256 of the Markdown a row
+  replicates, and NULL says the row was authored in the database instead — which is how a
+  mark-and-sweep run knows not to delete it. Reconciliation is mark-and-sweep keyed on
+  `vault_path`, **scoped by path prefix**, sweeping only after a complete walk and refusing an
+  implausibly small one. An unscoped sweep deletes every agent note. See ADR 0012.
+- **The embedding text is title + aliases + tags + summary + body, and nothing else.** Timestamps
+  and identifiers churn without changing meaning; `Type`/`Status` are excluded because they are
+  columns (`doc_type`, `doc_status`) and filtering exactly beats matching fuzzily. `frontmatter`
+  JSONB exists for faithful projection and is deliberately **not** embedded. Re-import and
+  re-embed are separate: `vault_document_embeddings.embedded_text_sha256` decides the second, and
+  NULL there means stale, not current. See ADR 0013.
+- **`search_vector` uses `vault.text_array_to_string`, and must.** `array_to_string` is STABLE, so
+  PostgreSQL rejects it in a generated column; `array_to_tsvector` is IMMUTABLE but emits
+  unstemmed lexemes that silently never match a stemmed query. Aliases are weighted 'A'; tags are
+  deliberately absent, being already served exactly by their GIN index.
 - **`VAULT_TEXT_SEARCH_CONFIG` is a migration-time choice.** It is compiled into the
   persisted `search_vector` generated column, so changing it later requires a table rewrite
   and a GIN reindex, not a restart. A startup assertion compares the environment against the

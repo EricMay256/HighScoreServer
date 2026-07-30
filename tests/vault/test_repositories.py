@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from hashlib import sha256
 from uuid import uuid4
 
 import pytest
@@ -558,6 +559,178 @@ def test_doc_status_is_independent_of_the_visibility_status(
 
                 assert stored.status is DocumentStatus.ACTIVE
                 assert stored.doc_status == "Stub"
+
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id == document_id
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_reconciliation_fields_round_trip_and_bound_their_hashes(
+    configure_test_env: None,
+) -> None:
+    """source_sha256, frontmatter, and aliases survive a write/read cycle.
+
+    A NULL ``source_sha256`` is the row saying it has no upstream file — it was
+    authored here — which is how a mark-and-sweep run knows not to delete it.
+    See ADR 0012.
+    """
+
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+        imported_id = f"recon-{uuid4().hex}"
+        authored_id = f"recon-{uuid4().hex}"
+        digest = sha256(b"the upstream file's bytes").digest()
+
+        try:
+            async with service.transaction() as connection:
+                imported = await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=imported_id,
+                        kind=DocumentKind.NOTE,
+                        vault_path=f"Human/17 Concepts/{imported_id}.md",
+                        status=DocumentStatus.ACTIVE,
+                        title="Imported from Markdown",
+                        body="Has an upstream file on disk.",
+                        aliases=("First alias", "Second alias"),
+                        # Keys the schema does not model, kept verbatim so the
+                        # projector can re-emit valid frontmatter.
+                        frontmatter={
+                            "Category": "Reference",
+                            "Owner/Collaborators": ["someone"],
+                        },
+                        source_sha256=digest,
+                        contributed_by="test:reconciliation",
+                        provenance={"fixture": True},
+                    ),
+                )
+                authored = await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=authored_id,
+                        kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{authored_id}.md",
+                        status=DocumentStatus.ACTIVE,
+                        title="Authored in the database",
+                        body="No file on disk governs this row.",
+                        contributed_by="test:reconciliation",
+                        provenance={"fixture": True},
+                    ),
+                )
+
+            assert imported.aliases == ("First alias", "Second alias")
+            assert imported.frontmatter["Category"] == "Reference"
+            assert imported.source_sha256 == digest
+            # No upstream file: a sweep over Human/** must not claim this row.
+            assert authored.source_sha256 is None
+            assert authored.aliases == ()
+            assert authored.frontmatter == {}
+
+            async with service.transaction() as connection:
+                reloaded = await documents.get_by_id(connection, imported_id)
+                assert reloaded is not None
+                assert reloaded.source_sha256 == digest
+                assert reloaded.frontmatter["Owner/Collaborators"] == ["someone"]
+
+            # A digest that is not 32 bytes is not a SHA-256.
+            with pytest.raises(IntegrityError) as caught:
+                async with service.transaction() as connection:
+                    await documents.insert(
+                        connection,
+                        NewVaultDocument(
+                            id=f"recon-bad-{uuid4().hex}",
+                            kind=DocumentKind.NOTE,
+                            vault_path=f"Human/17 Concepts/bad-{uuid4().hex}.md",
+                            status=DocumentStatus.ACTIVE,
+                            title="Truncated digest",
+                            body="Should not be storable.",
+                            source_sha256=b"too short",
+                            contributed_by="test:reconciliation",
+                            provenance={"fixture": True},
+                        ),
+                    )
+            assert "vault_documents_source_sha256_length" in str(caught.value)
+
+            async with service.transaction() as connection:
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id.in_([imported_id, authored_id])
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
+def test_embedded_text_hash_travels_with_the_vector(
+    configure_test_env: None,
+) -> None:
+    """The hash records which text produced this vector, per profile.
+
+    It lives on the embedding rather than the document because one profile can
+    be stale while another is current. NULL means unknown, which a re-embed job
+    treats as stale rather than as up to date. See ADR 0013.
+    """
+
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+        embeddings = VaultDocumentEmbeddingRepository()
+        document_id = f"texthash-{uuid4().hex}"
+        first = sha256(b"title\n\nbody as first embedded").digest()
+        second = sha256(b"title\n\nbody after an alias changed").digest()
+
+        try:
+            async with service.transaction() as connection:
+                await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=document_id,
+                        kind=DocumentKind.NOTE,
+                        vault_path=f"Agent/notes/{document_id}.md",
+                        status=DocumentStatus.ACTIVE,
+                        title="Embedded text hash",
+                        body="Decides re-embedding independently of re-import.",
+                        contributed_by="test:text-hash",
+                        provenance={"fixture": True},
+                    ),
+                )
+
+                stored = await embeddings.upsert(
+                    connection,
+                    DocumentEmbedding(
+                        document_id=document_id,
+                        profile_id="test/fixture-model:1536",
+                        vector=_vector(0.25),
+                        text_sha256=first,
+                    ),
+                )
+                assert stored.text_sha256 == first
+
+                # Re-embedding after the text changed replaces the hash too,
+                # or the row would claim a vector it no longer has.
+                replaced = await embeddings.upsert(
+                    connection,
+                    DocumentEmbedding(
+                        document_id=document_id,
+                        profile_id="test/fixture-model:1536",
+                        vector=_vector(0.75),
+                        text_sha256=second,
+                    ),
+                )
+                assert replaced.text_sha256 == second
 
                 await connection.execute(
                     delete(vault_documents).where(
