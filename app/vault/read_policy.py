@@ -37,8 +37,15 @@ from .tables import vault_documents
 READABLE_PATH_PREFIXES: tuple[str, ...] = (
     # Agents must be able to read the rules they are asked to follow.
     "00 Governance/",
-    # Agent-authored throughout.
-    "Agent/",
+    # Agent-authored, but enumerated rather than a blanket "Agent/". folders.yml
+    # has no `Agent/**` catch-all, so a subfolder nobody has classified falls
+    # through to `default: ai_read: forbidden`. A broad prefix here would admit
+    # it instead -- failing open exactly where the governance layer fails
+    # closed, which is the guarantee this module exists to keep.
+    "Agent/Promotion Candidates/",
+    "Agent/notes/",
+    "Agent/review/",
+    "Agent/wiki/",
     # The agent's own proposals into the human inbox.
     "Human/01 Inbox/AI/",
     "Human/03 Projects/",

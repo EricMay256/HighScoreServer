@@ -30,6 +30,13 @@ from tests.vault.test_search import vault_service
         ("Human/17 Concepts/Idempotency.md", True),
         ("Human/03 Projects/HighScoreServer.md", True),
         ("Agent/notes/abc.md", True),
+        ("Agent/wiki/page.md", True),
+        ("Agent/review/flagged.md", True),
+        ("Agent/Promotion Candidates/candidate.md", True),
+        # folders.yml has no `Agent/**` catch-all, so an unclassified Agent
+        # subfolder resolves to `default: forbidden`. A blanket "Agent/" prefix
+        # here would admit it and fail open where governance fails closed.
+        ("Agent/experiments/scratch.md", False),
         ("00 Governance/Vault Philosophy.md", True),
         ("Human/01 Inbox/AI/suggestion.md", True),
         # The two the operator named explicitly.
