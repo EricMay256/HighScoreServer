@@ -1,7 +1,7 @@
-"""Read-only HTTP surface for the vault.
+"""HTTP surface for the vault.
 
-Search and document retrieval only. Contribution, review, and compile endpoints
-belong to later phases and are deliberately absent.
+Search, note retrieval, and the governed contribution path. Review, compile,
+and export endpoints belong to later phases and are deliberately absent.
 
 Access is gated on operator-issued agent credentials
 (``hssv1_<credential-id>_<secret>``), verified against
@@ -12,19 +12,36 @@ leaderboard ``API_KEY`` are not vault credentials.
 """
 
 import logging
+from hashlib import sha256
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .api_models import VaultDocumentDetail, VaultSearchHit, VaultSearchResponse
+from .api_models import (
+    VaultContributionRequest,
+    VaultContributionResponse,
+    VaultDocumentDetail,
+    VaultSearchHit,
+    VaultSearchResponse,
+    VaultSimilarNote,
+)
 from .auth import VaultCredential, VaultScope, authorize, parse_token
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
 from .domain import DocumentStatus, VaultDocument
 from .embedding_runtime import get_embedding_provider
+from .embeddings import EmbeddingError
 from .rate_limit import get_limiter
 from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
-from .service import VaultSearchService, VaultTransactionService
+from .service import (
+    ContributionRequest,
+    DedupUnavailable,
+    IdempotencyConflict,
+    VaultContributionService,
+    VaultSearchService,
+    VaultTransactionService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -130,6 +147,12 @@ async def require_read_scope(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> VaultCredential:
     return await _authenticated((VaultScope.READ,), credentials)
+
+
+async def require_write_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.WRITE,), credentials)
 
 
 async def search_quota(
@@ -242,3 +265,106 @@ async def get_vault_document(
             detail="Note not found",
         )
     return _to_detail(document)
+
+
+async def write_quota(
+    credential: VaultCredential = Depends(require_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "contribute")
+    return credential
+
+
+def _canonical_request_digest(body: VaultContributionRequest) -> bytes:
+    """Hash the request so a reused idempotency key can be checked against it.
+
+    Hashes the validated model rather than the raw bytes: two JSON documents
+    differing only in key order or whitespace are the same request, and
+    treating them as a conflict would refuse a legitimate retry.
+    """
+
+    canonical = body.model_dump_json(exclude_none=False)
+    return sha256(canonical.encode("utf-8")).digest()
+
+
+@router.post(
+    "/contributions",
+    response_model=VaultContributionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Contribute a note through the governed write path",
+)
+async def contribute(
+    body: VaultContributionRequest,
+    request: Request,
+    credential: VaultCredential = Depends(write_quota),
+) -> VaultContributionResponse:
+    """Validate, embed, deduplicate, decide, and write.
+
+    Returns 200 for every settled outcome including ``flagged`` and
+    ``rejected``: the request was understood and processed, and the disposition
+    is in the body. Reserving non-2xx for transport and authorization failures
+    keeps a caller from treating "queued for review" as an error to retry.
+    """
+
+    service = VaultContributionService(
+        transactions=VaultTransactionService(get_vault_engine()),
+        provider=get_embedding_provider(),
+    )
+    contribution = ContributionRequest(
+        title=body.title,
+        body=body.body,
+        # The credential is the contributor. Taking it from the request body
+        # would let one principal write under another's name.
+        contributed_by=f"agent:{credential.principal_id}",
+        principal_id=credential.principal_id,
+        idempotency_key=body.idempotency_key,
+        request_sha256=_canonical_request_digest(body),
+        request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+        tags=tuple(body.tags),
+        source_url=str(body.source_url) if body.source_url else None,
+    )
+
+    try:
+        outcome = await service.contribute(contribution)
+    except IdempotencyConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Idempotency key was already used for a different request",
+        ) from exc
+    except DedupUnavailable as exc:
+        # Deliberately not a silent insert. Writing without the dedup gate
+        # would defeat the guarantee the vault exists to provide.
+        logger.error("Refusing a vault contribution: no embedding provider")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Contribution is unavailable: no embedding provider configured",
+        ) from exc
+    except EmbeddingError as exc:
+        # Type only, never the message: an embedding exception can carry the
+        # note body.
+        logger.error(
+            "Vault contribution failed to embed",
+            extra={"error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Contribution is temporarily unavailable",
+        ) from exc
+
+    if outcome.status == "invalid":
+        # Governance validation, not transport validation: 422 per the spec.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": outcome.message, "errors": outcome.errors},
+        )
+
+    return VaultContributionResponse(
+        status=outcome.status,
+        note_id=outcome.note_id,
+        message=outcome.message,
+        idempotent_replay=outcome.idempotent_replay,
+        similars=[
+            VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
+            for s in outcome.similars
+        ],
+        errors=list(outcome.errors),
+    )

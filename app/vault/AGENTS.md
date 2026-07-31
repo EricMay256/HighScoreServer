@@ -101,9 +101,12 @@ be edited when it does.
   and a GIN reindex, not a restart. A startup assertion compares the environment against the
   expression actually stored in the catalog. Search queries must use the same configuration:
   `websearch_to_tsquery(:config, :query)`.
-- Contribution policy for the write path is **not** implemented here during the read-only
-  phase. `vault_contrib.core.decide()` and `vault_contrib.models.Policy` remain normative and
-  will be ported verbatim with their tests at switchover. See ADR 0004.
+- **`decide()` and `Policy` are ported verbatim into `governance.py`** (ADR 0004) — keep them
+  diffable against `vault_contrib.core`. What is deliberately *not* ported is the **value** of
+  `flag_at`: Stage A's 0.85 is a title string ratio, here the score is cosine similarity where
+  unrelated prose exceeds 0.7. `DEFAULT_POLICY` ships `flag_at = 1.0` (only an identical
+  embedding flags) until a threshold is measured against the real corpus. Do not "restore"
+  0.85. See ADR 0016.
 
 ## Retrieval and embeddings
 
@@ -155,6 +158,24 @@ be edited when it does.
   response says which check failed.
 - Scopes are verbs. *What* a credential may read is ADR 0014's path policy, a property of the
   folder rather than of the credential.
+
+## The write path
+
+- **Embed before the transaction, never inside it.** An embedding call is a third-party round
+  trip; holding a transaction across it pins a pooled connection and the advisory lock for the
+  provider's latency. Idempotency is therefore re-checked *under the lock*.
+- **One corpus-wide `pg_advisory_xact_lock`** guards check-dedup-then-write. A per-key lock does
+  not help: the conflict is between different idempotency keys.
+- **No dedup, no write.** Missing embedding provider is 503, not a silent insert. The read path
+  may degrade to lexical; the write path may not degrade to no-dedup.
+- **Settled outcomes are 200**, including `flagged` and `rejected` — a client that retries a
+  "flagged" as an error creates a second note that flags against the first.
+- The idempotency digest covers the **validated model**, not raw bytes, so key order is not a
+  409. `contributed_by` comes from the **credential**, never the body.
+- `find_similar` applies `readable_path_predicate`: similarity output names and titles existing
+  documents, so an unscoped dedup query is a disclosure channel around ADR 0014.
+- `Merge` and `Link` raise. ADR 0004 keeps merge disabled and `link_at` unset; reaching either
+  means a policy set a band nobody decided on.
 
 ## Rate limiting
 

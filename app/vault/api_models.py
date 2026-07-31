@@ -39,6 +39,43 @@ class VaultContributionRequest(BaseModel):
         return tags
 
 
+class VaultSimilarNote(BaseModel):
+    """An existing note the deduper surfaced, as reported to a contributor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    title: str
+    score: float
+
+
+class VaultContributionResponse(BaseModel):
+    """Outcome of a governed write.
+
+    Mirrors the `vault.contribute` output in the MCP tool schema. Note that
+    `flagged` is a successful write, not a failure: the note landed and a
+    review case was opened. Callers branch on `status`, so it is deliberately
+    a small closed vocabulary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = Field(
+        description=(
+            "inserted | flagged | rejected | invalid. 'flagged' means the note "
+            "was written and queued for adjudication, not that it failed."
+        ),
+    )
+    note_id: str | None
+    message: str
+    idempotent_replay: bool = Field(
+        default=False,
+        description="True when this response replays an earlier identical request.",
+    )
+    similars: list[VaultSimilarNote] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 class VaultDocumentResponse(BaseModel):
     """Deliberate public subset of a persisted vault document."""
 

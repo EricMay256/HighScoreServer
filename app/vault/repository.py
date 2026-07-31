@@ -1,6 +1,7 @@
 """Connection-injected SQLAlchemy Core repositories for vault persistence."""
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -22,9 +23,11 @@ from .domain import (
 from .read_policy import readable_path_predicate
 from .tables import (
     vault_agent_credentials,
+    vault_audit_events,
     vault_document_embeddings,
     vault_documents,
     vault_review_cases,
+    vault_write_requests,
 )
 
 
@@ -333,4 +336,122 @@ class VaultAgentCredentialRepository:
             update(vault_agent_credentials)
             .where(vault_agent_credentials.c.id == credential_id)
             .values(last_used_at=func.now())
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WriteRequestRecord:
+    """A logical write, stable across retries of the same idempotency key."""
+
+    principal_id: str
+    idempotency_key: str
+    request_sha256: bytes
+    state: str
+    document_id: str | None
+    response: dict[str, Any] | None
+
+
+class VaultWriteRequestRepository:
+    """Idempotency records for governed writes."""
+
+    _columns = (
+        vault_write_requests.c.principal_id,
+        vault_write_requests.c.idempotency_key,
+        vault_write_requests.c.request_sha256,
+        vault_write_requests.c.state,
+        vault_write_requests.c.document_id,
+        vault_write_requests.c.response,
+    )
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        principal_id: str,
+        idempotency_key: str,
+    ) -> WriteRequestRecord | None:
+        statement = select(*self._columns).where(
+            vault_write_requests.c.principal_id == principal_id,
+            vault_write_requests.c.idempotency_key == idempotency_key,
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        if row is None:
+            return None
+        return WriteRequestRecord(
+            principal_id=row["principal_id"],
+            idempotency_key=row["idempotency_key"],
+            request_sha256=bytes(row["request_sha256"]),
+            state=row["state"],
+            document_id=row["document_id"],
+            response=dict(row["response"]) if row["response"] is not None else None,
+        )
+
+    async def complete(
+        self,
+        connection: AsyncConnection,
+        *,
+        principal_id: str,
+        idempotency_key: str,
+        request_sha256: bytes,
+        state: str,
+        document_id: str | None,
+        response: Mapping[str, Any],
+    ) -> None:
+        """Record the settled outcome of one logical write.
+
+        Written inside the same transaction as the document, so a replay can
+        never observe a document without its idempotency record or the reverse.
+        """
+
+        statement = pg_insert(vault_write_requests).values(
+            principal_id=principal_id,
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
+            state=state,
+            document_id=document_id,
+            response=dict(response),
+            completed_at=func.now(),
+        )
+        await connection.execute(
+            statement.on_conflict_do_update(
+                constraint="vault_write_requests_pkey",
+                set_={
+                    "state": statement.excluded.state,
+                    "document_id": statement.excluded.document_id,
+                    "response": statement.excluded.response,
+                    "completed_at": statement.excluded.completed_at,
+                },
+            )
+        )
+
+
+class VaultAuditEventRepository:
+    """Append-only audit trail. See ADR 0002 for why it carries no foreign keys."""
+
+    async def record(
+        self,
+        connection: AsyncConnection,
+        *,
+        operation: str,
+        outcome: str,
+        request_id: str,
+        principal_id: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        idempotency_key: str | None = None,
+        trace_id: str | None = None,
+        latency_ms: float | None = None,
+    ) -> None:
+        await connection.execute(
+            insert(vault_audit_events).values(
+                principal_id=principal_id,
+                operation=operation,
+                target_type=target_type,
+                target_id=target_id,
+                idempotency_key=idempotency_key,
+                outcome=outcome,
+                request_id=request_id,
+                trace_id=trace_id,
+                latency_ms=latency_ms,
+            )
         )

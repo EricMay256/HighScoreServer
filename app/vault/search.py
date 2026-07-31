@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .constants import EMBEDDING_DIMENSIONS
 from .domain import DocumentStatus, VaultDocument
 from .embeddings import EmbeddingVector
+from .governance import ScoredCandidate as GovernanceScoredCandidate
 from .read_policy import readable_path_predicate
 from .repository import DOCUMENT_DOMAIN_COLUMNS, document_from_row
 from .tables import vault_document_embeddings, vault_documents
@@ -231,6 +232,66 @@ class VaultSearchRepository:
             # both arms; cosine distance runs the other way.
             ScoredDocumentId(
                 document_id=row["document_id"],
+                score=1.0 - float(row["distance"]),
+            )
+            for row in result.mappings()
+        ]
+
+    async def find_similar(
+        self,
+        connection: AsyncConnection,
+        *,
+        embedding: EmbeddingVector,
+        profile_id: str,
+        limit: int,
+    ) -> list[GovernanceScoredCandidate]:
+        """Surface existing documents similar to a contribution candidate.
+
+        The dedup counterpart of ``vector_search``: same index and the same
+        cosine-similarity convention, but it returns titles because the caller
+        reports them back to a contributor, and it is not fused with anything.
+
+        It applies ``readable_path_predicate`` on purpose. Similarity output
+        names existing documents and scores them, so an unrestricted dedup
+        query would let a contributor learn that a note exists in a folder they
+        may not read, and roughly what it is about. Dedup quality is not worth
+        a disclosure channel around ADR 0014.
+        """
+
+        if len(embedding) != EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"Candidate embedding has {len(embedding)} dimensions; "
+                f"the vault schema stores {EMBEDDING_DIMENSIONS}"
+            )
+
+        distance = vault_document_embeddings.c.embedding.cosine_distance(
+            list(embedding)
+        )
+        statement = (
+            select(
+                vault_documents.c.id,
+                vault_documents.c.title,
+                distance.label("distance"),
+            )
+            .select_from(
+                vault_document_embeddings.join(
+                    vault_documents,
+                    vault_documents.c.id == vault_document_embeddings.c.document_id,
+                )
+            )
+            .where(
+                vault_document_embeddings.c.profile_id == profile_id,
+                vault_documents.c.status == DocumentStatus.ACTIVE.value,
+                readable_path_predicate(),
+            )
+            .order_by(distance, vault_documents.c.id)
+            .limit(limit)
+        )
+        result = await connection.execute(statement)
+        return [
+            GovernanceScoredCandidate(
+                note_id=row["id"],
+                title=row["title"],
                 score=1.0 - float(row["distance"]),
             )
             for row in result.mappings()
