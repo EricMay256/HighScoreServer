@@ -73,6 +73,15 @@ Re-running the importer is a no-op: each note's frontmatter `ID` is its idempote
 the service replays its earlier response rather than writing again. This was tested against a
 stub before the real run and holds in production shape.
 
+**The database is already 4 notes behind.** Four notes were contributed to the markdown corpus
+later in the same session, so `Vault/Agent/notes/` now holds **39** while `vault_documents`
+holds 35. Re-running the importer reconciles it — 35 replay, 4 insert — which needs the server
+up and a `vault:write` token:
+
+```powershell
+python scripts/import_to_vault_service.py --apply     # from knowledge-platform/engine
+```
+
 ---
 
 ## 2. Next step — calibrate `flag_at`, and amend ADR 0016
@@ -136,10 +145,12 @@ Ordered roughly by how much they block.
    Agent-layer project type with its own folder and `folders.yml` policy entry, or route
    project profiles into the Human layer's existing types via Promotion Candidates. This is a
    governance change and wants a decision recorded, not a quiet edit.
-4. **Decide whether the importer is committed** to knowledge-platform, and where. It is
-   untracked at `engine/scripts/import_to_vault_service.py`. It is a one-shot migration tool
-   whose job is done; the argument for keeping it is that the same script re-imports after a
-   schema reset, and the argument against is dead weight in a repo that will not need it again.
+4. **Commit the importer** to knowledge-platform, or decide against it deliberately. It is
+   untracked at `engine/scripts/import_to_vault_service.py`. It was written as a one-shot
+   migration tool, but the corpus grew by four notes within the same session and the database
+   is already stale, so it is in practice the **sync** path from markdown to the service until
+   ADR 0012's reconciliation exists. That is a much stronger argument for keeping it than
+   "useful again after a schema reset".
 5. **Measure embedding latency** — `scripts/measure_embedding_latency.py` has still never run
    against the real API, though `VAULT_EMBEDDING_API_KEY` is now live in `.env`, so the blocker
    is gone. Settles the retry budget (`_MAX_ATTEMPTS = 1`), still provisional.
