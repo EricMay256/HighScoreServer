@@ -190,6 +190,7 @@ def _to_detail(document: VaultDocument) -> VaultDocumentDetail:
         body=document.body,
         tags=list(document.tags),
         aliases=list(document.aliases),
+        facets={name: list(values) for name, values in document.facets.items()},
         related_ids=list(document.related_ids),
         source_ids=list(document.source_ids),
         source_url=document.source_url,
@@ -320,6 +321,11 @@ async def contribute(
         request_sha256=_canonical_request_digest(body),
         request_id=request.headers.get("X-Request-Id") or uuid4().hex,
         tags=tuple(body.tags),
+        summary=body.summary,
+        aliases=tuple(body.aliases),
+        facets=body.facets,
+        related_ids=tuple(body.related_ids),
+        source_ids=tuple(body.source_ids),
         source_url=str(body.source_url) if body.source_url else None,
     )
 

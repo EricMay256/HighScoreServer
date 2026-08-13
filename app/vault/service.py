@@ -3,7 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from uuid import uuid4
 
 from sqlalchemy import text as text_sql
@@ -24,6 +24,7 @@ from .embeddings import (
     EmbeddingProvider,
     embed_one,
 )
+from .facets import normalize_facets, validate_facets
 from .governance import (
     DEFAULT_POLICY,
     Action,
@@ -249,6 +250,12 @@ class ContributionRequest:
     request_sha256: bytes
     request_id: str
     tags: tuple[str, ...] = ()
+    summary: str | None = None
+    aliases: tuple[str, ...] = ()
+    # {name: [values]}. Never reaches the embedding text -- see ADR 0017.
+    facets: dict[str, list[str]] = field(default_factory=dict)
+    related_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
     source_url: str | None = None
 
 
@@ -296,7 +303,10 @@ class VaultContributionService:
 
         candidate = self._build_candidate(request)
 
-        errors = validate(candidate)
+        # Governance validation and facet vocabulary are reported together, so
+        # a contribution learns everything wrong with it in one round trip
+        # rather than one problem at a time.
+        errors = validate(candidate) + validate_facets(candidate.facets)
         if errors:
             return ContributionOutcome(
                 status="invalid",
@@ -362,8 +372,16 @@ class VaultContributionService:
             status=DocumentStatus.ACTIVE,
             doc_status="Active",
             title=request.title,
+            summary=request.summary,
             body=request.body,
             tags=request.tags,
+            aliases=request.aliases,
+            # Normalized here rather than at the transport boundary so that a
+            # contribution arriving through some future non-HTTP caller is
+            # stored the same way. See ADR 0017.
+            facets=normalize_facets(request.facets),
+            related_ids=request.related_ids,
+            source_ids=request.source_ids,
             contributed_by=request.contributed_by,
             source_url=request.source_url,
             provenance={"principal_id": request.principal_id},

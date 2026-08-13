@@ -105,7 +105,7 @@ def test_shared_database_builds_independent_schema_lineages(
     }
     assert version(shared_url, "public", "alembic_version") == ("0004_auth_identities")
     assert version(shared_url, "vault", "vault_alembic_version") == (
-        "0004_reconciliation"
+        "0005_document_facets"
     )
     assert vault_foreign_key_schemas(shared_url) == {("vault", "vault")}
     assert vector_extension_version(shared_url) is not None
@@ -138,6 +138,6 @@ def test_separate_databases_remain_configuration_only(
         "vault_alembic_version",
     }
     assert version(vault_url, "vault", "vault_alembic_version") == (
-        "0004_reconciliation"
+        "0005_document_facets"
     )
     assert vector_extension_version(vault_url) is not None

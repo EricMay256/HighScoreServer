@@ -176,6 +176,17 @@ vault_documents = Table(
         nullable=False,
         server_default=text("'{}'::jsonb"),
     ),
+    # Classification that relates notes to each other -- project, area, system
+    # -- as {name: [values]}. A column rather than namespaced entries in `tags`
+    # because ADR 0013 embeds `tags`, and a shared tag inflates pairwise cosine
+    # by ~0.04 against a dedup margin of 0.0094. Never read by
+    # assemble_embedding_text, which is the whole point. See ADR 0017.
+    Column(
+        "facets",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
     # SHA-256 of the upstream file. NULL means there is no upstream file: the
     # row was authored here, so nothing on disk governs it. See ADR 0012.
     Column("source_sha256", LargeBinary),
@@ -277,6 +288,13 @@ vault_documents = Table(
     CheckConstraint(
         "source_sha256 IS NULL OR octet_length(source_sha256) = 32",
         name="vault_documents_source_sha256_length",
+    ),
+    # An object of arrays of non-blank strings. The predicate lives in a
+    # function because PostgreSQL rejects a subquery inside a CHECK, and
+    # walking a JSONB object needs jsonb_each. See migration 0005 and ADR 0017.
+    CheckConstraint(
+        "vault.jsonb_is_facet_map(facets)",
+        name="vault_documents_facets_shape",
     ),
     UniqueConstraint("vault_path", name="vault_documents_vault_path_key"),
     CheckConstraint(
@@ -540,6 +558,17 @@ Index(
     postgresql_using="gin",
 )
 Index("idx_vault_documents_tags", vault_documents.c.tags, postgresql_using="gin")
+
+# jsonb_path_ops, not the default jsonb_ops: a facet filter is a containment
+# test (@>) and nothing else, and that operator class indexes only containment
+# for a fraction of the size. It does not support the existence operators
+# (?, ?|, ?&) -- a query needing those wants its own index, not a widened one.
+Index(
+    "idx_vault_documents_facets",
+    vault_documents.c.facets,
+    postgresql_using="gin",
+    postgresql_ops={"facets": "jsonb_path_ops"},
+)
 # Every folders.yml glob is a literal prefix plus '/**', so resolving a
 # document's policy context is a longest-prefix match. The UNIQUE index uses
 # the default collation and cannot serve LIKE 'prefix%' unless the database is

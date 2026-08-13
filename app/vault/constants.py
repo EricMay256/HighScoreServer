@@ -15,6 +15,15 @@ EMBEDDING_DIMENSIONS = 1536
 
 DEFAULT_TEXT_SEARCH_CONFIG = "english"
 
+# Facet name and value length ceilings. Persistence contracts: the name limit is
+# restated by the `vault_documents_facets_shape` CHECK in migration
+# 0005_document_facets, so the two must agree. Values are not length-checked in
+# the database -- a JSONB object is bounded overall and a per-element CHECK
+# would scan every value on every write for a limit application code already
+# enforces. See ADR 0017.
+MAX_FACET_NAME_LENGTH = 64
+MAX_FACET_VALUE_LENGTH = 128
+
 # The default per-request embedding timeout, in seconds.
 #
 # Not a persistence contract like the two above, but it lives here for the same

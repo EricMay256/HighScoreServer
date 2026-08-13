@@ -21,7 +21,47 @@ class VaultContributionRequest(BaseModel):
 
     title: str = Field(min_length=1, max_length=300)
     body: str = Field(min_length=1, max_length=100_000)
+    summary: str | None = Field(
+        default=None,
+        max_length=2_000,
+        description=(
+            "Optional short precis. Joins the embedding text and search_vector "
+            "at weight B, so it is a semantic field rather than a display one."
+        ),
+    )
     tags: list[str] = Field(default_factory=list, max_length=50)
+    aliases: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description=(
+            "Alternative titles. Weighted 'A' in search alongside the title, "
+            "because an alias is exactly the term a searcher types."
+        ),
+    )
+    facets: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Classification relating this note to others, as {name: [values]} "
+            "-- for example {\"project\": [\"highscoreserver\"]}. Deliberately "
+            "NOT embedded: a shared value would pull every note carrying it "
+            "together in the same vector space the dedup gate scores against. "
+            "Use tags for topics and facets for belonging. See ADR 0017."
+        ),
+    )
+    related_ids: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description=(
+            "Ids of notes this one relates to. Not checked for existence: a "
+            "contribution may legitimately reference a note that is archived, "
+            "flagged, or not yet written."
+        ),
+    )
+    source_ids: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Ids of notes this one was derived from.",
+    )
     source_url: AnyUrl | None = None
     idempotency_key: str = Field(
         min_length=8,
@@ -37,6 +77,46 @@ class VaultContributionRequest(BaseModel):
         if len(set(tags)) != len(tags):
             raise ValueError("tags must be unique")
         return tags
+
+    @field_validator("aliases")
+    @classmethod
+    def validate_aliases(cls, aliases: list[str]) -> list[str]:
+        if any(not alias.strip() for alias in aliases):
+            raise ValueError("aliases must not contain empty values")
+        if len(set(aliases)) != len(aliases):
+            raise ValueError("aliases must be unique")
+        return aliases
+
+    @field_validator("related_ids", "source_ids")
+    @classmethod
+    def validate_ids(cls, ids: list[str]) -> list[str]:
+        if any(not value.strip() for value in ids):
+            raise ValueError("ids must not contain empty values")
+        if len(set(ids)) != len(ids):
+            raise ValueError("ids must be unique")
+        return ids
+
+    @field_validator("facets")
+    @classmethod
+    def validate_facet_shape(cls, facets: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Transport-level shape only.
+
+        Which facet *names* are legal is governance, checked in
+        ``facets.validate_facets`` at the write boundary so that adding one
+        stays a data change. Rejecting a scalar here rather than coercing it is
+        deliberate: accepting both {"project": "hss"} and {"project": ["hss"]}
+        would make every reader handle two shapes, and a containment query
+        written for one silently misses the other.
+        """
+
+        for name, values in facets.items():
+            if not isinstance(values, list):
+                raise ValueError(
+                    f"facet {name!r} must be a list of strings, not a bare value"
+                )
+            if any(not str(value).strip() for value in values):
+                raise ValueError(f"facet {name!r} must not contain empty values")
+        return facets
 
 
 class VaultSimilarNote(BaseModel):
@@ -136,6 +216,14 @@ class VaultDocumentDetail(BaseModel):
     aliases: list[str] = Field(
         default_factory=list,
         description="Alternative titles, also indexed for lexical search.",
+    )
+    facets: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Classification relating this note to others, as {name: [values]}. "
+            "Not part of the embedded text, so it never influences ranking -- "
+            "it is what a consumer filters or groups by. See ADR 0017."
+        ),
     )
     related_ids: list[str]
     source_ids: list[str]

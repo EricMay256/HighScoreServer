@@ -351,3 +351,123 @@ def test_transport_validation_still_rejects_a_malformed_request(
     assert empty_title.status_code == 422
     assert short_key.status_code == 422
     assert duplicate_tags.status_code == 422
+
+
+def test_facets_and_relations_round_trip_through_the_write_path(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The v1 contract carries classification and note-to-note links.
+
+    Before ADR 0017 none of these were reachable: the request model carried
+    only title, body, tags, and source_url, so `related_ids` and `source_ids`
+    existed in the schema with zero rows using them.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload(
+        summary="A short precis.",
+        aliases=["Package cache expansion"],
+        facets={"project": ["highscoreserver"], "area": ["backend"]},
+        related_ids=["some-other-note"],
+        source_ids=["a-source-note"],
+    )
+
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions", json=body, headers=headers
+        )
+        assert response.status_code == 200, response.text
+
+        detail = client.get(
+            f"/api/v1/vault/notes/{response.json()['note_id']}", headers=headers
+        ).json()
+
+        assert detail["facets"] == {
+            "project": ["highscoreserver"],
+            "area": ["backend"],
+        }
+        assert detail["related_ids"] == ["some-other-note"]
+        assert detail["source_ids"] == ["a-source-note"]
+        assert detail["aliases"] == ["Package cache expansion"]
+        assert detail["summary"] == "A short precis."
+    finally:
+        _cleanup()
+
+
+def test_an_unknown_facet_name_is_refused_as_invalid(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """A typo like 'projects' files a note where nothing will look for it.
+
+    Governance validation failure is 422 per ADR 0016 -- distinct from
+    Pydantic's transport 422 only in origin. It is not one of the *settled*
+    outcomes (`flagged`, `rejected`) that return 200, because nothing landed.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions",
+            json=_payload(facets={"projects": ["typo"]}),
+            headers=headers,
+        )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["message"] == "contribution failed validation"
+        # The error names the known facets, so the typo is self-correcting.
+        assert any("projects" in error for error in detail["errors"])
+        assert any("project" in error for error in detail["errors"])
+    finally:
+        _cleanup()
+
+
+def test_a_scalar_facet_value_is_refused_at_the_transport_boundary(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """Shape is Pydantic's job, so this is a 422 rather than a settled outcome.
+
+    Refused rather than coerced: accepting both {"project": "hss"} and
+    {"project": ["hss"]} would make a containment query written for one
+    silently miss the other.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    response = client.post(
+        "/api/v1/vault/contributions",
+        json=_payload(facets={"project": "highscoreserver"}),
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+
+
+def test_facets_are_normalized_before_storage(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """Sorted, de-duplicated, and stripped.
+
+    A blank value never gets this far over HTTP -- the request model refuses
+    it outright, matching how `tags` is handled. `normalize_facets` drops
+    blanks anyway, for callers that are not this route and as defence in
+    depth.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload(facets={"project": ["  beta ", "alpha", "beta"]})
+
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions", json=body, headers=headers
+        )
+        assert response.status_code == 200, response.text
+
+        detail = client.get(
+            f"/api/v1/vault/notes/{response.json()['note_id']}", headers=headers
+        ).json()
+
+        assert detail["facets"] == {"project": ["alpha", "beta"]}
+    finally:
+        _cleanup()

@@ -78,6 +78,19 @@ be edited when it does.
   mark-and-sweep run knows not to delete it. Reconciliation is mark-and-sweep keyed on
   `vault_path`, **scoped by path prefix**, sweeping only after a complete walk and refusing an
   implausibly small one. An unscoped sweep deletes every agent note. See ADR 0012.
+- **`facets` classifies; `tags` describes — and the difference is load-bearing.** `facets` JSONB
+  (`{"project": ["hss"]}`) relates notes to each other and is **never** read by
+  `assemble_embedding_text`. That exclusion is structural, not stylistic: measured on ten real
+  documents, one shared tag raised *every* pairwise cosine, mean +0.0385 against a dedup margin
+  of 0.0094 — over 4x. Putting classification in `tags` would lift the known-distinct floor above
+  the known-duplicate ceiling and make `flag_at` uncalibratable. Do not "simplify" facets into
+  namespaced tags, and do not add `facets` to the embeddable field set. Facet *names* are a
+  closed set in `facets.py`; values are open, per ADR 0009's precedent. A facet must never gate
+  a read — it is authored content, so ADR 0010 keeps `vault_path` the only policy key. See
+  ADR 0017.
+- **`related_ids` / `source_ids` are opaque and unvalidated on purpose.** A contribution may
+  reference a note that is archived, flagged, or not yet written; a foreign key would fail the
+  write for the reason ADR 0002 already rejected for audit events.
 - **The embedding text is title + aliases + tags + summary + body, and nothing else.** Timestamps
   and identifiers churn without changing meaning; `Type`/`Status` are excluded because they are
   columns (`doc_type`, `doc_status`) and filtering exactly beats matching fuzzily. `frontmatter`
