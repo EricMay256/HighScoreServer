@@ -1,7 +1,9 @@
 """HTTP surface for the vault.
 
-Search, note retrieval, and the governed contribution path. Review, compile,
-and export endpoints belong to later phases and are deliberately absent.
+Search, note retrieval, and the governed write path: contribution (ADR 0016) and
+full replacement (ADR 0018). Review, compile, and export endpoints belong to
+later phases and are deliberately absent — which means a *flagged* document can
+be corrected through no surface here, as ADR 0018 records.
 
 Access is gated on operator-issued agent credentials
 (``hssv1_<credential-id>_<secret>``), verified against

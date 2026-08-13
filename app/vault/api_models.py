@@ -1,7 +1,9 @@
 """Pydantic models for the vault transport boundary.
 
-The read-only slice exposes search and document retrieval over HTTP. The
-contribution models below describe the write path, which is still unbuilt.
+Search and document retrieval over HTTP, plus the governed write path:
+contribution (ADR 0016) and full replacement (ADR 0018). Review, compile, and
+export have models in neither this module nor the router yet.
+
 Persistence records and SQLAlchemy table definitions intentionally live in
 separate modules.
 """

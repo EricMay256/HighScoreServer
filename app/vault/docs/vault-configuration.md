@@ -343,9 +343,30 @@ publishes no endpoints and no OpenAPI schema. They are mounted under
 
 Rate limits are enforced per authenticated principal by a vault-local token
 bucket (`app/vault/rate_limit.py`); slowapi lives in the host package and is not
-importable from here. The limits match the integration spec: search 30/min
-burst 10, note fetch 120/min burst 30. Exceeding one returns `429` with
-`Retry-After` in whole seconds.
+importable from here. Exceeding one returns `429` with `Retry-After` in whole
+seconds.
+
+| Operation | Sustained | Burst |
+| --- | --- | --- |
+| `search` | 30/min | 10 |
+| `get_note` | 120/min | 30 |
+| `contribute` | 30/min | 20 |
+| `update` | 30/min | 20 |
+| `snapshot` | 2/hour | 1 |
+
+`search`, `get_note` and `snapshot` match the integration spec. **`contribute`
+deliberately does not.** The spec's 10/min burst 3 assumes contributions trickle
+in; they arrive in batches instead — a librarian session settling nine notes, an
+importer replaying a corpus of fifty — so burst 3 throttled every real run
+without touching the abuse case, which is sustained rate. `update` takes the
+same shape in its own bucket, so a corpus-wide backfill cannot starve new
+contributions. The reasoning is on `LIMITS` in `rate_limit.py`.
+
+Raising the burst does **not** make concurrent writes work. `VAULT_DB_POOL_SIZE`
+defaults to 1 and the governed write path holds a corpus-wide advisory lock, so
+simultaneous writes queue and fail on the pool timeout rather than on the
+limiter. The burst makes *sequential* batches fast, which is what the only client
+actually does.
 
 **The buckets are per process.** Each Gunicorn worker holds its own, so the
 effective ceiling is the stated limit times the worker count — two, currently.

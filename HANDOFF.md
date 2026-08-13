@@ -2,16 +2,22 @@
 
 **HSS repo:** `C:\Users\yarom\Code\HighScoreServer\HighScoreServer`
 **Worktree:** `.claude\worktrees\vault-embedding-provider-0030a7`
-**Branch:** `ai-claude/vault-v1-handoff-077cad`, HEAD `2ce9550`, tree clean.
+**Branch:** `ai-claude/vault-v1-handoff-077cad`, tree clean.
 **Knowledge platform:** `C:\Users\yarom\Code\knowledge-platform`, branch `dev`, HEAD `8df16e0`.
 
-**`59985a4`, `5bdd5ad`, `9aebb5f` and `2ce9550` are unpushed**; `origin/dev` is `0c9fb9f`. CI
-has not seen the calibration work, the retry-budget change, the facets column, migration
-`0005`, or migration `0006`.
+**Everything from `59985a4` onward is unpushed**; `origin/dev` is `0c9fb9f`. CI has seen none
+of it: the calibration work, the retry-budget change, the facets column, migrations `0005` and
+`0006`, the raised contribute quota, or the update endpoint. `git log --oneline 0c9fb9f..HEAD`
+is the authoritative list — a hardcoded one here goes stale on the next commit.
 
 > This file goes stale fast. The durable record is `app/vault/docs/adr/` (0001–0018),
 > `app/vault/docs/embedding-calibration.md`, and the "Deferred decisions" section of
 > `app/vault/docs/vault-architecture.md`. Treat §1 as an index into those.
+>
+> **Companion:** [`HANDOFF-METADATA.md`](HANDOFF-METADATA.md) — the tags / facets / edge-graph
+> decisions, with the measured corpus state behind them. Split out because it is a decision
+> brief for a fresh session rather than a status report, and because keeping the corpus
+> measurements in one file stops two copies drifting apart. Task 4 points at it.
 
 ---
 
@@ -111,7 +117,8 @@ a full run.
 
 `check-wiki` reported **40 of 48 notes cited by zero pages**; the last compile was 2026-07-10
 and covered 8. A full-flush `compile plan --all` run produced 13 pages covering all 48 notes
-exactly once, and `check-wiki` is now 0/0/0.
+exactly once. Two more notes were written later in the session and compiled into a 14th page,
+so the wiki now stands at **14 pages over 50 notes** and `check-wiki` is 0/0/0.
 
 Two pages were rewritten rather than added: `rag-and-retrieval-design-for-the-b2-engine` and
 `unity-package-cache-and-project-initialization`. The threshold material moved out of the RAG
@@ -242,21 +249,21 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    costs no embedding call, which is exactly the backfill's shape.
 2e. **The backfill is now blocked on data, not on mechanism.** `Vault/00 Governance/Schemas/`
    has zero matches for facet, and no Agent Note carries `Aliases`, `Summary` or `SourceIDs`.
-   `RelatedIDs` is present on all 48 and **non-empty on none**. 2d built the endpoint; there is
+   `RelatedIDs` is present on all 50 notes and **non-empty on none**. 2d built the endpoint; there is
    still nothing to send through it. Order: the vocabulary decision (tasks 4 and 5), then an
    authoring-schema change so notes can carry facets, then re-annotating the corpus through the
    engine, then teaching the importer to PUT. **Nothing before that step is worth building.**
 3. **Search contract alignment** (§2).
-4. **Should `tags` be in the embedding text at all?** — an ADR 0013 question, and the single
-   thing most constraining whether `flag_at` can ever be calibrated. Tags move the corpus
-   *maximum* by ~0.05 while barely moving the mean, against a 0.0094 margin. ADR 0017 moved
-   classification out, but `gotcha` (18 notes) and `tooling` (7) will never be facets. Needs
-   the counterfactual measured on all 39 documents, not the 14 sampled. Removing tags would
-   drop the floor and could open a real gap — at the cost of tags no longer contributing to
-   semantic ranking.
-5. **Migrate `hss` / `b2-migration` from tags to facets.** They are project names inflating
-   dedup today. Changes their embedding text, so it needs a re-embed — a data operation with a
-   cost, not a cleanup.
+4. **Tags, facets, and the edge graph — see [`HANDOFF-METADATA.md`](HANDOFF-METADATA.md).**
+   Six entangled decisions with the measured corpus state behind them, kept in one place so the
+   numbers do not drift across two files. Headline: `tags` is the *only* metadata the corpus
+   carries (70 distinct over 50 notes, 40 of them singletons); `facets`, `related_ids`,
+   `source_ids`, `aliases` and `summary` are empty on all 48 rows. The first move is one
+   script run — the tag counterfactual on all 50 notes — because every other cost depends on it.
+5. **The wiki layer holds a real edge graph that nothing can query.** 50 `SourceIDs` edges
+   partition the corpus exactly, plus 21 page-to-page `Related` edges — and `Related` is keyed
+   by *title*, not id, which is the one referential inconsistency worth fixing before any of it
+   is projected. Detail in `HANDOFF-METADATA.md` §4.
 6. **Review surface** — `vault:review` is recognised and granted by no route. Lower priority
    than it looks: at `flag_at = 1.0` the queue only fills on exact resubmission.
 7. **Port `resolve_context`** to close the `folders.yml` ↔ `READABLE_PATH_PREFIXES`
