@@ -206,6 +206,19 @@ class VaultSearchService:
         return embedding, VectorSearchStatus.USED
 
 
+# Which rule `_canonical_request_digest` currently applies. Bump on any change
+# to that function: stored digests cannot be recomputed, because the payloads
+# that produced them were never kept, so the version is the only way to know
+# whether a stored digest is comparable to a fresh one.
+#
+# 1: sha256 of model_dump_json(exclude_none=False) -- covered unset fields at
+#    their defaults, so the digest moved whenever the request model gained a
+#    field. Retired by migration 0006.
+# 2: sha256 of model_dump_json(exclude_unset=True) -- covers only what the
+#    caller sent, and is therefore stable across additive schema change.
+REQUEST_DIGEST_VERSION = 2
+
+
 class IdempotencyConflict(Exception):
     """Same idempotency key, different request body.
 
@@ -249,6 +262,7 @@ class ContributionRequest:
     idempotency_key: str
     request_sha256: bytes
     request_id: str
+    digest_version: int = REQUEST_DIGEST_VERSION
     tags: tuple[str, ...] = ()
     summary: str | None = None
     aliases: tuple[str, ...] = ()
@@ -391,7 +405,24 @@ class VaultContributionService:
     def _replay(
         prior: WriteRequestRecord, request: ContributionRequest
     ) -> ContributionOutcome:
-        if prior.request_sha256 != request.request_sha256:
+        # A digest is only evidence about the body when both sides were computed
+        # the same way. Rows written under an older rule are not recomputable --
+        # only the digest was stored, never the payload -- so a mismatch there is
+        # an absence of evidence, not evidence of a different request. Refusing
+        # on it would turn every pre-0006 key into a permanent 409 that no
+        # caller could clear, which is exactly what stranded the 48 imported
+        # notes. Replay instead, and say so.
+        if prior.digest_version != REQUEST_DIGEST_VERSION:
+            logger.info(
+                "vault write request replayed without digest verification",
+                extra={
+                    "vault_principal_id": prior.principal_id,
+                    "vault_idempotency_key": prior.idempotency_key,
+                    "vault_stored_digest_version": prior.digest_version,
+                    "vault_current_digest_version": REQUEST_DIGEST_VERSION,
+                },
+            )
+        elif prior.request_sha256 != request.request_sha256:
             raise IdempotencyConflict(
                 "idempotency key was already used for a different request body"
             )
@@ -441,6 +472,7 @@ class VaultContributionService:
             principal_id=request.principal_id,
             idempotency_key=request.idempotency_key,
             request_sha256=request.request_sha256,
+            digest_version=request.digest_version,
             state=state,
             document_id=outcome.note_id,
             response={

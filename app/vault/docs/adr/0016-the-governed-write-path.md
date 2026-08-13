@@ -8,6 +8,12 @@ Accepted. Amended 2026-08-12: the `flag_at` section's reasoning was replaced wit
 measurement. The decision it reached — `flag_at = 1.0` — is unchanged, so this is
 an amendment in place rather than a superseding ADR. See "Amendment" below.
 
+Amended 2026-08-13: "The idempotency digest covers the validated model" is
+narrowed to *the fields the caller supplied*, and stored digests now record the
+rule that produced them. The decision's intent is unchanged — key order and
+whitespace still must not make a conflict — so this too is an amendment in place.
+See "Amendment, 2026-08-13" below.
+
 ## Context
 
 `POST /api/v1/vault/contributions` is the first write surface. Vault ADR 0004
@@ -87,6 +93,9 @@ from Pydantic's transport-level 422 only in origin.
 Not the raw request bytes. Two JSON documents differing in key order or
 whitespace are the same request, and treating them as a conflict would refuse a
 legitimate retry. A genuinely different body under the same key is 409.
+
+**Narrowed 2026-08-13** to the fields the caller supplied. See the amendment
+below: hashing the whole model made the digest depend on the server's schema.
 
 ### `contributed_by` comes from the credential
 
@@ -203,3 +212,56 @@ property of the model and corpus together, not a vault-wide constant.
 `scripts/measure_dedup_similarity.py` runs it; the per-model results live in the
 register. `tests/vault/test_calibration.py` keeps the derivation honest, including
 the case that nearly shipped a threshold below its own floor.
+
+## Amendment, 2026-08-13
+
+The digest hashed the validated model with `exclude_none=False`, which covered
+every field the model *declared* — including ones the caller never sent,
+serialized at their defaults. That made the digest a function of the server's
+schema as well as of the request.
+
+`5bdd5ad` added `summary`, `aliases`, `facets`, `related_ids` and `source_ids`
+to `VaultContributionRequest`. Every one is optional and backward compatible, and
+between them they changed the digest of every request that had ever been made.
+On 2026-08-13 the corpus importer replayed 48 unchanged notes; the 39 already
+present returned 409 with byte-identical payloads on the wire. Nothing had
+drifted except the schema, and the error blamed the client.
+
+The general form is worse than the instance: under the old rule *any* additive
+field addition silently invalidates every idempotency record in the table, and
+does so at the next replay rather than at deploy, so the deploy that causes it
+looks clean.
+
+**Two changes, together.** The digest covers only fields the caller supplied
+(`exclude_unset=True`), which is stable across additive schema change and keeps
+the key-order and whitespace property the original decision wanted. And
+`vault_write_requests.digest_version` records which rule produced a stored
+digest, because that question has to be answerable per row: stored digests are
+not recomputable, since the payloads that produced them were never kept.
+
+`REQUEST_DIGEST_VERSION` in `app/vault/service.py` is the current rule. Changing
+`_canonical_request_digest` means bumping it.
+
+**A version mismatch replays without comparing.** When a stored digest came from
+a retired rule, it is not evidence about the body — it is an absence of evidence,
+and refusing on it would strand every pre-migration key on a 409 no caller could
+clear. The replay is logged rather than silent. This is a deliberate, bounded
+weakening: it applies only to rows written before migration `0006`, which is the
+48 imported notes and nothing else. Keys written under the current rule compare
+exactly, and a mismatch there is still 409 — `tests/vault/test_contributions.py`
+asserts both halves so the grandfather clause cannot quietly widen.
+
+Rows are not upgraded on replay. Replay stays a read, so the invariant that a
+retry buys neither an embedding nor a write survives; the cost is that those 48
+rows never regain exact conflict detection. Recovering it needs a write, which
+belongs to the update path this ADR does not yet define.
+
+**What this does not fix.** There is still no way to *change* a document through
+the write surface. A replay returns the stored response and a conflict refuses;
+neither carries new field values onto an existing row. So the 48 imported
+documents cannot receive `facets`, `summary`, `aliases`, `related_ids` or
+`source_ids` by re-running the importer, however wide its payload gets. That is
+a separate decision — a distinct update endpoint keyed on document id, or an
+opt-in "replay may update when the body differs" — and it should be made before
+the importer is taught the fuller contract, because widening the payload without
+it changes the digest again and buys nothing.

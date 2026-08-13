@@ -349,6 +349,7 @@ class WriteRequestRecord:
     principal_id: str
     idempotency_key: str
     request_sha256: bytes
+    digest_version: int
     state: str
     document_id: str | None
     response: dict[str, Any] | None
@@ -361,6 +362,7 @@ class VaultWriteRequestRepository:
         vault_write_requests.c.principal_id,
         vault_write_requests.c.idempotency_key,
         vault_write_requests.c.request_sha256,
+        vault_write_requests.c.digest_version,
         vault_write_requests.c.state,
         vault_write_requests.c.document_id,
         vault_write_requests.c.response,
@@ -384,6 +386,7 @@ class VaultWriteRequestRepository:
             principal_id=row["principal_id"],
             idempotency_key=row["idempotency_key"],
             request_sha256=bytes(row["request_sha256"]),
+            digest_version=int(row["digest_version"]),
             state=row["state"],
             document_id=row["document_id"],
             response=dict(row["response"]) if row["response"] is not None else None,
@@ -396,6 +399,7 @@ class VaultWriteRequestRepository:
         principal_id: str,
         idempotency_key: str,
         request_sha256: bytes,
+        digest_version: int,
         state: str,
         document_id: str | None,
         response: Mapping[str, Any],
@@ -404,12 +408,19 @@ class VaultWriteRequestRepository:
 
         Written inside the same transaction as the document, so a replay can
         never observe a document without its idempotency record or the reverse.
+
+        ``request_sha256`` and ``digest_version`` are absent from the conflict
+        update on purpose: they describe the request that first claimed the key,
+        and a later settle of the same key must not quietly re-bless a different
+        body as the canonical one. They are written together so a digest can
+        never be read back without the rule that produced it.
         """
 
         statement = pg_insert(vault_write_requests).values(
             principal_id=principal_id,
             idempotency_key=idempotency_key,
             request_sha256=request_sha256,
+            digest_version=digest_version,
             state=state,
             document_id=document_id,
             response=dict(response),

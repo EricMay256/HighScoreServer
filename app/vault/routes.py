@@ -35,6 +35,7 @@ from .embeddings import EmbeddingError
 from .rate_limit import get_limiter
 from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
 from .service import (
+    REQUEST_DIGEST_VERSION,
     ContributionRequest,
     DedupUnavailable,
     IdempotencyConflict,
@@ -281,9 +282,20 @@ def _canonical_request_digest(body: VaultContributionRequest) -> bytes:
     Hashes the validated model rather than the raw bytes: two JSON documents
     differing only in key order or whitespace are the same request, and
     treating them as a conflict would refuse a legitimate retry.
+
+    Only the fields the caller actually supplied are covered. Serializing unset
+    fields at their defaults made the digest a function of the *server's* schema
+    as well as of the request, so adding an optional field silently changed the
+    digest of every request that had ever been made -- see migration 0006 and
+    ADR 0016's amendment. ``exclude_unset`` keeps the key-order and whitespace
+    property above while making additive schema change a non-event.
+
+    Any change to this function is a new REQUEST_DIGEST_VERSION, because stored
+    digests are not recomputable: the payloads that produced them were never
+    kept.
     """
 
-    canonical = body.model_dump_json(exclude_none=False)
+    canonical = body.model_dump_json(exclude_unset=True)
     return sha256(canonical.encode("utf-8")).digest()
 
 
@@ -319,6 +331,7 @@ async def contribute(
         principal_id=credential.principal_id,
         idempotency_key=body.idempotency_key,
         request_sha256=_canonical_request_digest(body),
+        digest_version=REQUEST_DIGEST_VERSION,
         request_id=request.headers.get("X-Request-Id") or uuid4().hex,
         tags=tuple(body.tags),
         summary=body.summary,

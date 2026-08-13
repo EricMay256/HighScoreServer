@@ -11,16 +11,20 @@ That is what makes the dedup assertions meaningful rather than incidental.
 """
 
 import asyncio
+import json
 from hashlib import sha256
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
+from app.vault.api_models import VaultContributionRequest
 from app.vault.auth import VaultScope  # noqa: E402  (grouped with vault imports)
 from app.vault.constants import EMBEDDING_DIMENSIONS
 from app.vault.embeddings import EmbeddingInputKind, EmbeddingVector
+from app.vault.routes import _canonical_request_digest
+from app.vault.service import REQUEST_DIGEST_VERSION
 from app.vault.settings import vault_enabled
 from app.vault.tables import (
     vault_audit_events,
@@ -246,6 +250,122 @@ def test_key_order_and_whitespace_do_not_make_a_conflict(
 
         assert second.status_code == 200
         assert second.json()["idempotent_replay"] is True
+    finally:
+        _cleanup()
+
+
+def test_the_digest_ignores_fields_the_caller_did_not_send() -> None:
+    """Adding an optional field must not change existing requests' digests.
+
+    This is the regression test for the defect migration 0006 records: the
+    digest hashed the validated model *including* unset fields at their
+    defaults, so `5bdd5ad` adding `summary`, `aliases`, `facets`, `related_ids`
+    and `source_ids` changed the digest of every request that had ever been
+    made. 48 imported notes replayed as 409s with identical bytes on the wire.
+
+    Asserting on the canonical form rather than on a frozen hash keeps the test
+    honest about *why*: a future optional field cannot appear here unless a
+    caller sent it.
+    """
+
+    supplied = {
+        "title": "A title",
+        "body": "A body.",
+        "tags": ["testing"],
+        "idempotency_key": f"key-{uuid4().hex}",
+    }
+    model = VaultContributionRequest.model_validate(supplied)
+    canonical = model.model_dump_json(exclude_unset=True)
+
+    assert set(json.loads(canonical)) == set(supplied)
+    for unsent in ("summary", "aliases", "facets", "related_ids", "source_ids"):
+        assert unsent not in canonical
+
+    assert (
+        _canonical_request_digest(model) == sha256(canonical.encode("utf-8")).digest()
+    )
+
+
+def _force_stored_digest(
+    principal_prefix: str, *, digest_version: int, request_sha256: bytes
+) -> None:
+    """Rewrite the stored digest of every write request a test just made."""
+
+    service, engine = vault_service()
+
+    async def rewrite() -> None:
+        async with service.transaction() as connection:
+            await connection.execute(
+                update(vault_write_requests)
+                .where(vault_write_requests.c.principal_id.like(f"{principal_prefix}%"))
+                .values(
+                    digest_version=digest_version,
+                    request_sha256=request_sha256,
+                )
+            )
+
+    try:
+        asyncio.run(rewrite())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_a_digest_from_a_retired_rule_replays_instead_of_conflicting(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """A stored digest is only evidence when both sides used the same rule.
+
+    Pre-0006 rows cannot be recompared -- only the digest was stored, never the
+    payload -- so a mismatch there is an absence of evidence rather than proof
+    of a different request. Refusing would strand those keys on a 409 that no
+    caller could ever clear.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload()
+
+    try:
+        first = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        assert first.status_code == 200, first.text
+
+        _force_stored_digest(
+            "test-principal-", digest_version=1, request_sha256=b"\x00" * 32
+        )
+
+        second = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+
+        assert second.status_code == 200, second.text
+        assert second.json()["idempotent_replay"] is True
+        assert second.json()["note_id"] == first.json()["note_id"]
+    finally:
+        _cleanup()
+
+
+def test_a_mismatched_digest_under_the_current_rule_is_still_a_conflict(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The grandfather clause is scoped to the retired rule, not to mismatches.
+
+    Same setup as the test above with only the stored version changed, so what
+    is being asserted is that the version -- not the mismatch -- is what decides.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload()
+
+    try:
+        first = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        assert first.status_code == 200, first.text
+
+        _force_stored_digest(
+            "test-principal-",
+            digest_version=REQUEST_DIGEST_VERSION,
+            request_sha256=b"\x00" * 32,
+        )
+
+        second = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+
+        assert second.status_code == 409
     finally:
         _cleanup()
 

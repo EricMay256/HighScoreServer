@@ -21,6 +21,7 @@ from sqlalchemy import (
     LargeBinary,
     MetaData,
     PrimaryKeyConstraint,
+    SmallInteger,
     Table,
     Text,
     UniqueConstraint,
@@ -407,6 +408,15 @@ vault_write_requests = Table(
     Column("principal_id", Text, nullable=False),
     Column("idempotency_key", Text, nullable=False),
     Column("request_sha256", LargeBinary, nullable=False),
+    # Which rule produced request_sha256. Without it the digest comparison
+    # depends on the server's schema version rather than the caller's payload --
+    # see migration 0006 and ADR 0016's amendment.
+    Column(
+        "digest_version",
+        SmallInteger,
+        nullable=False,
+        server_default=text("1"),
+    ),
     Column(
         "state",
         write_request_state_enum,
@@ -445,6 +455,10 @@ vault_write_requests = Table(
     CheckConstraint(
         "octet_length(request_sha256) = 32",
         name="vault_write_requests_sha256_length",
+    ),
+    CheckConstraint(
+        "digest_version > 0",
+        name="vault_write_requests_digest_version_positive",
     ),
     CheckConstraint(
         "(state = 'processing' AND completed_at IS NULL) "
