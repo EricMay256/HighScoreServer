@@ -392,6 +392,39 @@ class VaultWriteRequestRepository:
             response=dict(row["response"]) if row["response"] is not None else None,
         )
 
+    async def upgrade_digest(
+        self,
+        connection: AsyncConnection,
+        *,
+        principal_id: str,
+        idempotency_key: str,
+        request_sha256: bytes,
+        digest_version: int,
+    ) -> None:
+        """Restate a stored digest under the current rule.
+
+        Called when a replay finds a digest written under a retired rule. Those
+        are not recomputable -- only the digest was ever stored, never the
+        payload -- so the row is uncomparable until some request restates it.
+        Adopting the replaying request's digest is what makes the grandfather
+        clause self-healing rather than permanent.
+
+        Touches nothing but these two columns, so the invariant that a replay
+        buys neither an embedding call nor a second document still holds.
+        """
+
+        await connection.execute(
+            update(vault_write_requests)
+            .where(
+                vault_write_requests.c.principal_id == principal_id,
+                vault_write_requests.c.idempotency_key == idempotency_key,
+            )
+            .values(
+                request_sha256=request_sha256,
+                digest_version=digest_version,
+            )
+        )
+
     async def complete(
         self,
         connection: AsyncConnection,

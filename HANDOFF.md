@@ -25,7 +25,8 @@ pgvector 0.8.6 in local PostgreSQL 17.9; the vault schema lives in the ordinary 
 | Server | PostgreSQL 17.9, `localhost:5432` |
 | `leaderboard` (dev) | leaderboard `0004_auth_identities`; vault **`0006_request_digest_version`** (head) |
 | `leaderboard_test` | both lineages at head (vault `0006_request_digest_version`) |
-| Corpus | `vault_documents` holds **48**, matching the markdown corpus. 48 embeddings, 48 audit events, 48 write requests |
+| Corpus | `vault_documents` holds **48**; the markdown corpus is **50** (two notes written after the import — see 2c). 48 embeddings, 48 audit events, 48 write requests |
+| Digest versions | 4 write requests restated to `digest_version` 2 by replay; **44 still at 1** and will restate on next touch |
 | Vault credential | principal `importer`, scopes `vault:read vault:write`. **The principal name is load-bearing — see §4** |
 
 The venv is in the **main repo**, not the worktree:
@@ -144,9 +145,11 @@ deploy that caused it.
 Fixed by hashing only supplied fields (`exclude_unset=True`) plus
 `vault_write_requests.digest_version`, so a stored digest carries the rule that produced it.
 Stored digests are **not recomputable** — the payloads were never kept — so a version mismatch
-replays without comparing and logs that it did. That weakening is bounded to pre-`0006` rows
-(the 48 imported notes); current-rule keys still conflict exactly, and both halves are
-asserted. Rows are not upgraded on replay, so those 48 never regain exact conflict detection.
+replays without comparing, logs that it did, and then **restates the digest under the current
+rule**, so a row is uncomparable for one call rather than permanently. Current-rule keys still
+conflict exactly, and both halves are asserted. A version mismatch never overwrites the stored
+*document*: that would make retry-after-timeout replace current content with a stale payload,
+bypass the dedup gate, and force a re-embed — overwrite belongs in the update operation of 2d.
 Verified end to end: the importer now reports `replayed`, not `conflict`.
 
 **The importer was already committed** as `f942917` — item 8 below was stale.
@@ -184,7 +187,11 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
 2. **Remove `VAULT_EMBEDDING_TIMEOUT_SECONDS=10` from `.env`** (and check the Heroku config
    var). It overrides the new 5.0 default; at 10s the worst case is 38s, past the router budget.
 2b. ~~Apply `0005_document_facets` to `leaderboard`.~~ **Done 2026-08-13**, along with `0006`.
-2c. ~~Re-run the importer.~~ **Done 2026-08-13** — 48 documents, verified.
+2c. ~~Re-run the importer.~~ **Done 2026-08-13** — 48 documents, verified. Then drifted again:
+   the session wrote two more vault notes (`cb6a42ec`, `f66cd89c`, on the digest defect and the
+   duplicate-guard asymmetry), so the markdown corpus is 50. Re-running now inserts those two,
+   replays the other 48 cleanly, and restates the remaining 44 digests. **That the corpus
+   drifted twice inside one session is the argument for task 8's reconcile mode.**
 2d. **Decide the update path, before widening the importer's payload.** There is currently no
    way to *change* a document through the write surface: a replay returns the stored response
    and a conflict refuses, and neither carries new values onto an existing row. So the 48

@@ -307,8 +307,8 @@ class VaultContributionService:
             prior = await writes.get(
                 connection, request.principal_id, request.idempotency_key
             )
-        if prior is not None:
-            return self._replay(prior, request)
+            if prior is not None:
+                return await self._replay(connection, prior, request)
 
         if self._provider is None:
             raise DedupUnavailable(
@@ -350,7 +350,7 @@ class VaultContributionService:
                 connection, request.principal_id, request.idempotency_key
             )
             if prior is not None:
-                return self._replay(prior, request)
+                return await self._replay(connection, prior, request)
 
             similars = await search.find_similar(
                 connection,
@@ -402,8 +402,10 @@ class VaultContributionService:
         )
 
     @staticmethod
-    def _replay(
-        prior: WriteRequestRecord, request: ContributionRequest
+    async def _replay(
+        connection: AsyncConnection,
+        prior: WriteRequestRecord,
+        request: ContributionRequest,
     ) -> ContributionOutcome:
         # A digest is only evidence about the body when both sides were computed
         # the same way. Rows written under an older rule are not recomputable --
@@ -411,7 +413,14 @@ class VaultContributionService:
         # an absence of evidence, not evidence of a different request. Refusing
         # on it would turn every pre-0006 key into a permanent 409 that no
         # caller could clear, which is exactly what stranded the 48 imported
-        # notes. Replay instead, and say so.
+        # notes.
+        #
+        # Restate the digest under the current rule while replaying, so the row
+        # becomes comparable again and the concession lasts one call instead of
+        # forever. Two concurrent replays of the same key write the same value,
+        # and two *different* bodies racing here resolve to whichever lands last
+        # -- the same "first request after the migration wins" property the
+        # grandfather clause already has, not a new one.
         if prior.digest_version != REQUEST_DIGEST_VERSION:
             logger.info(
                 "vault write request replayed without digest verification",
@@ -421,6 +430,13 @@ class VaultContributionService:
                     "vault_stored_digest_version": prior.digest_version,
                     "vault_current_digest_version": REQUEST_DIGEST_VERSION,
                 },
+            )
+            await VaultWriteRequestRepository().upgrade_digest(
+                connection,
+                principal_id=prior.principal_id,
+                idempotency_key=prior.idempotency_key,
+                request_sha256=request.request_sha256,
+                digest_version=REQUEST_DIGEST_VERSION,
             )
         elif prior.request_sha256 != request.request_sha256:
             raise IdempotencyConflict(

@@ -251,10 +251,29 @@ weakening: it applies only to rows written before migration `0006`, which is the
 exactly, and a mismatch there is still 409 — `tests/vault/test_contributions.py`
 asserts both halves so the grandfather clause cannot quietly widen.
 
-Rows are not upgraded on replay. Replay stays a read, so the invariant that a
-retry buys neither an embedding nor a write survives; the cost is that those 48
-rows never regain exact conflict detection. Recovering it needs a write, which
-belongs to the update path this ADR does not yet define.
+**The replay restates the digest under the current rule**, so a row is
+uncomparable for one call rather than for the rest of its life. Grandfathering
+without restating was the first implementation and was wrong: it made the
+concession permanent where a two-column write makes it self-healing. The
+invariant that matters is the one the code asserts — a replay must buy neither an
+embedding call nor a second document — and restating a digest does neither.
+
+Where two different bodies race the first post-migration replay of one key, the
+last write wins. That is the same "the first request after the migration is taken
+as canonical" property the grandfather clause already had rather than a new one,
+and it needs two clients sharing a key, which is already pathological.
+
+What a version mismatch deliberately does *not* do is overwrite the stored
+**document**. That is tempting, because it looks like a free update path for
+exactly the rows that need one. Retry-after-timeout is the canonical reason
+idempotency keys exist: a client that never learned the outcome retries,
+sometimes from a queue, sometimes carrying a payload older than the one that
+actually landed. Under "newer wins" that retry silently replaces current content
+with stale content, and `vault_documents` keeps no history to recover from. It
+would also bypass the dedup gate — or run it against the very row being updated,
+which flags at cosine 1.0 — and force a re-embed on a path documented as free.
+Overwrite belongs in an update operation where it is the caller's stated intent,
+not in a retry.
 
 **What this does not fix.** There is still no way to *change* a document through
 the write surface. A replay returns the stored response and a conflict refuses;

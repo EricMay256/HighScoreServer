@@ -310,7 +310,30 @@ def _force_stored_digest(
         asyncio.run(engine.dispose())
 
 
-def test_a_digest_from_a_retired_rule_replays_instead_of_conflicting(
+def _stored_digests(principal_prefix: str) -> list[tuple[int, bytes]]:
+    """Read back (digest_version, request_sha256) for a test's write requests."""
+
+    service, engine = vault_service()
+
+    async def read() -> list[tuple[int, bytes]]:
+        async with service.transaction() as connection:
+            result = await connection.execute(
+                select(
+                    vault_write_requests.c.digest_version,
+                    vault_write_requests.c.request_sha256,
+                ).where(
+                    vault_write_requests.c.principal_id.like(f"{principal_prefix}%")
+                )
+            )
+            return [(row[0], bytes(row[1])) for row in result.all()]
+
+    try:
+        return asyncio.run(read())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_a_digest_from_a_retired_rule_replays_and_is_restated(
     client: TestClient, write_token: str, provider: StubEmbeddingProvider
 ) -> None:
     """A stored digest is only evidence when both sides used the same rule.
@@ -319,6 +342,53 @@ def test_a_digest_from_a_retired_rule_replays_instead_of_conflicting(
     payload -- so a mismatch there is an absence of evidence rather than proof
     of a different request. Refusing would strand those keys on a 409 that no
     caller could ever clear.
+
+    The replay restates the digest under the current rule, so the concession
+    lasts one call rather than forever. Without that the row stays uncomparable
+    for the rest of its life and conflict detection never comes back.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload()
+
+    try:
+        first = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        assert first.status_code == 200, first.text
+        calls_after_first = provider.calls
+
+        _force_stored_digest(
+            "test-principal-", digest_version=1, request_sha256=b"\x00" * 32
+        )
+
+        second = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+
+        assert second.status_code == 200, second.text
+        assert second.json()["idempotent_replay"] is True
+        assert second.json()["note_id"] == first.json()["note_id"]
+        # Restating a digest is two columns; it must not have bought an
+        # embedding call or a second document.
+        assert provider.calls == calls_after_first
+
+        stored = _stored_digests("test-principal-")
+        assert stored == [
+            (
+                REQUEST_DIGEST_VERSION,
+                _canonical_request_digest(
+                    VaultContributionRequest.model_validate(body)
+                ),
+            )
+        ]
+    finally:
+        _cleanup()
+
+
+def test_a_restated_digest_makes_the_next_conflict_detectable_again(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The point of restating: the row stops being permanently uncomparable.
+
+    A different body under the same key was undetectable while the row carried a
+    retired rule. After one replay it is a 409 again.
     """
 
     headers = {"Authorization": f"Bearer {write_token}"}
@@ -332,11 +402,15 @@ def test_a_digest_from_a_retired_rule_replays_instead_of_conflicting(
             "test-principal-", digest_version=1, request_sha256=b"\x00" * 32
         )
 
-        second = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        replay = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        assert replay.status_code == 200, replay.text
 
-        assert second.status_code == 200, second.text
-        assert second.json()["idempotent_replay"] is True
-        assert second.json()["note_id"] == first.json()["note_id"]
+        conflicting = {**body, "body": "Entirely different content."}
+        third = client.post(
+            "/api/v1/vault/contributions", json=conflicting, headers=headers
+        )
+
+        assert third.status_code == 409
     finally:
         _cleanup()
 

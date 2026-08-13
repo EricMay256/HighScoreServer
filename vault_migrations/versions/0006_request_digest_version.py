@@ -25,9 +25,10 @@ rows written under the old rule are recognisable rather than merely wrong.
 Existing rows default to 1. They are not recomputable -- the original payloads
 were never stored, only their digests -- so the service treats a version
 mismatch as "cannot verify" and replays without comparing, rather than raising a
-conflict it has no evidence for. That is a deliberate one-time weakening of
-conflict detection for the 48 rows that predate this migration; keys written
-from here on compare exactly.
+conflict it has no evidence for. The replay then restates the digest under the
+current rule, so a row is uncomparable for one call rather than permanently:
+keys written from here on compare exactly, and the pre-existing ones do too as
+soon as anything touches them.
 
 Revision ID: 0006_request_digest_version
 Revises: 0005_document_facets
