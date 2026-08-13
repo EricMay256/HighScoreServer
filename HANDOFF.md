@@ -1,12 +1,13 @@
-# Handoff — calibration settled, facets landed, search contract next
+# Handoff — corpus imported and synthesized, digest fixed, search contract next
 
 **HSS repo:** `C:\Users\yarom\Code\HighScoreServer\HighScoreServer`
 **Worktree:** `.claude\worktrees\vault-embedding-provider-0030a7`
-**Branch:** `ai-claude/vault-v1-handoff-077cad`, HEAD `5bdd5ad`, tree clean.
-**Knowledge platform:** `C:\Users\yarom\Code\knowledge-platform`
+**Branch:** `ai-claude/vault-v1-handoff-077cad`, HEAD `2ce9550`, tree clean.
+**Knowledge platform:** `C:\Users\yarom\Code\knowledge-platform`, branch `dev`, HEAD `8df16e0`.
 
-**`59985a4` and `5bdd5ad` are unpushed**; `origin/dev` is `0c9fb9f`. CI has not seen the
-calibration work, the retry-budget change, the facets column, or migration `0005`.
+**`59985a4`, `5bdd5ad`, `9aebb5f` and `2ce9550` are unpushed**; `origin/dev` is `0c9fb9f`. CI
+has not seen the calibration work, the retry-budget change, the facets column, migration
+`0005`, or migration `0006`.
 
 > This file goes stale fast. The durable record is `app/vault/docs/adr/` (0001–0017),
 > `app/vault/docs/embedding-calibration.md`, and the "Deferred decisions" section of
@@ -22,10 +23,10 @@ pgvector 0.8.6 in local PostgreSQL 17.9; the vault schema lives in the ordinary 
 | | |
 | --- | --- |
 | Server | PostgreSQL 17.9, `localhost:5432` |
-| `leaderboard` (dev) | leaderboard `0004_auth_identities`; vault **`0004_reconciliation`** — `0005_document_facets` is NOT applied here yet |
-| `leaderboard_test` | **created this session**, both lineages at head (vault `0005_document_facets`) |
-| Corpus | `vault_documents` holds **39**; the markdown corpus is now **48** (9 notes contributed 2026-08-13) |
-| Vault credential | principal `importer`, scopes `vault:read vault:write` |
+| `leaderboard` (dev) | leaderboard `0004_auth_identities`; vault **`0006_request_digest_version`** (head) |
+| `leaderboard_test` | both lineages at head (vault `0006_request_digest_version`) |
+| Corpus | `vault_documents` holds **48**, matching the markdown corpus. 48 embeddings, 48 audit events, 48 write requests |
+| Vault credential | principal `importer`, scopes `vault:read vault:write`. **The principal name is load-bearing — see §4** |
 
 The venv is in the **main repo**, not the worktree:
 
@@ -103,6 +104,55 @@ a full run.
 
 ---
 
+## 1b. Session of 2026-08-13 (librarian pass, import, digest fix)
+
+### The wiki was recompiled — 2 pages to 13 (`8df16e0`, knowledge-platform)
+
+`check-wiki` reported **40 of 48 notes cited by zero pages**; the last compile was 2026-07-10
+and covered 8. A full-flush `compile plan --all` run produced 13 pages covering all 48 notes
+exactly once, and `check-wiki` is now 0/0/0.
+
+Two pages were rewritten rather than added: `rag-and-retrieval-design-for-the-b2-engine` and
+`unity-package-cache-and-project-initialization`. The threshold material moved out of the RAG
+page into a new `semantic-dedup-threshold-calibration`, which reconciles the three notes on the
+subject into one argument rather than listing them — the corpus measurement is framed as a
+floor only, and "calibrate from the review queue" is explicitly demoted, since a queue never
+fills at a safe default threshold.
+
+**The lint key-order workaround is obsolete.** `compile finish` committed first try. Vault note
+`7164a912` has said `RESOLVED 2026-07-10` since the serializer fix; the workaround is still
+being carried in briefs that predate it.
+
+### The corpus is imported — 39 → 48
+
+Ran `0005_document_facets` against `leaderboard` (it had only ever been applied to
+`leaderboard_test`), then the importer. All verification passes: 48 documents all
+`status=active`, 48 embeddings under `openai/text-embedding-3-small:1536`, 48 write requests,
+`source_sha256` NULL throughout, 0 review cases. **All 48 documents have empty facets.**
+
+### The idempotency digest was broken by additive schema change (`2ce9550`, migration `0006`)
+
+The import surfaced it: 39 of 48 notes came back **409, with byte-identical payloads on the
+wire and no note having changed**. The digest hashed the validated model with
+`exclude_none=False`, so it covered fields the caller never sent, at their defaults — `5bdd5ad`
+adding five optional fields changed the digest of every request that had ever been made.
+
+Generalised: under the old rule *any* additive, backward-compatible field addition invalidates
+every idempotency record in the table, and it surfaces at the next replay rather than at the
+deploy that caused it.
+
+Fixed by hashing only supplied fields (`exclude_unset=True`) plus
+`vault_write_requests.digest_version`, so a stored digest carries the rule that produced it.
+Stored digests are **not recomputable** — the payloads were never kept — so a version mismatch
+replays without comparing and logs that it did. That weakening is bounded to pre-`0006` rows
+(the 48 imported notes); current-rule keys still conflict exactly, and both halves are
+asserted. Rows are not upgraded on replay, so those 48 never regain exact conflict detection.
+Verified end to end: the importer now reports `replayed`, not `conflict`.
+
+**The importer was already committed** as `f942917` — item 8 below was stale.
+
+---
+
 ## 2. Next — track #5, the search contract
 
 **This is the largest remaining piece and should start fresh.** It has three inputs that must
@@ -130,24 +180,25 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
 
 ## 3. Remaining tasks
 
-1. **Push `59985a4` and `5bdd5ad`.** CI has seen none of it.
+1. **Push `59985a4`, `5bdd5ad`, `9aebb5f` and `2ce9550`.** CI has seen none of it.
 2. **Remove `VAULT_EMBEDDING_TIMEOUT_SECONDS=10` from `.env`** (and check the Heroku config
    var). It overrides the new 5.0 default; at 10s the worst case is 38s, past the router budget.
-2b. **Apply `0005_document_facets` to the dev `leaderboard` database.** Only `leaderboard_test`
-   has it. Any dev-server run against `leaderboard` will fail schema-drift on `facets`:
-
-   ```bash
-   DATABASE_URL="postgresql://postgres:<pw>@localhost:5432/leaderboard" \
-     python -m alembic -c alembic-vault.ini upgrade head
-   ```
-
-2c. **Re-run the importer — the database is 9 notes behind.** `vault_documents` holds 39; the
-   markdown corpus is 48 after the 2026-08-13 contributions. Re-running reconciles it (39
-   replay by idempotency key, 9 insert). Needs 2b done first, the dev server up, and a
-   `vault:write` token in `VAULT_API_TOKEN`. The importer still sends only
-   title/body/tags/source_url — it has **not** been taught the fields added in `5bdd5ad`
-   (facets, related_ids, source_ids, aliases, summary), so imported rows will have empty
-   facets. That is a follow-up, not a blocker.
+2b. ~~Apply `0005_document_facets` to `leaderboard`.~~ **Done 2026-08-13**, along with `0006`.
+2c. ~~Re-run the importer.~~ **Done 2026-08-13** — 48 documents, verified.
+2d. **Decide the update path, before widening the importer's payload.** There is currently no
+   way to *change* a document through the write surface: a replay returns the stored response
+   and a conflict refuses, and neither carries new values onto an existing row. So the 48
+   imported documents cannot receive `facets`, `summary`, `aliases`, `related_ids` or
+   `source_ids` by re-running the importer, however wide its payload gets — and widening it
+   changes the digest again for no gain. The fork, recorded in ADR 0016's 2026-08-13 amendment:
+   a distinct update endpoint keyed on document id (keeps the write path's semantics clean), or
+   an opt-in "replay may update when the body differs" (one endpoint, conditional idempotency).
+   **This blocks task 5 and any facet backfill.**
+2e. **The markdown authoring schema has no facets.** `Vault/00 Governance/Schemas/` has zero
+   matches for facet, and no Agent Note carries `Aliases`, `Summary` or `SourceIDs`.
+   `RelatedIDs` is present on all 48 and **non-empty on none**. So there is currently nothing
+   to backfill even once 2d exists — the vocabulary decision (tasks 4 and 5) and a schema
+   change have to come first, followed by re-annotating 48 notes through the engine.
 3. **Search contract alignment** (§2).
 4. **Should `tags` be in the embedding text at all?** — an ADR 0013 question, and the single
    thing most constraining whether `flag_at` can ever be calibrated. Tags move the corpus
@@ -163,9 +214,19 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    than it looks: at `flag_at = 1.0` the queue only fills on exact resubmission.
 7. **Port `resolve_context`** to close the `folders.yml` ↔ `READABLE_PATH_PREFIXES`
    duplication. Entangled with deferred decision #2 (where governance YAML lives at runtime).
-8. **Commit the importer** to knowledge-platform, or decide against it deliberately. Untracked
-   at `engine/scripts/import_to_vault_service.py`, and in practice the sync path until ADR
-   0012's reconciliation exists.
+8. ~~Commit the importer.~~ **Already tracked** as `f942917` (2026-08-12). Still worth renaming
+   away from `import_to_vault_service` — it is a replay/sync tool, not a one-shot migration —
+   and giving it a no-write reconcile mode that reports corpus-vs-database drift. Do that after
+   2d, not before.
+8b. **Wiki pages are not in the database and cannot be.** `vault_document_kind` reserves
+   `wiki`, and `vault_documents_compile_provenance_consistent` requires `compile_run_id`,
+   `compiled_by` and `compiled_at` to be NOT NULL for `kind='wiki'` — so a wiki row cannot exist
+   without a `vault_compile_runs` row, and that table is empty. The importer walks
+   `Vault/Agent/notes/` only. Search therefore returns raw notes and no synthesis. The
+   architecture doc calls the intended mechanism a "compiled read-only projection"; the engine's
+   compile run id (e.g. `run_20260813_184935`) is what would become the `vault_compile_runs`
+   row. **This is a third sync path**, distinct from agent contributions and ADR 0012's
+   mark-and-sweep.
 9. **More reference pairs.** Three is thin, and the ceiling is a minimum over them.
 10. **Human-layer sync** — the other half of ADR 0012. Nothing built.
 11. **Export/snapshot** (`vault:export`), **E501**, **UP042**.
@@ -181,9 +242,26 @@ including `Human/07 People/**`.
 
 ## 4. Environment gotchas
 
+- **Run the importer only as principal `importer`.** `vault_write_requests` is keyed
+  `(principal_id, idempotency_key)`, and `vault_documents` has **no** natural-key uniqueness on
+  the note id — `id` is a service-minted surrogate and `vault_path` is derived from it, so a
+  duplicate import collides with nothing. That ledger is the *only* duplicate guard, and a
+  different principal bypasses it silently, writing the whole corpus a second time.
+  `issue_vault_credential.py --name <x>` sets the principal, so `--name importer` is required;
+  the token secret itself is irrelevant to idempotency. (Human-layer sync will not have this
+  problem: ADR 0012 keys identity on `vault_path`, which is a database constraint no credential
+  can defeat. The asymmetry is structural.)
+- **`VAULT_API_TOKEN` is undocumented.** It appears in no `.env.example`, ADR, or doc — the only
+  definition is `DEFAULT_TOKEN_ENV` in the importer. Tokens are shown once and stored as SHA-256
+  only, so a lost one means issuing another. Two stale `importer` credentials are unrevoked.
 - **`vault_migrations/env.py` hardcodes `Path(__file__).parents[1] / ".env"`**, which does not
   exist in a worktree. Pass `DATABASE_URL` explicitly for the vault lineage. `app/env.py` uses
   `find_dotenv(usecwd=True)` and walks up to the main repo, so the app and `scripts/*` are fine.
+- **`ruff format --check` is not clean on the repo** — 13 files would be reformatted, most
+  untouched for months. `ruff check` *is* clean. Don't reformat wholesale; format only the lines
+  you add, or the diff drowns in unrelated churn.
+- **PowerShell `Set-Content -Encoding utf8` writes a BOM** on 5.1. A token read back from such a
+  file carries three junk bytes into the Authorization header. Decode `utf-8-sig`.
 - **Vault Alembic is a separate lineage:** `alembic -c alembic-vault.ini upgrade head`.
 - **Never run two pytest processes against `leaderboard_test` at once** (see §0).
 - **PostgreSQL rejects subqueries in CHECK constraints.** Migration 0005 works around it with
