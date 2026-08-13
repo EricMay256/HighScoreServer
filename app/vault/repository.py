@@ -159,6 +159,46 @@ class VaultDocumentRepository:
         result = await connection.execute(statement)
         return document_from_row(result.mappings().one())
 
+    async def replace_content(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        content: NewVaultDocument,
+    ) -> VaultDocument | None:
+        """Replace one document's caller-supplied content in place.
+
+        Only the fields a caller supplies move. Identity, path, kind, governance
+        type, status, contributor, and compile provenance are the service's or
+        the corpus's, not the editor's -- an update is a new body for an
+        existing row, not a new row wearing its id. ``contributed_by`` in
+        particular stays put: overwriting it with the editor would erase who
+        wrote the note, and who edited it is what the audit event records.
+
+        Returns None when no row matched, so the caller can 404 without a
+        separate existence check.
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .values(
+                title=content.title,
+                summary=content.summary,
+                body=content.body,
+                tags=list(content.tags),
+                aliases=list(content.aliases),
+                facets=content.facets,
+                related_ids=list(content.related_ids),
+                source_ids=list(content.source_ids),
+                source_url=content.source_url,
+                updated_at=func.now(),
+            )
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
     async def get_by_id(
         self,
         connection: AsyncConnection,

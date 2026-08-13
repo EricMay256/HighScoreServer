@@ -22,6 +22,8 @@ from .api_models import (
     VaultContributionRequest,
     VaultContributionResponse,
     VaultDocumentDetail,
+    VaultDocumentUpdateRequest,
+    VaultDocumentUpdateResponse,
     VaultSearchHit,
     VaultSearchResponse,
     VaultSimilarNote,
@@ -29,17 +31,22 @@ from .api_models import (
 from .auth import VaultCredential, VaultScope, authorize, parse_token
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
-from .domain import DocumentStatus, VaultDocument
+from .domain import VaultDocument
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError
 from .rate_limit import get_limiter
+from .read_policy import READABLE_STATUSES
 from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
 from .service import (
     REQUEST_DIGEST_VERSION,
     ContributionRequest,
     DedupUnavailable,
+    DocumentNotFound,
     IdempotencyConflict,
+    UpdateRequest,
+    UpdateWouldDuplicate,
     VaultContributionService,
+    VaultDocumentUpdateService,
     VaultSearchService,
     VaultTransactionService,
 )
@@ -66,7 +73,10 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 #
 # Not configuration: a deployment must not be able to opt into serving
 # unendorsed content.
-READABLE_STATUSES = (DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED)
+#
+# Defined in read_policy so the write path applies the same rule without
+# importing this module. Imported above; the comment stays here because this is
+# where a reader of the read surface looks for it.
 
 
 async def _authenticated(
@@ -386,4 +396,105 @@ async def contribute(
             for s in outcome.similars
         ],
         errors=list(outcome.errors),
+    )
+
+
+async def update_quota(
+    credential: VaultCredential = Depends(require_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "update")
+    return credential
+
+
+@router.put(
+    "/notes/{note_id}",
+    response_model=VaultDocumentUpdateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Replace one vault note's content",
+)
+async def update_vault_document(
+    body: VaultDocumentUpdateRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(update_quota),
+) -> VaultDocumentUpdateResponse:
+    """Replace a document's caller-supplied content.
+
+    A replacement rather than a patch, and idempotent for that reason: the body
+    states what the document should now be, so sending it twice converges. No
+    idempotency key, because there is no identity to mint twice.
+
+    Runs the same dedup gate a contribution does, excluding the document being
+    updated. A collision is 409 and writes nothing -- see ADR 0018 for why an
+    update refuses where a contribution flags.
+    """
+
+    service = VaultDocumentUpdateService(
+        transactions=VaultTransactionService(get_vault_engine()),
+        provider=get_embedding_provider(),
+    )
+    update = UpdateRequest(
+        document_id=note_id,
+        title=body.title,
+        body=body.body,
+        principal_id=credential.principal_id,
+        request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+        summary=body.summary,
+        tags=tuple(body.tags),
+        aliases=tuple(body.aliases),
+        facets=body.facets,
+        related_ids=tuple(body.related_ids),
+        source_ids=tuple(body.source_ids),
+        source_url=str(body.source_url) if body.source_url else None,
+    )
+
+    try:
+        outcome = await service.update(update)
+    except DocumentNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Note not found",
+        ) from exc
+    except UpdateWouldDuplicate as exc:
+        # 409 rather than 422: the replacement is well-formed, it just collides
+        # with a document that already exists. Nothing was written.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "similars": [
+                    {"note_id": s.note_id, "title": s.title, "score": s.score}
+                    for s in exc.similars
+                ],
+            },
+        ) from exc
+    except DedupUnavailable as exc:
+        logger.error("Refusing a vault update: no embedding provider")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Update is unavailable: no embedding provider configured",
+        ) from exc
+    except EmbeddingError as exc:
+        # Type only, never the message: an embedding exception can carry the
+        # note body.
+        logger.error(
+            "Vault update failed to embed",
+            extra={"error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Update is temporarily unavailable",
+        ) from exc
+
+    if outcome.errors:
+        # Governance validation, not transport validation: 422 per the spec.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": outcome.message, "errors": list(outcome.errors)},
+        )
+
+    return VaultDocumentUpdateResponse(
+        note_id=outcome.note_id,
+        message=outcome.message,
+        re_embedded=outcome.re_embedded,
     )

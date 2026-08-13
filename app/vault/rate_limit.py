@@ -64,6 +64,11 @@ LIMITS: dict[str, Limit] = {
     "search": Limit(per_minute=30, burst=10),
     "get_note": Limit(per_minute=120, burst=30),
     "contribute": Limit(per_minute=30, burst=20),
+    # An update costs what a contribution costs -- a dedup query and, when the
+    # embedding text changed, an embedding call -- and arrives in the same
+    # batches, so it gets the same shape. Its own bucket rather than sharing
+    # contribute's, so a backfill cannot starve new contributions.
+    "update": Limit(per_minute=30, burst=20),
     "snapshot": Limit(per_minute=2 / 60, burst=1),  # 2/hour
 }
 

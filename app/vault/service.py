@@ -1,7 +1,7 @@
 """Application-service transaction boundary for vault use cases."""
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from uuid import uuid4
@@ -15,6 +15,7 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    VaultDocument,
     VectorSearchStatus,
 )
 from .embedding_text import assemble_embedding_text, embedding_text_digest
@@ -39,6 +40,7 @@ from .governance import (
     decide,
     validate,
 )
+from .read_policy import READABLE_STATUSES
 from .repository import (
     VaultAuditEventRepository,
     VaultDocumentEmbeddingRepository,
@@ -611,3 +613,245 @@ class VaultContributionService:
                 raise NotImplementedError(
                     "Merge requires a real merge strategy; deferred by ADR 0004"
                 )
+
+
+class DocumentNotFound(Exception):
+    """No document with that id is visible to this caller.
+
+    Distinct from a generic failure because it maps to 404. Deliberately does
+    not distinguish "no such row" from "exists but you may not read it": ADR
+    0014 keeps the read surface from confirming that a document exists in a
+    folder the caller cannot see, and an update surface that leaked it would
+    reopen the channel the dedup query already closes.
+    """
+
+
+class UpdateWouldDuplicate(Exception):
+    """The replacement content collides with a *different* document.
+
+    Carries the matches so the caller can see what it collided with.
+    """
+
+    def __init__(self, message: str, similars: Sequence[ScoredCandidate]) -> None:
+        super().__init__(message)
+        self.similars = tuple(similars)
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateRequest:
+    """A full replacement of one document's caller-supplied content."""
+
+    document_id: str
+    title: str
+    body: str
+    principal_id: str
+    request_id: str
+    summary: str | None = None
+    tags: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    facets: dict[str, list[str]] = field(default_factory=dict)
+    related_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    source_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateOutcome:
+    """What a settled replacement did."""
+
+    note_id: str
+    message: str
+    re_embedded: bool
+    errors: tuple[str, ...] = ()
+
+
+class VaultDocumentUpdateService:
+    """Replace an existing document's content, through the same gates.
+
+    Shares the contribution path's shape deliberately -- validate, embed outside
+    the transaction, take the corpus lock, run dedup, write -- because an update
+    can create a duplicate just as a contribution can, and a surface that
+    skipped the gate would be the easy way around it.
+
+    Three things differ, each for a stated reason:
+
+    - **Dedup excludes the document being updated.** It would otherwise score
+      1.0 against itself and every edit would look like a duplicate.
+    - **A collision refuses instead of flagging.** A contribution that flags is
+      still written, because the review queue needs the content to adjudicate.
+      An update that flagged would take an existing, active, readable document
+      out of the read surface as a side effect of an edit -- a strictly worse
+      state than before the call, reached by a caller trying to improve it.
+      Refusing leaves the document exactly as it was and says what it hit.
+    - **Embedding is conditional.** ``embedded_text_sha256`` already answers
+      "did the text that produced this vector change" (ADR 0013), so an edit
+      touching only facets or related_ids costs no embedding call.
+    """
+
+    def __init__(
+        self,
+        transactions: VaultTransactionService,
+        provider: EmbeddingProvider | None,
+        policy: Policy = DEFAULT_POLICY,
+        similar_limit: int = 5,
+    ) -> None:
+        self._transactions = transactions
+        self._provider = provider
+        self._policy = policy
+        self._similar_limit = similar_limit
+
+    async def update(self, request: UpdateRequest) -> UpdateOutcome:
+        documents = VaultDocumentRepository()
+        embeddings = VaultDocumentEmbeddingRepository()
+        search = VaultSearchRepository()
+
+        if self._provider is None:
+            raise DedupUnavailable(
+                "No embedding provider is configured; refusing to write without dedup"
+            )
+
+        # Load first, outside the lock: the replacement is validated against the
+        # row's own governance type and path, and an embedding call for a
+        # document that does not exist is wasted.
+        async with self._transactions.transaction() as connection:
+            existing = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=READABLE_STATUSES,
+                readable_only=True,
+            )
+            stored = (
+                None
+                if existing is None
+                else await embeddings.get(
+                    connection, request.document_id, self._provider.profile_id
+                )
+            )
+        if existing is None:
+            raise DocumentNotFound(request.document_id)
+
+        candidate = self._build_candidate(existing, request)
+
+        errors = validate(candidate) + validate_facets(candidate.facets)
+        if errors:
+            return UpdateOutcome(
+                note_id=request.document_id,
+                message="update failed validation",
+                re_embedded=False,
+                errors=tuple(errors),
+            )
+
+        # Embed only when the text the vector was built from actually moved.
+        embedding_text = assemble_embedding_text(candidate)
+        text_digest = embedding_text_digest(embedding_text)
+        re_embed = stored is None or stored.text_sha256 != text_digest
+        vector = (
+            await embed_one(self._provider, embedding_text, EmbeddingInputKind.DOCUMENT)
+            if re_embed
+            else stored.vector
+        )
+
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+
+            similars = await search.find_similar(
+                connection,
+                embedding=vector,
+                profile_id=self._provider.profile_id,
+                limit=self._similar_limit,
+                exclude_document_id=request.document_id,
+            )
+            match decide(candidate, similars, self._policy):
+                case Insert():
+                    pass
+                case Flag(reason=reason, similars=sims):
+                    raise UpdateWouldDuplicate(f"update refused: {reason}", sims)
+                case Reject(reason=reason, conflicting_id=conflicting):
+                    raise UpdateWouldDuplicate(
+                        f"update refused: {reason} (conflicts with {conflicting})",
+                        similars,
+                    )
+                case Link():
+                    raise NotImplementedError(
+                        "Link requires link_at, disabled under the current policy"
+                    )
+                case Merge():
+                    raise NotImplementedError(
+                        "Merge requires a real merge strategy; deferred by ADR 0004"
+                    )
+
+            updated = await documents.replace_content(
+                connection, request.document_id, candidate
+            )
+            if updated is None:
+                # Visible a moment ago and not now. Nothing deletes documents
+                # today, so this is a race rather than an ordinary miss --
+                # surface it as the 404 it is.
+                raise DocumentNotFound(request.document_id)
+
+            if re_embed:
+                await embeddings.upsert(
+                    connection,
+                    DocumentEmbedding(
+                        document_id=request.document_id,
+                        profile_id=self._provider.profile_id,
+                        vector=vector,
+                        text_sha256=text_digest,
+                    ),
+                )
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.update",
+                outcome="updated",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=request.document_id,
+            )
+
+        return UpdateOutcome(
+            note_id=request.document_id,
+            message=(
+                "document replaced and re-embedded"
+                if re_embed
+                else "document replaced; embedding text unchanged"
+            ),
+            re_embedded=re_embed,
+        )
+
+    @staticmethod
+    def _build_candidate(
+        existing: VaultDocument, request: UpdateRequest
+    ) -> NewVaultDocument:
+        """The row as it would be after the replacement.
+
+        Identity, path, kind, governance type, status and contributor come from
+        the existing row; only what a caller may supply comes from the request.
+        Built as a ``NewVaultDocument`` so it satisfies the same ``validate``
+        and ``assemble_embedding_text`` the contribution path uses -- the point
+        of running the same gate is running exactly the same gate.
+        """
+
+        return NewVaultDocument(
+            id=existing.id,
+            kind=existing.kind,
+            doc_type=existing.doc_type,
+            vault_path=existing.vault_path,
+            status=existing.status,
+            doc_status=existing.doc_status,
+            title=request.title,
+            summary=request.summary,
+            body=request.body,
+            tags=request.tags,
+            aliases=request.aliases,
+            facets=normalize_facets(request.facets),
+            related_ids=request.related_ids,
+            source_ids=request.source_ids,
+            contributed_by=existing.contributed_by,
+            source_url=request.source_url,
+            provenance=existing.provenance,
+        )

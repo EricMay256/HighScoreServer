@@ -244,6 +244,7 @@ class VaultSearchRepository:
         embedding: EmbeddingVector,
         profile_id: str,
         limit: int,
+        exclude_document_id: str | None = None,
     ) -> list[GovernanceScoredCandidate]:
         """Surface existing documents similar to a contribution candidate.
 
@@ -256,6 +257,11 @@ class VaultSearchRepository:
         query would let a contributor learn that a note exists in a folder they
         may not read, and roughly what it is about. Dedup quality is not worth
         a disclosure channel around ADR 0014.
+
+        ``exclude_document_id`` is for the update path, where the candidate is
+        an existing row: without it a document scores 1.0 against itself and
+        every edit looks like a duplicate. Excluding it is what lets an update
+        run the same gate a contribution does rather than skipping it.
         """
 
         if len(embedding) != EMBEDDING_DIMENSIONS:
@@ -285,10 +291,21 @@ class VaultSearchRepository:
                 readable_path_predicate(),
             )
             .order_by(distance, vault_documents.c.id)
-            .limit(limit)
         )
+        if exclude_document_id is None:
+            statement = statement.limit(limit)
+        else:
+            # HNSW is scanned by distance and filtered afterwards, so a
+            # predicate the index cannot use costs rows off the end of the
+            # result rather than being applied first. The excluded row is
+            # exactly one and sorts first (distance 0 against itself), so
+            # fetching one extra and trimming restores a full page. See the
+            # over-fetch rule in the hybrid-retrieval design.
+            statement = statement.where(
+                vault_documents.c.id != exclude_document_id
+            ).limit(limit + 1)
         result = await connection.execute(statement)
-        return [
+        candidates = [
             GovernanceScoredCandidate(
                 note_id=row["id"],
                 title=row["title"],
@@ -296,6 +313,8 @@ class VaultSearchRepository:
             )
             for row in result.mappings()
         ]
+        # Trim the over-fetch rather than the caller's page size.
+        return candidates[:limit]
 
     async def fetch_documents(
         self,

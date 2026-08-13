@@ -9,7 +9,7 @@
 has not seen the calibration work, the retry-budget change, the facets column, migration
 `0005`, or migration `0006`.
 
-> This file goes stale fast. The durable record is `app/vault/docs/adr/` (0001–0017),
+> This file goes stale fast. The durable record is `app/vault/docs/adr/` (0001–0018),
 > `app/vault/docs/embedding-calibration.md`, and the "Deferred decisions" section of
 > `app/vault/docs/vault-architecture.md`. Treat §1 as an index into those.
 
@@ -154,6 +154,24 @@ Verified end to end: the importer now reports `replayed`, not `conflict`.
 
 **The importer was already committed** as `f942917` — item 8 below was stale.
 
+### The update endpoint landed (ADR 0018)
+
+`PUT /api/v1/vault/notes/{note_id}`. See 2d below for the shape and the reasoning. Three
+consequences worth carrying forward, all recorded in the ADR:
+
+- **Flagged documents cannot be corrected through it** — they sit outside `READABLE_STATUSES`,
+  so an update targeting one is a 404. Adjudication belongs to the unbuilt review surface.
+- **Last write wins.** No version column, no `If-Match`. The advisory lock serializes the calls
+  but cannot detect the conflict, because a full replacement has no server-side
+  read-modify-write span to detect it in. Theoretical at one sequential importer; real the
+  moment a second writer exists.
+- **It does not touch `source_sha256`,** so human-layer sync must not reuse this endpoint — a
+  replica row would be edited out from under its file without ADR 0012's reconciliation
+  noticing. Latent today, since every row is NULL.
+
+`READABLE_STATUSES` moved from `routes.py` to `read_policy.py` so the write path can apply the
+read rule without importing the transport layer.
+
 ### The contribute quota now diverges from the integration spec, on purpose
 
 `contribute` was `10/min burst 3`; it is now **`30/min burst 20`**. That shape assumed
@@ -216,20 +234,18 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    duplicate-guard asymmetry), so the markdown corpus is 50. Re-running now inserts those two,
    replays the other 48 cleanly, and restates the remaining 44 digests. **That the corpus
    drifted twice inside one session is the argument for task 8's reconcile mode.**
-2d. **Decide the update path, before widening the importer's payload.** There is currently no
-   way to *change* a document through the write surface: a replay returns the stored response
-   and a conflict refuses, and neither carries new values onto an existing row. So the 48
-   imported documents cannot receive `facets`, `summary`, `aliases`, `related_ids` or
-   `source_ids` by re-running the importer, however wide its payload gets — and widening it
-   changes the digest again for no gain. The fork, recorded in ADR 0016's 2026-08-13 amendment:
-   a distinct update endpoint keyed on document id (keeps the write path's semantics clean), or
-   an opt-in "replay may update when the body differs" (one endpoint, conditional idempotency).
-   **This blocks task 5 and any facet backfill.**
-2e. **The markdown authoring schema has no facets.** `Vault/00 Governance/Schemas/` has zero
-   matches for facet, and no Agent Note carries `Aliases`, `Summary` or `SourceIDs`.
-   `RelatedIDs` is present on all 48 and **non-empty on none**. So there is currently nothing
-   to backfill even once 2d exists — the vocabulary decision (tasks 4 and 5) and a schema
-   change have to come first, followed by re-annotating 48 notes through the engine.
+2d. ~~Decide the update path.~~ **Done — `PUT /api/v1/vault/notes/{note_id}`, ADR 0018.** Full
+   replacement, no idempotency key (a replacement is idempotent by construction), the same dedup
+   gate with the document itself excluded, and a **409 that writes nothing** on collision rather
+   than flagging — flagging would take an active document out of the read surface as a side
+   effect of an edit. Embedding is conditional on `embedded_text_sha256`, so a facets-only edit
+   costs no embedding call, which is exactly the backfill's shape.
+2e. **The backfill is now blocked on data, not on mechanism.** `Vault/00 Governance/Schemas/`
+   has zero matches for facet, and no Agent Note carries `Aliases`, `Summary` or `SourceIDs`.
+   `RelatedIDs` is present on all 48 and **non-empty on none**. 2d built the endpoint; there is
+   still nothing to send through it. Order: the vocabulary decision (tasks 4 and 5), then an
+   authoring-schema change so notes can carry facets, then re-annotating the corpus through the
+   engine, then teaching the importer to PUT. **Nothing before that step is worth building.**
 3. **Search contract alignment** (§2).
 4. **Should `tags` be in the embedding text at all?** — an ADR 0013 question, and the single
    thing most constraining whether `flag_at` can ever be calibrated. Tags move the corpus

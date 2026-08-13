@@ -24,6 +24,7 @@ excluded. Changing what is readable is a governance change that travels through
 
 from sqlalchemy import ColumnElement, false, or_
 
+from .domain import DocumentStatus
 from .tables import vault_documents
 
 
@@ -97,3 +98,13 @@ def readable_path_predicate() -> ColumnElement[bool]:
             for prefix in EXCLUDED_PATH_PREFIXES
         )
     )
+
+
+# Which statuses the read surface serves. Lives here rather than in routes.py so
+# the write path can apply the same rule without importing the transport layer,
+# and so there is one definition to change. See vault ADR 0008, which also
+# records why the restriction is not in the repository.
+#
+# Not configuration: a deployment must not be able to opt into serving
+# unendorsed content.
+READABLE_STATUSES = (DocumentStatus.ACTIVE, DocumentStatus.ARCHIVED)

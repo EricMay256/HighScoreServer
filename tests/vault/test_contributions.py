@@ -665,3 +665,287 @@ def test_facets_are_normalized_before_storage(
         assert detail["facets"] == {"project": ["alpha", "beta"]}
     finally:
         _cleanup()
+
+
+def _update_payload(**overrides) -> dict:
+    base = {
+        "title": f"Replacement {uuid4().hex[:8]}",
+        "body": "A replacement body, distinctive enough not to collide.",
+        "tags": ["testing"],
+    }
+    return {**base, **overrides}
+
+
+def _contribute(client: TestClient, token: str, **overrides) -> str:
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/api/v1/vault/contributions", json=_payload(**overrides), headers=headers
+    )
+    assert response.status_code == 200, response.text
+    note_id = response.json()["note_id"]
+    assert note_id is not None
+    return note_id
+
+
+def test_an_update_replaces_content_and_re_embeds(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        note_id = _contribute(client, write_token)
+        calls_after_contribute = provider.calls
+
+        replacement = _update_payload(tags=["testing", "replaced"])
+        response = client.put(
+            f"/api/v1/vault/notes/{note_id}", json=replacement, headers=headers
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["note_id"] == note_id
+        assert response.json()["re_embedded"] is True
+        # The embedding text moved, so exactly one further call was bought.
+        assert provider.calls == calls_after_contribute + 1
+
+        fetched = client.get(f"/api/v1/vault/notes/{note_id}", headers=headers)
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.json()["title"] == replacement["title"]
+        assert fetched.json()["body"] == replacement["body"]
+        assert sorted(fetched.json()["tags"]) == ["replaced", "testing"]
+    finally:
+        _cleanup()
+
+
+def test_an_update_touching_only_unembedded_fields_does_not_re_embed(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """ADR 0013's whole point: facets are not in the embedding text.
+
+    This is the case a facet backfill runs, so it must not pay for an embedding
+    call per document.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    original = _payload()
+
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions", json=original, headers=headers
+        )
+        assert response.status_code == 200, response.text
+        note_id = response.json()["note_id"]
+        calls_after_contribute = provider.calls
+
+        # Same title/body/tags; only facets differ.
+        replacement = {
+            "title": original["title"],
+            "body": original["body"],
+            "tags": original["tags"],
+            "facets": {"project": ["highscoreserver"]},
+        }
+        updated = client.put(
+            f"/api/v1/vault/notes/{note_id}", json=replacement, headers=headers
+        )
+
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["re_embedded"] is False
+        assert provider.calls == calls_after_contribute
+
+        fetched = client.get(f"/api/v1/vault/notes/{note_id}", headers=headers)
+        assert fetched.json()["facets"] == {"project": ["highscoreserver"]}
+    finally:
+        _cleanup()
+
+
+def test_an_update_is_not_a_duplicate_of_itself(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """Dedup excludes the document being updated.
+
+    Without the exclusion the candidate scores 1.0 against its own stored
+    vector and every no-op edit is refused. Resending identical content is the
+    sharpest form of the case.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    original = _payload()
+
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions", json=original, headers=headers
+        )
+        assert response.status_code == 200, response.text
+        note_id = response.json()["note_id"]
+
+        identical = {
+            "title": original["title"],
+            "body": original["body"],
+            "tags": original["tags"],
+        }
+        updated = client.put(
+            f"/api/v1/vault/notes/{note_id}", json=identical, headers=headers
+        )
+
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["re_embedded"] is False
+    finally:
+        _cleanup()
+
+
+def test_an_update_colliding_with_another_document_is_refused(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The gate still applies to *other* documents.
+
+    Editing one note into an exact copy of another is the way around dedup that
+    an unguarded update surface would open. It refuses rather than flagging, so
+    the document being edited is left exactly as it was.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    first = _payload()
+
+    try:
+        created = client.post(
+            "/api/v1/vault/contributions", json=first, headers=headers
+        )
+        assert created.status_code == 200, created.text
+
+        victim_id = _contribute(client, write_token)
+        before = client.get(f"/api/v1/vault/notes/{victim_id}", headers=headers).json()
+
+        collision = {
+            "title": first["title"],
+            "body": first["body"],
+            "tags": first["tags"],
+        }
+        refused = client.put(
+            f"/api/v1/vault/notes/{victim_id}", json=collision, headers=headers
+        )
+
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail["similars"], "the collision should name what it hit"
+
+        # Refused means nothing was written.
+        after = client.get(f"/api/v1/vault/notes/{victim_id}", headers=headers).json()
+        assert after["title"] == before["title"]
+        assert after["body"] == before["body"]
+        assert after["updated_at"] == before["updated_at"]
+    finally:
+        _cleanup()
+
+
+def test_updating_a_missing_document_is_404(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        response = client.put(
+            f"/api/v1/vault/notes/{uuid4().hex}",
+            json=_update_payload(),
+            headers=headers,
+        )
+        assert response.status_code == 404
+    finally:
+        _cleanup()
+
+
+def test_an_update_requires_the_write_scope(
+    client: TestClient, provider: StubEmbeddingProvider, configure_test_env: None
+) -> None:
+    credential_id, read_only = _issue(scopes=(VaultScope.READ,))
+    try:
+        response = client.put(
+            f"/api/v1/vault/notes/{uuid4().hex}",
+            json=_update_payload(),
+            headers={"Authorization": f"Bearer {read_only}"},
+        )
+        assert response.status_code == 403
+    finally:
+        _drop(credential_id)
+        _cleanup()
+
+
+def test_an_update_does_not_change_the_contributor(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """Who wrote a note and who edited it are different facts.
+
+    ``contributed_by`` is the author; the editor lands in the audit trail. An
+    update that overwrote it would erase authorship on every correction.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        note_id = _contribute(client, write_token)
+
+        service, engine = vault_service()
+
+        async def read_contributor() -> str:
+            async with service.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_documents.c.contributed_by).where(
+                        vault_documents.c.id == note_id
+                    )
+                )
+                return str(result.scalar_one())
+
+        try:
+            before = asyncio.run(read_contributor())
+        finally:
+            asyncio.run(engine.dispose())
+
+        updated = client.put(
+            f"/api/v1/vault/notes/{note_id}",
+            json=_update_payload(),
+            headers=headers,
+        )
+        assert updated.status_code == 200, updated.text
+
+        service, engine = vault_service()
+        try:
+            after = asyncio.run(read_contributor())
+        finally:
+            asyncio.run(engine.dispose())
+
+        assert after == before
+    finally:
+        _cleanup()
+
+
+def test_an_update_records_an_audit_event(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        note_id = _contribute(client, write_token)
+        updated = client.put(
+            f"/api/v1/vault/notes/{note_id}",
+            json=_update_payload(),
+            headers=headers,
+        )
+        assert updated.status_code == 200, updated.text
+
+        service, engine = vault_service()
+
+        async def operations() -> list[str]:
+            async with service.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_audit_events.c.operation).where(
+                        vault_audit_events.c.target_id == note_id
+                    )
+                )
+                return [str(row[0]) for row in result.all()]
+
+        try:
+            recorded = asyncio.run(operations())
+        finally:
+            asyncio.run(engine.dispose())
+
+        assert "vault.update" in recorded
+    finally:
+        _cleanup()

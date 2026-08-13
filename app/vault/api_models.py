@@ -119,6 +119,43 @@ class VaultContributionRequest(BaseModel):
         return facets
 
 
+class VaultDocumentUpdateRequest(BaseModel):
+    """Full replacement of one document's caller-supplied content.
+
+    Deliberately a replacement rather than a patch. A patch would need a way to
+    say "leave this alone" that is distinct from "set this to empty", and every
+    optional field would carry that ambiguity; a replacement says what the
+    document should now be, and an omitted list means an empty list. The cost is
+    that a caller changing one facet resends the body, which is free for the
+    only client that exists -- a projector that already holds the whole note.
+
+    Carries no ``idempotency_key``. A full replacement is already idempotent:
+    sending it twice converges, which is what PUT means. The contribution path
+    needs a key because it mints identity and must not mint it twice.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=300)
+    body: str = Field(min_length=1, max_length=100_000)
+    summary: str | None = Field(default=None, max_length=2_000)
+    tags: list[str] = Field(default_factory=list, max_length=50)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    facets: dict[str, list[str]] = Field(default_factory=dict)
+    related_ids: list[str] = Field(default_factory=list, max_length=50)
+    source_ids: list[str] = Field(default_factory=list, max_length=50)
+    source_url: AnyUrl | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, tags: list[str]) -> list[str]:
+        if any(not tag for tag in tags):
+            raise ValueError("tags must not contain empty values")
+        if len(set(tags)) != len(tags):
+            raise ValueError("tags must be unique")
+        return tags
+
+
 class VaultSimilarNote(BaseModel):
     """An existing note the deduper surfaced, as reported to a contributor."""
 
@@ -127,6 +164,25 @@ class VaultSimilarNote(BaseModel):
     note_id: str
     title: str
     score: float
+
+
+class VaultDocumentUpdateResponse(BaseModel):
+    """The settled outcome of one replacement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    message: str
+    re_embedded: bool = Field(
+        description=(
+            "Whether the edit changed the embedding text and therefore bought "
+            "an embedding call. False means the change touched only fields the "
+            "embedding does not read -- facets, related_ids, source_url -- so "
+            "the stored vector was already correct."
+        ),
+    )
+    similars: list[VaultSimilarNote] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class VaultContributionResponse(BaseModel):
