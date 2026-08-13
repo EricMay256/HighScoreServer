@@ -22,9 +22,9 @@ pgvector 0.8.6 in local PostgreSQL 17.9; the vault schema lives in the ordinary 
 | | |
 | --- | --- |
 | Server | PostgreSQL 17.9, `localhost:5432` |
-| `leaderboard` | leaderboard `0004_auth_identities`; vault `0005_document_facets` |
-| `leaderboard_test` | **created this session**, both lineages at head |
-| Corpus | **39** documents, all embedded under `openai/text-embedding-3-small:1536` |
+| `leaderboard` (dev) | leaderboard `0004_auth_identities`; vault **`0004_reconciliation`** — `0005_document_facets` is NOT applied here yet |
+| `leaderboard_test` | **created this session**, both lineages at head (vault `0005_document_facets`) |
+| Corpus | `vault_documents` holds **39**; the markdown corpus is now **48** (9 notes contributed 2026-08-13) |
 | Vault credential | principal `importer`, scopes `vault:read vault:write` |
 
 The venv is in the **main repo**, not the worktree:
@@ -133,6 +133,21 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
 1. **Push `59985a4` and `5bdd5ad`.** CI has seen none of it.
 2. **Remove `VAULT_EMBEDDING_TIMEOUT_SECONDS=10` from `.env`** (and check the Heroku config
    var). It overrides the new 5.0 default; at 10s the worst case is 38s, past the router budget.
+2b. **Apply `0005_document_facets` to the dev `leaderboard` database.** Only `leaderboard_test`
+   has it. Any dev-server run against `leaderboard` will fail schema-drift on `facets`:
+
+   ```bash
+   DATABASE_URL="postgresql://postgres:<pw>@localhost:5432/leaderboard" \
+     python -m alembic -c alembic-vault.ini upgrade head
+   ```
+
+2c. **Re-run the importer — the database is 9 notes behind.** `vault_documents` holds 39; the
+   markdown corpus is 48 after the 2026-08-13 contributions. Re-running reconciles it (39
+   replay by idempotency key, 9 insert). Needs 2b done first, the dev server up, and a
+   `vault:write` token in `VAULT_API_TOKEN`. The importer still sends only
+   title/body/tags/source_url — it has **not** been taught the fields added in `5bdd5ad`
+   (facets, related_ids, source_ids, aliases, summary), so imported rows will have empty
+   facets. That is a follow-up, not a blocker.
 3. **Search contract alignment** (§2).
 4. **Should `tags` be in the embedding text at all?** — an ADR 0013 question, and the single
    thing most constraining whether `flag_at` can ever be calibrated. Tags move the corpus
