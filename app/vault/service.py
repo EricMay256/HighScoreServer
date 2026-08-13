@@ -399,6 +399,25 @@ class VaultContributionService:
         document without its idempotency record, or the reverse.
         """
 
+        # The top similarity this contribution scored against the corpus, kept
+        # so `flag_at` calibration accumulates from real traffic instead of only
+        # from re-running scripts/measure_dedup_similarity.py. Every settled
+        # write is one more observation of where legitimate contributions sit,
+        # which is the floor half of the two-sided derivation in
+        # docs/embedding-calibration.md.
+        #
+        # A score only, never an id or a title: this column is read back on
+        # replay, and naming a document the contributor may not read would
+        # reopen the disclosure channel find_similar closes.
+        #
+        # Write requests are prunable, so this is a rolling window rather than a
+        # durable series — harvest into the model register before pruning.
+        top_similarity = (
+            max(candidate.score for candidate in outcome.similars)
+            if outcome.similars
+            else None
+        )
+
         await VaultWriteRequestRepository().complete(
             connection,
             principal_id=request.principal_id,
@@ -406,7 +425,11 @@ class VaultContributionService:
             request_sha256=request.request_sha256,
             state=state,
             document_id=outcome.note_id,
-            response={"status": outcome.status, "message": outcome.message},
+            response={
+                "status": outcome.status,
+                "message": outcome.message,
+                "top_similarity": top_similarity,
+            },
         )
         await VaultAuditEventRepository().record(
             connection,

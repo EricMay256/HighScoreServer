@@ -27,6 +27,7 @@ easy to overlook:
 | `alembic-vault.ini` | Points at `vault_migrations/`. |
 | `scripts/seed_vault_demo.py` | Onboarding fixture loader. Lives in the host's `scripts/` by convention and imports `app.env` and `app.vault.*` absolutely; both imports need repointing on the move. |
 | `scripts/measure_embedding_latency.py` | Provider latency measurement for the retry-budget decision. Same convention and the same absolute imports to repoint. |
+| `scripts/measure_dedup_similarity.py` | Derives `Policy.flag_at` for the configured embedding model (ADR 0016 amendment, ADR 0017). Same convention and imports; also imports `app.vault.calibration`. |
 | `scripts/issue_vault_credential.py` | Issues, lists, and revokes agent credentials. Same convention and imports. |
 | `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. |
 

@@ -355,9 +355,8 @@ checked into HSS beside its code and contract tests.
 ## Deferred decisions
 
 Open questions surfaced during the persistence foundation and the read-only slice. Item 1 blocks
-the importer. Item 2 is a boundary question with no deadline. Item 3 is shipped, working, and
-deliberately provisional — it is listed because the values were chosen by reasoning rather than
-measurement, and should not be mistaken for settled.
+the importer. Item 2 is a boundary question with no deadline. Item 3 was settled by measurement
+on 2026-08-12 and is kept for its reasoning, not as an open question.
 
 Three questions that were open after Phase 1 have since been settled and are no longer listed
 below: the embedding provider and `profile_id` identity (vault ADR 0005), how the two retrieval
@@ -398,42 +397,46 @@ precedent. Governance prose then reaches the database the same way the wiki laye
 compiled read-only projection — rather than as a second source of truth that can silently
 contradict the YAML.
 
-### 3. The embedding request budget is provisional — active consideration
+### 3. The embedding request budget — SETTLED 2026-08-12 by measurement
 
-**Status: shipped and working. Revisit with usage data, not before.**
+**Status: settled. Three attempts at a 5s timeout.** Kept here rather than deleted because the
+reasoning is what makes the constants defensible, and because the same measurement should be
+re-taken if the provider changes.
 
-The query path currently allows **one attempt at a 10s timeout** and no retry
-(`_MAX_ATTEMPTS`, `_MAX_BACKOFF_SECONDS` in `embeddings_openai.py`;
-`VAULT_EMBEDDING_TIMEOUT_SECONDS` for the timeout). The budget exists because running out of it
-is not a failure — it is the fall back to lexical results — and that is only worth anything if it
-happens while a caller is still waiting. Heroku's router gives up at 30s, so the whole budget
-must fit inside that with room for the search itself.
+The query path allows **three attempts at a 5s timeout** (`_MAX_ATTEMPTS`,
+`_MAX_BACKOFF_SECONDS` in `embeddings_openai.py`; `DEFAULT_EMBEDDING_TIMEOUT_SECONDS` in
+`constants.py`, overridable by `VAULT_EMBEDDING_TIMEOUT_SECONDS`). Worst case is
+3 × 5s + 2 × 4s of capped backoff = **23s**, inside Heroku's 30s router budget with room for
+the search itself. The budget exists because running out of it is not a failure — it is the
+fall back to lexical results — and that is only worth anything while a caller is still waiting.
 
-The main alternative considered was **three attempts at a 5s timeout**: 16.5s in the ordinary
-worst case, 23s if a `Retry-After` maxes the 4s cap twice, so it also fits. Its appeal is that
-the realistic failure is a transient 429 or 502 rather than genuine slowness, and today a single
-blip costs the vector arm entirely. It was not adopted because the argument for it rests on
-`text-embedding-3-small` returning a single short embedding in well under a second, which is
-general knowledge about the model rather than anything measured against this deployment.
+It previously allowed one attempt at 10s with no retry. That was chosen by reasoning about the
+router budget rather than by measuring this deployment, and the measurement reversed it.
 
-What would settle it, in rough order of value:
+Measured against the real API on 2026-08-12 via `scripts/measure_embedding_latency.py`:
 
-1. **p50/p99 latency of a single query embedding** against the real API. If p99 is comfortably
-   under 5s, three attempts at 5s is the better configuration. If it is near 5s, a short timeout
-   converts slow-but-successful calls into failures and then retries into the same wall — the one
-   genuinely bad outcome available here.
-2. **How often embedding actually fails in practice**, from the `vector_status="failed"` rate.
-   Retries are worth adding only if transient failure is real; if the rate is ~0, the current
-   single attempt is correct and simpler.
-3. **Batch latency at realistic sizes.** `VAULT_EMBEDDING_TIMEOUT_SECONDS` is one setting shared
-   by the single-query path and the batch path, where `DEFAULT_BATCH_SIZE` is 128. A value chosen
-   for queries may be too tight for a full batch of long documents. The importer will likely need
-   its own value — it is already configuration, so a separate process can set it — and at that
-   point the default should be documented as the query-path default rather than a general one.
+| Path | samples | min | p50 | p90 | p99 | max |
+| --- | --- | --- | --- | --- | --- | --- |
+| Single query | 20 | 0.130s | 0.163s | 0.374s | 1.194s | 1.194s |
+| Batch of 128 documents | 5 | 0.538s | 0.608s | 0.728s | 0.728s | 0.728s |
 
-Two known imprecisions in the arithmetic above, so nobody re-derives them from scratch: httpx's
-read timeout is **per-chunk, not total request duration**, so `attempts × timeout` is an upper
-bound for well-behaved responses rather than a hard guarantee; and
-`test_worst_case_retry_budget_fits_inside_the_router_timeout` hardcodes the 10s timeout instead
-of reading it from configuration, so changing the default without touching that test would leave
-it modelling something that is no longer true.
+Reading these against the criteria this section pre-registered:
+
+1. **p99 is comfortably under 5s** — 1.194s, about a quarter of the ceiling. That was the
+   pre-registered condition for preferring three attempts at 5s, so it applies. A 5s timeout
+   does not convert slow-but-successful calls into failures at this latency.
+2. **Transient failure is real.** Two `EmbeddingUnavailable` failures occurred during these very
+   measurement runs, one of them aborting a complete calibration run mid-way. At one attempt,
+   each cost the vector arm entirely. This is exactly the failure retries exist for, and it is
+   no longer hypothetical. The `vector_status="failed"` rate in production remains the better
+   long-run signal.
+3. **Batch latency is not the constraint it was feared to be.** A full 128-document batch
+   completes in 0.728s — *faster* than the single-query p99, because connection setup dominates
+   a single small request. One shared `VAULT_EMBEDDING_TIMEOUT_SECONDS` is therefore fine for
+   both paths at present sizes. A backfill over much longer documents should still set its own
+   value; it has no caller waiting and should prefer eventual success over latency.
+
+One imprecision remains, so nobody re-derives it: httpx's read timeout is **per-chunk, not
+total request duration**, so `attempts × timeout` is an upper bound for well-behaved responses
+rather than a hard guarantee. `test_worst_case_retry_budget_fits_inside_the_router_timeout`
+reads both constants from configuration, so it tracks changes to either.

@@ -39,31 +39,34 @@ MAX_BATCH_SIZE = 2048
 
 _RETRY_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
 
-# One attempt: no retry at all.
+# Three attempts at a 5s timeout. Worst case 3 x 5s + 2 x 4s of capped backoff
+# = 23s, inside Heroku's 30s router budget with room for the search itself.
 #
 # The budget is bounded by the request the caller is waiting on, not by what
 # would most likely eventually succeed. A query embedding sits in the middle of
 # a search, so exhausting the budget is not a failure but a fall back to lexical
-# results — worth having only while someone is still waiting. At one attempt the
-# worst case is a single request timeout, 10s, leaving the rest of Heroku's 30s
-# router budget to the search itself.
+# results — worth having only while someone is still waiting.
 #
-# The retry machinery below is deliberately kept rather than deleted: raising
-# _MAX_ATTEMPTS re-enables it, and a batch backfill will want exactly that,
-# along with a far longer wait than a request path can afford. It stays under
-# test at a patched attempt count so raising the constant is safe.
+# Settled by measurement on 2026-08-12, replacing one attempt at 10s. Observed
+# single-query latency is p50 0.163s / p99 1.194s, so genuine slowness is not
+# the failure mode this budget has to survive; a transient 429 or 502 is, and at
+# one attempt a single blip cost the vector arm entirely. That is not
+# hypothetical — it happened twice while taking these very measurements, once
+# aborting a full calibration run. A 5s ceiling still sits ~4x above the
+# observed p99, so it does not turn slow-but-successful calls into failures.
 #
-# These values are PROVISIONAL and under active consideration. They were chosen
-# by reasoning about the router budget, not by measuring this deployment. Three
-# attempts at a 5s timeout is the leading alternative and also fits. Before
-# changing them, read "Deferred decisions" item 4 in docs/vault-architecture.md,
-# which records what to measure first and why the arithmetic here is an upper
-# bound rather than a guarantee.
-_MAX_ATTEMPTS = 1
+# The arithmetic is an upper bound rather than a guarantee: httpx's read timeout
+# is per-chunk, not total request duration. See "Deferred decisions" item 3 in
+# docs/vault-architecture.md.
+#
+# A batch backfill should still set its own, longer values — it has no caller
+# waiting on it and should prefer eventual success over latency.
+_MAX_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 0.5
-# Caps any Retry-After the provider sends. Only consulted when retries are
-# enabled; on a request path a long rate-limit window helps nobody once the
-# caller has gone, and a backfill should set its own value.
+# Caps any Retry-After the provider sends: on a request path a long rate-limit
+# window helps nobody once the caller has gone, and a backfill should set its
+# own value. Load-bearing for the worst-case budget above — two waits at this
+# cap are 8 of the 23 seconds.
 _MAX_BACKOFF_SECONDS = 4.0
 
 

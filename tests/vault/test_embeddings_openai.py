@@ -175,14 +175,16 @@ def test_large_inputs_are_split_into_batches() -> None:
     assert len(vectors) == 5
 
 
-def test_retries_are_disabled_by_default() -> None:
-    """The shipped budget is a single attempt.
+def test_retries_are_enabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped budget retries, because the realistic failure is transient.
 
-    A query embedding is inside a search someone is waiting on, and running out
-    of budget means falling back to lexical results rather than failing — worth
-    doing promptly. Retrying is machinery for a backfill, not this path.
+    Measured single-query latency is p99 1.194s against a 5s timeout, so a
+    request that fails is far more likely to have hit a 429 or a 502 than to
+    have been genuinely slow. At the previous single attempt one such blip cost
+    the vector arm entirely.
     """
 
+    monkeypatch.setattr("app.vault.embeddings_openai.asyncio.sleep", _no_sleep)
     attempts: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -196,20 +198,21 @@ def test_retries_are_disabled_by_default() -> None:
         finally:
             await provider.aclose()
 
-    assert _MAX_ATTEMPTS == 1
+    assert _MAX_ATTEMPTS > 1
     with pytest.raises(EmbeddingUnavailable, match="HTTP 429"):
         asyncio.run(exercise())
 
-    # Retryable status, but nothing to retry with: one request, no waiting.
-    assert len(attempts) == 1
+    # Every attempt in the budget is spent before giving up.
+    assert len(attempts) == _MAX_ATTEMPTS
 
 
 def test_rate_limiting_is_retried_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The retry machinery is dormant at the shipped attempt count. It is kept
-    # for a backfill, so it stays under test at a raised count — otherwise
-    # raising the constant later would be an untested change.
+    # Pinned to 2 rather than reading the shipped count, so the assertion below
+    # states an exact number of attempts. Retries are live at the shipped count
+    # (see test_retries_are_enabled_by_default); this covers the succeeds-on-
+    # retry path specifically.
     monkeypatch.setattr("app.vault.embeddings_openai._MAX_ATTEMPTS", 2)
     monkeypatch.setattr(
         "app.vault.embeddings_openai.asyncio.sleep",
@@ -303,8 +306,13 @@ def test_transport_failure_becomes_embedding_unavailable(
         finally:
             await provider.aclose()
 
-    # Singular at the shipped attempt count: no retry happened.
-    with pytest.raises(EmbeddingUnavailable, match="after 1 attempt"):
+    # A connect error is retryable, so the whole budget is spent. Derived from
+    # the constant rather than restated, including the pluralization, so this
+    # keeps describing the shipped budget if the count moves again.
+    plural = "" if _MAX_ATTEMPTS == 1 else "s"
+    with pytest.raises(
+        EmbeddingUnavailable, match=f"after {_MAX_ATTEMPTS} attempt{plural}"
+    ):
         asyncio.run(exercise())
 
 
@@ -357,8 +365,8 @@ def test_retry_after_is_honoured_but_capped(
 ) -> None:
     """The wait tracks Retry-After only up to the configured ceiling.
 
-    Covers machinery that is dormant at the shipped attempt count, so that
-    raising _MAX_ATTEMPTS for a backfill is not an untested change.
+    The cap is load-bearing for the worst-case budget: at the shipped attempt
+    count two waits at this ceiling are 8 of the 23 seconds.
     """
 
     slept: list[float] = []

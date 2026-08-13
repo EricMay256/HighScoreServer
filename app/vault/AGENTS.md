@@ -103,10 +103,15 @@ be edited when it does.
   `websearch_to_tsquery(:config, :query)`.
 - **`decide()` and `Policy` are ported verbatim into `governance.py`** (ADR 0004) — keep them
   diffable against `vault_contrib.core`. What is deliberately *not* ported is the **value** of
-  `flag_at`: Stage A's 0.85 is a title string ratio, here the score is cosine similarity where
-  unrelated prose exceeds 0.7. `DEFAULT_POLICY` ships `flag_at = 1.0` (only an identical
-  embedding flags) until a threshold is measured against the real corpus. Do not "restore"
-  0.85. See ADR 0016.
+  `flag_at`: Stage A's 0.85 is a title string ratio, here the score is cosine similarity on a
+  specific model. `DEFAULT_POLICY` ships `flag_at = 1.0` — only an identical embedding flags.
+  That is now the **measured** answer for `text-embedding-3-small`, not a placeholder: the
+  corpus's closest legitimately-distinct pair scores 0.7406 and the weakest deliberate
+  restatement scores 0.7500, a gap of 0.0094. Do not "restore" 0.85, and do not derive a
+  threshold from the corpus distribution alone — it looks like a wide safe band above 0.74 and
+  real duplicates live inside it. `flag_at` is derived per model by the two-sided procedure in
+  `calibration.py` / `docs/embedding-calibration.md`; changing the constant needs a new row in
+  that register. See ADR 0016 and its 2026-08-12 amendment.
 
 ## Retrieval and embeddings
 
@@ -119,6 +124,11 @@ be edited when it does.
 - The embedding provider is **optional at runtime**. Without a credential the vault serves
   lexical-only search and says so in the response. Do not turn a missing key back into a
   startup failure — CI depends on this.
+- **The query request budget is three attempts at a 5s timeout**, settled by measurement on
+  2026-08-12 (single-query p99 1.194s; a 128-document batch takes 0.728s). Worst case
+  3 × 5s + 2 × 4s backoff = 23s, inside Heroku's 30s router budget. The realistic failure is a
+  transient 429/502, not slowness. A backfill should set its own, longer values. See "Deferred
+  decisions" item 3 in `docs/vault-architecture.md`.
 - `vector_status` distinguishes `used` / `not_configured` / `failed`. Keep those three
   separate: a broken provider must never be reportable as a deliberate lexical-only
   deployment. `failed` also logs at ERROR; `not_configured` logs nothing per request.

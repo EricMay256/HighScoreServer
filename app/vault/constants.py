@@ -26,7 +26,14 @@ DEFAULT_TEXT_SEARCH_CONFIG = "english"
 #
 # Changing this changes the worst case that test models. See "Deferred
 # decisions" item 3 in docs/vault-architecture.md before touching it.
-DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 10.0
+#
+# 5.0 since 2026-08-12, measured rather than reasoned: single-query latency
+# against the real API is p50 0.163s, p99 1.194s, and a 128-document batch takes
+# 0.728s. A 5s ceiling is roughly four times the observed p99, so it converts
+# essentially no slow-but-successful call into a failure, and it buys room for
+# three attempts inside the router budget. The previous 10.0 was chosen before
+# any measurement existed.
+DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 5.0
 
 # The configuration name is interpolated into DDL as a literal, so it is
 # constrained to the shape of an unquoted PostgreSQL identifier before it can

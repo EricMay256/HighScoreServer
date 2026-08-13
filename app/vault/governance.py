@@ -7,10 +7,11 @@ than reinterpreted, so a reviewer can diff it against the source.
 
 What is deliberately *not* transcribed is the **value** of `flag_at`. Stage A's
 0.85 is a normalized-title string ratio; here the score is cosine similarity on
-`text-embedding-3-small`. Those are different scales — unrelated prose routinely
-exceeds 0.7 cosine — so carrying the number across would send a large share of
-the corpus to review on its first day. Porting logic verbatim and porting a
-calibrated constant verbatim are not the same act. See ``DEFAULT_POLICY``.
+an embedding model. Those are different scales measured over different things,
+so the number does not carry across: porting logic verbatim and porting a
+calibrated constant verbatim are not the same act. A `flag_at` is derived per
+model by the two-sided procedure in ``calibration.py`` and
+``docs/embedding-calibration.md``. See ``DEFAULT_POLICY``.
 
 This module is pure: no I/O, no database, no embedding calls. That is what makes
 it testable against the source's own test cases.
@@ -108,15 +109,20 @@ class Policy:
 
 # `flag_at = 1.0` means only an *identical* embedding flags. That is not the
 # same as switching dedup off: byte-identical text produces the same vector and
-# a cosine similarity of 1.0, so exact resubmission is still caught.
+# a cosine similarity of 1.0, so exact resubmission is still caught. It is dedup
+# narrowed to the one band that needs no calibration.
 #
-# It is set here because the corpus this path first replays — the Stage-A Agent
-# notes — has already passed string dedup, so nothing in it *should* flag, and
-# any mid-range threshold invented now would be a guess that sends real
-# contributions to review. The number to replace it with comes from measuring
-# the pairwise cosine distribution over the imported corpus, which is only
-# possible once the corpus is imported. Calibrate from the review queue, not
-# from a literature constant.
+# 1.0 is the correct default for any model whose distribution has not been
+# measured, and it is also — as of 2026-08-12 — the *measured* answer for
+# `text-embedding-3-small`. The corpus's closest legitimately-distinct pair
+# scores 0.7406 and the weakest deliberate restatement scores 0.7500: a gap of
+# 0.0094, which is sampling noise. This model does not separate restatement from
+# adjacency on a corpus of short operational notes, so there is no threshold
+# below 1.0 that is not wrong in both directions at once.
+#
+# Do not set this from a literature constant, from the corpus distribution
+# alone, or by eye. `docs/embedding-calibration.md` carries the procedure and
+# the per-model register; a change here needs a new row in it.
 DEFAULT_POLICY = Policy()
 
 

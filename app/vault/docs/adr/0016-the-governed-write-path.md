@@ -4,7 +4,9 @@ Date: 2026-07-30
 
 ## Status
 
-Accepted
+Accepted. Amended 2026-08-12: the `flag_at` section's reasoning was replaced with
+measurement. The decision it reached — `flag_at = 1.0` — is unchanged, so this is
+an amendment in place rather than a superseding ADR. See "Amendment" below.
 
 ## Context
 
@@ -26,20 +28,19 @@ That is ADR 0012's mark-and-sweep and is deliberately not this endpoint.
 ### `flag_at` is calibration, not a constant, and does not port
 
 Stage A ships `flag_at = 0.85`. That is a **normalized-title string ratio**.
-Here the score is **cosine similarity on `text-embedding-3-small`**, where
-unrelated prose routinely exceeds 0.7. Carrying the number across would have
-sent a large share of the corpus to review on its first day.
+Here the score is **cosine similarity on an embedding model**. Those are
+different scales measured over different things, so the number does not carry
+across — porting logic verbatim and porting a calibrated constant verbatim are
+different acts.
 
-Porting logic verbatim and porting a calibrated constant verbatim are different
-acts. `DEFAULT_POLICY` therefore ships `flag_at = 1.0`: only an *identical*
-embedding flags. That is not dedup switched off — byte-identical text produces
-the same vector and a cosine of 1.0, so exact resubmission is still caught — it
-is dedup narrowed to the only band that needs no calibration.
+`DEFAULT_POLICY` therefore ships `flag_at = 1.0`: only an *identical* embedding
+flags. That is not dedup switched off — byte-identical text produces the same
+vector and a cosine of 1.0, so exact resubmission is still caught — it is dedup
+narrowed to the only band that needs no calibration.
 
-The replacement comes from measuring the pairwise cosine distribution over the
-imported corpus, which is only possible *after* the import. The corpus this path
-first replays has already passed string dedup, so nothing in it should flag.
-Calibrate from the review queue, not from a literature constant.
+A replacement value must be **derived by measurement, per model**, and the
+procedure is `app/vault/docs/embedding-calibration.md`. Until a model has a row
+in that register, its `flag_at` is 1.0.
 
 ### One corpus-wide advisory lock
 
@@ -129,3 +130,76 @@ document must delete those first. That is correct — an audit trail that vanish
 with its subject would not be an audit trail — but it makes cleanup ordering
 load-bearing, and it is the reason the contribution tests sweep by contributor
 rather than by collected ID.
+
+## Amendment, 2026-08-12
+
+The original `flag_at` section reached the right decision from a premise that was
+never measured. It asserted that "unrelated prose routinely exceeds 0.7 cosine"
+and that carrying Stage A's 0.85 across "would have sent a large share of the
+corpus to review on its first day." Both claims are now measured, and both are
+wrong — in opposite directions, which is why the conclusion survived.
+
+Over 39 imported Agent notes (741 pairs) on `text-embedding-3-small`: p50 0.2542,
+p99 0.6265, max 0.7406. Unrelated prose does **not** routinely exceed 0.7, and
+`flag_at = 0.85` would have flagged nothing at all rather than a large share.
+
+The reasoning that replaced it is the more important correction. Reading only that
+distribution suggests a wide empty band between 0.7406 and 1.0 in which a
+threshold could safely sit — and the first draft of this amendment proposed 0.85
+on exactly that basis. Measuring the *other* side refutes it: deliberate
+restatements of a single insight in different words score 0.7500, 0.7664, and
+0.8431. They sit inside the supposedly empty band. A threshold of 0.85 catches
+none of them; 0.80 catches one.
+
+The band looked empty because nothing had been measured in it.
+
+So the corpus distribution bounds only the false-positive side. Deriving a
+threshold needs an opposing measurement — known duplicates — and a value sits
+between the two only if they are far enough apart to survive further sampling.
+Here they are not: floor 0.7406, ceiling 0.7500, a gap of 0.0094. The closest
+legitimately-distinct pair in the corpus and the weakest deliberate duplicate are
+within 0.01 of each other. `text-embedding-3-small` does not separate
+restatement from adjacency on a corpus of short operational notes.
+
+### A second methodological correction, same day
+
+The first version of the measurement compared the two sides on **different text
+shapes**, and that biased it. Corpus scores come from stored vectors, which
+`assemble_embedding_text` built over title + aliases + tags + summary + body;
+the reference pairs were embedded as bare body prose, with no title line and no
+tags.
+
+Tags are not a rounding error in that comparison. Re-embedding fourteen corpus
+documents with tags removed moved the *maximum* pair by −0.0513 while moving the
+mean only −0.0099 — tags disproportionately inflate exactly the top pairs,
+because the pairs that share tags are the pairs already topically close. One pair
+sharing `git`, `gotcha`, and `tooling` fell 0.0995.
+
+So the floor was tag-inflated and the ceiling was not, which understated the
+margin. The reference pairs are now full note shapes — title, body, and
+overlapping-but-not-identical tags — and both sides run through
+`assemble_embedding_text`.
+
+Correcting it moved the ceiling from 0.7478 to 0.7500 and the margin from 0.0072
+to 0.0094. **The verdict is unchanged**: still far under `MINIMUM_SEPARATION`,
+still `flag_at = 1.0`. Notably the fix did not uniformly inflate the ceiling —
+one pair rose 0.035, another *fell* 0.038 because its two titles differ more than
+its bodies do — which is the behaviour a fixture that is not flattering itself
+should show.
+
+This leaves an open question for ADR 0013 rather than answering it: if tags
+inflate the top of the corpus distribution by ~0.05, and topical tags like
+`gotcha` or `tooling` will never become facets under ADR 0017, then **whether
+`tags` belongs in the embedding text at all** is now a measurable question that
+directly governs how calibratable `flag_at` can ever be.
+
+`flag_at` therefore stays 1.0, now for a measured reason rather than a placeholder
+one. "Calibrate from the review queue" is superseded by the two-sided procedure in
+`app/vault/docs/embedding-calibration.md`, which does not require a review queue
+to have accumulated first, and which must be re-run per model — the threshold is a
+property of the model and corpus together, not a vault-wide constant.
+
+`app/vault/calibration.py` carries the reference pairs and the derivation;
+`scripts/measure_dedup_similarity.py` runs it; the per-model results live in the
+register. `tests/vault/test_calibration.py` keeps the derivation honest, including
+the case that nearly shipped a threshold below its own floor.

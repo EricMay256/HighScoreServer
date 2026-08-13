@@ -194,7 +194,14 @@ def test_search_returns_lexical_hits(
     client: TestClient,
     read_token: str,
     seeded_corpus: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Patched to None rather than relying on VAULT_EMBEDDING_API_KEY being
+    # absent from the environment. Once a real key landed in .env this test
+    # began exercising the `used` path and failing on an assertion about
+    # `not_configured` — an ambient dependency, not a behaviour change. Same
+    # mechanism test_contributions.py uses to inject its stub.
+    monkeypatch.setattr("app.vault.routes.get_embedding_provider", lambda: None)
 
     response = client.get(
         "/api/v1/vault/search",
@@ -205,9 +212,9 @@ def test_search_returns_lexical_hits(
     assert response.status_code == 200
     body = response.json()
     assert body["query"] == "running"
-    # No embedding credential is configured in the test environment. The
-    # response must name that as the reason rather than reporting a bare
-    # "vector search didn't run", which would look identical to an outage.
+    # With no embedding provider configured, the response must name that as the
+    # reason rather than reporting a bare "vector search didn't run", which
+    # would look identical to an outage.
     assert body["vector_status"] == "not_configured"
     assert body["profile_id"] is None
     assert [hit["note_id"] for hit in body["hits"]] == [seeded_corpus["alpha"]]
@@ -465,12 +472,22 @@ def test_read_surface_carries_doc_type_including_when_untyped(
 def test_search_returns_429_with_retry_after_once_the_burst_is_spent(
     client: TestClient,
     read_token: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The quota is per principal, and the response says when to come back.
 
     A fresh credential means a fresh bucket, so this does not depend on what
     other tests spent.
+
+    The clock is frozen because the bucket refills continuously: search allows
+    30/min, so 0.5 tokens arrive per second, and spending a burst of 10 takes
+    over two seconds whenever the database is slow — which refills a token and
+    lets the request that should be refused through. That made this pass alone
+    and fail in a full run. Freezing time tests the quota rather than the speed
+    of the suite.
     """
+
+    monkeypatch.setattr("app.vault.rate_limit.time.monotonic", lambda: 1_000.0)
 
     headers = {"Authorization": f"Bearer {read_token}"}
     limit = LIMITS["search"]
