@@ -39,13 +39,31 @@ class Limit:
         return self.per_minute / 60.0
 
 
-# From the integration spec's limits table. The write, review, compile, and
-# export operations are listed so that building those routes is adding a route
-# rather than also inventing a quota.
+# From the integration spec's limits table, except `contribute` -- see below.
+# The write, review, compile, and export operations are listed so that building
+# those routes is adding a route rather than also inventing a quota.
+#
+# `contribute` deliberately diverges from the spec's 10/min burst 3. That shape
+# assumes contributions trickle in, and they do not: they arrive as batches --
+# a librarian session settling nine notes, an importer replaying a corpus of
+# fifty. At burst 3 and a 6s refill every such batch is throttled end to end for
+# no protective gain, since the batch is not the abuse case.
+#
+# What burst does and does not buy is worth being precise about. Long-run damage
+# from a runaway loop is bounded by `per_minute` alone; `burst` only decides how
+# fast the first few land. So a generous burst against a modest sustained rate
+# costs little: a loop still cannot exceed 30 embedding calls per minute per
+# principal per worker.
+#
+# Concurrency is bounded elsewhere and this does not change it. VAULT_DB_POOL_SIZE
+# defaults to 1, so genuinely simultaneous contributions queue on one connection
+# and fail on the 5s pool timeout rather than on this limiter. Raising the burst
+# makes *sequential* batches fast; it does not make parallel contribution work,
+# and a client that wants that needs a bigger pool first.
 LIMITS: dict[str, Limit] = {
     "search": Limit(per_minute=30, burst=10),
     "get_note": Limit(per_minute=120, burst=30),
-    "contribute": Limit(per_minute=10, burst=3),
+    "contribute": Limit(per_minute=30, burst=20),
     "snapshot": Limit(per_minute=2 / 60, burst=1),  # 2/hour
 }
 

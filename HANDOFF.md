@@ -154,6 +154,30 @@ Verified end to end: the importer now reports `replayed`, not `conflict`.
 
 **The importer was already committed** as `f942917` — item 8 below was stale.
 
+### The contribute quota now diverges from the integration spec, on purpose
+
+`contribute` was `10/min burst 3`; it is now **`30/min burst 20`**. That shape assumed
+contributions trickle in. They do not — they arrive in batches, and burst 3 throttled every
+librarian session and every importer run end to end without touching the abuse case, which is
+sustained rate. Long-run exposure is bounded by `per_minute` alone; `burst` only decides how fast
+the first few land, so a generous burst against a modest sustained rate costs little.
+
+`test_limits_match_the_integration_spec` no longer covers `contribute`; a separate test asserts
+the new numbers and says why, so this reads as a decision rather than drift. **The spec's limits
+table should be updated to match, or the divergence accepted explicitly** — see task 12.
+
+The importer's `DEFAULT_DELAY_SECONDS` tracked down 6.0 → 2.0 to match the new sustained rate.
+A run of 20 notes or fewer now clears the burst and is not paced at all.
+
+**This does not make concurrent contribution work, and nothing here changes that.** The vault is
+already fully async; the serialization is `VAULT_DB_POOL_SIZE=1` (`max_overflow=0`,
+`pool_timeout=5`) and the corpus-wide `pg_advisory_xact_lock` that ADR 0016 holds across
+check-dedup-then-write deliberately. Raising the pool would move the queue from the pool to the
+lock — a cleaner failure mode, the same throughput — and it spends against the
+`vault_connections = pool_size * process_count` budget in `settings.py`. The real lever for batch
+throughput is a **batch contribution endpoint** (one lock acquisition, one transaction,
+embeddings computed concurrently up front), which needs a per-item outcome model first.
+
 ---
 
 ## 2. Next — track #5, the search contract
@@ -237,6 +261,13 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
 9. **More reference pairs.** Three is thin, and the ceiling is a minimum over them.
 10. **Human-layer sync** — the other half of ADR 0012. Nothing built.
 11. **Export/snapshot** (`vault:export`), **E501**, **UP042**.
+12. **Reconcile the integration spec's limits table with `contribute` = 30/min burst 20**, or
+   record the divergence in the spec deliberately. The code and its test already state the
+   reasoning; the spec is the copy that is now wrong.
+13. **A batch contribution endpoint**, if batch throughput ever matters. One request carrying N
+   notes, one advisory-lock acquisition, one transaction, embeddings computed concurrently
+   before it opens. Blocked on a per-item outcome model — what a 200 means when note 7 of 20
+   flags — and on how idempotency keys work for a batch.
 
 **Blocked / out of scope until re-approved:** MCP (`mcp` is not an approved dependency);
 `VAULT_ENABLED=true` in production; partial HNSW index per profile; dimension-change DDL.

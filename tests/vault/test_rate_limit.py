@@ -142,13 +142,26 @@ def test_an_unlimited_operation_is_allowed() -> None:
     [
         ("search", 30, 10),
         ("get_note", 120, 30),
-        ("contribute", 10, 3),
     ],
 )
 def test_limits_match_the_integration_spec(
     operation: str, per_minute: float, burst: int
 ) -> None:
     assert LIMITS[operation] == Limit(per_minute=per_minute, burst=burst)
+
+
+def test_the_contribute_limit_diverges_from_the_spec_on_purpose() -> None:
+    """The spec says 10/min burst 3; this ships 30/min burst 20.
+
+    Asserted separately rather than folded into the spec-matching test above,
+    because the point is that it is a decision and not drift. Contributions
+    arrive in batches -- a librarian session settling nine notes, an importer
+    replaying a corpus of fifty -- and burst 3 throttles every one of them
+    without touching the abuse case, which is sustained rate. See the comment
+    on LIMITS.
+    """
+
+    assert LIMITS["contribute"] == Limit(per_minute=30, burst=20)
 
 
 def test_the_snapshot_limit_is_two_per_hour() -> None:
