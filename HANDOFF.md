@@ -7,10 +7,10 @@
 
 **Everything from `59985a4` onward is unpushed**; `origin/dev` is `0c9fb9f`. CI has seen none
 of it: the calibration work, the retry-budget change, the facets column, migrations `0005` and
-`0006`, the raised contribute quota, or the update endpoint. `git log --oneline 0c9fb9f..HEAD`
+`0006`, the raised contribute quota, or the update and retire endpoints. `git log --oneline 0c9fb9f..HEAD`
 is the authoritative list — a hardcoded one here goes stale on the next commit.
 
-> This file goes stale fast. The durable record is `app/vault/docs/adr/` (0001–0018),
+> This file goes stale fast. The durable record is `app/vault/docs/adr/` (0001–0019),
 > `app/vault/docs/embedding-calibration.md`, and the "Deferred decisions" section of
 > `app/vault/docs/vault-architecture.md`. Treat §1 as an index into those.
 >
@@ -31,8 +31,8 @@ pgvector 0.8.6 in local PostgreSQL 17.9; the vault schema lives in the ordinary 
 | Server | PostgreSQL 17.9, `localhost:5432` |
 | `leaderboard` (dev) | leaderboard `0004_auth_identities`; vault **`0006_request_digest_version`** (head) |
 | `leaderboard_test` | both lineages at head (vault `0006_request_digest_version`) |
-| Corpus | `vault_documents` holds **48**; the markdown corpus is **50** (two notes written after the import — see 2c). 48 embeddings, 48 audit events, 48 write requests |
-| Digest versions | 4 write requests restated to `digest_version` 2 by replay; **44 still at 1** and will restate on next touch |
+| Corpus | `vault_documents` holds **49**; the markdown corpus is **50** (one note written after the last import). 49 embeddings |
+| Digest versions | Nearly all restated to `digest_version` 2; stragglers restate on next touch |
 | Vault credential | principal `importer`, scopes `vault:read vault:write`. **The principal name is load-bearing — see §4** |
 
 The venv is in the **main repo**, not the worktree:
@@ -178,6 +178,24 @@ consequences worth carrying forward, all recorded in the ADR:
 
 `READABLE_STATUSES` moved from `routes.py` to `read_policy.py` so the write path can apply the
 read rule without importing the transport layer.
+
+### Both surfaces can now update and retire (ADR 0018, ADR 0019)
+
+`PUT /api/v1/vault/notes/{id}` and `DELETE /api/v1/vault/notes/{id}`, with `vault_contrib update`
+and `vault_contrib retire` as their markdown counterparts. The engine also reslugs a note's
+filename when its title changes, which it previously never did.
+
+Retire is a **delete**, not ADR 0008's archived status. Archived is for content that is
+superseded but true; this is for content that is false, where a resolvable row is the failure.
+The write-request ledger keeps its row with a null `document_id` — deleting it would let a
+replayed key recreate the retired document, turning a retry into an undo.
+
+Used in anger this session: five notes revised, one retired on both surfaces, and one retitled.
+
+**Two gaps this leaves.** The markdown CLI refuses to retire a note a wiki page cites, naming
+the pages; the HTTP endpoint has no equivalent because wiki pages are not in the database at
+all. And the two surfaces retire independently — there is no deletion path from markdown to the
+service, so retiring means doing it on both, deliberately.
 
 ### The contribute quota now diverges from the integration spec, on purpose
 
