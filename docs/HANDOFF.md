@@ -383,17 +383,22 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    notes, one advisory-lock acquisition, one transaction, embeddings computed concurrently
    before it opens. Blocked on a per-item outcome model — what a 200 means when note 7 of 20
    flags — and on how idempotency keys work for a batch.
-14. **Pin `_canonical_request_digest` to a golden hex digest.** `exclude_unset` makes additive
-   schema change a non-event, but Pydantic serializes in field-declaration order, so
-   *reordering* or renaming a field in `VaultContributionRequest` silently changes the digest
-   of every stored key — the same stranding that migration `0006` exists to fix. The docstring
-   says any change is a new `REQUEST_DIGEST_VERSION`, which is the right rule, but a reorder
-   does not look like a change to that function, so the rule will not fire. A fixed payload
-   against a hardcoded digest turns it into a failing test instead. Cheap; not done in §1c.
-15. **Make auth and the handler share one connection checkout.** A vault request checks out
-   twice in sequence, which is why the pool needed a second connection at all. Yielding the
-   open connection from the credential dependency would halve pool pressure and make `touch()`
-   free. A real refactor of the dependency chain, so it was filed rather than done.
+14. ~~Pin `_canonical_request_digest` to a golden hex digest.~~ **Done 2026-08-14.**
+   `test_the_digest_rule_is_pinned_to_a_golden_value` freezes a fully-populated payload against
+   both `REQUEST_DIGEST_VERSION` and the digest hex. Verified by mutation, not by assertion:
+   swapping two fields' declaration order breaks it, adding an unsupplied optional field does
+   not. Both constants are pinned so that "fix the failing test" cannot mean pasting the new
+   hash — the version has to be bumped and a migration written first.
+15. ~~Make auth and the handler share one connection checkout.~~ **Rejected 2026-08-14 — do not
+   revive without re-reading this.** It appears to halve pool pressure, and does for `get_note`
+   and `retire`. But `search`, `contribute` and `update` all call the embedding provider
+   *between* their checkouts, deliberately (`service.py`, and vault ADR 0016). A dependency
+   that `yield`s a connection holds it for the whole request, so it would pin one across an
+   embedding budget of 3 attempts × 5s plus backoff — **up to 23 seconds**. At pool size 2,
+   two concurrent searches would exhaust the pool and turn the new 503 into a routine response.
+   The original motivation has also shrunk: `touch()` is sampled now, so authentication is
+   usually one indexed `SELECT`. Revisit only if `VaultPoolObserver` reports real contention,
+   and the answer then is a larger pool, not a longer-held connection.
 16. **Decide whether this file and `HANDOFF-METADATA.md` belong in a public repo at all.**
    Moved to `docs/` on 2026-08-14, which fixes the root-level signal but not the contents:
    both still carry `C:\Users\yarom\...` paths and name the private `knowledge-platform`

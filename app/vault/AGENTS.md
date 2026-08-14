@@ -167,6 +167,13 @@ be edited when it does.
 
 ## Authentication
 
+- **The credential dependency must not `yield` an open connection.** Sharing one checkout
+  between authentication and the handler looks like free savings and is not: a dependency that
+  yields holds the connection for the whole request, and `search`, `contribute` and `update`
+  all call the embedding provider *between* their checkouts on purpose. It would pin a pooled
+  connection across a 23s worst-case embedding budget, which is the same mistake as embedding
+  inside a transaction, one layer up. Authentication takes its own short checkout and releases
+  it. Considered and rejected 2026-08-14; see `docs/HANDOFF.md` task 15.
 - **Agents authenticate with `hssv1_<credential-id>_<secret>`**, verified against
   `vault_agent_credentials`; only `sha256(secret)` is stored. `VAULT_READ_API_KEY` is gone and
   there is no global on/off secret — a credential verifies or it does not. See ADR 0015.

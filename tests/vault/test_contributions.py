@@ -287,6 +287,64 @@ def test_the_digest_ignores_fields_the_caller_did_not_send() -> None:
     )
 
 
+# A payload frozen against the digest it must produce. Every declared field is
+# supplied on purpose: `exclude_unset` emits only supplied fields, in *declaration*
+# order, so covering all of them means any reordering of any two is caught.
+_GOLDEN_PAYLOAD: dict[str, object] = {
+    "title": "Golden payload",
+    "body": "A fixed body, pinned so the digest rule cannot move unnoticed.",
+    "summary": "A fixed summary.",
+    "tags": ["golden", "digest"],
+    "aliases": ["golden-note"],
+    "facets": {"project": ["hss"]},
+    "related_ids": ["rel-1"],
+    "source_ids": ["src-1"],
+    "source_url": "https://example.test/golden",
+    "idempotency_key": "golden-key-0001",
+}
+_GOLDEN_DIGEST_VERSION = 2
+_GOLDEN_DIGEST_HEX = "2dcc9875331153c7c9d566de0152bd89aeb2b3333962ec56a363ae74914a0230"
+
+
+def test_the_digest_rule_is_pinned_to_a_golden_value() -> None:
+    """A change to the digest rule must be a decision, not a side effect.
+
+    The test above asserts the digest ignores unsupplied fields, but it computes
+    its expectation the same way the function does -- so if the serialization
+    *order* changes, both sides move together and it still passes. Pydantic emits
+    in field-declaration order, so reordering or renaming a field in
+    `VaultContributionRequest` silently changes the digest of every request, and
+    every stored key then compares against a rule it was not written under. That
+    is migration 0006's failure exactly: 409s no caller can clear.
+
+    Note what this does *not* fire on. Adding an optional field anywhere in the
+    model leaves this digest untouched, because an unsupplied field is not
+    emitted regardless of its position -- which is the property `exclude_unset`
+    exists to provide. So this is not a change-detector that cries at every edit;
+    it fires on reorders and renames, which is precisely when a caller's stored
+    digest stops meaning what it meant.
+
+    **Both halves are pinned deliberately.** If this fails, the fix is not to
+    paste in the new hash: it is to decide whether the rule changed, bump
+    REQUEST_DIGEST_VERSION, and write the migration that lets old rows replay --
+    then update both constants together. Asserting the version here is what makes
+    that step unskippable.
+    """
+
+    model = VaultContributionRequest.model_validate(_GOLDEN_PAYLOAD)
+
+    assert REQUEST_DIGEST_VERSION == _GOLDEN_DIGEST_VERSION, (
+        "REQUEST_DIGEST_VERSION moved without the golden digest being restated. "
+        "Update _GOLDEN_DIGEST_HEX in the same change, and confirm a migration "
+        "exists for rows written under the previous rule."
+    )
+    assert _canonical_request_digest(model).hex() == _GOLDEN_DIGEST_HEX, (
+        "The canonical request digest changed for a fixed payload. Every stored "
+        "digest at this version was produced by the old rule, so bump "
+        "REQUEST_DIGEST_VERSION and add the migration before restating this value."
+    )
+
+
 def _force_stored_digest(
     principal_prefix: str, *, digest_version: int, request_sha256: bytes
 ) -> None:
