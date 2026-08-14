@@ -1,10 +1,28 @@
-"""Token-bucket behaviour, driven by an injected clock rather than sleeping."""
+"""Token-bucket behaviour, driven by an injected clock rather than sleeping.
+
+The pre-auth IP guard is exercised at the bottom, through a synthetic router
+shaped like the vault's. It needs no database precisely because the property
+under test is that a refused request never reaches one.
+"""
 
 import asyncio
 
 import pytest
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.testclient import TestClient
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-from app.vault.rate_limit import LIMITS, Limit, TokenBucketLimiter
+from app.vault.rate_limit import (
+    LIMITS,
+    Limit,
+    TokenBucketLimiter,
+    build_preauth_dependency,
+    client_ip,
+    enforce_preauth_ip_limit,
+)
 
 
 def test_burst_is_the_capacity_and_the_next_request_is_refused() -> None:
@@ -169,3 +187,108 @@ def test_the_snapshot_limit_is_two_per_hour() -> None:
     # spec's hourly figure survives the conversion.
     assert LIMITS["snapshot"].per_minute * 60 == pytest.approx(2.0)
     assert LIMITS["snapshot"].burst == 1
+
+
+# --- The pre-authentication IP guard ---------------------------------------
+
+
+def _guarded_app(limit: str) -> tuple[TestClient, list[int]]:
+    """A router shaped like the vault's, with the database stood in for.
+
+    `reached` counts how many requests got as far as the dependency that would
+    have queried `vault_agent_credentials`. That count is the finding: without
+    the guard it equals the number of requests sent, however many that is.
+    """
+
+    reached: list[int] = []
+
+    async def authenticate() -> None:
+        reached.append(1)
+
+    guard = build_preauth_dependency(Limiter(key_func=client_ip), limit)
+    router = APIRouter(dependencies=[Depends(guard)])
+
+    @router.get("/search", dependencies=[Depends(authenticate)])
+    async def search() -> dict[str, bool]:
+        return {"ok": True}
+
+    async def handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+        return JSONResponse(status_code=429, content={"detail": str(exc.detail)})
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1/vault")
+    app.add_exception_handler(RateLimitExceeded, handler)
+    return TestClient(app), reached
+
+
+def test_the_guard_refuses_before_the_credential_lookup() -> None:
+    """The whole point of F1: a refused request must cost no database work.
+
+    A route decorator would satisfy the 429 half of this and fail the second
+    assertion, because FastAPI solves dependencies -- including the one that
+    authenticates -- before it calls the endpoint the decorator wraps.
+    """
+
+    client, reached = _guarded_app("3/minute")
+
+    statuses = [client.get("/api/v1/vault/search").status_code for _ in range(5)]
+
+    assert statuses == [200, 200, 200, 429, 429]
+    assert sum(reached) == 3
+
+
+def test_the_guard_is_keyed_per_client_address() -> None:
+    """One noisy caller must not spend another caller's allowance."""
+
+    client, _reached = _guarded_app("2/minute")
+    noisy = {"X-Forwarded-For": "203.0.113.9"}
+    other = {"X-Forwarded-For": "198.51.100.4"}
+
+    for _ in range(3):
+        client.get("/api/v1/vault/search", headers=noisy)
+
+    assert client.get("/api/v1/vault/search", headers=noisy).status_code == 429
+    assert client.get("/api/v1/vault/search", headers=other).status_code == 200
+
+
+def test_the_vault_router_carries_the_guard() -> None:
+    """Attached to the router, so a route added later inherits it by default."""
+
+    from app.vault.routes import router as vault_router
+
+    assert any(
+        dependency.dependency is enforce_preauth_ip_limit
+        for dependency in vault_router.dependencies
+    )
+
+
+def test_the_client_key_is_the_leftmost_forwarded_address() -> None:
+    """Heroku appends, so the original client is first and the proxies follow."""
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-forwarded-for", b"203.0.113.9, 70.41.3.18, 150.172.238.178")],
+            "client": ("10.0.0.1", 5000),
+        }
+    )
+
+    assert client_ip(request) == "203.0.113.9"
+
+
+def test_the_client_key_falls_back_to_the_socket_peer() -> None:
+    """Local development has no proxy in front, so there is no header to read."""
+
+    request = Request(
+        {"type": "http", "headers": [], "client": ("127.0.0.1", 5000)}
+    )
+
+    assert client_ip(request) == "127.0.0.1"
+
+
+def test_the_client_key_tolerates_a_missing_peer() -> None:
+    """`request.client` is Optional in Starlette; a None key would raise."""
+
+    request = Request({"type": "http", "headers": [], "client": None})
+
+    assert client_ip(request) == "unknown"

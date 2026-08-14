@@ -27,6 +27,7 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api_models import (
@@ -45,7 +46,7 @@ from .db import get_vault_engine
 from .domain import VaultDocument
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError
-from .rate_limit import get_limiter
+from .rate_limit import enforce_preauth_ip_limit, get_limiter
 from .read_policy import READABLE_STATUSES
 from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
 from .service import (
@@ -68,7 +69,11 @@ from .service import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["vault"])
+# The pre-auth guard is attached here rather than per route so it covers the
+# whole surface, including routes added later, and so FastAPI solves it before
+# the per-route dependency that authenticates -- which is the only ordering in
+# which it protects anything. See rate_limit.enforce_preauth_ip_limit.
+router = APIRouter(tags=["vault"], dependencies=[Depends(enforce_preauth_ip_limit)])
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -91,6 +96,37 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # Defined in read_policy so the write path applies the same rule without
 # importing this module. Imported above; the comment stays here because this is
 # where a reader of the read surface looks for it.
+
+
+# Advisory only, and deliberately equal to the default pool timeout: a caller
+# that waited that long for a connection and lost has no better estimate to
+# offer than "about as long as you just waited".
+_SATURATION_RETRY_AFTER_SECONDS = 5
+
+
+async def vault_saturation_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Map an exhausted vault connection pool to 503 rather than 500.
+
+    SQLAlchemy raises ``TimeoutError`` when a checkout waits out
+    ``pool_timeout`` — saturation, not a defect. Unhandled it becomes a 500,
+    which is the wrong signal in two directions at once: the caller is told not
+    to retry something that is purely transient, and the error tracker reports
+    a bug where the truth is that the vault is busy.
+
+    Registered by the host application because exception handlers live on the
+    app, but written here so it leaves with the package. It names no HSS
+    concept, and SQLAlchemy is the vault's dependency alone.
+    """
+
+    logger.warning(
+        "Vault connection pool exhausted",
+        extra={"path": request.url.path},
+    )
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "Vault is temporarily saturated"},
+        headers={"Retry-After": str(_SATURATION_RETRY_AFTER_SECONDS)},
+    )
 
 
 async def _authenticated(

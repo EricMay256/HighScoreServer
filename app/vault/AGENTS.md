@@ -202,13 +202,27 @@ be edited when it does.
 
 ## Rate limiting
 
-- **Per authenticated principal, never per IP** — agents share egress addresses and a
-  credential is what an operator can revoke. `app/vault/rate_limit.py` carries a token bucket
-  because slowapi lives in the host package and importing it would breach the isolation rule.
-- Limits mirror the integration spec's table; `LIMITS` is the single statement of them.
-- **Buckets are per process**, so the real ceiling is the limit times the worker count. Do not
-  describe this as a hard limit in operator docs, and do not "fix" it in-process — the fix is a
-  shared backend, and it only matters across hosts.
+- **Two layers, and they are not interchangeable.** The *quota* is a token bucket per
+  (principal, operation) and enforces what an operator granted a credential. The *pre-auth
+  guard* is IP-keyed and bounds the cost of authentication itself. Do not delete one as
+  redundant with the other.
+- **The quota is per authenticated principal, never per IP** — agents share egress addresses
+  and a credential is what an operator can revoke. Limits mirror the integration spec's
+  table; `LIMITS` is the single statement of them.
+- **The pre-auth guard must stay a router-level dependency, never a route decorator.**
+  FastAPI solves dependencies before calling the endpoint, and authentication *is* a
+  dependency that queries `vault_agent_credentials` — so a `@limiter.limit` decorator on the
+  endpoint charges after the database round trip it exists to prevent, protecting nothing.
+  Attached to the `APIRouter` so new routes inherit it.
+- **slowapi is used here, and that is not a boundary breach.** It is a third-party import;
+  the vault builds its own `Limiter` and never touches the host's. `app/vault/` still contains
+  no `from app.`. The guard's X-Forwarded-For key is forgeable and deliberately not an
+  authorization boundary — forging it spreads load across buckets, it grants nothing.
+- **Both layers are per process by default**, so the real ceiling is the limit times the
+  worker count. Do not describe this as a hard limit in operator docs, and do not "fix" the
+  quota in-process — the fix is a shared backend. The pre-auth guard can already take one via
+  `VAULT_RATE_LIMIT_STORAGE_URI`, with slowapi's in-memory fallback so an unreachable Redis
+  degrades the layer instead of failing requests.
 - A bucket may be pruned **only** when elapsed time proves it would have refilled. Dropping a
   partly-drained bucket silently refunds requests already charged.
 

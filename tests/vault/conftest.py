@@ -3,7 +3,24 @@ from collections.abc import Iterator
 
 import pytest
 
+from app.vault.rate_limit import reset_ip_limiter
 from tests.vault.migration_helpers import create_database, drop_database
+
+
+@pytest.fixture(autouse=True)
+def clear_preauth_ip_buckets() -> Iterator[None]:
+    """Give every vault test a fresh pre-auth bucket.
+
+    The per-principal quota needs no equivalent: a test that issues its own
+    credential gets a clean bucket for free. The pre-auth guard is keyed on the
+    client address, and every test shares a loopback one, so without this the
+    suite's own request volume accumulates into one bucket and tests start
+    failing according to the order they ran in.
+    """
+
+    reset_ip_limiter()
+    yield
+    reset_ip_limiter()
 
 
 @pytest.fixture(scope="session")

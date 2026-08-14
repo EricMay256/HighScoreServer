@@ -40,6 +40,11 @@ easy to overlook:
 `SQLAlchemy` is shared: the vault uses Core directly, and HSS needs it as Alembic's engine
 layer. It stays in both.
 
+`slowapi` is shared: `app/vault/rate_limit.py` builds its **own** `Limiter` for the pre-auth
+IP guard, and HSS has a separate one in `app/limiter.py`. Two independent instances, no
+shared state, and neither imports the other — so extraction moves the vault's and leaves
+HSS's alone. It stays in both. The vault repo must declare it; nothing else changes.
+
 `httpx` is shared: the vault's embedding adapter uses it, and HSS uses it for Steam ticket
 validation. It stays in both.
 

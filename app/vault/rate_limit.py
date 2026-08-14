@@ -1,25 +1,39 @@
-"""Per-principal rate limiting for the vault surface.
+"""Rate limiting for the vault surface, in two layers that answer two questions.
 
-slowapi lives in the host package and is unreachable from here — importing it
-would breach the isolation rule that keeps extraction a directory move — so the
-vault carries its own limiter. It is deliberately small: a token bucket per
-(principal, operation), which is exactly the shape the integration spec states
-its limits in ("sustained limit" is the refill rate, "burst" is the capacity).
+**The quota** is a token bucket per (principal, operation), which is exactly the
+shape the integration spec states its limits in ("sustained limit" is the refill
+rate, "burst" is the capacity). It enforces what an operator granted a
+credential, so it is keyed by authenticated principal, not IP: agents share
+egress addresses and a credential is the thing an operator can actually revoke.
 
-**Keyed by authenticated principal, not IP.** Agents share egress addresses and
-a credential is the thing an operator can actually revoke, so an IP key would
-both over- and under-restrict.
+**The pre-auth guard** is IP-keyed and charged before the credential is looked
+up. It exists because the quota structurally cannot cover the cost of
+authentication itself — see `enforce_preauth_ip_limit` below. Neither layer
+replaces the other, and removing either reopens a hole the other never covered.
 
-**In-process, and that has a consequence worth stating.** Each Gunicorn worker
-holds its own buckets, so a limit of 30/min admits up to 30 per worker per
-minute. On a single-host deployment that is a known factor, not a surprise;
-across hosts it stops being a limit at all, which is where a shared backend
-becomes necessary rather than merely tidier.
+**Both are per process by default, and that has a consequence worth stating.**
+Each Gunicorn worker holds its own state, so a limit of 30/min admits up to 30
+per worker per minute. On a single-host deployment that is a known factor, not a
+surprise; across hosts it stops being a limit at all, which is where a shared
+backend becomes necessary rather than merely tidier. The pre-auth guard can take
+one today via ``VAULT_RATE_LIMIT_STORAGE_URI``, because it is the layer where an
+attacker is least likely to stay on one worker.
+
+slowapi appears here for the pre-auth guard only. That is a **third-party**
+import, not a host import: `app/vault/` still contains no `from app.`, so
+extraction remains a directory move, and `tests/vault/test_boundaries.py` still
+passes. The cost is that slowapi leaves with the package, and the extraction
+manifest lists it.
 """
 
 import asyncio
+import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+
+from slowapi import Limiter
+from starlette.requests import Request
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,10 +70,11 @@ class Limit:
 # principal per worker.
 #
 # Concurrency is bounded elsewhere and this does not change it. VAULT_DB_POOL_SIZE
-# defaults to 1, so genuinely simultaneous contributions queue on one connection
-# and fail on the 5s pool timeout rather than on this limiter. Raising the burst
-# makes *sequential* batches fast; it does not make parallel contribution work,
-# and a client that wants that needs a bigger pool first.
+# defaults to 2 and a request checks out twice in sequence, so a handful of
+# simultaneous contributions still queue and can fail on the 5s pool timeout
+# rather than on this limiter. Raising the burst makes *sequential* batches
+# fast; it does not make wide parallel contribution work, and a client that
+# wants that needs a bigger pool first.
 LIMITS: dict[str, Limit] = {
     "search": Limit(per_minute=30, burst=10),
     "get_note": Limit(per_minute=120, burst=30),
@@ -184,3 +199,114 @@ def get_limiter() -> TokenBucketLimiter:
     """
 
     return _limiter
+
+
+def client_ip(request: Request) -> str:
+    """The originating client address, as far as it can be trusted.
+
+    Behind Heroku's router the socket peer is the router, so the client is the
+    **leftmost** entry of X-Forwarded-For. That header is caller-supplied and
+    therefore forgeable — which is survivable here precisely because this limit
+    is not an authorization boundary. Forging it lets an attacker spread across
+    buckets; it grants no access. The quota that decides what a caller may do
+    is keyed on the credential, which cannot be forged.
+    """
+
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    client = request.client
+    return client.host if client is not None else "unknown"
+
+
+# Deliberately loose, and sustained-only rather than also per-second. This is a
+# floor, not a quota: the per-principal buckets above are where real limits are
+# expressed, and a caller legitimately holding several credentials behind one
+# egress address can exceed any tight IP number without doing anything wrong
+# (get_note alone is 120/min per principal). A short-window clause would also
+# make the test suite order-dependent, since every test shares 127.0.0.1.
+#
+# What it has to achieve is narrower than it looks: turning "unbounded database
+# round trips from an anonymous caller" into "a bounded number", after which
+# hammering the endpoint stops being interesting. Tighten it via the environment
+# for a deployment that expects fewer clients.
+_DEFAULT_PREAUTH_LIMIT = "600/minute"
+
+
+def _make_ip_limiter() -> Limiter:
+    """Build the pre-auth limiter.
+
+    ``in_memory_fallback_enabled`` so an unreachable Redis degrades this layer
+    to per-process instead of failing vault requests — the same tradeoff the
+    host makes for its own limiter, reached through slowapi's own mechanism
+    rather than a connectivity probe at import.
+
+    ``headers_enabled`` stays off. The rate-limit headers describe a quota the
+    caller can act on, and this is not that; the per-principal 429 is the one
+    carrying Retry-After.
+    """
+
+    return Limiter(
+        key_func=client_ip,
+        storage_uri=os.environ.get("VAULT_RATE_LIMIT_STORAGE_URI", "memory://"),
+        in_memory_fallback_enabled=True,
+        headers_enabled=False,
+    )
+
+
+# Module level because the decorator below needs it at import time. Reading the
+# environment here means these two settings are fixed for the life of the
+# process, which matches how the limiter itself is scoped.
+_ip_limiter = _make_ip_limiter()
+_PREAUTH_LIMIT = os.environ.get(
+    "VAULT_PREAUTH_RATE_LIMIT",
+    _DEFAULT_PREAUTH_LIMIT,
+)
+
+
+def build_preauth_dependency(
+    limiter: Limiter,
+    limit: str,
+) -> Callable[[Request], Awaitable[None]]:
+    """Build the FastAPI dependency that charges the pre-auth guard.
+
+    **A dependency, not a route decorator, and the distinction is the whole
+    point.** FastAPI resolves dependencies before it calls the endpoint, and
+    authentication is a dependency — `_authenticated` opens a vault transaction
+    and queries `vault_agent_credentials`. A `@limiter.limit` decorator on the
+    endpoint therefore charges its token *after* the database round trip it was
+    meant to prevent, which is no protection at all.
+
+    Attached at the router so it covers the whole surface including routes not
+    written yet, and so it is solved before the per-route dependencies that
+    authenticate. A route that opts out has to say so explicitly.
+
+    A factory rather than a bare decorated function so a test can build one at a
+    limit it can actually exhaust; the module-level instance below is the real
+    one. slowapi requires the wrapped callable to take a parameter named
+    ``request``, and raises at import if it does not.
+    """
+
+    @limiter.limit(limit)
+    async def guard(request: Request) -> None:
+        # Called for its effect. Raising RateLimitExceeded is the *successful*
+        # path once the limit is spent; the host application's existing handler
+        # turns it into a 429.
+        return None
+
+    return guard
+
+
+enforce_preauth_ip_limit = build_preauth_dependency(_ip_limiter, _PREAUTH_LIMIT)
+
+
+def reset_ip_limiter() -> None:
+    """Drop all pre-auth buckets. For tests and for a freshly started process.
+
+    The quota's buckets are keyed per principal, so a test issuing a new
+    credential gets a clean bucket for free. An IP key has no such escape
+    hatch — every test shares a loopback address — so this is the seam that
+    keeps the suite order-independent.
+    """
+
+    _ip_limiter.reset()
