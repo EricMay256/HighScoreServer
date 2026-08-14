@@ -14,6 +14,11 @@ rule that produced them. The decision's intent is unchanged — key order and
 whitespace still must not make a conflict — so this too is an amendment in place.
 See "Amendment, 2026-08-13" below.
 
+Amended 2026-08-14: "One corpus-wide advisory lock" gains an explicit account of
+the throughput it costs and the condition under which the decision would be
+revisited. Nothing about the decision changes — no code changed with it — so this
+is an amendment in place. See "Amendment, 2026-08-14" below.
+
 ## Context
 
 `POST /api/v1/vault/contributions` is the first write surface. Vault ADR 0004
@@ -284,3 +289,40 @@ a separate decision — a distinct update endpoint keyed on document id, or an
 opt-in "replay may update when the body differs" — and it should be made before
 the importer is taught the fuller contract, because widening the payload without
 it changes the digest again and buys nothing.
+
+## Amendment, 2026-08-14: what the one lock actually costs
+
+"One corpus-wide advisory lock" above says a per-key lock would not help. It does
+not say what the chosen lock costs, and a reader who notices the cost before the
+justification will read it as an oversight. Stating it plainly.
+
+`_CONTRIBUTION_LOCK_KEY` is a single constant, and `pg_advisory_xact_lock` takes
+its lock in the *database*, not in the process. So the serialization is total and
+cluster-wide: a contribution from principal A blocks one from principal B on
+entirely unrelated content, across workers and across dynos. It is not one lock
+per worker, and adding dynos does not add write throughput.
+
+That is the intended behaviour, and the reason is the shape of the invariant
+rather than a tolerance for slowness. The dedup read is `find_similar` over the
+**whole corpus** — it has no partition key, because "is this note already here?"
+is not a question about a principal or a path. A lock key derived from anything
+narrower than the corpus therefore fails exactly where the lock is needed: two
+principals contributing the same insight concurrently is not a hypothetical, it
+is the normal failure mode of parallel agents, and per-principal keys would let
+both pass dedup and both insert. The lock has to cover what the read covers.
+
+**What bounds the cost.** The critical section is deliberately short: embedding
+happens before the transaction opens (see above), so what the lock actually holds
+is a vector query plus an insert — milliseconds, not the provider's latency.
+Contribution is quota'd at 30/min per principal, so the arrival rate the lock has
+to absorb is small by construction. And writes are the rare operation here; the
+vault is read-mostly, and reads take no lock at all.
+
+**When this stops being right.** The signal is sustained write concurrency high
+enough that the queue behind the lock exceeds the pool timeout, surfacing as 503s
+from saturation rather than as slow writes. The fix at that point is not a
+narrower key — that trades a throughput problem for a correctness one — but
+moving dedup off the synchronous write path: insert provisionally, resolve
+duplicates in a background pass. That is a different governance model, with a
+window in which the corpus contains known-unreviewed duplicates, and it should be
+its own ADR rather than a quiet change to this key.
