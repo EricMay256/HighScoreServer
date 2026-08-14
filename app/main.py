@@ -10,6 +10,7 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -24,6 +25,7 @@ from app.limiter import limiter
 from app.vault.db import close_vault_db, init_vault_db
 from app.vault.embedding_runtime import close_vault_embeddings, init_vault_embeddings
 from app.vault.routes import router as vault_router
+from app.vault.routes import vault_saturation_handler
 from app.vault.settings import vault_enabled
 from app.view_routes import router as view_router
 
@@ -106,6 +108,10 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
     app.add_exception_handler(CrossRouteError, _cross_route_handler)
+    # Vault pool saturation is a 503, not a 500. SQLAlchemy is the vault's
+    # dependency alone, so this cannot mask an HSS failure, and a disabled
+    # vault has no engine to raise it -- hence no need to gate registration.
+    app.add_exception_handler(SQLAlchemyTimeoutError, vault_saturation_handler)
     app.add_middleware(SlowAPIMiddleware)
 
     # Register CORS after SlowAPI (Starlette uses reverse registration order)

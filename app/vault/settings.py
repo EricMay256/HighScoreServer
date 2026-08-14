@@ -207,7 +207,12 @@ class VaultSettings:
             hss_database_url=normalize_sqlalchemy_url(hss_database_url),
             pool_size=_positive_int(
                 "VAULT_DB_POOL_SIZE",
-                os.environ.get("VAULT_DB_POOL_SIZE", "1"),
+                # 2 rather than 1 because a vault request checks out twice in
+                # sequence -- once to authenticate, once to serve -- so at size
+                # 1 a second concurrent request on the same worker waits out
+                # pool_timeout_seconds and fails. One spare connection is what
+                # makes concurrency possible at all, not a throughput tuning.
+                os.environ.get("VAULT_DB_POOL_SIZE", "2"),
             ),
             pool_timeout_seconds=_positive_int(
                 "VAULT_DB_POOL_TIMEOUT_SECONDS",
@@ -215,7 +220,9 @@ class VaultSettings:
             ),
             hss_pool_max_size=_positive_int(
                 "HSS_DB_POOL_MAX_SIZE",
-                os.environ.get("HSS_DB_POOL_MAX_SIZE", "5"),
+                # Must track app.db's default, which this only mirrors -- the
+                # budget is validated here but spent there.
+                os.environ.get("HSS_DB_POOL_MAX_SIZE", "4"),
             ),
             process_count=_positive_int(
                 "HSS_PROCESS_COUNT",

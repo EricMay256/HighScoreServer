@@ -17,9 +17,9 @@ def make_settings(**overrides: object) -> VaultSettings:
         "enabled": True,
         "database_url": SHARED_URL,
         "hss_database_url": SHARED_URL,
-        "pool_size": 1,
+        "pool_size": 2,
         "pool_timeout_seconds": 5,
-        "hss_pool_max_size": 5,
+        "hss_pool_max_size": 4,
         "process_count": 2,
         "hss_connection_limit": 20,
         "vault_connection_limit": 20,
@@ -34,8 +34,8 @@ def test_essential_zero_shared_budget_leaves_thirty_percent() -> None:
     budget = make_settings().validate_connection_budget()
 
     assert budget.shared_database is True
-    assert budget.hss_allocated == 10
-    assert budget.vault_allocated == 2
+    assert budget.hss_allocated == 8
+    assert budget.vault_allocated == 4
     assert budget.combined_allocated == 14
     assert budget.hss_limit - budget.combined_allocated == 6
 
@@ -47,14 +47,29 @@ def test_prior_hss_pool_size_fails_shared_budget() -> None:
         settings.validate_connection_budget()
 
 
+def test_hss_pool_of_five_no_longer_fits_beside_the_vault() -> None:
+    """The vault's second connection is what cost HSS its fifth.
+
+    5 * 2 + 2 * 2 + 2 = 16, one over the 15 left after the 25% reserve. This is
+    the check catching a half-applied config change -- raising
+    VAULT_DB_POOL_SIZE without lowering HSS_DB_POOL_MAX_SIZE -- which fails at
+    lifespan and would take the leaderboard down with the vault.
+    """
+
+    settings = make_settings(hss_pool_max_size=5)
+
+    with pytest.raises(RuntimeError, match="connection budget exceeded"):
+        settings.validate_connection_budget()
+
+
 def test_separate_database_budgets_are_calculated_independently() -> None:
     settings = make_settings(database_url=SEPARATE_URL)
 
     budget = settings.validate_connection_budget()
 
     assert budget.shared_database is False
-    assert budget.hss_allocated == 12
-    assert budget.vault_allocated == 4
+    assert budget.hss_allocated == 10
+    assert budget.vault_allocated == 6
     assert budget.combined_allocated is None
 
 

@@ -23,7 +23,7 @@ async def test_hss_pool_defaults_to_essential_zero_budget(
     pool_type.assert_called_once_with(
         conninfo="postgresql://user:secret@db.example.test:5432/hss",
         min_size=1,
-        max_size=5,
+        max_size=4,
         open=False,
     )
     pool.open.assert_awaited_once_with()
