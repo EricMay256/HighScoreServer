@@ -1,8 +1,8 @@
 """HTTP surface for the vault.
 
 Search, note retrieval, and the governed write path: contribution (ADR 0016) and
-full replacement (ADR 0018). Review, compile, and export endpoints belong to
-later phases and are deliberately absent — which means a *flagged* document can
+full replacement (ADR 0018), and retirement (ADR 0019). Review, compile, and
+export endpoints belong to later phases and are deliberately absent — which means a *flagged* document can
 be corrected through no surface here, as ADR 0018 records.
 
 Access is gated on operator-issued agent credentials
@@ -17,7 +17,16 @@ import logging
 from hashlib import sha256
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api_models import (
@@ -44,10 +53,13 @@ from .service import (
     ContributionRequest,
     DedupUnavailable,
     DocumentNotFound,
+    DocumentUnderReview,
     IdempotencyConflict,
+    RetireRequest,
     UpdateRequest,
     UpdateWouldDuplicate,
     VaultContributionService,
+    VaultDocumentRetireService,
     VaultDocumentUpdateService,
     VaultSearchService,
     VaultTransactionService,
@@ -500,3 +512,58 @@ async def update_vault_document(
         message=outcome.message,
         re_embedded=outcome.re_embedded,
     )
+
+
+async def retire_quota(
+    credential: VaultCredential = Depends(require_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "retire")
+    return credential
+
+
+@router.delete(
+    "/notes/{note_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove one vault note",
+)
+async def retire_vault_document(
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(retire_quota),
+) -> Response:
+    """Remove a document from the vault.
+
+    Deletion, not an archived status. ADR 0008's archived state is right for
+    content that is superseded but true; this exists for content that is
+    *wrong*, where a row a caller can still resolve by id is the failure rather
+    than the record. See ADR 0019.
+
+    204 with no body: there is nothing meaningful to return about a document
+    that no longer exists, and repeating the id back would suggest otherwise.
+    """
+
+    service = VaultDocumentRetireService(
+        transactions=VaultTransactionService(get_vault_engine()),
+    )
+    try:
+        await service.retire(
+            RetireRequest(
+                document_id=note_id,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except DocumentNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Note not found",
+        ) from exc
+    except DocumentUnderReview as exc:
+        # 409 rather than 403: the request is legitimate and may succeed later,
+        # once the review case is settled. Nothing was deleted.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot retire a document under review: {exc}",
+        ) from exc
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

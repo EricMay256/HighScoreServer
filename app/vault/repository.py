@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -230,6 +230,50 @@ class VaultDocumentRepository:
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
+
+
+
+    async def delete(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+    ) -> bool:
+        """Remove a document. Returns False when no row matched.
+
+        Embeddings go with it -- that FK cascades, because a vector for a
+        document that no longer exists is not a record of anything.
+
+        ``vault_write_requests`` does **not** cascade and must not: the ledger
+        entry is what makes a replayed idempotency key a no-op, and dropping it
+        would let a retired document be recreated by a retry. Its
+        ``document_id`` is nullable precisely so the row can outlive its
+        subject, so the pointer is cleared and the ledger keeps its meaning --
+        "this key was used, and what it produced is gone".
+        """
+
+        await connection.execute(
+            update(vault_write_requests)
+            .where(vault_write_requests.c.document_id == document_id)
+            .values(document_id=None)
+        )
+        result = await connection.execute(
+            delete(vault_documents).where(vault_documents.c.id == document_id)
+        )
+        return bool(result.rowcount)
+
+    async def count_review_cases(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+    ) -> int:
+        """How many review cases name this document as their candidate."""
+
+        result = await connection.execute(
+            select(func.count())
+            .select_from(vault_review_cases)
+            .where(vault_review_cases.c.candidate_document_id == document_id)
+        )
+        return int(result.scalar_one())
 
 
 class VaultDocumentEmbeddingRepository:

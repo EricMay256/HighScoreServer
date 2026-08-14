@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from app.vault.api_models import VaultContributionRequest
 from app.vault.auth import VaultScope  # noqa: E402  (grouped with vault imports)
@@ -28,6 +28,7 @@ from app.vault.service import REQUEST_DIGEST_VERSION
 from app.vault.settings import vault_enabled
 from app.vault.tables import (
     vault_audit_events,
+    vault_document_embeddings,
     vault_documents,
     vault_review_cases,
     vault_write_requests,
@@ -947,5 +948,174 @@ def test_an_update_records_an_audit_event(
             asyncio.run(engine.dispose())
 
         assert "vault.update" in recorded
+    finally:
+        _cleanup()
+
+
+def _count(table, **where):
+    service, engine = vault_service()
+
+    async def run() -> int:
+        async with service.transaction() as connection:
+            statement = select(func.count()).select_from(table)
+            for column, value in where.items():
+                statement = statement.where(table.c[column] == value)
+            result = await connection.execute(statement)
+            return int(result.scalar_one())
+
+    try:
+        return asyncio.run(run())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_retiring_a_document_removes_it_and_its_embedding(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        note_id = _contribute(client, write_token)
+        assert _count(vault_document_embeddings, document_id=note_id) == 1
+
+        response = client.delete(f"/api/v1/vault/notes/{note_id}", headers=headers)
+
+        assert response.status_code == 204, response.text
+        assert response.content == b""
+        assert _count(vault_documents, id=note_id) == 0
+        # The embedding FK cascades: a vector for a document that no longer
+        # exists is not a record of anything.
+        assert _count(vault_document_embeddings, document_id=note_id) == 0
+        assert client.get(
+            f"/api/v1/vault/notes/{note_id}", headers=headers
+        ).status_code == 404
+    finally:
+        _cleanup()
+
+
+def test_retiring_keeps_the_write_request_and_clears_its_pointer(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The ledger row outlives the document, deliberately.
+
+    It is what makes a replayed idempotency key a no-op. Deleting it would let a
+    retired document be recreated by a retry, which is the opposite of retiring.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload()
+
+    try:
+        created = client.post(
+            "/api/v1/vault/contributions", json=body, headers=headers
+        )
+        assert created.status_code == 200, created.text
+        note_id = created.json()["note_id"]
+        assert _count(vault_write_requests, document_id=note_id) == 1
+
+        client.delete(f"/api/v1/vault/notes/{note_id}", headers=headers)
+
+        assert _count(vault_write_requests, document_id=note_id) == 0
+        assert _count(
+            vault_write_requests, idempotency_key=body["idempotency_key"]
+        ) == 1
+    finally:
+        _cleanup()
+
+
+def test_retiring_records_an_audit_event_that_outlives_the_document(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        note_id = _contribute(client, write_token)
+        client.delete(f"/api/v1/vault/notes/{note_id}", headers=headers)
+
+        service, engine = vault_service()
+
+        async def operations() -> list[str]:
+            async with service.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_audit_events.c.operation).where(
+                        vault_audit_events.c.target_id == note_id
+                    )
+                )
+                return [str(row[0]) for row in result.all()]
+
+        try:
+            recorded = asyncio.run(operations())
+        finally:
+            asyncio.run(engine.dispose())
+
+        assert "vault.retire" in recorded
+    finally:
+        _cleanup()
+
+
+def test_retiring_a_missing_document_is_404(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    try:
+        response = client.delete(
+            f"/api/v1/vault/notes/{uuid4().hex}",
+            headers={"Authorization": f"Bearer {write_token}"},
+        )
+        assert response.status_code == 404
+    finally:
+        _cleanup()
+
+
+def test_retiring_requires_the_write_scope(
+    client: TestClient, provider: StubEmbeddingProvider, configure_test_env: None
+) -> None:
+    credential_id, read_only = _issue(scopes=(VaultScope.READ,))
+    try:
+        response = client.delete(
+            f"/api/v1/vault/notes/{uuid4().hex}",
+            headers={"Authorization": f"Bearer {read_only}"},
+        )
+        assert response.status_code == 403
+    finally:
+        _drop(credential_id)
+        _cleanup()
+
+
+def test_a_document_under_review_cannot_be_retired(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """A review case is a judgement, and its FK does not cascade.
+
+    Deleting under it would either fail on the constraint or leave a decision
+    pointing at nothing, so the retire path refuses and says why.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload()
+
+    try:
+        first = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        assert first.status_code == 200, first.text
+
+        # Same content under a new key: the shipped policy flags an exact match,
+        # which is what opens a review case.
+        duplicate = {**body, "idempotency_key": f"key-{uuid4().hex}"}
+        flagged = client.post(
+            "/api/v1/vault/contributions", json=duplicate, headers=headers
+        )
+        assert flagged.status_code == 200, flagged.text
+        assert flagged.json()["status"] == "flagged"
+        candidate = flagged.json()["note_id"]
+
+        response = client.delete(
+            f"/api/v1/vault/notes/{candidate}", headers=headers
+        )
+
+        # Flagged documents are outside READABLE_STATUSES, so the retire path
+        # cannot see it at all -- 404 rather than 409. Either way it is refused
+        # and the row survives; correcting a flagged document belongs to the
+        # review surface, which is unbuilt.
+        assert response.status_code in (404, 409)
+        assert _count(vault_documents, id=candidate) == 1
     finally:
         _cleanup()

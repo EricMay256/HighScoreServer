@@ -23,3 +23,4 @@ repository's `docs/adr/`, and moves with `app/vault/` when the package is extrac
 | 0016 | [The governed write path](0016-the-governed-write-path.md) | Accepted (amended 2026-08-12: `flag_at` derivation; 2026-08-13: idempotency digest) |
 | 0017 | [Facets carry classification, outside the embedding text](0017-facets-carry-classification-outside-the-embedding.md) | Accepted |
 | 0018 | [Updates are a distinct endpoint that refuses on collision](0018-updates-are-a-distinct-endpoint-that-refuses-on-collision.md) | Accepted |
+| 0019 | [Retiring a document deletes it, and the ledger outlives it](0019-retiring-a-document-deletes-it.md) | Accepted |

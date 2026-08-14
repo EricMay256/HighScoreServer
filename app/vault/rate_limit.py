@@ -69,6 +69,9 @@ LIMITS: dict[str, Limit] = {
     # batches, so it gets the same shape. Its own bucket rather than sharing
     # contribute's, so a backfill cannot starve new contributions.
     "update": Limit(per_minute=30, burst=20),
+    # Retirement is rare and irreversible, so it gets a deliberately tight
+    # bucket: a loop that deletes is worse than a loop that writes.
+    "retire": Limit(per_minute=10, burst=5),
     "snapshot": Limit(per_minute=2 / 60, burst=1),  # 2/hour
 }
 

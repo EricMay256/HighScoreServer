@@ -855,3 +855,76 @@ class VaultDocumentUpdateService:
             source_url=request.source_url,
             provenance=existing.provenance,
         )
+
+@dataclass(frozen=True, slots=True)
+class RetireRequest:
+    """A request to remove one document."""
+
+    document_id: str
+    principal_id: str
+    request_id: str
+
+
+class DocumentUnderReview(Exception):
+    """A review case still names this document as its candidate."""
+
+
+class VaultDocumentRetireService:
+    """Remove a document from the vault.
+
+    Deletion rather than an archived status, and that is the decision worth
+    stating. ADR 0008 keeps archived documents out of search but still
+    resolvable by id, which is right for content that is *retired* -- superseded
+    but true. The case this exists for is content that is **wrong**, where a row
+    a caller can still resolve is the failure rather than the record.
+
+    No dedup gate: retiring is the one write that cannot create a duplicate.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def retire(self, request: RetireRequest) -> None:
+        documents = VaultDocumentRepository()
+
+        async with self._transactions.transaction() as connection:
+            # No advisory lock. The contribution lock exists to make
+            # check-dedup-then-write atomic; a delete has no such span, and
+            # taking it would serialize retirement behind every contribution
+            # for no benefit.
+            existing = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=READABLE_STATUSES,
+                readable_only=True,
+            )
+            if existing is None:
+                raise DocumentNotFound(request.document_id)
+
+            # A review case is an audit record of a judgement, and its FK does
+            # not cascade. Deleting the document under it would either fail on
+            # the constraint or, if forced, leave a decision pointing at
+            # nothing. Refuse and let the review surface settle it first.
+            open_cases = await documents.count_review_cases(
+                connection, request.document_id
+            )
+            if open_cases:
+                raise DocumentUnderReview(
+                    f"{open_cases} review case(s) reference this document"
+                )
+
+            # Audit first: the event has to survive the row it describes, and
+            # writing it inside the same transaction means a retirement can
+            # never be observed without its record, or the reverse.
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.retire",
+                outcome="retired",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=request.document_id,
+            )
+            removed = await documents.delete(connection, request.document_id)
+            if not removed:
+                raise DocumentNotFound(request.document_id)
