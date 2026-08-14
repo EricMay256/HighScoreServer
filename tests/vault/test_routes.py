@@ -1,16 +1,16 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, insert
+from sqlalchemy import delete, insert, select
 from sqlalchemy import delete as sql_delete
 
 from app.vault.auth import TOKEN_PREFIX, VaultScope, hash_secret
 from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
 from app.vault.rate_limit import LIMITS
-from app.vault.repository import VaultDocumentRepository
+from app.vault.repository import TOUCH_RESOLUTION, VaultDocumentRepository
 from app.vault.settings import vault_enabled
 from app.vault.tables import vault_agent_credentials, vault_documents
 from tests.vault.test_search import clear_corpus, seed_corpus, vault_service
@@ -188,6 +188,99 @@ def test_search_rejects_an_expired_credential(
         _drop(credential_id)
 
     assert response.status_code == 401
+
+
+def _last_used_at(credential_id: str) -> datetime | None:
+    service, engine = vault_service()
+
+    async def read() -> datetime | None:
+        async with service.transaction() as connection:
+            result = await connection.execute(
+                select(vault_agent_credentials.c.last_used_at).where(
+                    vault_agent_credentials.c.id == credential_id
+                )
+            )
+            return result.scalar_one()
+
+    try:
+        return asyncio.run(read())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_a_recent_credential_is_not_touched_again(
+    client: TestClient,
+) -> None:
+    """An authenticated read must not cost a write on the hot credential row.
+
+    `last_used_at` is sampled at TOUCH_RESOLUTION. Without that, get_note's
+    120/min quota buys 120 updates a minute to one row per principal, which is
+    WAL churn plus row-lock serialization between workers.
+    """
+
+    recent = datetime.now(UTC)
+    credential_id, token = _issue(last_used_at=recent)
+    try:
+        response = client.get(
+            "/api/v1/vault/search",
+            params={"q": "running"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        after = _last_used_at(credential_id)
+    finally:
+        _drop(credential_id)
+
+    # Unchanged to the microsecond: the predicate matched no row, so PostgreSQL
+    # rewrote nothing rather than storing the same value again.
+    assert after == recent
+
+
+def test_a_stale_credential_is_touched(
+    client: TestClient,
+) -> None:
+    """Sampling still has to record use, or the column stops meaning anything.
+
+    Once the row is older than TOUCH_RESOLUTION the predicate matches and the
+    write lands -- which is what an operator deciding whether to revoke reads.
+    """
+
+    stale = datetime.now(UTC) - TOUCH_RESOLUTION - timedelta(seconds=30)
+    credential_id, token = _issue(last_used_at=stale)
+    try:
+        response = client.get(
+            "/api/v1/vault/search",
+            params={"q": "running"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        after = _last_used_at(credential_id)
+    finally:
+        _drop(credential_id)
+
+    assert after is not None
+    assert after > stale
+
+
+def test_a_never_used_credential_is_touched(
+    client: TestClient,
+) -> None:
+    """NULL is not "recent" -- the IS NULL arm is what makes first use record."""
+
+    credential_id, token = _issue()
+    try:
+        assert _last_used_at(credential_id) is None
+        response = client.get(
+            "/api/v1/vault/search",
+            params={"q": "running"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        after = _last_used_at(credential_id)
+    finally:
+        _drop(credential_id)
+
+    assert after is not None
 
 
 def test_search_returns_lexical_hits(

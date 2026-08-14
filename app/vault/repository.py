@@ -2,10 +2,11 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -30,6 +31,12 @@ from .tables import (
     vault_write_requests,
 )
 
+
+# How coarse `last_used_at` is allowed to be. See VaultAgentCredentialRepository
+# .touch: this is a write-amplification control, not a precision setting, so it
+# is a constant rather than configuration -- a deployment has no reason to want
+# a different answer, and tuning it down is how the write returns.
+TOUCH_RESOLUTION = timedelta(seconds=60)
 
 # The public projection of a document. Shared with the retrieval module so the
 # two read paths cannot drift into returning different shapes.
@@ -412,16 +419,34 @@ class VaultAgentCredentialRepository:
         connection: AsyncConnection,
         credential_id: str,
     ) -> None:
-        """Record a successful use.
+        """Record a successful use, at ``TOUCH_RESOLUTION`` granularity.
 
         Only on success: the column means "last used", not "last attempted", so
         a failed secret must not let an attacker keep a revoked-looking
         credential looking live.
+
+        Sampled rather than written every time. Unsampled, this turns every
+        authenticated *read* into a write on one hot row per principal --
+        get_note alone is quota'd at 120/min -- which is WAL churn plus row-lock
+        serialization between workers on the busiest row the vault has.
+
+        The predicate is what makes it cheap: a row already touched within the
+        window does not match, so PostgreSQL updates nothing rather than
+        rewriting the row with the same value. The question this column answers
+        is "is this credential still in use?", asked by an operator deciding
+        whether to revoke, and a minute's resolution answers it exactly as well.
         """
 
         await connection.execute(
             update(vault_agent_credentials)
-            .where(vault_agent_credentials.c.id == credential_id)
+            .where(
+                vault_agent_credentials.c.id == credential_id,
+                or_(
+                    vault_agent_credentials.c.last_used_at.is_(None),
+                    vault_agent_credentials.c.last_used_at
+                    < func.now() - TOUCH_RESOLUTION,
+                ),
+            )
             .values(last_used_at=func.now())
         )
 
