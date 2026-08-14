@@ -22,7 +22,7 @@ The production Essential-0 plan permits 20 connections. With two Gunicorn
 workers, the approved initial allocation is:
 
 ```text
-(HSS pool max 5 + vault pool size 1) * 2 workers
+(HSS pool max 4 + vault pool size 2) * 2 workers
   + 2 release/operator connections
   = 14 allocated
 
@@ -32,6 +32,23 @@ workers, the approved initial allocation is:
 The 30% remainder satisfies the architecture's requirement to leave at least
 25% unallocated.
 
+**The split moved from 5/1 to 4/2 on 2026-08-14, at the same total.** A vault
+request checks out twice in sequence — once to authenticate, once to serve — so
+at pool size 1 a second concurrent request waited out `pool_timeout` and failed:
+the surface could not serve two callers at once. HSS gave up its fifth
+connection to pay for it, because 5 was never measured (it is the original
+default in `app/db.py`) whereas the vault needing two is measured in its own
+timeout. `validate_connection_budget` passes by exactly one connection either
+way, so **both variables must move together** — setting only
+`VAULT_DB_POOL_SIZE=2` gives 16 against an available 15 and raises `RuntimeError`
+at lifespan, taking the leaderboard down with the vault.
+
+Two consumers this formula does not count. The release dyno takes one connection
+for `alembic upgrade head` while the web dynos are still up (14 + 1 = 15 — inside
+the hard limit, but spending the reserve). And preboot doubles every per-worker
+figure, so `heroku features:enable preboot` needs the pool sizes halved first or
+new dynos fail to boot mid-deploy.
+
 ## Non-secret Heroku configuration
 
 Do not apply these settings as part of Phase 1 development. Apply them in the
@@ -40,11 +57,11 @@ reviewed release that first enables the vault runtime:
 ```powershell
 heroku config:set `
   HSS_DB_POOL_MIN_SIZE=1 `
-  HSS_DB_POOL_MAX_SIZE=5 `
+  HSS_DB_POOL_MAX_SIZE=4 `
   HSS_PROCESS_COUNT=2 `
   DATABASE_CONNECTION_LIMIT=20 `
   DB_OPERATIONAL_CONNECTION_RESERVE=2 `
-  VAULT_DB_POOL_SIZE=1 `
+  VAULT_DB_POOL_SIZE=2 `
   VAULT_DB_POOL_TIMEOUT_SECONDS=5 `
   VAULT_TEXT_SEARCH_CONFIG=english `
   VAULT_ENABLED=true `
@@ -54,6 +71,17 @@ heroku config:set `
 The `Procfile` currently fixes Gunicorn at two workers. If that count changes,
 update `HSS_PROCESS_COUNT` in the same release and recalculate the budget before
 deploying.
+
+**Do not replace `-w 2` with `-w ${WEB_CONCURRENCY}` to remove that coupling.**
+Heroku's Python buildpack sets `WEB_CONCURRENCY` in the dyno environment at boot
+as `min(cores * 2 + 1, RAM_MB / 256)`, and it never appears in `heroku config`
+because it is not a config var. Wiring it would make the connection budget a
+function of dyno size: a 1 GB dyno yields 4 workers and 26 allocated against a
+ceiling of 15, so resizing the dyno would stop the app booting. The Node.js
+buildpack writes the same `.profile.d` filename, so with multiple buildpacks the
+value would also depend on buildpack order, which this repo does not pin.
+Gunicorn's own default for `workers` *is* `WEB_CONCURRENCY`, which is precisely
+why `-w` is passed explicitly.
 
 ## Text search configuration
 
@@ -341,10 +369,10 @@ Routes are registered only when `VAULT_ENABLED` is true, so a disabled vault
 publishes no endpoints and no OpenAPI schema. They are mounted under
 `/api/v1/vault`, ahead of the SPA catch-all and the static-file mount.
 
-Rate limits are enforced per authenticated principal by a vault-local token
-bucket (`app/vault/rate_limit.py`); slowapi lives in the host package and is not
-importable from here. Exceeding one returns `429` with `Retry-After` in whole
-seconds.
+Rate limiting is **two layers**, both in `app/vault/rate_limit.py`.
+
+The **quota** is enforced per authenticated principal by a vault-local token
+bucket. Exceeding one returns `429` with `Retry-After` in whole seconds.
 
 | Operation | Sustained | Burst |
 | --- | --- | --- |
@@ -352,7 +380,29 @@ seconds.
 | `get_note` | 120/min | 30 |
 | `contribute` | 30/min | 20 |
 | `update` | 30/min | 20 |
+| `retire` | 10/min | 5 |
 | `snapshot` | 2/hour | 1 |
+
+`retire` is deliberately the tightest bucket: retirement is rare and
+irreversible, and a loop that deletes is worse than a loop that writes.
+
+The **pre-auth guard** is IP-keyed and charged *before* the credential is looked
+up, because verifying a credential is itself a database round trip and the quota
+cannot cover the cost of the check that produces its own key. It is a slowapi
+`Limiter` owned by the vault — a third-party import, not a host import, so the
+isolation rule is intact and this instance is independent of HSS's. Defaults to
+`600/minute`, deliberately loose: it is a floor that stops anonymous hammering,
+not a quota, and one egress address may legitimately carry several credentials.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAULT_PREAUTH_RATE_LIMIT` | `600/minute` | Per-IP ceiling before authentication |
+| `VAULT_RATE_LIMIT_STORAGE_URI` | `memory://` | Set to `REDIS_URL` to share across workers and dynos; falls back to in-memory if Redis is unreachable |
+
+The guard is attached as a **router-level dependency**, not a route decorator.
+FastAPI solves dependencies before calling the endpoint and authentication is a
+dependency, so a decorator would charge after the round trip it exists to
+prevent. Do not "simplify" it into a decorator.
 
 `search`, `get_note` and `snapshot` match the integration spec. **`contribute`
 deliberately does not.** The spec's 10/min burst 3 assumes contributions trickle
@@ -362,14 +412,27 @@ without touching the abuse case, which is sustained rate. `update` takes the
 same shape in its own bucket, so a corpus-wide backfill cannot starve new
 contributions. The reasoning is on `LIMITS` in `rate_limit.py`.
 
-Raising the burst does **not** make concurrent writes work. `VAULT_DB_POOL_SIZE`
-defaults to 1 and the governed write path holds a corpus-wide advisory lock, so
-simultaneous writes queue and fail on the pool timeout rather than on the
-limiter. The burst makes *sequential* batches fast, which is what the only client
-actually does.
+Raising the burst does **not** make concurrent writes fast. The governed write
+path holds a corpus-wide advisory lock, so simultaneous writes serialize on it
+rather than on the limiter. `VAULT_DB_POOL_SIZE` was a second serializer until it
+moved to 2; at 1 a concurrent write failed on the pool timeout instead of
+queueing. The burst makes *sequential* batches fast, which is what the only
+client actually does.
 
-**The buckets are per process.** Each Gunicorn worker holds its own, so the
-effective ceiling is the stated limit times the worker count — two, currently.
-That is a known factor on a single host. Across hosts it stops being a limit at
-all, which is the point at which a shared backend becomes necessary rather than
-tidier.
+**The quota's buckets are per process.** Each Gunicorn worker holds its own, so
+the effective ceiling is the stated limit times the worker count — two,
+currently. That is a known factor on a single host. Across hosts it stops being a
+limit at all, which is the point at which a shared backend becomes necessary
+rather than tidier. The pre-auth guard can already take one via
+`VAULT_RATE_LIMIT_STORAGE_URI`; the quota cannot, and would need the same
+treatment.
+
+## Saturation
+
+An exhausted vault pool — every connection checked out, `pool_timeout` elapsed —
+raises `sqlalchemy.exc.TimeoutError`, which the application maps to **`503` with
+`Retry-After`**, not `500`. Saturation is a load condition, not a defect: a `500`
+would tell the caller not to retry something purely transient, and an error
+tracker to report a bug where the truth is that the vault is busy. A rise in
+these is a signal to raise `VAULT_DB_POOL_SIZE`, which means revisiting the
+budget above.

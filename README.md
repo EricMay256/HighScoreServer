@@ -79,15 +79,27 @@ flowchart LR
   without saturating the free tier. The DSN is treated as optional monitoring config 
   so the app starts cleanly in environments where Sentry isn't provisioned.
 
-### Planned knowledge-platform bounded context
+### Knowledge-platform bounded context
 
-The cloud knowledge platform will initially be staged in this service as an isolated
-`app/vault/` package. It will expose authenticated HTTP and MCP adapters over one
-application-service layer, use SQLAlchemy Core (not the ORM) for new vault persistence,
-and keep all knowledge content in PostgreSQL rather than this public repository. The
-package boundary is also an extraction seam: the eventual target keeps HSS and the private
+The cloud knowledge platform is staged in this service as an isolated `app/vault/` package,
+with its own decision log of 19 ADRs under
+[`app/vault/docs/adr/`](app/vault/docs/adr/). It exposes an authenticated HTTP adapter —
+hybrid lexical and vector search fused by reciprocal rank, fetch by id, and a governed write
+path covering contribution, replacement, and retirement — over one application-service layer.
+Access is by operator-issued agent credentials, not by player JWTs or the leaderboard API key.
+It uses SQLAlchemy Core (not the ORM) for vault persistence, and keeps all knowledge content
+in PostgreSQL rather than in this public repository.
+
+The routes are registered only when `VAULT_ENABLED` is true, so a default deployment publishes
+no vault schema and no vault endpoints. An MCP adapter is intended over the same service layer
+but is **not built** — it is the reason the layer is separate from the HTTP surface, not
+something the package currently ships.
+
+The package boundary is also an extraction seam: the eventual target keeps HSS and the private
 knowledge runtime in focused repositories and lets private composition CI build the combined
 deployment. HSS never fetches the private repository.
+[`app/vault/docs/vault-extraction-manifest.md`](app/vault/docs/vault-extraction-manifest.md)
+records what leaves and what has to be edited when it does.
 
 The initial deployment reuses the existing Postgres add-on but places vault objects in
 the explicitly qualified `vault` schema. Setting `VAULT_DATABASE_URL` to another Postgres

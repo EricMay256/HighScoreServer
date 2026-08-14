@@ -42,3 +42,15 @@ decision log as an append-only record. `requires_auth` rename ADR will be
 | 0013 | [Cumulative scoring via idempotency keys](0013-cumulative-scoring-via-idempotency-keys.md) | Accepted |
 | 0014 | [Async migration to psycopg3](0014-async-migration-psycopg3.md)                        | Accepted |
 | 0015 | [Auth identities over provider columns](0015-auth-identities-over-provider-columns.md)  | Accepted |
+
+## The vault has its own ADR lineage
+
+The `app/vault/` bounded context keeps a **separate, independently numbered** decision log at
+[`app/vault/docs/adr/`](../../app/vault/docs/adr/README.md), because those records move with the
+package when it is extracted.
+
+**The two lineages collide by number.** This directory's 0009 is Alembic adoption; the vault's
+0009 is `doc_type` validation. The same is true of 0008 and 0012–0015. The directories
+disambiguate, but a bare citation does not — so **a reference to a vault decision must say so**:
+write "vault ADR 0016", never "ADR 0016". Comments inside `app/vault/` are read in the context
+of that package and refer to its own lineage unless they say otherwise.

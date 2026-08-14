@@ -7,6 +7,16 @@ Date: 2026-07-29
 Accepted. Replaces the `VAULT_READ_API_KEY` mechanism described in ADR 0008's context and in
 the read-only slice's configuration runbook.
 
+**Note, 2026-08-14 — the Context's aside on slowapi is superseded, the decision is not.** It
+records that "slowapi lives in the host package and is unreachable from `app/vault/`", which
+was the reasoning for a vault-local token bucket. That bucket exists and remains the
+per-principal quota. But the constraint as stated was too broad: slowapi is a *third-party*
+package, and the isolation rule forbids importing the **host**, not importing what the host
+also happens to use. `app/vault/rate_limit.py` now builds its own independent `Limiter` for an
+IP-keyed pre-authentication guard, which the per-principal quota structurally cannot provide —
+a quota keyed on the credential cannot charge the lookup that resolves the credential. Nothing
+about operator-issued credentials changes. See `vault-configuration.md`.
+
 ## Context
 
 The read-only slice gated access on one shared secret in the environment. Its own module

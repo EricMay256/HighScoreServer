@@ -3,6 +3,10 @@
 This lineage is owned by the vault bounded context, is numbered independently of the host
 repository's `docs/adr/`, and moves with `app/vault/` when the package is extracted.
 
+**Numbers collide with the host lineage** — this 0009 is `doc_type` validation, the host's is
+Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vault/`, a bare
+"ADR 0016" means *this* lineage. Anywhere else, cite it as "vault ADR 0016".
+
 | ADR | Title | Status |
 | --- | ----- | ------ |
 | 0001 | [SQLAlchemy Core for the vault bounded context](0001-sqlalchemy-core-for-vault-bounded-context.md) | Accepted |

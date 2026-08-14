@@ -7,27 +7,32 @@ them cannot be decided at all without a measurement nobody has run yet.
 **Read `HANDOFF.md` first** for repo/branch/database state and the general task list. This file
 is the metadata slice only.
 
-**Repos.** HSS worktree `.claude\worktrees\vault-embedding-provider-0030a7` (branch
-`ai-claude/vault-v1-handoff-077cad`). Knowledge platform `C:\Users\yarom\Code\knowledge-platform`
-(branch `dev`). The authoring schema is in the second; the database and API are in the first.
-**Most of these decisions change both.**
+**Repos.** HSS worktree `.claude\worktrees\vault-readonly-slice-review-0f7ee7` (branch
+`ai-claude/chat-findings-option-a-30464c`). Knowledge platform
+`C:\Users\yarom\Code\knowledge-platform` (branch `dev`). The authoring schema is in the second;
+the database and API are in the first. **Most of these decisions change both.**
+
+Nothing in this brief has been acted on. Its measurements were re-verified against the database
+on 2026-08-14 — every field it calls empty is still empty — so the argument stands as written.
 
 ---
 
 ## 0. What actually exists today
 
-Measured 2026-08-13 over 50 markdown notes and 48 database rows. The gap is two notes written
-after the last import.
+Measured 2026-08-13 over 50 markdown notes; database counts re-verified 2026-08-14 at **49
+rows**, the figure used below. The gap is one note written after the last import. (This table
+read 48 until 2026-08-14 while `HANDOFF.md` read 49 — the two files had drifted, which is the
+hazard this brief exists to avoid. The database is the tiebreaker.)
 
 | Field | Schema | Populated | Where it lives |
 | --- | --- | --- | --- |
 | `tags` | `text[]`, GIN | **50/50 notes**, 3–5 each, 70 distinct | authoring + DB + embedding text |
-| `facets` | `jsonb`, GIN `jsonb_path_ops` | **0/48** | DB + API only — **not in the authoring schema at all** |
+| `facets` | `jsonb`, GIN `jsonb_path_ops` | **0/49** | DB + API only — **not in the authoring schema at all** |
 | `related_ids` | `text[]`, no FK | **0/50** (key present, empty on every note) | authoring (`RelatedIDs`) + DB |
-| `source_ids` | `text[]`, no FK | **0/48** on notes; **50 edges** on wiki pages | wiki frontmatter (`SourceIDs`) — markdown only |
-| `aliases` | `text[]` | **0/48** | DB + API; **not in the Agent Note schema** |
-| `summary` | `text` | **0/48** | DB + API; wiki pages have it, notes do not |
-| `frontmatter` | `jsonb` catch-all | **0/48** | DB only |
+| `source_ids` | `text[]`, no FK | **0/49** on notes; **50 edges** on wiki pages | wiki frontmatter (`SourceIDs`) — markdown only |
+| `aliases` | `text[]` | **0/49** | DB + API; **not in the Agent Note schema** |
+| `summary` | `text` | **0/49** | DB + API; wiki pages have it, notes do not |
+| `frontmatter` | `jsonb` catch-all | **0/49** | DB only |
 
 So: **`tags` is the only metadata the corpus actually carries.** Everything else is schema
 waiting for a decision. That is the single most important fact in this document — none of these

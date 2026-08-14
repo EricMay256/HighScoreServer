@@ -1,14 +1,15 @@
-# Handoff — corpus imported and synthesized, digest fixed, search contract next
+# Handoff — code-review findings applied; search contract next
 
 **HSS repo:** `C:\Users\yarom\Code\HighScoreServer\HighScoreServer`
-**Worktree:** `.claude\worktrees\vault-embedding-provider-0030a7`
-**Branch:** `ai-claude/vault-v1-handoff-077cad`, tree clean.
+**Worktree:** `.claude\worktrees\vault-readonly-slice-review-0f7ee7`
+**Branch:** `ai-claude/chat-findings-option-a-30464c`, tree clean.
 **Knowledge platform:** `C:\Users\yarom\Code\knowledge-platform`, branch `dev`, HEAD `8df16e0`.
 
-**Everything from `59985a4` onward is unpushed**; `origin/dev` is `0c9fb9f`. CI has seen none
-of it: the calibration work, the retry-budget change, the facets column, migrations `0005` and
-`0006`, the raised contribute quota, or the update and retire endpoints. `git log --oneline 0c9fb9f..HEAD`
-is the authoritative list — a hardcoded one here goes stale on the next commit.
+**`origin/dev` is `9eb69ec`, and everything through it is pushed** — the earlier claim that
+the calibration, facets, digest, quota, update and retire work was unpushed is obsolete. The
+branch above carries four further commits applying a code-review pass (§1c), not yet pushed.
+`git log --oneline origin/dev..HEAD` is the authoritative list — a hardcoded one here goes
+stale on the next commit.
 
 > This file goes stale fast. The durable record is `app/vault/docs/adr/` (0001–0019),
 > `app/vault/docs/embedding-calibration.md`, and the "Deferred decisions" section of
@@ -41,12 +42,13 @@ The venv is in the **main repo**, not the worktree:
 & "C:\Users\yarom\Code\HighScoreServer\HighScoreServer\.venv\Scripts\Activate.ps1"
 ```
 
-**`TEST_DATABASE_URL` in `.env` is still the placeholder** `role:password@...` and fails auth.
-`leaderboard_test` now exists and is migrated — point at it explicitly per command:
+**`TEST_DATABASE_URL` is fixed as of 2026-08-14** — it was the `.env.example` placeholder
+`role:password@...`, which never worked because **there is no `role` user on this server; the
+only superuser is `postgres:postgres`**. It now points at `leaderboard_test` directly, so a
+bare `python -m pytest` runs from a worktree with no per-command override (478 passed).
 
-```bash
-TEST_DATABASE_URL="postgresql://postgres:<pw>@localhost:5432/leaderboard_test" python -m pytest
-```
+If a run suddenly fails with `FATAL: password authentication failed for user "role"`, that
+line has been copied back from `.env.example` — the code under test is not the cause.
 
 **Do not run two pytest processes against it at once.** The autouse `clean_tables` fixture
 `TRUNCATE`s, and two concurrent runs deadlock — that produced 26 spurious failures this session.
@@ -212,14 +214,84 @@ table should be updated to match, or the divergence accepted explicitly** — se
 The importer's `DEFAULT_DELAY_SECONDS` tracked down 6.0 → 2.0 to match the new sustained rate.
 A run of 20 notes or fewer now clears the burst and is not paced at all.
 
-**This does not make concurrent contribution work, and nothing here changes that.** The vault is
-already fully async; the serialization is `VAULT_DB_POOL_SIZE=1` (`max_overflow=0`,
-`pool_timeout=5`) and the corpus-wide `pg_advisory_xact_lock` that ADR 0016 holds across
-check-dedup-then-write deliberately. Raising the pool would move the queue from the pool to the
-lock — a cleaner failure mode, the same throughput — and it spends against the
-`vault_connections = pool_size * process_count` budget in `settings.py`. The real lever for batch
-throughput is a **batch contribution endpoint** (one lock acquisition, one transaction,
-embeddings computed concurrently up front), which needs a per-item outcome model first.
+**This does not make concurrent contribution fast, and nothing here changes that.** The vault is
+already fully async; the serialization is the corpus-wide `pg_advisory_xact_lock` that ADR 0016
+holds across check-dedup-then-write deliberately.
+
+`VAULT_DB_POOL_SIZE` was the *other* serializer and is no longer — it moved 1 → 2 on
+2026-08-14, so the surface can serve two callers at once at all. That was a floor, not a
+throughput change: a request checks out twice in sequence (authenticate, then serve), so at
+size 1 a second concurrent request simply failed on the 5s pool timeout. Queueing now happens
+at the lock rather than at the pool, which is the cleaner failure mode at the same write
+throughput. See §1c and ADR 0016's 2026-08-14 amendment.
+
+The real lever for batch throughput is still a **batch contribution endpoint** (one lock
+acquisition, one transaction, embeddings computed concurrently up front), which needs a
+per-item outcome model first.
+
+---
+
+## 1c. Session of 2026-08-14 (code-review findings)
+
+Four commits on `ai-claude/chat-findings-option-a-30464c`, from an external review of
+`origin/dev`. Full suite green (478 passed) after each.
+
+### Unauthenticated callers could force database work (`ed34d2d`)
+
+Verifying a credential is a database round trip, and nothing was charged before it. The vault
+routes carried no IP-keyed limit, and the host's slowapi `Limiter` has no `default_limits`, so
+`SlowAPIMiddleware` covered them with nothing. `parse_token` rejects malformed tokens for free,
+but the format is documented and trivially generated.
+
+**The fix is a router-level dependency, and the review's first suggestion — a
+`@limiter.limit` decorator on each route — would not have worked.** FastAPI solves dependencies
+before calling the endpoint, and authentication *is* a dependency, so a decorator charges after
+the round trip it exists to prevent. `tests/vault/test_rate_limit.py` pins the distinction:
+five requests against a 3/minute guard reach the credential lookup three times.
+
+slowapi is now a vault dependency, deliberately reversing the note in `rate_limit.py`'s
+docstring. It is a *third-party* import, not a host import — `app/vault/` still contains no
+`from app.` and `test_boundaries.py` still passes — and the pre-auth layer is the one that
+benefits from shared storage, available via `VAULT_RATE_LIMIT_STORAGE_URI`. The per-principal
+token bucket stays; the two answer different questions.
+
+### The vault got a second connection, and saturation stopped looking like a bug (`da5177d`)
+
+See the amended paragraph in §1b. The budget passed by exactly one connection, so this was a
+two-variable change: HSS 5 → 4 pays for vault 1 → 2, holding at 14 of the 15 available after
+the 25% reserve. 5 was never measured — it was the default in `app/db.py`. A test pins that
+HSS at 5 no longer fits, so a half-applied config change fails in CI rather than at boot.
+
+**This lowers the HSS pool on merge whether or not the vault is enabled**, and any deployment
+setting `HSS_DB_POOL_MAX_SIZE` or `VAULT_DB_POOL_SIZE` explicitly overrides the new defaults
+and must be updated together. Check with `heroku config` before enabling the vault.
+
+Separately, an exhausted pool raised `sqlalchemy.exc.TimeoutError` with no handler registered,
+so saturation surfaced as a 500 — telling the caller not to retry something transient, and the
+error tracker to report a bug. Now 503 with `Retry-After`.
+
+**`HSS_PROCESS_COUNT` is deliberately not wired to `WEB_CONCURRENCY`.** Heroku's Python
+buildpack sets that per dyno from CPU and RAM and never as a config var, so `-w
+${WEB_CONCURRENCY}` would make the connection budget a function of dyno size: a 1 GB dyno
+yields 4 workers, 26 against a ceiling of 15, and the boot aborts. Reasoning is in
+`.env.example` next to the formula.
+
+### Authenticated reads stopped costing writes (`60c38ab`)
+
+`touch()` ran an unconditional `UPDATE` on every successful auth, so `get_note` at 120/min
+meant 120 writes a minute to one hot row per principal. Now sampled at 60s by predicate, so a
+recently-touched row matches nothing and PostgreSQL rewrites nothing.
+
+### ADR 0016 states what its lock costs (`75dea7b`)
+
+Amendment only, no code. The ADR argued why a per-key lock fails but never priced the one it
+chose; a reader who noticed the cost first read it as an oversight.
+
+### Not done, deliberately
+
+`_canonical_request_digest` still has **no golden test** — task 14. The existing
+`test_the_digest_ignores_fields_the_caller_did_not_send` computes its expectation the same way
+the function does, so a field *reorder* passes it while silently changing every stored digest.
 
 ---
 
@@ -250,9 +322,11 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
 
 ## 3. Remaining tasks
 
-1. **Push `59985a4`, `5bdd5ad`, `9aebb5f` and `2ce9550`.** CI has seen none of it.
+1. ~~Push `59985a4`, `5bdd5ad`, `9aebb5f` and `2ce9550`.~~ **Done** — `origin/dev` is `9eb69ec`.
+   The four commits of §1c are the only unpushed work.
 2. **Remove `VAULT_EMBEDDING_TIMEOUT_SECONDS=10` from `.env`** (and check the Heroku config
    var). It overrides the new 5.0 default; at 10s the worst case is 38s, past the router budget.
+   **Still present in `.env` as of 2026-08-14.**
 2b. ~~Apply `0005_document_facets` to `leaderboard`.~~ **Done 2026-08-13**, along with `0006`.
 2c. ~~Re-run the importer.~~ **Done 2026-08-13** — 48 documents, verified. Then drifted again:
    the session wrote two more vault notes (`cb6a42ec`, `f66cd89c`, on the digest defect and the
@@ -309,6 +383,21 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    notes, one advisory-lock acquisition, one transaction, embeddings computed concurrently
    before it opens. Blocked on a per-item outcome model — what a 200 means when note 7 of 20
    flags — and on how idempotency keys work for a batch.
+14. **Pin `_canonical_request_digest` to a golden hex digest.** `exclude_unset` makes additive
+   schema change a non-event, but Pydantic serializes in field-declaration order, so
+   *reordering* or renaming a field in `VaultContributionRequest` silently changes the digest
+   of every stored key — the same stranding that migration `0006` exists to fix. The docstring
+   says any change is a new `REQUEST_DIGEST_VERSION`, which is the right rule, but a reorder
+   does not look like a change to that function, so the rule will not fire. A fixed payload
+   against a hardcoded digest turns it into a failing test instead. Cheap; not done in §1c.
+15. **Make auth and the handler share one connection checkout.** A vault request checks out
+   twice in sequence, which is why the pool needed a second connection at all. Yielding the
+   open connection from the credential dependency would halve pool pressure and make `touch()`
+   free. A real refactor of the dependency chain, so it was filed rather than done.
+16. **Decide whether this file and `HANDOFF-METADATA.md` belong in a public repo at all.**
+   Moved to `docs/` on 2026-08-14, which fixes the root-level signal but not the contents:
+   both still carry `C:\Users\yarom\...` paths and name the private `knowledge-platform`
+   repository. Untracking them, or scrubbing the paths, is a separate call.
 
 **Blocked / out of scope until re-approved:** MCP (`mcp` is not an approved dependency);
 `VAULT_ENABLED=true` in production; partial HNSW index per profile; dimension-change DDL.
