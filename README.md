@@ -23,27 +23,42 @@ There are multiple clients for the HighScoreServer, aimed at providing coverage 
 flowchart LR
     Unity["Unity Client<br/>(C#)"]
     Browser["Web Browser"]
-    subgraph Heroku["Heroku (single dyno)"]
-        API["FastAPI<br/>api_routes + view_routes"]
+    Agent["Agent client<br/>(vault credential)"]
+    subgraph Heroku["Heroku (single dyno, 2 gunicorn workers)"]
+        API["FastAPI<br/>leaderboard + auth + Jinja2 + SPA"]
         Cache["In-process TTL cache<br/>(cachetools)"]
-        Postgres[("PostgreSQL")]
+        Vault["app/vault/<br/>gated by VAULT_ENABLED<br/>(off in production)"]
+        Postgres[("PostgreSQL<br/>public + vault schemas")]
     end
     Sentry["Sentry<br/>(error monitoring)"]
+    Embeddings["Embedding provider<br/>(OpenAI REST)"]
+    Steam["Steam Web API"]
     Unity -->|JSON over HTTPS| API
     Browser -->|server-rendered HTML<br/>Jinja2| API
     Browser -->|SPA shell + JSON<br/>React/Vite| API
+    Agent -.->|only when enabled| Vault
     API --> Postgres
     API --> Cache
+    API -.->|ticket validation| Steam
+    Vault -.-> Postgres
+    Vault -.-> Embeddings
     API -.->|errors| Sentry
     classDef external fill:#e8e8e8,stroke:#888,color:#000
     classDef infra fill:#d4e6f1,stroke:#2874a6,color:#000
     classDef ephemeral fill:#fcf3cf,stroke:#b9770e,color:#000
     classDef monitoring fill:#fdebd0,stroke:#b9770e,color:#000
-    class Unity,Browser external
+    classDef gated fill:#eaeaea,stroke:#aaa,color:#555
+    class Unity,Browser,Agent,Steam,Embeddings external
     class API,Postgres infra
     class Cache ephemeral
     class Sentry monitoring
+    class Vault gated
 ```
+
+> **The vault is deployed but dark.** `VAULT_ENABLED` defaults to false, so in the
+> running app there are no vault routes, no vault engine, and no vault schema —
+> the dashed path above does not exist in production today. See
+> [Deployment](#deployment).
 
 > **Cache backend.** The deployed configuration uses an in-process TTL cache (`CACHE_BACKEND=memory`). Redis is opt-in using the same cache interface and can be re-enabled by provisioning the Heroku Redis add-on and setting `CACHE_BACKEND=redis` — no code changes required. At a single dyno with a single worker, the two backends are behaviorally equivalent, so the add-on was removed to reduce cost with no side-effects.
 
@@ -68,8 +83,16 @@ flowchart LR
   and a points mode are treated symmetrically.
 - **Rank and percentile** — computed server-side via SQL window functions. Every
   score response includes the player's rank and percentile standing.
+- **External identities** — `users` is the durable leaderboard identity and
+  `auth_identities` is the set of ways it can be proven, so a provider is a row
+  rather than a nullable column per vendor. Native email/password is the `ubear`
+  provider; Steam is validated server-side against the Steam Web API, never from
+  a client-supplied SteamID (see [ADR 0015](docs/adr/0015-auth-identities-over-provider-columns.md)).
+  Steam is optional and inert until its three config variables are set.
 - **Public leaderboard** — server-rendered HTML view at `/leaderboard` with
-  per-mode tabs, rank, percentile, and medal highlights for the top three.
+  per-mode tabs, rank, percentile, and medal highlights for the top three, plus a
+  React/TanStack Query SPA at `/app` served from the same origin. The Jinja2
+  views remain the canonical no-JavaScript path rather than a fallback.
 - **Unity C# client** — drop-in `LeaderboardService.cs` with coroutine-based
   API calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
   errors without exceptions. Handles the full auth lifecycle including silent
@@ -106,6 +129,35 @@ the explicitly qualified `vault` schema. Setting `VAULT_DATABASE_URL` to another
 add-on moves the same schema and migration lineage to a physically separate database.
 Its documentation and decision records live with the package, in
 [`app/vault/docs/`](app/vault/docs/vault-architecture.md), so they leave with it.
+
+#### What co-hosting costs HSS, and what returns on extraction
+
+Staging the vault here is not free, and the costs are deliberately the reversible
+kind. Listing them in one place keeps the bill visible while it is being paid, and
+makes extraction a subtraction rather than an excavation.
+[`vault-extraction-manifest.md`](app/vault/docs/vault-extraction-manifest.md) is the
+executable checklist; this is the summary of what changes for HSS.
+
+| Cost today | On extraction |
+| --- | --- |
+| **HSS runs a smaller connection pool.** 4 per worker instead of the 10 it used, so the vault's 2 fit inside one 20-connection plan. | The whole plan is HSS's again. Raise `HSS_DB_POOL_MAX_SIZE` — but see the caveat below. |
+| **A shared-budget check runs at startup**, with `HSS_PROCESS_COUNT` and `DB_OPERATIONAL_CONNECTION_RESERVE` to feed it. | `validate_connection_budget` and the `VAULT_*` budget variables go away; the arithmetic collapses to one consumer. |
+| **Two Alembic lineages**, `alembic-vault.ini`, and a release phase that gates one of them on a feature flag. | Back to a single lineage. `scripts/release.sh` loses its gated block, and the `Procfile` could return to `release: alembic upgrade head`. |
+| **`pgvector` is a production dependency** and CI layers it onto the Postgres image. | Leaves entirely. Nothing in HSS imports it. |
+| **A `vault` schema in the leaderboard database**, and a note in `db/role.sql` explaining why the restricted role deliberately cannot see it. | Schema dropped; the note becomes moot. |
+| **Vault wiring in `app/main.py`** — lifespan hooks, the route gate, and a 503 handler for SQLAlchemy pool timeouts that only the vault can raise. | All removed. Check `load_environment()` at the top of `create_app` before deleting it: it is there so the route gate can be evaluated. |
+
+Two dependencies look like they should leave and do not. **SQLAlchemy** stays —
+HSS needs it as Alembic's engine layer regardless, and [ADR 0002](docs/adr/0002-raw-sql-over-orm.md)'s
+raw-SQL stance is about the ORM, which neither side uses. **slowapi** stays because
+HSS had it first; the vault simply builds its own independent `Limiter`.
+
+**One thing that should not revert.** The pool was 10 per worker because nobody had
+done the arithmetic: across two workers that allocated the entire 20-connection
+limit, leaving nothing for the release dyno or for `heroku pg:psql` during an
+incident. The vault forced the calculation, and the calculation was overdue. When
+the constraint lifts, the right move is a measured pool with a deliberate reserve —
+not a return to 10.
 
 
 ## Local Setup
