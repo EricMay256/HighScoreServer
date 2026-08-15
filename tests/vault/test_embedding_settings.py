@@ -1,6 +1,12 @@
 import pytest
 
-from app.vault.constants import DEFAULT_EMBEDDING_TIMEOUT_SECONDS, EMBEDDING_DIMENSIONS
+from app.vault.constants import (
+    DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+    EMBEDDING_DIMENSIONS,
+    ROUTER_TIMEOUT_BUDGET_SECONDS,
+    embedding_retry_budget_seconds,
+    max_embedding_timeout_seconds,
+)
 from app.vault.embedding_runtime import (
     UnknownEmbeddingProviderError,
     create_embedding_provider,
@@ -46,6 +52,66 @@ def test_unset_timeout_falls_back_to_the_shared_default(
     settings = EmbeddingSettings.from_environment()
 
     assert settings.timeout_seconds == DEFAULT_EMBEDDING_TIMEOUT_SECONDS
+
+
+def test_a_configured_timeout_that_outlasts_the_router_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard has to be on the configured value, not only on the default.
+
+    ``test_worst_case_retry_budget_fits_inside_the_router_timeout`` asserts the
+    *constant* fits, which says nothing about what a deployment actually runs
+    under. 10s shipped in `.env` and `.env.example` for months while that test
+    passed: the timeout is per attempt, so 10 reads as a 10s ceiling and is
+    really 38s.
+    """
+
+    monkeypatch.setenv("VAULT_EMBEDDING_TIMEOUT_SECONDS", "10")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        EmbeddingSettings.from_environment()
+
+    message = str(excinfo.value)
+    # The arithmetic belongs in the message: an operator who set 10 needs to see
+    # why 10 is not the number that matters, not just that it was rejected.
+    assert "3 x 10s + 2 x 4s" in message
+    assert "38s" in message
+    assert "7.3s" in message
+    assert "backfill" in message
+
+
+def test_the_largest_fitting_timeout_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary is inclusive, so the advertised maximum actually works.
+
+    Rejecting the exact value the error message tells you to use would be a
+    small cruelty, and it is the sort of off-by-one nobody checks.
+    """
+
+    monkeypatch.setenv(
+        "VAULT_EMBEDDING_TIMEOUT_SECONDS",
+        str(max_embedding_timeout_seconds()),
+    )
+
+    settings = EmbeddingSettings.from_environment()
+
+    assert (
+        embedding_retry_budget_seconds(settings.timeout_seconds)
+        <= ROUTER_TIMEOUT_BUDGET_SECONDS
+    )
+
+
+def test_the_shipped_default_leaves_room_for_the_rest_of_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """23s of 30s. The remainder covers auth, the search transaction, and slack."""
+
+    monkeypatch.delenv("VAULT_EMBEDDING_TIMEOUT_SECONDS", raising=False)
+
+    settings = EmbeddingSettings.from_environment()
+
+    assert embedding_retry_budget_seconds(settings.timeout_seconds) == 23.0
 
 
 def test_default_profile_follows_the_configured_provider(

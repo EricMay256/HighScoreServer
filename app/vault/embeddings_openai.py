@@ -16,7 +16,11 @@ from collections.abc import Sequence
 
 import httpx
 
-from .constants import DEFAULT_EMBEDDING_TIMEOUT_SECONDS
+from .constants import (
+    DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+    MAX_EMBEDDING_ATTEMPTS,
+    MAX_EMBEDDING_BACKOFF_SECONDS,
+)
 from .embeddings import (
     EmbeddingDimensionMismatch,
     EmbeddingInputKind,
@@ -61,13 +65,14 @@ _RETRY_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
 #
 # A batch backfill should still set its own, longer values — it has no caller
 # waiting on it and should prefer eventual success over latency.
-_MAX_ATTEMPTS = 3
+# Both defined in constants.py, because settings validates the configured
+# timeout against the budget they produce and cannot import this module.
+_MAX_ATTEMPTS = MAX_EMBEDDING_ATTEMPTS
 _BACKOFF_BASE_SECONDS = 0.5
 # Caps any Retry-After the provider sends: on a request path a long rate-limit
 # window helps nobody once the caller has gone, and a backfill should set its
-# own value. Load-bearing for the worst-case budget above — two waits at this
-# cap are 8 of the 23 seconds.
-_MAX_BACKOFF_SECONDS = 4.0
+# own value.
+_MAX_BACKOFF_SECONDS = MAX_EMBEDDING_BACKOFF_SECONDS
 
 
 class OpenAIEmbeddingProvider:

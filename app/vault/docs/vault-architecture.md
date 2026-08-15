@@ -403,12 +403,22 @@ contradict the YAML.
 reasoning is what makes the constants defensible, and because the same measurement should be
 re-taken if the provider changes.
 
-The query path allows **three attempts at a 5s timeout** (`_MAX_ATTEMPTS`,
-`_MAX_BACKOFF_SECONDS` in `embeddings_openai.py`; `DEFAULT_EMBEDDING_TIMEOUT_SECONDS` in
-`constants.py`, overridable by `VAULT_EMBEDDING_TIMEOUT_SECONDS`). Worst case is
+The query path allows **three attempts at a 5s timeout** (`MAX_EMBEDDING_ATTEMPTS`,
+`MAX_EMBEDDING_BACKOFF_SECONDS`, `DEFAULT_EMBEDDING_TIMEOUT_SECONDS` in `constants.py`,
+overridable by `VAULT_EMBEDDING_TIMEOUT_SECONDS`). Worst case is
 3 × 5s + 2 × 4s of capped backoff = **23s**, inside Heroku's 30s router budget with room for
 the search itself. The budget exists because running out of it is not a failure — it is the
 fall back to lexical results — and that is only worth anything while a caller is still waiting.
+
+**The environment override is bounded, as of 2026-08-14.** The retry constants moved from
+`embeddings_openai.py` into `constants.py` so that `EmbeddingSettings.from_environment` can
+check the configured timeout against the router budget without importing a transport module,
+and it now raises with the arithmetic when the budget would exceed 30s (max 7.3s). This closed
+a real hole rather than a theoretical one: `test_worst_case_retry_budget_fits_inside_the_router_timeout`
+asserts the *constant* fits, and it passed for months while `.env`, `.env.example` and the
+deployed configuration all carried 10 — a 38s budget. **A test cannot see what a deployment
+configures.** The adapter's `timeout_seconds` parameter is deliberately still unbounded, which
+is the backfill's escape hatch.
 
 It previously allowed one attempt at 10s with no retry. That was chosen by reasoning about the
 router budget rather than by measuring this deployment, and the measurement reversed it.

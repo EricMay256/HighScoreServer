@@ -2,11 +2,12 @@
 Measures embedding request latency against the real provider.
 
 Exists to settle one question: the query path's retry budget
-(``_MAX_ATTEMPTS`` and ``VAULT_EMBEDDING_TIMEOUT_SECONDS`` in
-``app/vault/embeddings_openai.py``) was chosen by reasoning about Heroku's 30s
-router budget rather than by measuring this deployment. "Deferred decisions"
-item 3 in ``app/vault/docs/vault-architecture.md`` records what to measure and
-how to read the answer; this script produces the numbers.
+(``MAX_EMBEDDING_ATTEMPTS`` and ``DEFAULT_EMBEDDING_TIMEOUT_SECONDS`` in
+``app/vault/constants.py``, overridable by ``VAULT_EMBEDDING_TIMEOUT_SECONDS``)
+was chosen by reasoning about Heroku's 30s router budget rather than by
+measuring this deployment. "Deferred decisions" item 3 in
+``app/vault/docs/vault-architecture.md`` records what to measure and how to read
+the answer; this script produces the numbers.
 
 How to read the output:
 
@@ -32,15 +33,20 @@ Usage:
     Single-query latency:  python -m scripts.measure_embedding_latency
     More samples:          python -m scripts.measure_embedding_latency -n 50
     Batch path:            python -m scripts.measure_embedding_latency --batch 128
+    Past the ceiling:      python -m scripts.measure_embedding_latency --timeout 30
+
+Use ``--timeout`` rather than raising ``VAULT_EMBEDDING_TIMEOUT_SECONDS`` when
+measuring. A slow response should be recorded rather than truncated into a
+timeout — measuring the ceiling you are trying to choose defeats the point — but
+since 2026-08-14 the environment variable is validated against the router budget
+and refuses anything above 7.3s. The flag applies the override programmatically,
+which is the path that validation deliberately leaves open.
 
 Environment variables:
     VAULT_EMBEDDING_API_KEY   Required.
     VAULT_EMBEDDING_MODEL     Optional. Default from EmbeddingSettings.
     VAULT_EMBEDDING_TIMEOUT_SECONDS
-                              Optional. Raise it while measuring, so a slow
-                              response is recorded rather than truncated into
-                              a timeout — measuring the ceiling you are trying
-                              to choose defeats the point.
+                              Optional, and bounded. See ``--timeout`` above.
 """
 
 import argparse
@@ -48,6 +54,7 @@ import asyncio
 import statistics
 import sys
 import time
+from dataclasses import replace
 
 from app.env import load_environment
 from app.vault.embedding_runtime import create_embedding_provider
@@ -116,8 +123,20 @@ def report(label: str, timings: list[float], failures: int) -> None:
     print(f"  mean      : {statistics.fmean(timings):6.3f}s")
 
 
-async def measure(samples: int, batch_size: int | None) -> int:
+async def measure(
+    samples: int,
+    batch_size: int | None,
+    timeout_seconds: float | None = None,
+) -> int:
     settings = EmbeddingSettings.from_environment()
+    if timeout_seconds is not None:
+        # Deliberately not via the environment. from_environment validates the
+        # configured timeout against the router budget, which is the right rule
+        # for a serving process and the wrong one here: measuring where the
+        # ceiling should sit requires exceeding the current ceiling. `replace`
+        # is the programmatic path the validation intentionally leaves open --
+        # the same one a batch backfill uses.
+        settings = replace(settings, timeout_seconds=timeout_seconds)
     if not settings.api_key:
         print(
             "VAULT_EMBEDDING_API_KEY is not set - nothing to measure.\n"
@@ -193,6 +212,19 @@ def main() -> int:
         help="Number of requests to issue. Default: 20.",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-attempt timeout for this run only, overriding "
+            "VAULT_EMBEDDING_TIMEOUT_SECONDS. Use this rather than raising the "
+            "environment variable: that is validated against the router budget "
+            "and refuses anything above 7.3s, which is exactly the ceiling you "
+            "are trying to measure past."
+        ),
+    )
+    parser.add_argument(
         "--batch",
         type=int,
         default=None,
@@ -212,7 +244,9 @@ def main() -> int:
     load_environment()
     # No database connection here, so the SelectorEventLoop dance that
     # run_dev.py and seed_vault_demo.py need does not apply.
-    return asyncio.run(measure(arguments.samples, arguments.batch))
+    return asyncio.run(
+        measure(arguments.samples, arguments.batch, arguments.timeout)
+    )
 
 
 if __name__ == "__main__":

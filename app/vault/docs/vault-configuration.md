@@ -63,9 +63,22 @@ heroku config:set `
   DB_OPERATIONAL_CONNECTION_RESERVE=2 `
   VAULT_DB_POOL_SIZE=2 `
   VAULT_DB_POOL_TIMEOUT_SECONDS=5 `
+  VAULT_EMBEDDING_TIMEOUT_SECONDS=5 `
   VAULT_TEXT_SEARCH_CONFIG=english `
   VAULT_ENABLED=true `
   --app high-score-server
+```
+
+`VAULT_EMBEDDING_TIMEOUT_SECONDS` is listed here, not only with the other
+embedding settings below, because it is **per attempt** and a plausible-looking
+value silently exceeds Heroku's router budget. Read
+"[`VAULT_EMBEDDING_TIMEOUT_SECONDS` is per attempt, not per
+request](#vault_embedding_timeout_seconds-is-per-attempt-not-per-request)"
+before changing it. If it is already set on the app to anything above 7.3, this
+release will refuse to boot until it is corrected — check first:
+
+```bash
+heroku config:get VAULT_EMBEDDING_TIMEOUT_SECONDS --app high-score-server
 ```
 
 The `Procfile` currently fixes Gunicorn at two workers. If that count changes,
@@ -310,10 +323,46 @@ VAULT_EMBEDDING_PROVIDER=openai
 VAULT_EMBEDDING_MODEL=text-embedding-3-small
 VAULT_EMBEDDING_PROFILE_ID=openai/text-embedding-3-small:1536
 VAULT_EMBEDDING_DIMENSIONS=1536
-VAULT_EMBEDDING_TIMEOUT_SECONDS=10
+VAULT_EMBEDDING_TIMEOUT_SECONDS=5
 # VAULT_EMBEDDING_BASE_URL=   # unset: each adapter supplies its own default
 # VAULT_EMBEDDING_API_KEY=    # secret; Heroku config only, never a tracked file
 ```
+
+### `VAULT_EMBEDDING_TIMEOUT_SECONDS` is per attempt, not per request
+
+**This is the easiest value here to get wrong, and it was wrong in this file,
+in `.env.example`, and in the deployed configuration until 2026-08-14.** The
+embedding call retries, so the number an operator sets is not the number that
+bounds the request:
+
+```text
+worst case = 3 attempts x <timeout> + 2 x 4s of capped backoff
+```
+
+| Setting | Worst case | Outcome |
+| --- | --- | --- |
+| **5 (default)** | **23s** | Fits, with 7s left for the rest of the request |
+| 7.3 | 29.9s | The largest value that fits |
+| 10 | 38s | Router 503s at 30s; the work is discarded |
+
+**Startup now refuses anything whose budget exceeds 30s**, and the error prints
+the arithmetic, the maximum that fits, and what to do instead. Before this guard
+existed the only check was a unit test against the *default* constant, which
+kept passing while the deployed value was 10 — a test cannot see what a
+deployment configures.
+
+Do not raise this to give slow calls more room. 5s is roughly **four times** the
+measured single-query p99 of 1.194s, and because the timeout is per attempt a
+slow call is *retried* rather than lost. The failure this budget exists to
+survive is a transient 429 or 502, not slowness.
+
+A batch backfill is the one legitimate reason to want longer, and it must not
+change this variable: it has no caller waiting, so it passes `timeout_seconds`
+to the provider directly. Only the environment is constrained.
+
+Changing it means changing it in every place it is set — `.env`, `.env.example`,
+the `heroku config:set` block above, and this table — because nothing reconciles
+them.
 
 `VAULT_EMBEDDING_PROFILE_ID` defaults to `{provider}/{model}:{dimensions}` and
 is validated at startup against the same pattern as the

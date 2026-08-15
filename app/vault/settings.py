@@ -10,6 +10,11 @@ from sqlalchemy.engine import make_url
 from .constants import (
     DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
     EMBEDDING_DIMENSIONS,
+    MAX_EMBEDDING_ATTEMPTS,
+    MAX_EMBEDDING_BACKOFF_SECONDS,
+    ROUTER_TIMEOUT_BUDGET_SECONDS,
+    embedding_retry_budget_seconds,
+    max_embedding_timeout_seconds,
     resolve_text_search_config,
 )
 
@@ -51,6 +56,42 @@ def _positive_float(name: str, value: str) -> float:
     if parsed <= 0:
         raise RuntimeError(f"{name} must be greater than zero")
     return parsed
+
+
+def _validate_embedding_timeout(timeout_seconds: float) -> float:
+    """Reject a per-attempt timeout whose retries outlast the router.
+
+    The timeout is per *attempt*, so the number an operator sets is not the
+    number that matters — the budget is that timeout times the attempt count,
+    plus the waits between them. Setting 10 looks like a 10s ceiling and is
+    really 38s, which is past the point where the caller has already been given
+    a 503 by the router and the work is thrown away.
+
+    Checked here rather than only in a test because a test can only assert the
+    *default*, and the default is not what production runs under. Only the
+    environment is constrained: an adapter constructed directly with a longer
+    ``timeout_seconds`` is a backfill with no caller waiting, which is a
+    legitimate case this must not block.
+    """
+
+    budget = embedding_retry_budget_seconds(timeout_seconds)
+    if budget <= ROUTER_TIMEOUT_BUDGET_SECONDS:
+        return timeout_seconds
+
+    raise RuntimeError(
+        f"VAULT_EMBEDDING_TIMEOUT_SECONDS={timeout_seconds:g} does not fit the "
+        f"request budget. The timeout is per attempt, so the worst case is "
+        f"{MAX_EMBEDDING_ATTEMPTS} x {timeout_seconds:g}s + "
+        f"{MAX_EMBEDDING_ATTEMPTS - 1} x {MAX_EMBEDDING_BACKOFF_SECONDS:g}s of "
+        f"capped backoff = {budget:g}s, and the router gives up at "
+        f"{ROUTER_TIMEOUT_BUDGET_SECONDS:g}s. A response that late is not a slow "
+        f"success, it is one the caller never receives. The largest value that "
+        f"fits is {max_embedding_timeout_seconds():.1f}s; the measured default is "
+        f"{DEFAULT_EMBEDDING_TIMEOUT_SECONDS:g}s, which is about four times the "
+        f"observed single-query p99 of 1.194s. If this is a batch backfill, it "
+        f"has no caller waiting: pass timeout_seconds to the provider directly "
+        f"instead of raising this variable."
+    )
 
 
 def vault_enabled() -> bool:
@@ -160,12 +201,14 @@ class EmbeddingSettings:
             model=model,
             profile_id=profile_id,
             embedding_dimensions=embedding_dimensions,
-            timeout_seconds=_positive_float(
-                "VAULT_EMBEDDING_TIMEOUT_SECONDS",
-                os.environ.get(
+            timeout_seconds=_validate_embedding_timeout(
+                _positive_float(
                     "VAULT_EMBEDDING_TIMEOUT_SECONDS",
-                    str(DEFAULT_EMBEDDING_TIMEOUT_SECONDS),
-                ),
+                    os.environ.get(
+                        "VAULT_EMBEDDING_TIMEOUT_SECONDS",
+                        str(DEFAULT_EMBEDDING_TIMEOUT_SECONDS),
+                    ),
+                )
             ),
         )
 

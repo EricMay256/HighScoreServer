@@ -287,6 +287,25 @@ recently-touched row matches nothing and PostgreSQL rewrites nothing.
 Amendment only, no code. The ADR argued why a per-key lock fails but never priced the one it
 chose; a reader who noticed the cost first read it as an oversight.
 
+### The embedding timeout was over budget everywhere, and is now bounded
+
+`VAULT_EMBEDDING_TIMEOUT_SECONDS` is **per attempt**, so 10 was never a 10s
+ceiling — the budget is `3 x timeout + 2 x 4s backoff`, which is 38s against a 30s router
+limit. It was 10 in `.env`, `.env.example` and `vault-configuration.md`.
+
+The guard that should have caught it, `test_worst_case_retry_budget_fits_inside_the_router_timeout`,
+computes from `DEFAULT_EMBEDDING_TIMEOUT_SECONDS` — the constant, which was already 5. So it
+passed for months while nothing that ran was under 23s. **A test on a default cannot see what a
+deployment configures**, and that is the transferable lesson here rather than the specific
+number.
+
+Now validated at the environment boundary, with the arithmetic in the message. The retry
+constants moved from `embeddings_openai.py` to `constants.py` so `settings.py` can reach them
+without importing a transport module — the separation that keeps the Alembic environment free
+of httpx. The adapter's `timeout_seconds` parameter stays unbounded on purpose: a batch
+backfill has no caller waiting. `scripts/measure_embedding_latency.py` gained `--timeout` for
+exactly that reason, since measuring where the ceiling belongs requires exceeding it.
+
 ### Not done, deliberately
 
 `_canonical_request_digest` still has **no golden test** — task 14. The existing
@@ -324,9 +343,14 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
 
 1. ~~Push `59985a4`, `5bdd5ad`, `9aebb5f` and `2ce9550`.~~ **Done** — `origin/dev` is `9eb69ec`.
    The four commits of §1c are the only unpushed work.
-2. **Remove `VAULT_EMBEDDING_TIMEOUT_SECONDS=10` from `.env`** (and check the Heroku config
-   var). It overrides the new 5.0 default; at 10s the worst case is 38s, past the router budget.
-   **Still present in `.env` as of 2026-08-14.**
+2. ~~Remove `VAULT_EMBEDDING_TIMEOUT_SECONDS=10` from `.env`.~~ **Done 2026-08-14**, and the
+   hole behind it closed. It was 10 in `.env`, `.env.example`, and `vault-configuration.md`;
+   all three are 5. `EmbeddingSettings.from_environment` now rejects any configured timeout
+   whose full budget exceeds 30s (max 7.3s), printing the arithmetic — the retry constants
+   moved to `constants.py` so settings can check them without importing a transport module.
+   **Still check the Heroku config var before the release that enables the vault:** if it is
+   set above 7.3 there, the app will refuse to boot.
+   `heroku config:get VAULT_EMBEDDING_TIMEOUT_SECONDS --app high-score-server`
 2b. ~~Apply `0005_document_facets` to `leaderboard`.~~ **Done 2026-08-13**, along with `0006`.
 2c. ~~Re-run the importer.~~ **Done 2026-08-13** — 48 documents, verified. Then drifted again:
    the session wrote two more vault notes (`cb6a42ec`, `f66cd89c`, on the digest defect and the

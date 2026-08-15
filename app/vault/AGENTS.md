@@ -140,8 +140,15 @@ be edited when it does.
 - **The query request budget is three attempts at a 5s timeout**, settled by measurement on
   2026-08-12 (single-query p99 1.194s; a 128-document batch takes 0.728s). Worst case
   3 × 5s + 2 × 4s backoff = 23s, inside Heroku's 30s router budget. The realistic failure is a
-  transient 429/502, not slowness. A backfill should set its own, longer values. See "Deferred
-  decisions" item 3 in `docs/vault-architecture.md`.
+  transient 429/502, not slowness. See "Deferred decisions" item 3 in
+  `docs/vault-architecture.md`.
+- **`VAULT_EMBEDDING_TIMEOUT_SECONDS` is per attempt, and validated against the router budget
+  at startup.** The retry constants live in `constants.py`, not in the adapter, precisely so
+  `settings.py` can check them without importing a transport module — do not move them back.
+  A unit test on the default constant is not sufficient and was not: it passed for months while
+  every real environment carried 10, a 38s budget. A backfill wanting longer passes
+  `timeout_seconds` to the provider directly; the adapter parameter is deliberately unbounded
+  and the environment variable deliberately is not.
 - `vector_status` distinguishes `used` / `not_configured` / `failed`. Keep those three
   separate: a broken provider must never be reportable as a deliberate lexical-only
   deployment. `failed` also logs at ERROR; `not_configured` logs nothing per request.
