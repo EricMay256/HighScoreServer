@@ -89,7 +89,23 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> StubEmbeddingProvider:
 
 @pytest.fixture
 def write_token(configure_test_env: None) -> str:
-    credential_id, token = _issue(scopes=(VaultScope.READ, VaultScope.WRITE))
+    """A credential holding every write verb.
+
+    All three are granted because this fixture serves tests of contribute,
+    replace *and* retire, and those are separate scopes since ADR 0020. That
+    they are separable is asserted deliberately in the scope tests below rather
+    than incidentally here — a fixture that under-grants would fail those tests
+    for the wrong reason.
+    """
+
+    credential_id, token = _issue(
+        scopes=(
+            VaultScope.READ,
+            VaultScope.WRITE,
+            VaultScope.UPDATE,
+            VaultScope.DELETE,
+        )
+    )
     try:
         yield token
     finally:
@@ -1177,3 +1193,119 @@ def test_a_document_under_review_cannot_be_retired(
         assert _count(vault_documents, id=candidate) == 1
     finally:
         _cleanup()
+
+
+# --- Write scopes are separable (ADR 0020) ---------------------------------
+
+
+def _seeded_note(client: TestClient, token: str) -> str:
+    """Contribute one note and return its id, for the scope tests to target."""
+
+    response = client.post(
+        "/api/v1/vault/contributions",
+        json={
+            "title": f"Scope fixture {uuid4().hex[:8]}",
+            "body": "A note that exists so a scope check has something to aim at.",
+            "idempotency_key": f"scope-{uuid4().hex}",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["note_id"]
+
+
+def test_contribute_scope_does_not_grant_replacement(
+    client: TestClient, provider: StubEmbeddingProvider
+) -> None:
+    """vault:write is contribute only.
+
+    Before ADR 0020 this returned 200: one scope gated all three write routes,
+    so any credential that could add a note could also overwrite one.
+    """
+
+    credential_id, token = _issue(scopes=(VaultScope.READ, VaultScope.WRITE))
+    try:
+        note_id = _seeded_note(client, token)
+        response = client.put(
+            f"/api/v1/vault/notes/{note_id}",
+            json={"title": "Replaced", "body": "Replaced body."},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+        _cleanup()
+
+    assert response.status_code == 403
+
+
+def test_contribute_scope_does_not_grant_deletion(
+    client: TestClient, provider: StubEmbeddingProvider
+) -> None:
+    """The one that matters: adding a note must not imply destroying one."""
+
+    credential_id, token = _issue(scopes=(VaultScope.READ, VaultScope.WRITE))
+    try:
+        note_id = _seeded_note(client, token)
+        response = client.delete(
+            f"/api/v1/vault/notes/{note_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+        _cleanup()
+
+    assert response.status_code == 403
+
+
+def test_update_scope_does_not_grant_deletion(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """Replacement and deletion are separate verbs, not a ladder.
+
+    An importer-shaped credential -- contribute and replace, never delete -- is
+    the case this split exists to make expressible.
+    """
+
+    note_id = _seeded_note(client, write_token)
+    credential_id, token = _issue(
+        scopes=(VaultScope.READ, VaultScope.WRITE, VaultScope.UPDATE)
+    )
+    try:
+        replaced = client.put(
+            f"/api/v1/vault/notes/{note_id}",
+            json={"title": "Replaced", "body": "A replacement body."},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        refused = client.delete(
+            f"/api/v1/vault/notes/{note_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+        _cleanup()
+
+    assert replaced.status_code == 200, replaced.text
+    assert refused.status_code == 403
+
+
+def test_delete_scope_alone_does_not_grant_contribution(
+    client: TestClient, provider: StubEmbeddingProvider
+) -> None:
+    """Scopes are verbs, not privilege levels: delete does not imply write."""
+
+    credential_id, token = _issue(scopes=(VaultScope.READ, VaultScope.DELETE))
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions",
+            json={
+                "title": "Should not land",
+                "body": "A contribution from a delete-only credential.",
+                "idempotency_key": f"scope-{uuid4().hex}",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+        _cleanup()
+
+    assert response.status_code == 403

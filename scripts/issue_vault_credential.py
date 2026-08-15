@@ -36,9 +36,15 @@ from app.vault.settings import VaultSettings
 from app.vault.tables import vault_agent_credentials
 
 
+# Order is the order an operator reads them in, so the three write verbs sit
+# together: WRITE is contribute alone, and UPDATE and DELETE are granted
+# separately on purpose (ADR 0020). Granting all three reproduces the old
+# vault:write, which is a decision rather than a default.
 KNOWN_SCOPES = (
     VaultScope.READ,
     VaultScope.WRITE,
+    VaultScope.UPDATE,
+    VaultScope.DELETE,
     VaultScope.REVIEW,
     VaultScope.COMPILE,
     VaultScope.EXPORT,

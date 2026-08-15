@@ -193,7 +193,15 @@ be edited when it does.
 - `last_used_at` is written only on success — it means "last used", not "last attempted".
 - `401` for a bad or inactive credential, `403` for a valid one missing a scope. Neither
   response says which check failed.
-- Scopes are verbs. *What* a credential may read is ADR 0014's path policy, a property of the
+- Scopes are verbs, **one per route**. `vault:write` is *contribute only*; `vault:update` gates
+  replacement and `vault:delete` gates retirement (ADR 0020). Do not re-fold them into one
+  grant, and do not gate a new write route on an existing scope because adding one looks like
+  ceremony — that is exactly how `vault:write` came to mean "may destroy any note". A quota is
+  not an authorization boundary: `retire`'s tight bucket bounds how fast, not whether.
+- The scope is `vault:delete` even though the route, service and quota bucket all say *retire*.
+  The internal vocabulary describes the operation; the permission name warns the operator
+  granting it, and "retire" reads as reversible when ADR 0019 makes it not.
+- *What* a credential may read is ADR 0014's path policy, a property of the
   folder rather than of the credential.
 
 ## The write path

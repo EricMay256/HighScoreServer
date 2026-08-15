@@ -54,7 +54,16 @@ The dependency that used to sit in front of this is gone: the tag counterfactual
 is measured and tags stay in the embedding text, so decisions 2 and 3 are judged
 on queryability alone.
 
-## 4. Split `vault:write` into contribute / update / delete
+## ~~4. Split `vault:write` into contribute / update / delete~~ — done 2026-08-15
+
+**Shipped.** Vault ADR 0020, migration `0007_write_scope_split`. `vault:write`
+is contribute only; `vault:update` and `vault:delete` gate replacement and
+retirement. Existing holders were grandfathered in the same revision — the three
+`importer` credentials kept every capability, verified against the dev database
+before and after. Credentials stay non-expiring by default.
+
+<details>
+<summary>The reasoning, kept for the record</summary>
 
 Independent of everything above and small, so it can slot in whenever. Today
 `require_write_scope` gates all three write routes on the single `vault:write`
@@ -91,8 +100,15 @@ client that exists buys nothing.
 takes `--days`, which sets `expires_at`, and `app/vault/auth.py` refuses an
 expired credential on every request with no cache to wait out. What is missing
 is that nothing *defaults* to an expiry — omitting `--days` mints a permanent
-credential — so if the goal is bounded lifetimes, the change is a default and a
-rotation story, not a new argument.
+credential.
+
+**Decided 2026-08-15: leave that non-expiring.** These are machine clients an
+operator revokes directly, revocation takes effect on the next request with no
+cache to wait out, and an expiry that lapses unnoticed is an outage rather than
+a security event. `--days` stays available for anything handed to a third party
+or issued for one task.
+
+</details>
 
 ---
 

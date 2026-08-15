@@ -505,9 +505,13 @@ vault_agent_credentials = Table(
         "octet_length(secret_sha256) = 32",
         name="vault_agent_credentials_sha256_length",
     ),
+    # Mirrors migration 0007. 'vault:write' is contribute only; replacement and
+    # deletion are their own verbs, so a credential that may add a note does not
+    # thereby may destroy one.
     CheckConstraint(
-        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:review', "
-        "'vault:compile', 'vault:export']::text[]",
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
+        "'vault:delete', 'vault:review', 'vault:compile', "
+        "'vault:export']::text[]",
         name="vault_agent_credentials_scopes_known",
     ),
 )

@@ -392,14 +392,15 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    than it looks: at `flag_at = 1.0` the queue only fills on exact resubmission — and after the
    2026-08-15 calibration it is worth restating that the bands now *overlap*, so nothing but an
    exact resubmission will ever reach that queue on this model.
-6b. **Split `vault:write` into contribute / update / delete.** All three write routes share one
-   `require_write_scope`, so a credential that can add a note can also delete one — the
-   `importer` credential included. Needs an Alembic revision on the vault lineage, because
-   `vault_agent_credentials_scopes_known` enumerates the five legal scope names. The fork worth
-   settling first is whether `vault:write` narrows to contribute (cleaner, breaking, wants
-   grandfathering in the same revision) or stays a superset. See `docs/NEXT-STEPS.md` §4.
-   Note the *duration* half of this is already built: `issue_vault_credential.py --days` sets
-   `expires_at` and `auth.py` enforces it; what is missing is a non-permanent default.
+6b. ~~Split `vault:write` into contribute / update / delete.~~ **Done 2026-08-15** — vault ADR
+   0020, migration `0007_write_scope_split`. `vault:write` narrowed to contribute; `vault:update`
+   and `vault:delete` gate replacement and retirement. Existing holders grandfathered in the same
+   revision, so the three `importer` credentials kept every capability (verified against the dev
+   database before and after). Credentials remain non-expiring by default, decided deliberately:
+   revocation is immediate and needs no cache to expire, whereas a lapsed expiry is an outage.
+   **The vault lineage head is now `0007_write_scope_split`** — an existing database needs
+   `alembic -c alembic-vault.ini upgrade head` before this code runs against it, or every
+   credential write fails the old CHECK constraint.
 7. **Port `resolve_context`** to close the `folders.yml` ↔ `READABLE_PATH_PREFIXES`
    duplication. Entangled with deferred decision #2 (where governance YAML lives at runtime).
 8. ~~Commit the importer.~~ **Already tracked** as `f942917` (2026-08-12). Still worth renaming

@@ -28,3 +28,4 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0017 | [Facets carry classification, outside the embedding text](0017-facets-carry-classification-outside-the-embedding.md) | Accepted |
 | 0018 | [Updates are a distinct endpoint that refuses on collision](0018-updates-are-a-distinct-endpoint-that-refuses-on-collision.md) | Accepted |
 | 0019 | [Retiring a document deletes it, and the ledger outlives it](0019-retiring-a-document-deletes-it.md) | Accepted |
+| 0020 | [`vault:write` narrows to contribute; update and delete are their own scopes](0020-write-scopes-split-by-verb.md) | Accepted |

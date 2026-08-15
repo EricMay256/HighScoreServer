@@ -39,10 +39,23 @@ _DUMMY_HASH = sha256(b"vault-credential-miss").digest()
 
 
 class VaultScope:
-    """The scopes the schema's CHECK constraint permits."""
+    """The scopes the schema's CHECK constraint permits.
+
+    Scopes are verbs, per ADR 0015, and since 0020 the three write verbs are
+    separate: ``WRITE`` means *contribute* alone. It used to gate replacement
+    and deletion as well, which made "may add a note" and "may destroy one" the
+    same grant — and the importer, the only long-lived credential, held it.
+
+    ``DELETE`` rather than ``RETIRE`` even though the route, the service and the
+    quota bucket all say retire. ADR 0019's point is that retiring *is* deletion
+    with no archived row left behind, and the audience for a scope name is an
+    operator deciding whether to hand it over. "Retire" reads as reversible.
+    """
 
     READ = "vault:read"
     WRITE = "vault:write"
+    UPDATE = "vault:update"
+    DELETE = "vault:delete"
     REVIEW = "vault:review"
     COMPILE = "vault:compile"
     EXPORT = "vault:export"

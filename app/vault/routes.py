@@ -213,7 +213,21 @@ async def require_read_scope(
 async def require_write_scope(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> VaultCredential:
+    """Contribute only. See ADR 0020 for why this no longer covers all writes."""
+
     return await _authenticated((VaultScope.WRITE,), credentials)
+
+
+async def require_update_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.UPDATE,), credentials)
+
+
+async def require_delete_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.DELETE,), credentials)
 
 
 async def search_quota(
@@ -450,7 +464,7 @@ async def contribute(
 
 
 async def update_quota(
-    credential: VaultCredential = Depends(require_write_scope),
+    credential: VaultCredential = Depends(require_update_scope),
 ) -> VaultCredential:
     await _enforce_quota(credential, "update")
     return credential
@@ -551,7 +565,7 @@ async def update_vault_document(
 
 
 async def retire_quota(
-    credential: VaultCredential = Depends(require_write_scope),
+    credential: VaultCredential = Depends(require_delete_scope),
 ) -> VaultCredential:
     await _enforce_quota(credential, "retire")
     return credential

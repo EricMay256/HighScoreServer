@@ -400,9 +400,9 @@ Changing provider or model requires controlled re-embedding; it must never be
 treated as a credentials-only configuration change. The procedure is above under
 "Changing embedding model or dimensions".
 
-## Read-only access
+## Credentials and scopes
 
-The read surface is gated on operator-issued agent credentials, sent as
+Every surface is gated on operator-issued agent credentials, sent as
 `Authorization: Bearer hssv1_<credential-id>_<secret>`:
 
 ```bash
@@ -416,12 +416,43 @@ lost one is revoked and reissued rather than recovered. Issuing against
 production means setting `DATABASE_URL` explicitly for the command — writing a
 credential into the wrong database is silent.
 
+### One scope per verb
+
+| Scope | Grants |
+| --- | --- |
+| `vault:read` | Search, and fetch by id |
+| `vault:write` | Contribute a new note — **and nothing else** |
+| `vault:update` | Replace an existing note's content |
+| `vault:delete` | Retire a note, **destroying it** (vault ADR 0019) |
+| `vault:review`, `vault:compile`, `vault:export` | Recognised, granted by no route yet |
+
+`vault:write` is contribute *only*. It gated all three write routes until vault
+ADR 0020, which is why credentials issued before 2026-08-15 carry all three —
+migration `0007_write_scope_split` grandfathered existing holders rather than
+silently stripping capability from a working client.
+
+**Grant `vault:delete` deliberately.** It is the only irreversible verb: ADR 0019
+retirement leaves no archived row and nothing a caller can still resolve. An
+importer-shaped client wants `vault:read vault:write vault:update` and not the
+fourth:
+
+```bash
+python -m scripts.issue_vault_credential issue --name importer `
+  --scopes vault:read vault:write vault:update
+```
+
+Credentials do not expire unless `--days` is given, which is deliberate for the
+machine clients this serves — an expiry that lapses unnoticed is an outage, and
+revocation is immediate and needs no cache to expire. Use `--days` for anything
+handed to a third party or issued for one task.
+
 The vault cannot reuse HighScoreServer's authentication — importing it would
 breach the isolation rule that keeps extraction a directory move — and the
 integration spec is explicit that player JWTs and the leaderboard `API_KEY` are
 not vault credentials. A request with no credential, an unknown credential, or
-a revoked or expired one is `401`; one that authenticates but lacks
-`vault:read` is `403`. See vault ADR 0015.
+a revoked or expired one is `401`; one that authenticates but lacks the scope
+the route requires is `403`. Neither response says which check failed. See vault
+ADR 0015 and 0020.
 
 Routes are registered only when `VAULT_ENABLED` is true, so a disabled vault
 publishes no endpoints and no OpenAPI schema. They are mounted under
