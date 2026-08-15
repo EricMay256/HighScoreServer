@@ -394,10 +394,16 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    exact resubmission will ever reach that queue on this model.
 6b. ~~Split `vault:write` into contribute / update / delete.~~ **Done 2026-08-15** — vault ADR
    0020, migration `0007_write_scope_split`. `vault:write` narrowed to contribute; `vault:update`
-   and `vault:delete` gate replacement and retirement. Existing holders grandfathered in the same
-   revision, so the three `importer` credentials kept every capability (verified against the dev
-   database before and after). Credentials remain non-expiring by default, decided deliberately:
-   revocation is immediate and needs no cache to expire, whereas a lapsed expiry is an outage.
+   and `vault:delete` gate replacement and retirement. **The migration grants nothing** — it
+   widens the CHECK constraint and stops there, because a migration reruns and one that
+   re-applies privilege silently restores permissions on every rebuild, rollback or staging
+   refresh. Widening an existing credential is a manual per-credential `UPDATE`, or a reissue.
+   The three local `importer` credentials already hold all four scopes and were left as they
+   are; **whether they should keep `vault:delete` is an open call** — the ADR's own example of
+   the shape this split exists for is contribute + replace and never delete, but the importer
+   lives in the knowledge-platform repo and was not inspected. Credentials remain non-expiring
+   by default, decided deliberately: revocation is immediate and needs no cache to expire,
+   whereas a lapsed expiry is an outage.
    **The vault lineage head is now `0007_write_scope_split`** — an existing database needs
    `alembic -c alembic-vault.ini upgrade head` before this code runs against it, or every
    credential write fails the old CHECK constraint.

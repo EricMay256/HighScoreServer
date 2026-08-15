@@ -58,9 +58,18 @@ on queryability alone.
 
 **Shipped.** Vault ADR 0020, migration `0007_write_scope_split`. `vault:write`
 is contribute only; `vault:update` and `vault:delete` gate replacement and
-retirement. Existing holders were grandfathered in the same revision — the three
-`importer` credentials kept every capability, verified against the dev database
-before and after. Credentials stay non-expiring by default.
+retirement. The migration widens the CHECK constraint and **grants nothing** —
+re-granting privilege from a procedure that reruns would silently restore
+permissions on every rebuild, rollback or staging refresh. Widening an existing
+credential is a manual per-credential `UPDATE`, or a reissue. Credentials stay
+non-expiring by default.
+
+**One open call:** the three local `importer` credentials hold all four scopes
+and were left alone. ADR 0020's own example of the shape this split exists for
+is contribute + replace and *never* delete — but the importer lives in the
+knowledge-platform repo, so whether it ever calls `DELETE /notes/{id}` was not
+verified. Dropping `vault:delete` from them is a one-line `UPDATE` once that is
+known.
 
 <details>
 <summary>The reasoning, kept for the record</summary>

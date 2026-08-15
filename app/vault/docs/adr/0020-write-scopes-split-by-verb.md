@@ -54,10 +54,30 @@ deciding whether to hand it to a client, and "retire" reads as reversible to
 someone who has not read ADR 0019. The internal vocabulary keeps "retire"
 because that is the operation; the permission says what granting it risks.
 
-**Existing credentials are grandfathered in the same migration.** Migration
-`0007_write_scope_split` widens the `vault_agent_credentials_scopes_known` CHECK
-constraint and then grants `vault:update` and `vault:delete` to every row
-holding `vault:write` at that moment.
+**Migration `0007_write_scope_split` changes the schema only.** It widens the
+`vault_agent_credentials_scopes_known` CHECK constraint and grants nothing.
+
+Widening the credentials that already exist is a **manual, per-credential,
+one-time** operation, and deliberately not idempotent-by-rerun. The first draft
+of this decision put that grant in the migration so pre-split clients kept
+working, which is a reasonable one-time intent expressed in the one place that
+guarantees it is not one-time: a migration is a procedure that reruns.
+Rebuilding a staging database, testing a revision, or rolling back and
+redeploying would each silently restore permissions an operator had deliberately
+removed, with nothing in the logs saying a privilege had been granted.
+
+The threat model here is not primarily an attacker. Anyone who can run Alembic
+against a database already holds `DATABASE_URL` or deploy access, and can
+`UPDATE` the scopes column directly — the migration hands them nothing. The
+likely failure is an ordinary operator doing ordinary maintenance and silently
+undoing a tightening they made on purpose. That is worse than the attacker case
+because it needs no attacker.
+
+`downgrade()` still strips `vault:update` and `vault:delete`, because the
+narrowed constraint rejects rows carrying them and the `ALTER` would otherwise
+fail partway through. That is constraint satisfaction rather than an
+authorization decision, and the resulting asymmetry is the safe direction: a
+down-then-up cycle can only ever *reduce* what a credential may do.
 
 ## Consequences
 
@@ -66,24 +86,31 @@ credentials issued from here on. An importer-shaped credential — contribute an
 replace, never delete — is now a thing an operator can issue, and it is the
 shape the only real client should have had all along.
 
-Grandfathering means the split buys nothing for credentials that already exist.
-That is the deliberate trade: narrowing without it would silently strip
-capability from working clients, surfacing at the next importer run as a 403
-naming no cause, and it would have broken the corpus importer for a benefit —
-retroactive least privilege on three credentials belonging to one operator —
-that does not exist. Tightening an existing credential is a reissue, which is
-two commands and now actually expressible.
+**Deploying this without granting anything breaks pre-split clients**, and that
+is now an explicit operator step rather than an automatic one. A credential
+issued before the split holds `vault:write` alone, so its replace and retire
+calls begin returning `403` — a real failure, and the price of not having a
+migration that re-grants. The mitigation is that the failure is loud, one-time,
+and fixed either by a deliberate per-credential `UPDATE` or, better, by
+reissuing with exactly the scopes that client needs.
+
+The cost is small here in a way it might not be elsewhere: at the time of the
+split, every credential in existence was a local `importer` on one developer
+machine, and production had never deployed the vault and held no vault
+credentials at all. A deployment with many live third-party credentials would
+weigh this differently, and should — the argument is about *where* the grant
+happens, not that grants are wrong.
 
 Granting all three scopes reproduces the old `vault:write` exactly. That is
 fine: it is now a decision made at issuance rather than a default nobody chose.
 
 **The migration is not reversible in the authorization sense.** Its downgrade
-strips `vault:update` and `vault:delete` and restores the narrow constraint,
-because the old vocabulary cannot express them — so a credential issued with
-`vault:delete` and no `vault:write` loses the capability entirely rather than
-being mapped onto something. The downgrade is a schema rollback, and the honest
-failure mode is a credential that stops working rather than one that silently
-retains a permission the schema no longer knows about.
+strips `vault:update` and `vault:delete`, because the old vocabulary cannot
+express them — so a credential issued with `vault:delete` and no `vault:write`
+loses the capability entirely rather than being mapped onto something. The
+downgrade is a schema rollback, and the honest failure mode is a credential that
+stops working rather than one that silently retains a permission the schema no
+longer knows about.
 
 `vault:review`, `vault:compile` and `vault:export` remain recognised and granted
 by no route, unchanged by this. The pattern this ADR sets — a verb per

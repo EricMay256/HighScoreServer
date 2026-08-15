@@ -427,9 +427,26 @@ credential into the wrong database is silent.
 | `vault:review`, `vault:compile`, `vault:export` | Recognised, granted by no route yet |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
-ADR 0020, which is why credentials issued before 2026-08-15 carry all three —
-migration `0007_write_scope_split` grandfathered existing holders rather than
-silently stripping capability from a working client.
+ADR 0020.
+
+**A credential issued before 2026-08-15 holds `vault:write` alone**, so its
+replace and retire calls now return `403`. Migration `0007_write_scope_split`
+changes the schema and grants nothing, deliberately: a migration reruns, and one
+that re-applies privilege would silently restore permissions on every rebuild,
+rollback, or staging refresh. Widening an existing credential is a manual,
+per-credential decision:
+
+```sql
+UPDATE vault.vault_agent_credentials
+SET scopes = (
+    SELECT array_agg(scope ORDER BY scope)
+    FROM (SELECT unnest(scopes || ARRAY['vault:update']::text[]) AS scope) w
+)
+WHERE id = '<credential-id>';
+```
+
+Reissuing with exactly the scopes that client needs is better for anything
+long-lived, and `issue_vault_credential.py` has always supported it.
 
 **Grant `vault:delete` deliberately.** It is the only irreversible verb: ADR 0019
 retirement leaves no archived row and nothing a caller can still resolve. An
