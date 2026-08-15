@@ -135,15 +135,59 @@ low — 0.75–0.81 is a decent signal — but that closely-related-but-distinct
 as high. A model with better *discrimination* in the 0.7–0.9 range would help here even if its
 absolute duplicate scores were lower.
 
+### `openai/text-embedding-3-small:1536` — re-measured 2026-08-15, with the tag counterfactual
+
+| | |
+| --- | --- |
+| Measured | 2026-08-15 |
+| Corpus | 49 active readable Agent notes, 1176 pairs, all tagged |
+| Command | `python -m scripts.measure_dedup_similarity --tag-counterfactual` |
+| Adopted `flag_at` | **1.0** (unchanged, and now for a stronger reason) |
+
+Both arms re-embedded fresh, including the with-tags arm whose vectors already existed, so the
+comparison is not confounded by provider drift since the import.
+
+| Arm | Floor | Ceiling | Margin | Verdict |
+| --- | --- | --- | --- | --- |
+| With tags | 0.8318 | 0.7500 | **−0.0818** | Bands overlap |
+| Without tags | 0.8209 | 0.7258 | **−0.0950** | Bands overlap, wider |
+
+**Removing tags does not open a band — it closes it further.** That refutes the hypothesis this
+section previously carried. Dropping tags lowered the floor by only 0.0109 while lowering the
+ceiling by 0.0242, because the reference pairs' overlapping-but-not-identical tags are real
+signal for *restatement*, which is exactly what the ceiling measures. Tags help the true-positive
+side more than they hurt the false-positive side. Decision 1 in `HANDOFF-METADATA.md` is settled:
+tags stay in the embedding text, and they were never the blocker.
+
+**The floor moved from 0.7406 to 0.8318, and the bands now genuinely overlap** rather than merely
+touching. On 2026-08-12 the floor was a hair *below* the ceiling (gap +0.0094); a known-distinct
+pair now scores well *above* the weakest known duplicate. The cause is one pair added since:
+
+| Score | Pair |
+| --- | --- |
+| 0.8318 | "Calibrate semantic dedup thresholds from the review queue, not literature constants" (2026-08-12) vs "A dedup threshold needs both a floor and a ceiling; the corpus alone gives an illusory empty band" (2026-08-13) |
+
+These are **not** duplicates, and they must not be merged. The second refutes the first — it is
+why "calibrate from the review queue" was demoted, a queue never filling at a safe default
+threshold. They score 0.83 because a claim and its correction share almost all their vocabulary,
+subject, and tags while asserting opposite things.
+
+That is the sharpest statement of this model's limitation yet recorded: **cosine similarity on
+short operational notes cannot distinguish a restatement from a refutation.** A corpus that
+documents its own reasoning will keep generating such pairs — they are the normal output of
+changing your mind in writing — so this is a structural ceiling on the approach, not an artifact
+of a small sample. It also means the floor will keep rising as the corpus matures, moving *away*
+from any usable threshold rather than toward one.
+
 ## What to measure next
 
-- **Whether `tags` should be in the embedding text at all** — the largest open question, and
-  the one that most constrains whether `flag_at` can ever be calibrated. Tags move the corpus
-  maximum by ~0.05 while barely moving the mean, and the margin they are competing against is
-  0.0094. ADR 0017 moved *classification* out of `tags`, but topical tags like `gotcha` and
-  `tooling` remain and will never become facets. Removing tags from the embedding would drop
-  the floor and could plausibly open a real gap. It is an ADR 0013 decision and needs the
-  counterfactual measured on the full corpus, not fourteen documents.
+- ~~Whether `tags` should be in the embedding text at all.~~ **Measured 2026-08-15: no.** Removing
+  them widens the overlap. See the register entry above.
+- **A second model is now the only lever with real upside.** The failure is discrimination in the
+  0.7–0.9 band, not absolute duplicate scores, and no amount of text-shape tuning fixes that —
+  the counterfactual just demonstrated the largest available text-shape change making it worse.
+  A model that separates refutation from restatement is what this needs, if one exists at this
+  price point.
 - **More reference pairs.** Three is thin, and the ceiling is a minimum over them, so it is the
   least stable number in the procedure. Every pair added tightens it.
 - **A second model**, to find out whether the narrow gap is `text-embedding-3-small`'s

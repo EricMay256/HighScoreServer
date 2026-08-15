@@ -48,13 +48,27 @@ def _normalize_terms(values: Sequence[str]) -> list[str]:
     return sorted(seen)
 
 
-def assemble_embedding_text(document: EmbeddableDocument) -> str:
+def assemble_embedding_text(
+    document: EmbeddableDocument,
+    *,
+    include_tags: bool = True,
+) -> str:
     """Render the text to embed for one document.
 
     Title, aliases, and tags lead because they are the densest signal; the body
     follows after a blank line. Absent parts are omitted rather than emitted as
     empty lines, so a document that gains a summary does not merely shift
     whitespace around.
+
+    ``include_tags`` exists for **measurement only** — the counterfactual in
+    ``scripts/measure_dedup_similarity.py`` that asks whether removing tags from
+    the embedding text would open a usable calibration margin. Nothing on the
+    write path may pass it: this function's output is what
+    ``vault_document_embeddings.embedded_text_sha256`` hashes, so a document
+    embedded without tags and hashed as though it had them would make the stale
+    check silently wrong. Keeping the default at True is what makes the
+    parameter safe; changing the default is an ADR 0013 decision and a re-embed
+    of the entire corpus.
     """
 
     head: list[str] = [document.title.strip()]
@@ -63,7 +77,7 @@ def assemble_embedding_text(document: EmbeddableDocument) -> str:
     if aliases:
         head.append(" ".join(aliases))
 
-    tags = _normalize_terms(document.tags)
+    tags = _normalize_terms(document.tags) if include_tags else []
     if tags:
         head.append(" ".join(tags))
 

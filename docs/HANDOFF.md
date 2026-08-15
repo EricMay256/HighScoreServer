@@ -462,9 +462,12 @@ including `Human/07 People/**`.
 - **`vault_migrations/env.py` hardcodes `Path(__file__).parents[1] / ".env"`**, which does not
   exist in a worktree. Pass `DATABASE_URL` explicitly for the vault lineage. `app/env.py` uses
   `find_dotenv(usecwd=True)` and walks up to the main repo, so the app and `scripts/*` are fine.
-- **`ruff format --check` is not clean on the repo** — 13 files would be reformatted, most
-  untouched for months. `ruff check` *is* clean. Don't reformat wholesale; format only the lines
-  you add, or the diff drowns in unrelated churn.
+- **Neither `ruff format --check` nor `ruff check` is clean on the repo.** 13 files would be
+  reformatted, and `ruff check` reports 9 `I001` import-sort errors (2026-08-15) across
+  `migrations/env.py`, the four `migrations/versions/*`, `run_dev.py` and `wsgi.py` — all
+  auto-fixable, all in files untouched for months. The earlier claim that `ruff check` was clean
+  is obsolete. Don't reformat wholesale; format only the lines you add, or the diff drowns in
+  unrelated churn. `app/`, `scripts/` and `tests/` are clean, so scope a check to those.
 - **PowerShell `Set-Content -Encoding utf8` writes a BOM** on 5.1. A token read back from such a
   file carries three junk bytes into the Authorization header. Decode `utf-8-sig`.
 - **Vault Alembic is a separate lineage:** `alembic -c alembic-vault.ini upgrade head`.

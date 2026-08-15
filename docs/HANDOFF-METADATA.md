@@ -65,7 +65,31 @@ expected to find.
 
 ## 1. Decision: does `tags` stay in the embedding text?
 
-**Status: open since ADR 0013. Blocks decisions 2 and 3. Needs a measurement first.**
+**Status: SETTLED 2026-08-15 by measurement — tags stay. Decisions 2 and 3 are unblocked.**
+
+> The counterfactual has been run on the full corpus
+> (`python -m scripts.measure_dedup_similarity --tag-counterfactual`, 49 notes, 1176 pairs per
+> arm, both arms embedded fresh). **Removing tags does not open a usable band — it widens the
+> overlap**, from −0.0818 to −0.0950. Dropping them lowered the floor by 0.0109 but the ceiling
+> by 0.0242: the reference pairs' overlapping tags are genuine signal for restatement, which is
+> what the ceiling measures, so tags help the true-positive side more than they cost the
+> false-positive side.
+>
+> **The reasoning below was sound and its conclusion was wrong**, which is why it is kept rather
+> than deleted. It extrapolated from a 14-note sample where tags moved the maximum pair −0.0513,
+> and inferred that the floor would fall far enough to open a gap. On the full corpus the floor
+> did fall — just not nearly as far as the ceiling did. The one-sided measurement was the error,
+> the same shape of error the calibration procedure itself exists to prevent.
+>
+> A second finding matters more than this decision. The floor has risen from 0.7406 to 0.8318
+> because the corpus gained a note that *refutes* an earlier one, and cosine similarity cannot
+> tell a refutation from a restatement — they share vocabulary, subject and tags while asserting
+> opposite things. A corpus that records its own changes of mind will keep producing such pairs,
+> so the floor drifts away from any usable threshold as the corpus matures. See
+> `app/vault/docs/embedding-calibration.md`. **The remaining lever is a different model, not a
+> different text shape.**
+
+The original argument, preserved:
 
 ADR 0013 embeds `title + aliases + tags + summary + body`. ADR 0016's amendment then measured
 what tags do to the similarity distribution, and it is not small:
@@ -86,16 +110,18 @@ The counter-argument is real: tags are genuine topical signal, and they are the 
 topicality the corpus has. Dropping them from the embedding costs semantic ranking quality in
 search.
 
-**The measurement that decides it, and has not been run:** the counterfactual on all 50 notes,
+**The measurement that decided it, run 2026-08-15 — see the box above:** the counterfactual on all
 not the 14 sampled. Score every pair with tags in the embedding text and again with tags removed;
 report floor, ceiling, and margin for both. `scripts/measure_dedup_similarity.py` already runs
-both sides — it needs a flag to exclude tags from `assemble_embedding_text`. If removing tags
-opens a margin above `MINIMUM_SEPARATION` (0.05), semantic dedup becomes possible and that is
+both sides — the `--tag-counterfactual` flag added on 2026-08-15 does exactly this. If removing
+tags opens a margin above `MINIMUM_SEPARATION` (0.05), semantic dedup becomes possible and that is
 probably worth more than tag-weighted ranking. If it does not, tags are not the blocker and this
 decision goes away.
 
-**Do this measurement before anything else in this document.** Decisions 2 and 3 both change
-which strings land in the embedding text, so their cost depends entirely on the answer.
+**It did not, so the decision has gone away.** Decisions 2 and 3 no longer wait on it: they change
+which strings land in the embedding text, and the answer is that the embedding text is not where
+the problem lives. Judge them on queryability alone — which is what facets were for — and treat
+any effect on the dedup margin as a rounding error against a −0.08 overlap.
 
 ---
 
@@ -255,12 +281,14 @@ back-catalogue of 50 notes has neither.
 
 The dependencies run one way. Doing these out of order means redoing them.
 
-1. **Measure the tag counterfactual on all 50 notes** (decision 1). Everything else costs
-   differently depending on the answer, and it is one script run plus a flag.
+1. ~~Measure the tag counterfactual~~ and ~~decide tags-in-embedding~~ (decision 1). **Both done
+   2026-08-15: tags stay.** Removing them widened the overlap rather than opening a band, so the
+   embedding text is not where the dedup problem lives and nothing below is contingent on it.
 2. **Build the tag census endpoint** (decision 3, middle option). Independent of everything, makes
-   the vocabulary visible, cheap.
-3. **Decide tags-in-embedding** (decision 1) on the measurement.
-4. **Decide `FACET_NAMES`** (decision 2), knowing what tags cost. Add the `kind`/`genre` axis or
+   the vocabulary visible, cheap — and now the cheapest remaining step, since step 1 is done.
+4. **Decide `FACET_NAMES`** (decision 2) on **queryability alone**. The "what tags cost the dedup
+   margin" input is gone: against a −0.08 overlap, moving a tag to a facet changes nothing that
+   matters. Add the `kind`/`genre` axis or
    consciously decline it.
 5. **Extend `types.yml`** so notes can carry facets — and `summary`/`aliases` if decision 5 says
    so. **Nothing can be backfilled before this**; the authoring schema is the constraint, not the
@@ -272,8 +300,8 @@ The dependencies run one way. Doing these out of order means redoing them.
 8. **Fix `Related` to be ID-keyed**, then project the wiki layer into `vault_documents` with its
    `vault_compile_runs` rows (decision 4). Traversal becomes possible here and not before.
 
-Steps 1 and 2 are cheap and unblock the rest. **Step 5 is the real gate** — the handoff's task 2e
-records that the backfill is blocked on data, and this is that data.
+Step 1 is done. **Step 5 is the real gate** — the handoff's task 2e records that the backfill is
+blocked on data, and this is that data. Step 2 remains the cheapest way in.
 
 ---
 
