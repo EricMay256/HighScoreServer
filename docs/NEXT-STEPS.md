@@ -5,10 +5,14 @@ relationships, not the detail. `HANDOFF.md` holds the full task list and session
 history; `HANDOFF-METADATA.md` holds the metadata-model decision brief. This file
 exists so neither has to be read to know what to pick up.
 
-**State:** branch `ai-claude/chat-findings-option-a-30464c`, 8 commits ahead of
-`origin/dev`, suite green (482), tree clean. `origin/dev` is 45+ commits ahead of
-`main`. Nothing since the last merge to `main` is configured on Heroku, and
-nothing needs to be — see [Deployment](../README.md#deployment).
+**State:** branch `ai-claude/chat-findings-option-a-30464c`, 13 commits ahead of
+`origin/dev` and unpushed, suite green (486), tree clean. `origin/dev` is 45+
+commits ahead of `main`. Nothing since the last merge to `main` is configured on
+Heroku, and nothing needs to be — see [Deployment](../README.md#deployment).
+
+**Local databases are migrated to vault lineage `0007_write_scope_split`.** A
+database that predates it needs `alembic -c alembic-vault.ini upgrade head`
+before this code runs against it, or credential writes fail the old CHECK.
 
 ---
 
