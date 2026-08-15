@@ -54,6 +54,46 @@ The dependency that used to sit in front of this is gone: the tag counterfactual
 is measured and tags stay in the embedding text, so decisions 2 and 3 are judged
 on queryability alone.
 
+## 4. Split `vault:write` into contribute / update / delete
+
+Independent of everything above and small, so it can slot in whenever. Today
+`require_write_scope` gates all three write routes on the single `vault:write`
+scope, so **a credential that can add a note can also delete one** — including
+the long-lived `importer` credential, whose actual need is contribute plus
+update. ADR 0015 already establishes that scopes are verbs, so this is a
+refinement of the existing model rather than a new idea; the tight `retire`
+quota (10/min burst 5, deliberately the tightest, because a loop that deletes is
+worse than a loop that writes) is the same instinct expressed at the wrong
+layer.
+
+**This needs an Alembic revision on the vault lineage.** `scopes` carries a
+CHECK constraint enumerating the five known values
+(`vault_agent_credentials_scopes_known`, `app/vault/tables.py`), so new scope
+names cannot be issued until it is widened.
+
+The fork to settle first, because it decides whether the migration is
+data-touching:
+
+- **`vault:write` keeps meaning "all writes"**, with `vault:update` and
+  `vault:delete` as narrower grants. Non-breaking; existing credentials keep
+  working. Muddier, and the permissive default survives.
+- **`vault:write` narrows to contribute only.** Cleaner, and the version worth
+  having. Breaking: every existing `vault:write` holder silently loses update
+  and delete, so the migration must decide whether to grandfather them by
+  granting the new scopes to current holders. Grandfathering is one `UPDATE` and
+  keeps the importer working; not grandfathering means reissuing credentials.
+
+Recommended: narrow it, and grandfather in the same revision — the whole point
+is that *future* credentials get least privilege, and silently breaking the one
+client that exists buys nothing.
+
+**Not needed: a duration argument.** `scripts/issue_vault_credential.py` already
+takes `--days`, which sets `expires_at`, and `app/vault/auth.py` refuses an
+expired credential on every request with no cache to wait out. What is missing
+is that nothing *defaults* to an expiry — omitting `--days` mints a permanent
+credential — so if the goal is bounded lifetimes, the change is a default and a
+rotation story, not a new argument.
+
 ---
 
 ## Closed recently, so nobody reopens them

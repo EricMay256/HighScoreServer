@@ -389,7 +389,17 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    by *title*, not id, which is the one referential inconsistency worth fixing before any of it
    is projected. Detail in `HANDOFF-METADATA.md` §4.
 6. **Review surface** — `vault:review` is recognised and granted by no route. Lower priority
-   than it looks: at `flag_at = 1.0` the queue only fills on exact resubmission.
+   than it looks: at `flag_at = 1.0` the queue only fills on exact resubmission — and after the
+   2026-08-15 calibration it is worth restating that the bands now *overlap*, so nothing but an
+   exact resubmission will ever reach that queue on this model.
+6b. **Split `vault:write` into contribute / update / delete.** All three write routes share one
+   `require_write_scope`, so a credential that can add a note can also delete one — the
+   `importer` credential included. Needs an Alembic revision on the vault lineage, because
+   `vault_agent_credentials_scopes_known` enumerates the five legal scope names. The fork worth
+   settling first is whether `vault:write` narrows to contribute (cleaner, breaking, wants
+   grandfathering in the same revision) or stays a superset. See `docs/NEXT-STEPS.md` §4.
+   Note the *duration* half of this is already built: `issue_vault_credential.py --days` sets
+   `expires_at` and `auth.py` enforces it; what is missing is a non-permanent default.
 7. **Port `resolve_context`** to close the `folders.yml` ↔ `READABLE_PATH_PREFIXES`
    duplication. Entangled with deferred decision #2 (where governance YAML lives at runtime).
 8. ~~Commit the importer.~~ **Already tracked** as `f942917` (2026-08-12). Still worth renaming
