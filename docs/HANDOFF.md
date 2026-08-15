@@ -348,9 +348,17 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    all three are 5. `EmbeddingSettings.from_environment` now rejects any configured timeout
    whose full budget exceeds 30s (max 7.3s), printing the arithmetic — the retry constants
    moved to `constants.py` so settings can check them without importing a transport module.
-   **Still check the Heroku config var before the release that enables the vault:** if it is
-   set above 7.3 there, the app will refuse to boot.
-   `heroku config:get VAULT_EMBEDDING_TIMEOUT_SECONDS --app high-score-server`
+   Not a deploy risk: the variable is **unset on Heroku**, and the validation only runs when
+   the vault is enabled, which it has never been.
+2b. **Nothing added since the last merge to `main` is configured on Heroku** — 23 variables
+   across the connection budget, Steam auth, and the whole vault. Confirmed 2026-08-14. That
+   is safe rather than pending work: `REQUIRED_ENV_VARS` is unchanged, so every one of them
+   has a default and a merge deploys without a config change. Two consequences to carry:
+   **the HSS pool silently drops from 10 per worker to 4** (`main` hardcodes `max_size=10`;
+   it is now configurable, default 4 — a fix, since 10 × 2 workers allocated the entire
+   20-connection limit, but a real reduction in concurrency), and **Steam endpoints stay
+   unavailable** until their three variables are set. The vault ships dark and is meant to.
+   Written up in README "Deployment" and banner-noted at the top of `vault-configuration.md`.
 2b. ~~Apply `0005_document_facets` to `leaderboard`.~~ **Done 2026-08-13**, along with `0006`.
 2c. ~~Re-run the importer.~~ **Done 2026-08-13** — 48 documents, verified. Then drifted again:
    the session wrote two more vault notes (`cb6a42ec`, `f66cd89c`, on the digest defect and the

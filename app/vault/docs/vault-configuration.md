@@ -7,6 +7,15 @@ schemas
 
 **Contains secrets:** no
 
+**Nothing in this document has been applied. As of 2026-08-14 no `VAULT_*`
+variable is set on `high-score-server`, and the vault has never been deployed.**
+Read every command here as a plan, not as a description of the running app. The
+vault ships dark by design — `VAULT_ENABLED` defaults to false, so no routes are
+registered, no engine is created, and `scripts/release.sh` skips the vault
+migration lineage — which is why the code can merge to `main` well before any of
+this is configured. Confirm the real state with `heroku config --app
+high-score-server` before acting on anything below.
+
 This document records variable names and operator commands only. Never paste
 real database URLs, tokens, note content, exports, or embedding vectors into
 this file, source control, CI logs, or build artifacts.

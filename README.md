@@ -204,14 +204,68 @@ alembic downgrade -1          # revert the most recent revision (local/test only
 ```
 
 > **Heroku auto-migrates on deploy.** The `Procfile` carries
-> `release: alembic upgrade head`, so every release applies pending migrations
+> `release: bash scripts/release.sh`, so every release applies pending migrations
 > before the new code goes live; a failed migration aborts the release. There is
-> no manual migration step on deploy.
+> no manual migration step on deploy. The script runs the leaderboard lineage
+> unconditionally and the vault lineage only when `VAULT_ENABLED=true`, because
+> the vault's first migration runs `CREATE EXTENSION vector` and running it
+> unconditionally would make every deploy depend on pgvector being available.
 
 > **Grants are not in migrations.** Production runs as a single owner role, so a
 > `GRANT ... TO leaderboard_app` inside a revision would error there and abort
 > the release. Role grants live in `db/role.sql`, applied per-environment (see
 > [Deployment](#deployment)).
+
+
+## Deployment
+
+Only three variables are required at boot — `DATABASE_URL`, `API_KEY`, and
+`JWT_SECRET` (`REQUIRED_ENV_VARS` in `app/env.py`). Everything else has a
+default, which is what makes the section below possible rather than dangerous.
+
+### Configuration added since the last merge to `main` is not set on Heroku
+
+Twenty-three variables have been added to `.env.example` since `main`, covering
+the connection budget, Steam authentication, and the vault. **None of them are
+configured on the app.** That is deliberate and safe — nothing new is
+boot-required, so a merge deploys without touching config — but it has three
+consequences worth knowing before the merge rather than after.
+
+**1. The HSS connection pool shrinks, with no config change.** `main` hardcodes
+`max_size=10` per worker; the pool is now configurable and defaults to **4**.
+Across two workers that is 20 connections → 8. This is a fix rather than a
+regression: at 10 per worker the app was allocating the entire 20-connection
+Essential-0 limit, leaving nothing for the release dyno or for `heroku pg:psql`
+during an incident. But it is a real reduction in per-worker concurrency, and it
+is the one change here that takes effect silently. Set `HSS_DB_POOL_MAX_SIZE`
+explicitly if 4 proves tight — and recalculate the budget in `.env.example` if
+you do, because the vault's share is sized against it.
+
+**2. Steam authentication stays unavailable.** `STEAM_WEB_API_KEY`,
+`STEAM_APP_ID`, and `STEAM_AUTH_IDENTITY` are read lazily, so the endpoints
+raise `SteamAuthConfigError` when called and nothing else is affected.
+`STEAM_WEB_API_KEY` is a publisher key: Heroku config only, never a tracked file.
+
+**3. The vault ships dark, and that is the intended first release.**
+`VAULT_ENABLED` defaults to false, so no vault routes are registered, no vault
+OpenAPI schema is published, no vault engine is created, and the release phase
+skips the vault migration lineage entirely. Every `VAULT_*` variable is inert
+until the flag is set. Enabling it is a separate, reviewed change — see
+[`app/vault/docs/vault-configuration.md`](app/vault/docs/vault-configuration.md),
+which carries the `heroku config:set` block and the connection-budget arithmetic.
+
+Verify the current state before a release rather than trusting this list:
+
+```bash
+heroku config --app high-score-server
+```
+
+### Role grants
+
+`db/role.sql` is applied per environment, never from a migration. Production
+runs as the database owner and never executes it; it exists for environments
+that can host a restricted `leaderboard_app` role. It deliberately grants nothing
+on the `vault` schema — the file explains why.
 
 
 ## Architecture Diagrams
