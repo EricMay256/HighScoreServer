@@ -10,9 +10,10 @@ exists so neither has to be read to know what to pick up.
 commits ahead of `main`. Nothing since the last merge to `main` is configured on
 Heroku, and nothing needs to be — see [Deployment](../README.md#deployment).
 
-**Local databases are migrated to vault lineage `0007_write_scope_split`.** A
-database that predates it needs `alembic -c alembic-vault.ini upgrade head`
-before this code runs against it, or credential writes fail the old CHECK.
+**The vault lineage head is `0009_request_digest_v3`.** A database that predates
+it needs `alembic -c alembic-vault.ini upgrade head` before this code runs
+against it. Revisions 0008 and 0009 preserve compile provenance and make digest
+v3 the default for future/direct write-request inserts.
 
 ---
 

@@ -7,8 +7,10 @@ schemas
 
 **Contains secrets:** no
 
-**Nothing in this document has been applied. As of 2026-08-14 no `VAULT_*`
-variable is set on `high-score-server`, and the vault has never been deployed.**
+**Nothing in this document has been applied. Re-verified on 2026-08-16:
+`VAULT_ENABLED` is unset on `high-score-server`, and a read-only catalog query
+returns NULL for `to_regclass('vault.vault_agent_credentials')`, so the vault
+credential schema has never been deployed.**
 Read every command here as a plan, not as a description of the running app. The
 vault ships dark by design — `VAULT_ENABLED` defaults to false, so no routes are
 registered, no engine is created, and `scripts/release.sh` skips the vault
@@ -40,6 +42,16 @@ workers, the approved initial allocation is:
 
 The 30% remainder satisfies the architecture's requirement to leave at least
 25% unallocated.
+
+**Production evidence, 2026-08-16 (vault still disabled):** Heroku explicitly
+sets `HSS_DB_POOL_MAX_SIZE=4`; one Basic web dyno runs the Procfile's two Gunicorn
+workers; Essential-0 reported 2/20 live connections. Across the 52 router samples
+available in the recent log window, service time was p50 47 ms, p95 1,451 ms,
+max 4,789 ms, with zero pool-timeout signals, H12s, or router 5xx responses.
+This supports retaining 4 for the current low-traffic disabled state; it is not a
+substitute for a load test. `HSS_PROCESS_COUNT` and `VAULT_DB_POOL_SIZE` remain
+unset in production. Set them explicitly to 2 in the reviewed vault-enablement
+release and repeat the connection/latency check after traffic reaches the vault.
 
 **The split moved from 5/1 to 4/2 on 2026-08-14, at the same total.** A vault
 request checks out twice in sequence — once to authenticate, once to serve — so
@@ -196,7 +208,12 @@ alembic -c alembic-vault.ini upgrade head
 
 The Heroku release phase is `bash scripts/release.sh`. It runs the leaderboard
 lineage unconditionally, then the vault lineage **only when `VAULT_ENABLED` is
-`true`**, and aborts the release if either fails.
+enabled**, and aborts the release if either fails. Release and runtime use the
+same case-insensitive boolean contract: `1`, `true`, `yes`, and `on` enable;
+`0`, `false`, `no`, and `off` disable; surrounding whitespace is ignored. An
+unset value defaults to `false`, while an empty or unrecognized value aborts the
+release instead of silently skipping migrations. Use lowercase `true` and
+`false` in operator configuration for clarity.
 
 The gate is deliberate. `0001_vault_foundation` runs `CREATE EXTENSION vector`;
 if pgvector is unavailable on the attached plan, an ungated release phase would
@@ -451,6 +468,11 @@ WHERE id = '<credential-id>';
 Reissuing with exactly the scopes that client needs is better for anything
 long-lived, and `issue_vault_credential.py` has always supported it.
 
+The 2026-08-16 pre-merge production check found no credential table and thus no
+production credentials to migrate. That is evidence for the current dark
+deployment, not a permanent exemption: repeat the inventory immediately before
+enablement, after migrations and before routes receive traffic.
+
 **Grant `vault:delete` deliberately.** It is the only irreversible verb: ADR 0019
 retirement leaves no archived row and nothing a caller can still resolve. An
 importer-shaped client wants `vault:read vault:write vault:update` and not the
@@ -465,6 +487,17 @@ Credentials do not expire unless `--days` is given, which is deliberate for the
 machine clients this serves — an expiry that lapses unnoticed is an outage, and
 revocation is immediate and needs no cache to expire. Use `--days` for anything
 handed to a third party or issued for one task.
+
+### Browser and CORS contract
+
+The current vault write clients are operator-issued agents and projectors, not
+browser applications. They call the HTTP API as machine clients, so browser CORS
+preflight intentionally does not advertise `PUT` or `DELETE`. HighScoreServer's
+global CORS policy remains scoped to its public leaderboard/auth browser surfaces
+(`GET`, `POST`, and `OPTIONS`). This is not an authorization boundary — every
+vault route still requires an agent credential — but it avoids promising a
+browser integration that does not exist. If a browser vault client is added,
+widen CORS deliberately and add preflight coverage in the same change.
 
 The vault cannot reuse HighScoreServer's authentication — importing it would
 breach the isolation rule that keeps extraction a directory move — and the
@@ -502,6 +535,15 @@ cannot cover the cost of the check that produces its own key. It is a slowapi
 isolation rule is intact and this instance is independent of HSS's. Defaults to
 `600/minute`, deliberately loose: it is a floor that stops anonymous hammering,
 not a quota, and one egress address may legitimately carry several credentials.
+
+The deployment topology is direct client → Heroku router → dyno. Heroku appends
+the address it observes to the **right** of any existing `X-Forwarded-For` list,
+so the guard keys on the rightmost value and ignores caller-controlled prefixes.
+Heroku also warns that forwarded headers as a whole are unsuitable authorization
+inputs; this address is only an abuse-control bucket. If a CDN or other proxy is
+placed in front of Heroku, the rightmost value identifies that proxy and this
+assumption must be revisited. See Heroku's
+[HTTP routing documentation](https://devcenter.heroku.com/articles/http-routing#heroku-headers).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

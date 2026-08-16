@@ -105,7 +105,7 @@ flowchart LR
 ### Knowledge-platform bounded context
 
 The cloud knowledge platform is staged in this service as an isolated `app/vault/` package,
-with its own decision log of 19 ADRs under
+with its own decision log of 20 ADRs under
 [`app/vault/docs/adr/`](app/vault/docs/adr/). It exposes an authenticated HTTP adapter —
 hybrid lexical and vector search fused by reciprocal rank, fetch by id, and a governed write
 path covering contribution, replacement, and retirement — over one application-service layer.
@@ -262,6 +262,37 @@ alembic downgrade -1          # revert the most recent revision (local/test only
 > unconditionally and the vault lineage only when `VAULT_ENABLED=true`, because
 > the vault's first migration runs `CREATE EXTENSION vector` and running it
 > unconditionally would make every deploy depend on pgvector being available.
+
+### Production rollback after a migration
+
+Do **not** use `heroku rollback` to a slug whose source tree predates a migration
+already recorded in production. The old slug's release phase cannot construct
+the newer revision graph; for example, a database at `0004_auth_identities`
+cannot be handled by `main`, whose graph ends at `0003_max_score_claimed_tier`.
+Do not solve that mismatch with a production downgrade: `0004`'s downgrade drops
+identity data and is explicitly local/test-only.
+
+Use a roll-forward application rollback instead:
+
+1. Branch from the currently deployed revision so both Alembic lineages and the
+   current `scripts/release.sh` remain present.
+2. Revert only the application behavior implicated in the incident. Keep every
+   applied migration file. Preserve compatibility writes required by the newer
+   schema (for `0004`, native registration and claim must continue populating
+   `auth_identities`) unless the recovery change also supplies a safe backfill.
+3. Run the full tests, both empty-database upgrade paths, and a production-shaped
+   boot against a database already at the current heads.
+4. Deploy that new commit as a normal release and verify `alembic current` before
+   directing traffic to it.
+
+This recovery pattern was rehearsed on 2026-08-16 against a throwaway PostgreSQL
+database by
+`test_roll_forward_application_rollback_keeps_both_migration_graphs`: both
+lineages were advanced to head, then the recovery release's two `upgrade head`
+operations were rerun and remained at `0004_auth_identities` and
+`0009_request_digest_v3`. Keep that test in the release gate. A production
+incident still uses a new release, never a destructive downgrade or a rollback
+to a slug whose graph predates an applied revision.
 
 > **Grants are not in migrations.** Production runs as a single owner role, so a
 > `GRANT ... TO leaderboard_app` inside a revision would error there and abort

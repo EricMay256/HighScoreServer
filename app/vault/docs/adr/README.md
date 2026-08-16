@@ -24,7 +24,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0013 | [The embedding text carries semantic frontmatter, not bookkeeping](0013-embedding-text-is-semantic-fields-only.md) | Accepted |
 | 0014 | [`ai_read` excludes at import and again at query time](0014-ai-read-excludes-at-import-and-at-query.md) | Accepted |
 | 0015 | [Operator-issued agent credentials replace the shared read key](0015-agent-credentials-replace-the-shared-read-key.md) | Accepted |
-| 0016 | [The governed write path](0016-the-governed-write-path.md) | Accepted (amended 2026-08-12: `flag_at` derivation; 2026-08-13: idempotency digest) |
+| 0016 | [The governed write path](0016-the-governed-write-path.md) | Accepted (amended 2026-08-12: `flag_at` derivation; 2026-08-13 and 2026-08-16: idempotency digest) |
 | 0017 | [Facets carry classification, outside the embedding text](0017-facets-carry-classification-outside-the-embedding.md) | Accepted |
 | 0018 | [Updates are a distinct endpoint that refuses on collision](0018-updates-are-a-distinct-endpoint-that-refuses-on-collision.md) | Accepted |
 | 0019 | [Retiring a document deletes it, and the ledger outlives it](0019-retiring-a-document-deletes-it.md) | Accepted |

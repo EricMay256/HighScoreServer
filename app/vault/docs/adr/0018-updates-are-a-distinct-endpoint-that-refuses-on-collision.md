@@ -52,6 +52,10 @@ an omitted list is an empty list.
 The cost is that a caller changing one facet resends the body. For the only
 client that exists — a projector holding the whole note already — that is free.
 
+Create and replacement inherit one content request model. Title/body bounds and
+the validators for tags, aliases, related ids, source ids, and facet shape are
+therefore the same contract rather than parallel copies that can drift.
+
 ### No idempotency key
 
 A full replacement is idempotent by construction: send it twice and the second
@@ -93,6 +97,22 @@ precisely the shape a facet backfill has, so the backfill is cheap by
 construction rather than by accident.
 
 Dedup still needs a vector when the text did not move; the stored one is reused.
+
+The provider call is conditional, but persistence of the candidate vector is not.
+The text comparison necessarily happens before the corpus lock so a provider call
+does not hold a transaction open. That snapshot can be stale by the time the lock is
+acquired: one writer can change the text while another writer, which observed the old
+text and reused its vector, waits to restore it. Every successful replacement therefore
+upserts the candidate vector and digest under the lock, including the reused stored
+vector. This preserves the final text/vector invariant without moving provider I/O into
+the transaction.
+
+The configured OpenAI model also imposes a token boundary that a character
+limit cannot express exactly. Official documentation gives
+`text-embedding-3-small` a maximum input of 8,192 tokens. Its context-length 400
+is a permanent input rejection: the adapter does not retry it, and both create
+and update map it to 422. Other provider failures remain 503. This avoids a new
+tokenizer dependency while keeping the public retry contract honest.
 
 ### Identity, authorship and status are not caller-supplied
 

@@ -77,6 +77,13 @@ Values are shape-validated in the database and vocabulary-validated in
 application code, following ADR 0009: which projects exist is a data change, not
 a migration.
 
+Normalization must be lossless. Distinct input names such as `" project"` and
+`"project"` both strip to the same stored key; accepting both would make one
+assignment silently overwrite the other. Such collisions are rejected at the
+shared create/update transport model and again in domain normalization for
+non-HTTP callers. Values are not implicitly merged because that would conceal a
+malformed request and make its digest semantics ambiguous.
+
 ### `related_ids` and `source_ids` become reachable
 
 Both columns already exist and are already outside the embedding text. Zero rows

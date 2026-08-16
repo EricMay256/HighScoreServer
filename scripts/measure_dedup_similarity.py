@@ -58,6 +58,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.env import load_environment
 from app.vault.calibration import (
@@ -70,7 +71,7 @@ from app.vault.db import create_vault_engine
 from app.vault.domain import DocumentStatus
 from app.vault.embedding_runtime import create_embedding_provider
 from app.vault.embedding_text import assemble_embedding_text
-from app.vault.embeddings import EmbeddingError, EmbeddingInputKind
+from app.vault.embeddings import EmbeddingError, EmbeddingInputKind, EmbeddingProvider
 from app.vault.read_policy import readable_path_predicate
 from app.vault.settings import EmbeddingSettings, VaultSettings
 from app.vault.tables import vault_document_embeddings, vault_documents
@@ -109,7 +110,10 @@ def percentile(values: list[float], fraction: float) -> float:
     return ordered[rank - 1]
 
 
-async def load_corpus(engine, profile_id: str) -> list[tuple[str, list[float]]]:
+async def load_corpus(
+    engine: AsyncEngine,
+    profile_id: str,
+) -> list[tuple[str, list[float]]]:
     """Every active, readable document's title and vector under one profile.
 
     Filtered by ``readable_path_predicate`` and ``status = active`` so the
@@ -212,7 +216,7 @@ class _EmbeddableRow:
     aliases: tuple[str, ...]
 
 
-async def load_corpus_documents(engine) -> list[_EmbeddableRow]:
+async def load_corpus_documents(engine: AsyncEngine) -> list[_EmbeddableRow]:
     """The same population as ``load_corpus``, as text rather than vectors.
 
     The counterfactual re-embeds, so it needs the fields
@@ -251,7 +255,7 @@ async def load_corpus_documents(engine) -> list[_EmbeddableRow]:
 
 
 async def _embed_documents(
-    provider,
+    provider: EmbeddingProvider,
     documents: list[_EmbeddableRow],
     *,
     include_tags: bool,

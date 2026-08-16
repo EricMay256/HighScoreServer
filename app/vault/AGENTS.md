@@ -6,8 +6,9 @@ the package; the host repository's `AGENTS.md` governs everything outside these 
 ## What this is
 
 The knowledge-platform bounded context: its own API models, domain records, Core tables,
-repositories, services, auth, embeddings, HTTP routes, and MCP adapter. It holds runtime code
-and schema definitions only — never corpus content, credentials, exports, or vectors.
+repositories, services, auth, embeddings, and HTTP routes. An MCP adapter is planned but does
+not exist yet. The package holds runtime code and schema definitions only — never corpus
+content, credentials, exports, or vectors.
 
 It is currently hosted inside HighScoreServer, which is a staging location rather than
 permanent ownership. See `docs/vault-extraction-manifest.md` for what leaves and what has to
@@ -26,6 +27,10 @@ be edited when it does.
   Alembic and must never reach `create_all()` in production.
 - Migrations are explicit reviewed SQL in `vault_migrations/`, a lineage separate from the
   host's, versioned in `vault.vault_alembic_version`.
+- Historical revision modules import only migration-owned helpers from
+  `vault_migrations.helpers`, never the staged `app.vault` package. Alembic must be able to
+  construct the full graph after the lineage directory is moved independently; runtime-only
+  imports belong in `env.py` and are repointed during extraction.
 - `pgvector` is used only here and leaves with the package.
 
 ## Isolation
@@ -50,6 +55,10 @@ be edited when it does.
 - **Embeddings live in `vault_document_embeddings`, keyed by `(document_id, profile_id)`** —
   not as columns on `vault_documents`. "Not embedded" is the absence of a row. Re-embedding a
   profile is an upsert. See ADR 0003.
+- **Compile provenance is durable.** A wiki document's `compile_run_id` is required by the
+  provenance consistency CHECK, so its foreign key uses `ON DELETE RESTRICT`. Never change it
+  to `SET NULL`: PostgreSQL would attempt an update that the CHECK rejects, and provenance
+  would be lost even if the CHECK were weakened.
 - **`kind` is lifecycle; `doc_type` is taxonomy.** `document_kind_enum('note','wiki')` stays a
   coarse storage and lifecycle discriminator and keeps its role in
   `vault_documents_compile_provenance_consistent`. The governance Type Dictionary value lives in
@@ -118,13 +127,14 @@ be edited when it does.
   diffable against `vault_contrib.core`. What is deliberately *not* ported is the **value** of
   `flag_at`: Stage A's 0.85 is a title string ratio, here the score is cosine similarity on a
   specific model. `DEFAULT_POLICY` ships `flag_at = 1.0` — only an identical embedding flags.
-  That is now the **measured** answer for `text-embedding-3-small`, not a placeholder: the
-  corpus's closest legitimately-distinct pair scores 0.7406 and the weakest deliberate
-  restatement scores 0.7500, a gap of 0.0094. Do not "restore" 0.85, and do not derive a
-  threshold from the corpus distribution alone — it looks like a wide safe band above 0.74 and
-  real duplicates live inside it. `flag_at` is derived per model by the two-sided procedure in
-  `calibration.py` / `docs/embedding-calibration.md`; changing the constant needs a new row in
-  that register. See ADR 0016 and its 2026-08-12 amendment.
+  That is now the **measured** answer for `text-embedding-3-small`, not a placeholder: in the
+  2026-08-15 with-tags counterfactual, the corpus's closest legitimately-distinct pair scores
+  0.8318 and the weakest deliberate restatement scores 0.7500, so the bands overlap by 0.0818.
+  Do not "restore" 0.85, and do not derive a threshold from the corpus distribution alone —
+  real duplicates and legitimately adjacent notes do not separate cleanly. `flag_at` is derived
+  per model by the two-sided procedure in `calibration.py` / `docs/embedding-calibration.md`;
+  changing the constant needs a new row in that register. See ADR 0016 and its calibration
+  amendments.
 
 ## Retrieval and embeddings
 
@@ -210,13 +220,37 @@ be edited when it does.
   trip; holding a transaction across it pins a pooled connection and the advisory lock for the
   provider's latency. Idempotency is therefore re-checked *under the lock*.
 - **One corpus-wide `pg_advisory_xact_lock`** guards check-dedup-then-write. A per-key lock does
-  not help: the conflict is between different idempotency keys.
+  not help: the conflict is between different idempotency keys. Retirement takes the same lock
+  so its pending-review check cannot race with creation of a review case.
+- **Update provider I/O is conditional; vector persistence is unconditional.** The candidate
+  vector may be reused when its pre-lock digest matches, but every successful replacement
+  upserts that candidate under the lock. Otherwise a concurrent writer can make the pre-lock
+  decision stale and leave final text paired with the wrong embedding. See ADR 0018.
+- **Pending review evidence is undeletable.** Retirement checks both the candidate foreign key
+  and document IDs inside `similar_documents`; the latter is JSON and has no database FK. See
+  ADR 0019.
 - **No dedup, no write.** Missing embedding provider is 503, not a silent insert. The read path
   may degrade to lexical; the write path may not degrade to no-dedup.
+- **Embedding context overflow is permanent input failure.** OpenAI documents an 8,192-token
+  maximum for `text-embedding-3-small`; its context-length 400 is not retried and maps to 422
+  on contribution and update. Other provider failures remain 503. Never infer permanence from
+  every 400: an invalid model or dimensions setting is an operator error, not bad note content.
 - **Settled outcomes are 200**, including `flagged` and `rejected` — a client that retries a
   "flagged" as an error creates a second note that flags against the first.
-- The idempotency digest covers the **validated model**, not raw bytes, so key order is not a
-  409. `contributed_by` comes from the **credential**, never the body.
+- The idempotency digest covers the **validated model**, not raw bytes, and v3 recursively sorts
+  object keys, so top-level or nested key order is not a 409. List order remains significant.
+  `contributed_by` comes from the **credential**, never the body. Any digest-rule change bumps
+  `REQUEST_DIGEST_VERSION` and gets an Alembic revision; old rows retain their version and use
+  the one-replay compatibility path in ADR 0016.
+- Create and update inherit one content request model. Do not add normalization or collection
+  validation to only one verb. Facet-name normalization rejects collisions rather than merging
+  or silently overwriting caller data.
+- An idempotent replay does not create a second document or write-request row, but it **does**
+  append a `replayed` audit event carrying that inbound attempt's request ID. A retry must not
+  disappear from incident reconstruction.
+- Reusing a current-version idempotency key for a different body appends a `conflict` audit
+  event before the service raises. The event uses a separate transaction because the
+  transaction that detects and raises the conflict rolls back.
 - `find_similar` applies `readable_path_predicate`: similarity output names and titles existing
   documents, so an unscoped dedup query is a disclosure channel around ADR 0014.
 - `Merge` and `Link` raise. ADR 0004 keeps merge disabled and `link_at` unset; reaching either
@@ -238,8 +272,13 @@ be edited when it does.
   Attached to the `APIRouter` so new routes inherit it.
 - **slowapi is used here, and that is not a boundary breach.** It is a third-party import;
   the vault builds its own `Limiter` and never touches the host's. `app/vault/` still contains
-  no `from app.`. The guard's X-Forwarded-For key is forgeable and deliberately not an
-  authorization boundary — forging it spreads load across buckets, it grants nothing.
+  no `from app.`. For the current direct-to-Heroku topology, key the guard from the rightmost
+  `X-Forwarded-For` value: Heroku appends the address it observes after caller-controlled
+  prefixes. If another proxy is placed in front of Heroku, revisit this assumption rather than
+  guessing at a different list position.
+- **Unknown quota operations fail closed.** Every route operation must be registered in
+  `LIMITS`; a typo or new operation without a deliberate quota is a programming error, not an
+  unlimited bucket.
 - **Both layers are per process by default**, so the real ceiling is the limit times the
   worker count. Do not describe this as a hard limit in operator docs, and do not "fix" the
   quota in-process — the fix is a shared backend. The pre-auth guard can already take one via
@@ -258,3 +297,5 @@ be edited when it does.
   manifest as leaving with the package.
 - Material architectural decisions get a Nygard-format ADR in `docs/adr/`, continuing this
   lineage's own numbering.
+- `tests/vault/` is not one ownership unit. Follow the classification and standalone-fixture
+  plan in `docs/vault-extraction-manifest.md`; never move the directory wholesale.

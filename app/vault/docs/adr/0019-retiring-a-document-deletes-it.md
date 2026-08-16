@@ -54,9 +54,13 @@ is true: this key was used, and what it produced is gone.
 ### A document under review cannot be retired
 
 `vault_review_cases.candidate_document_id` has no cascade either, and a review
-case is a record of a judgement. Deleting the document under it would fail on the
-constraint or, if forced, leave a decision pointing at nothing. The service
-counts open cases and refuses with 409.
+case is a durable record of a judgement. A candidate reference therefore blocks
+retirement in every review state; otherwise a resolved case would pass the
+service check and fail later at the foreign key. Its `similar_documents` JSON
+also names the evidence used to reach that judgement but cannot carry a foreign
+key. Evidence references block while the case is pending, when deleting one
+would destroy unresolved review context. The service applies those two rules
+explicitly and refuses with 409 rather than leaking a database error.
 
 In practice a flagged document is already unreachable here: it is outside
 `READABLE_STATUSES`, so the lookup 404s first. The check exists for the case
@@ -78,11 +82,14 @@ longer exists, and echoing the id back would suggest otherwise.
 `update` share. Those were widened because contributions arrive in batches; a
 retirement should not, and a loop that deletes is worse than a loop that writes.
 
-### No advisory lock
+### Retirement shares the corpus advisory lock
 
-The corpus-wide lock exists to make check-dedup-then-write atomic. A delete has
-no such span, and taking the lock would serialize retirement behind every
-contribution for no benefit.
+The pending-review check and delete must be atomic with creation of a review case.
+Retirement therefore takes the same corpus-wide advisory transaction lock as
+contribution and update before checking references. Without it, retirement could
+observe no case, a concurrent contribution could record the document as duplicate
+evidence, and retirement could then delete that evidence. The serialization cost is
+accepted because retirement is deliberately rare and tightly rate-limited.
 
 ## Consequences
 

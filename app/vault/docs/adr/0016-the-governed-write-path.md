@@ -99,6 +99,12 @@ Not the raw request bytes. Two JSON documents differing in key order or
 whitespace are the same request, and treating them as a conflict would refuse a
 legitimate retry. A genuinely different body under the same key is 409.
 
+The refused attempt is still an auditable write attempt. It appends a
+`vault.contribute` event with outcome `conflict`, the request ID, principal, and
+idempotency key. That insert runs in a separate transaction after the detecting
+transaction rolls back; recording it inside the transaction that raises the 409
+would erase the event along with the rollback.
+
 **Narrowed 2026-08-13** to the fields the caller supplied. See the amendment
 below: hashing the whole model made the digest depend on the server's schema.
 
@@ -326,3 +332,17 @@ moving dedup off the synchronous write path: insert provisionally, resolve
 duplicates in a background pass. That is a different governance model, with a
 window in which the corpus contains known-unreviewed duplicates, and it should be
 its own ADR rather than a quiet change to this key.
+
+## Amendment, 2026-08-16: nested objects are canonical and versioned as v3
+
+Digest v2 fixed additive schema drift but still used Pydantic's JSON emission
+order. That made top-level request keys stable because model fields have a fixed
+declaration order, while keys inside caller-supplied objects did not: two
+equivalent `facets` objects with reversed insertion order hashed differently.
+
+Digest v3 serializes the JSON-mode validated model as compact JSON with object
+keys sorted recursively. Arrays retain order; changing tag or relation order is
+still a request change. `REQUEST_DIGEST_VERSION` is now 3, and migration
+`0009_request_digest_v3` changes the database default for future/direct writers
+without relabeling existing v1/v2 rows. Those rows retain their honest version
+and use the same one-replay compatibility path established above.

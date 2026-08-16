@@ -113,11 +113,11 @@ class Policy:
 # narrowed to the one band that needs no calibration.
 #
 # 1.0 is the correct default for any model whose distribution has not been
-# measured, and it is also — as of 2026-08-12 — the *measured* answer for
-# `text-embedding-3-small`. The corpus's closest legitimately-distinct pair
-# scores 0.7406 and the weakest deliberate restatement scores 0.7500: a gap of
-# 0.0094, which is sampling noise. This model does not separate restatement from
-# adjacency on a corpus of short operational notes, so there is no threshold
+# measured, and it is also — as of the 2026-08-15 counterfactual — the
+# *measured* answer for `text-embedding-3-small`. With tags, the corpus's
+# closest legitimately-distinct pair scores 0.8318 while the weakest deliberate
+# restatement scores 0.7500: the bands overlap by 0.0818. This model does not
+# separate restatement from adjacency on this corpus, so there is no threshold
 # below 1.0 that is not wrong in both directions at once.
 #
 # Do not set this from a literature constant, from the corpus distribution

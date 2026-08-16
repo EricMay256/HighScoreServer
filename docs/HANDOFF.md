@@ -404,9 +404,10 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    lives in the knowledge-platform repo and was not inspected. Credentials remain non-expiring
    by default, decided deliberately: revocation is immediate and needs no cache to expire,
    whereas a lapsed expiry is an outage.
-   **The vault lineage head is now `0007_write_scope_split`** — an existing database needs
-   `alembic -c alembic-vault.ini upgrade head` before this code runs against it, or every
-   credential write fails the old CHECK constraint.
+   **Superseded head note (2026-08-16):** the vault lineage now ends at
+   `0009_request_digest_v3`. An existing database needs
+   `alembic -c alembic-vault.ini upgrade head`; revisions 0008 and 0009 preserve
+   compile provenance and establish the digest-v3 default.
 7. **Port `resolve_context`** to close the `folders.yml` ↔ `READABLE_PATH_PREFIXES`
    duplication. Entangled with deferred decision #2 (where governance YAML lives at runtime).
 8. ~~Commit the importer.~~ **Already tracked** as `f942917` (2026-08-12). Still worth renaming

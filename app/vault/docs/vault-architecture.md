@@ -95,7 +95,7 @@ Extract the runtime when any of these occurs:
 Until then, keep the initial package at the same boundary so extraction is a file/package
 move plus composition wiring, not a rewrite.
 
-## Initial HSS staging hierarchy
+## Current HSS staging hierarchy
 
 Add the knowledge platform as one bounded package rather than more flat modules:
 
@@ -105,18 +105,17 @@ app/
   db.py                      existing leaderboard psycopg pool
   vault/
     __init__.py
-    api_models.py            Pydantic HTTP/MCP inputs and outputs
+    api_models.py            Pydantic HTTP inputs and outputs
     domain.py                VaultDocument, VaultSearchHit, decisions
     tables.py                schema-qualified SQLAlchemy Core Tables
     db.py                    vault AsyncEngine lifecycle/configuration
     repository.py            Core/SQL statements + RowMapping conversion
     service.py               use cases, policy, transaction ownership
     governance.py            validation and conservative decision policy
-    embeddings.py            async provider adapter
+    embeddings.py            async provider port
+    embeddings_openai.py     OpenAI HTTP adapter
     auth.py                  agent credentials and scope checks
     routes.py                /api/v1/vault HTTP adapter
-    mcp.py                   /mcp/v1/vault thin MCP adapter
-    export.py                consistent projector snapshot service
     AGENTS.md                conventions that travel with the package
     docs/
       vault-architecture.md
@@ -131,6 +130,10 @@ tests/
     ...                      unit, contract, and Postgres/pgvector integration tests
 alembic-vault.ini            dedicated vault migration lineage
 ```
+
+The tree above is an inventory, not a target diagram. `mcp.py` and `export.py`
+do not exist. An MCP adapter and consistent export/projector snapshot remain
+planned surfaces; add them to this inventory only when implementations land.
 
 Documentation lives under the package rather than in the host repository's `docs/`, so
 extraction moves it automatically. `vault_migrations/` and `alembic-vault.ini` sit at the
