@@ -131,10 +131,7 @@ class TokenBucketLimiter:
 
         limit = LIMITS.get(operation)
         if limit is None:
-            # An operation with no configured quota is not silently unlimited
-            # by accident; it is unlimited because nobody gave it a limit, and
-            # that should be visible in this dict rather than here.
-            return None
+            raise ValueError(f"Unknown vault quota operation: {operation}")
 
         moment = time.monotonic() if now is None else now
         key = (principal_id, operation)
@@ -202,19 +199,19 @@ def get_limiter() -> TokenBucketLimiter:
 
 
 def client_ip(request: Request) -> str:
-    """The originating client address, as far as it can be trusted.
+    """Return the client address observed by the trusted Heroku router hop.
 
-    Behind Heroku's router the socket peer is the router, so the client is the
-    **leftmost** entry of X-Forwarded-For. That header is caller-supplied and
-    therefore forgeable — which is survivable here precisely because this limit
-    is not an authorization boundary. Forging it lets an attacker spread across
-    buckets; it grants no access. The quota that decides what a caller may do
-    is keyed on the credential, which cannot be forged.
+    Heroku appends the address it observes to the **right** of any caller-supplied
+    ``X-Forwarded-For`` entries. The rightmost value is therefore the only useful
+    limiter key in this direct-to-Heroku topology; trusting the leftmost value
+    lets a caller mint a new bucket by changing an untrusted prefix. If another
+    proxy is placed in front of Heroku, this assumption must be revisited because
+    the rightmost value would identify that proxy instead of the original client.
     """
 
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.rsplit(",", maxsplit=1)[-1].strip()
     client = request.client
     return client.host if client is not None else "unknown"
 

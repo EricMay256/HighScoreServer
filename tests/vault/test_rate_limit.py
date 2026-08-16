@@ -145,12 +145,12 @@ def test_pruning_drops_buckets_that_have_provably_refilled() -> None:
     asyncio.run(exercise())
 
 
-def test_an_unlimited_operation_is_allowed() -> None:
+def test_an_unknown_operation_fails_closed() -> None:
     limiter = TokenBucketLimiter()
 
     async def exercise() -> None:
-        for _ in range(50):
-            assert await limiter.check("agent", "not-configured", now=0.0) is None
+        with pytest.raises(ValueError, match="Unknown vault quota operation"):
+            await limiter.check("agent", "not-configured", now=0.0)
 
     asyncio.run(exercise())
 
@@ -262,8 +262,8 @@ def test_the_vault_router_carries_the_guard() -> None:
     )
 
 
-def test_the_client_key_is_the_leftmost_forwarded_address() -> None:
-    """Heroku appends, so the original client is first and the proxies follow."""
+def test_the_client_key_is_the_rightmost_heroku_address() -> None:
+    """Heroku appends its observed address after caller-controlled prefixes."""
 
     request = Request(
         {
@@ -273,7 +273,27 @@ def test_the_client_key_is_the_leftmost_forwarded_address() -> None:
         }
     )
 
-    assert client_ip(request) == "203.0.113.9"
+    assert client_ip(request) == "150.172.238.178"
+
+
+def test_untrusted_forwarded_prefixes_do_not_create_new_buckets() -> None:
+    client, reached = _guarded_app("2/minute")
+    forwarded_values = [
+        "198.51.100.1, 203.0.113.9",
+        "198.51.100.2, 203.0.113.9",
+        "198.51.100.3, 203.0.113.9",
+    ]
+
+    statuses = [
+        client.get(
+            "/api/v1/vault/search",
+            headers={"X-Forwarded-For": value},
+        ).status_code
+        for value in forwarded_values
+    ]
+
+    assert statuses == [200, 200, 429]
+    assert sum(reached) == 2
 
 
 def test_the_client_key_falls_back_to_the_socket_peer() -> None:

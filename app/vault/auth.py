@@ -77,7 +77,7 @@ class VaultCredential:
 
     def is_active(self, now: datetime | None = None) -> bool:
         moment = now or datetime.now(UTC)
-        if self.revoked_at is not None and self.revoked_at <= moment:
+        if self.revoked_at is not None:
             return False
         return not (self.expires_at is not None and self.expires_at <= moment)
 

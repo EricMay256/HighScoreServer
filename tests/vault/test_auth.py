@@ -106,6 +106,13 @@ def test_a_future_expiry_is_still_active() -> None:
     assert authorize(credential(expires_at=future), SECRET, ()) is None
 
 
+def test_a_future_dated_revocation_is_already_inactive() -> None:
+    future = datetime.now(UTC) + timedelta(days=1)
+
+    assert credential(revoked_at=future).is_active() is False
+    assert authorize(credential(revoked_at=future), SECRET, ()) == "inactive"
+
+
 def test_every_required_scope_must_be_present() -> None:
     both = credential(scopes=(VaultScope.READ, VaultScope.EXPORT))
 
