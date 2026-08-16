@@ -73,19 +73,22 @@ async client (as the Redis cache does) — never call it directly on the event l
 ## How to run
 
 - Tests: `pytest`
-- Dev server: `python run_dev.py` (interactive docs at `/docs`). **On Windows, use `run_dev.py`, not `uvicorn app.main:app` directly** — psycopg3's async pool can't run on Windows' default ProactorEventLoop, and uvicorn builds its loop before importing the app, so the SelectorEventLoop policy has to be set in the launcher first. On Linux/macOS `uvicorn app.main:app --reload` works directly (Selector is the default). `conftest.py` sets the same policy for the test suite.
+- Lint (CI scope): `./scripts/lint.sh` on Linux/WSL, `.\scripts\lint.ps1` on Windows. Both wrap `ruff check app/ tests/ scripts/` and take `--fix` / `--format` (`-Fix` / `-Format`). They are two ports of one thing — change both together, and keep the target list in sync with the ruff step in `.github/workflows/ci.yml`.
+- Dev server: `python run_dev.py` (interactive docs at `/docs`) works everywhere. On Linux/WSL/macOS `uvicorn app.main:app --reload` also works directly, because SelectorEventLoop is already the default there. **On Windows you must use `run_dev.py`** — psycopg3's async pool can't run on Windows' default ProactorEventLoop, and uvicorn builds its loop before importing the app, so the policy has to be set in the launcher first. `tests/conftest.py` sets the same policy for the test suite.
+  - That policy code is guarded by `sys.platform == "win32"` in `run_dev.py`, `tests/conftest.py`, and several `scripts/`. It is a deliberate no-op on Linux — **do not delete it as dead code** when working from WSL.
 - DB schema is managed by **Alembic** (raw-SQL migrations; baseline `0001_baseline` reflects the pre-Alembic schema). `db/schema.sql` is a labeled bootstrap snapshot, not the source of truth.
   - Fresh/empty DB (CI, new clone): `alembic upgrade head` builds the whole schema.
   - Existing DB that predates Alembic: `alembic stamp 0001_baseline` once (never `upgrade` — the objects already exist), then `upgrade head` for later revisions.
-  - `env.py` reads `DATABASE_URL`, loading `.env` with `override=False` — so a process-env URL (a throwaway DB, or prod) overrides `.env`. Always `echo $env:DATABASE_URL` before a stamp/upgrade against a non-default target.
+  - `env.py` reads `DATABASE_URL`, loading `.env` with `override=False` — so a process-env URL (a throwaway DB, or prod) overrides `.env`. Always print the value before a stamp/upgrade against a non-default target: `echo $DATABASE_URL` in bash, `echo $env:DATABASE_URL` in PowerShell.
   - For local migration tests, remember that pytest points the app at `TEST_DATABASE_URL`, but Alembic reads `DATABASE_URL`. Override `DATABASE_URL` to the test URL before `alembic upgrade head` when preparing the test database.
 - Deploy (Heroku): migrations run automatically via the Procfile `release: bash scripts/release.sh` phase; a failed migration aborts the release. No manual migration step on deploy. The script runs the leaderboard lineage always and the vault lineage only when `VAULT_ENABLED=true` — the vault's first migration runs `CREATE EXTENSION vector`, so running it unconditionally would make every deploy depend on pgvector being available on the plan.
-- DB ad-hoc, Heroku: `cat file.sql | heroku pg:psql --app high-score-server`, or `heroku run alembic current --app high-score-server`.
+- DB ad-hoc, Heroku: `cat file.sql | heroku pg:psql --app high-score-server` (`Get-Content` instead of `cat` in PowerShell), or `heroku run alembic current --app high-score-server`.
 - Steam auth is optional and configured through `STEAM_WEB_API_KEY`, `STEAM_APP_ID`, and `STEAM_AUTH_IDENTITY`. `STEAM_WEB_API_KEY` must stay server-side only; never log or expose this.
-- **Windows / PowerShell** is the primary dev environment:
-  - `curl` is an alias for `Invoke-WebRequest` (throws on non-2xx) — use `curl.exe`.
-  - Stdin redirection (`< file`) is unsupported — use `Get-Content file | heroku pg:psql`.
-  - Env vars set with `$env:` are per-process and do not persist across shells; `.env` is loaded by the app and by Alembic's `env.py`, not by the shell.
+- **Dev environment: determine it, don't assume it.** As of 2026-08-15 the primary environment is **WSL2 (`Ubuntu-24.04`)**, migrated from Windows/PowerShell to get command sandboxing; Windows remains supported and its constraints below are still live. Check `uname -s` (or the platform your harness already reports) before choosing shell syntax — this section describes both environments, and the wrong half is actively misleading.
+  - *Linux / WSL:* an ordinary POSIX shell. `curl`, `< file` redirection, `$VAR`, and `cat` all behave normally. Venv: `source .venv/bin/activate`.
+  - *Windows / PowerShell:* `curl` is an alias for `Invoke-WebRequest` (throws on non-2xx) — use `curl.exe`. Stdin redirection (`< file`) is unsupported — use `Get-Content file | heroku pg:psql`. Env vars set with `$env:` are per-process and do not persist across shells. Venv: `.venv\Scripts\Activate.ps1`.
+  - Either way, `.env` is loaded by the app and by Alembic's `env.py`, **not** by the shell.
+- **Keep the repo on the Linux filesystem.** Under WSL it lives at `/home/ubuntu/projects/HighScoreServer` (ext4). A checkout under `/mnt/c` goes through DrvFs, which is slow and does not carry POSIX permission bits faithfully. The reliable test is the path prefix — `case "$PWD" in /mnt/*) ... ;; esac` — not the filesystem type, which a sandbox can mask.
 
 ## Scope guardrails for current work
 

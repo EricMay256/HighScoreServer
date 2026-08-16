@@ -9,6 +9,8 @@
 # The check-only mode is the one to run before committing — it mirrors
 # what CI will do, no surprises. The -Fix mode is what to run while
 # actively writing code.
+#
+# Bash/WSL equivalent: scripts/lint.sh. Keep the two in sync.
 
 [CmdletBinding()]
 param(

@@ -7,9 +7,9 @@ them cannot be decided at all without a measurement nobody has run yet.
 **Read `HANDOFF.md` first** for repo/branch/database state and the general task list. This file
 is the metadata slice only.
 
-**Repos.** HSS worktree `.claude\worktrees\vault-readonly-slice-review-0f7ee7` (branch
+**Repos.** HSS worktree `.claude/worktrees/vault-readonly-slice-review-0f7ee7` (branch
 `ai-claude/chat-findings-option-a-30464c`). Knowledge platform
-`C:\Users\yarom\Code\knowledge-platform` (branch `dev`). The authoring schema is in the second;
+`/home/ubuntu/projects/knowledge-platform` (branch `dev`). The authoring schema is in the second;
 the database and API are in the first. **Most of these decisions change both.**
 
 Nothing in this brief has been acted on. Its measurements were re-verified against the database

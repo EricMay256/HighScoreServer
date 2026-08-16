@@ -1,9 +1,9 @@
 # Handoff — code-review findings applied; search contract next
 
-**HSS repo:** `C:\Users\yarom\Code\HighScoreServer\HighScoreServer`
-**Worktree:** `.claude\worktrees\vault-readonly-slice-review-0f7ee7`
+**HSS repo:** `/home/ubuntu/projects/HighScoreServer` (WSL, `Ubuntu-24.04`)
+**Worktree:** `.claude/worktrees/vault-readonly-slice-review-0f7ee7`
 **Branch:** `ai-claude/chat-findings-option-a-30464c`, tree clean.
-**Knowledge platform:** `C:\Users\yarom\Code\knowledge-platform`, branch `dev`, HEAD `8df16e0`.
+**Knowledge platform:** `/home/ubuntu/projects/knowledge-platform`, branch `dev`, HEAD `8df16e0`.
 
 **`origin/dev` is `9eb69ec`, and everything through it is pushed** — the earlier claim that
 the calibration, facets, digest, quota, update and retire work was unpushed is obsolete. The
@@ -38,8 +38,8 @@ pgvector 0.8.6 in local PostgreSQL 17.9; the vault schema lives in the ordinary 
 
 The venv is in the **main repo**, not the worktree:
 
-```powershell
-& "C:\Users\yarom\Code\HighScoreServer\HighScoreServer\.venv\Scripts\Activate.ps1"
+```bash
+source /home/ubuntu/projects/HighScoreServer/.venv/bin/activate
 ```
 
 **`TEST_DATABASE_URL` is fixed as of 2026-08-14** — it was the `.env.example` placeholder
@@ -450,8 +450,9 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    and the answer then is a larger pool, not a longer-held connection.
 16. **Decide whether this file and `HANDOFF-METADATA.md` belong in a public repo at all.**
    Moved to `docs/` on 2026-08-14, which fixes the root-level signal but not the contents:
-   both still carry `C:\Users\yarom\...` paths and name the private `knowledge-platform`
-   repository. Untracking them, or scrubbing the paths, is a separate call.
+   both still name the private `knowledge-platform` repository and give its checkout path.
+   The paths were rewritten to their WSL locations on 2026-08-15, which removed the Windows
+   username but not the disclosure. Untracking them is a separate call.
 
 **Blocked / out of scope until re-approved:** MCP (`mcp` is not an approved dependency);
 `VAULT_ENABLED=true` in production; partial HNSW index per profile; dimension-change DDL.
@@ -494,7 +495,11 @@ including `Human/07 People/**`.
 - Revision ids must fit `varchar(32)`.
 - `ruff target-version` must be the oldest runtime (3.12), never the local interpreter.
 - **Never pipe a check you intend to trust** — use `${PIPESTATUS[0]}`.
-- Standalone scripts must set the SelectorEventLoop policy themselves on Windows.
-- Windows/PowerShell: `curl.exe` not `curl`; `< file` unsupported; `$env:` does not persist.
-  The Bash tool is Git Bash — PowerShell here-strings are a syntax error there.
+- Standalone scripts must set the SelectorEventLoop policy themselves on Windows. The
+  `sys.platform == "win32"` guards are no-ops under WSL — leave them in place.
+- **Check the platform before choosing shell syntax** (`uname -s`); as of 2026-08-15 the
+  primary environment is WSL2 `Ubuntu-24.04`, with Windows still supported. See the dev
+  environment bullets in `AGENTS.md` for both sets of constraints. Under WSL the shell is
+  ordinary bash; on Windows it is PowerShell (`curl.exe` not `curl`, no `< file`, `$env:`
+  does not persist).
 - Shell state does not survive between separate command invocations.
