@@ -7,23 +7,23 @@ from slowapi import Limiter
 from starlette.requests import Request
 
 
-
 logger = logging.getLogger(__name__)
 
 
 def get_real_ip(request: Request) -> str:
     """
-    Extracts the real client IP from X-Forwarded-For when behind Heroku's
-    load balancer. Falls back to direct connection address for local dev.
+    Return the client address observed by the trusted Heroku router hop.
 
-    X-Forwarded-For can contain a comma-separated chain of IPs if the request
-    passed through multiple proxies: "client, proxy1, proxy2". The leftmost
-    entry is the original client — we always want index 0.
+    Heroku appends the address it observes to the right of any caller-supplied
+    X-Forwarded-For entries. Trusting the leftmost value would let a caller
+    evade rate limits by changing an untrusted prefix. If another proxy is
+    placed in front of Heroku, revisit this direct-to-Heroku assumption.
     """
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    return request.client.host
+        return forwarded_for.rsplit(",", maxsplit=1)[-1].strip()
+    client = request.client
+    return client.host if client is not None else "unknown"
 
 
 def _make_limiter() -> Limiter:

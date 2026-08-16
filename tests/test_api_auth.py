@@ -1,7 +1,18 @@
 import os
 import secrets
-from jose import jwt
+from concurrent.futures import ThreadPoolExecutor
+
+import psycopg
 from fastapi.testclient import TestClient
+from httpx import Response
+from jose import jwt
+
+from app.auth_identities import NATIVE_AUTH_PROVIDER
+from app.steam_auth import (
+    SteamAuthConfigError,
+    SteamAuthInvalidTicket,
+    SteamAuthUpstreamError,
+)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -40,6 +51,50 @@ def bearer(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def get_conn():
+    url = os.environ["DATABASE_URL"]
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg.connect(url)
+
+
+def identity_rows_for_username(username: str) -> list[tuple[str, str]]:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ai.provider, ai.provider_user_id
+                FROM auth_identities ai
+                JOIN users u ON u.id = ai.user_id
+                WHERE u.username = %s
+                ORDER BY ai.provider, ai.provider_user_id
+                """,
+                (username,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def identity_rows_for_user_id(user_id: int) -> list[tuple[str, str]]:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT provider, provider_user_id
+                FROM auth_identities
+                WHERE user_id = %s
+                ORDER BY provider, provider_user_id
+                """,
+                (user_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
 # ── register ───────────────────────────────────────────────────────────────
 
 def test_register_returns_201(client):
@@ -61,6 +116,14 @@ def test_register_token_payload(client):
     payload = decode_token(tokens["access_token"])
     assert payload["username"] == user["username"]
     assert payload["is_guest"] is False
+
+
+def test_register_creates_native_auth_identity(client):
+    user = random_user()
+    register(client, user)
+    assert identity_rows_for_username(user["username"]) == [
+        (NATIVE_AUTH_PROVIDER, user["email"])
+    ]
 
 
 def test_register_duplicate_username_returns_409(client):
@@ -120,6 +183,152 @@ def test_login_unknown_username_returns_401(client):
         "/api/auth/login",
         json={"username": "nobody_real", "password": "testpassword123"},
     )
+    assert response.status_code == 401
+
+
+# -- steam auth --------------------------------------------------------------
+
+def test_steam_login_creates_steam_identity_user(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        assert ticket == "valid-ticket"
+        return "76561198000000010"
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+
+    response = client.post("/api/auth/steam/login", json={"ticket": "valid-ticket"})
+
+    assert response.status_code == 200
+    payload = decode_token(response.json()["access_token"])
+    assert payload["username"].startswith("steam_")
+    assert payload["is_guest"] is False
+    assert identity_rows_for_user_id(int(payload["sub"])) == [
+        ("steam", "76561198000000010")
+    ]
+
+
+def test_steam_login_reuses_existing_steam_identity(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        return "76561198000000011"
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+
+    first = client.post("/api/auth/steam/login", json={"ticket": "ticket-one"})
+    second = client.post("/api/auth/steam/login", json={"ticket": "ticket-two"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert decode_token(first.json()["access_token"])["sub"] == decode_token(
+        second.json()["access_token"]
+    )["sub"]
+
+
+def test_steam_link_adds_second_provider_to_native_user(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        return "76561198000000012"
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+    user = random_user()
+    tokens = register(client, user)
+    user_id = int(decode_token(tokens["access_token"])["sub"])
+
+    response = client.post(
+        "/api/auth/steam/link",
+        json={"ticket": "valid-ticket"},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    assert decode_token(response.json()["access_token"])["sub"] == str(user_id)
+    assert identity_rows_for_user_id(user_id) == [
+        ("steam", "76561198000000012"),
+        (NATIVE_AUTH_PROVIDER, user["email"]),
+    ]
+
+
+def test_steam_link_upgrades_guest_account(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        return "76561198000000013"
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+    tokens = guest(client)
+    user_id = int(decode_token(tokens["access_token"])["sub"])
+
+    response = client.post(
+        "/api/auth/steam/link",
+        json={"ticket": "valid-ticket"},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    payload = decode_token(response.json()["access_token"])
+    assert payload["sub"] == str(user_id)
+    assert payload["is_guest"] is False
+    assert identity_rows_for_user_id(user_id) == [("steam", "76561198000000013")]
+
+
+def test_steam_link_rejects_identity_owned_by_another_user(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        return "76561198000000014"
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+    first = register(client)
+    second = register(client)
+    client.post(
+        "/api/auth/steam/link",
+        json={"ticket": "first-link"},
+        headers=bearer(first["access_token"]),
+    )
+
+    response = client.post(
+        "/api/auth/steam/link",
+        json={"ticket": "second-link"},
+        headers=bearer(second["access_token"]),
+    )
+
+    assert response.status_code == 409
+
+
+def test_steam_auth_invalid_ticket_returns_401(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        raise SteamAuthInvalidTicket("bad ticket")
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+
+    response = client.post("/api/auth/steam/login", json={"ticket": "bad-ticket"})
+
+    assert response.status_code == 401
+
+
+def test_steam_auth_missing_config_returns_503(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        raise SteamAuthConfigError("missing config")
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+
+    response = client.post("/api/auth/steam/login", json={"ticket": "valid-ticket"})
+
+    assert response.status_code == 503
+
+
+def test_steam_auth_upstream_error_returns_502(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        raise SteamAuthUpstreamError("upstream down")
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+
+    response = client.post("/api/auth/steam/login", json={"ticket": "valid-ticket"})
+
+    assert response.status_code == 502
+
+
+def test_steam_link_requires_auth(client, monkeypatch):
+    async def fake_verify(ticket: str) -> str:
+        return "76561198000000015"
+
+    monkeypatch.setattr("app.auth_routes.verify_steam_auth_ticket", fake_verify)
+
+    response = client.post("/api/auth/steam/link", json={"ticket": "valid-ticket"})
+
     assert response.status_code == 401
 
 
@@ -288,7 +497,7 @@ def test_rename_to_guest_username_returns_409(client):
     """Guest usernames should be protected from rename collision."""
     guest_tokens = guest(client)
     guest_username = decode_token(guest_tokens["access_token"])["username"]
-    
+
     other_tokens = register(client)
     response = client.post(
         "/api/auth/rename",
@@ -323,6 +532,19 @@ def test_claim_returns_non_guest_token(client):
     assert payload["is_guest"] is False
 
 
+def test_claim_creates_native_auth_identity_on_guest_user(client):
+    tokens = guest(client)
+    username = decode_token(tokens["access_token"])["username"]
+    email = f"claim_{secrets.token_hex(4)}@example.com"
+    response = client.post(
+        "/api/auth/claim",
+        json={"email": email, "password": "testpassword123"},
+        headers=bearer(tokens["access_token"]),
+    )
+    assert response.status_code == 200
+    assert identity_rows_for_username(username) == [(NATIVE_AUTH_PROVIDER, email)]
+
+
 def test_claim_already_claimed_returns_400(client):
     tokens = register(client)
     response = client.post(
@@ -331,6 +553,49 @@ def test_claim_already_claimed_returns_400(client):
         headers=bearer(tokens["access_token"]),
     )
     assert response.status_code == 400
+
+
+def test_claim_rejects_replay_of_original_guest_token(client):
+    tokens = guest(client)
+    headers = bearer(tokens["access_token"])
+
+    first = client.post(
+        "/api/auth/claim",
+        json={"email": f"claim_{secrets.token_hex(4)}@example.com", "password": "testpassword123"},
+        headers=headers,
+    )
+    replay = client.post(
+        "/api/auth/claim",
+        json={"email": f"replay_{secrets.token_hex(4)}@example.com", "password": "different-password"},
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 400
+    assert replay.json()["detail"] == "Account is already claimed"
+
+
+def test_concurrent_guest_claims_allow_exactly_one_winner(client):
+    tokens = guest(client)
+    username = decode_token(tokens["access_token"])["username"]
+    headers = bearer(tokens["access_token"])
+    emails = [f"claim_{secrets.token_hex(4)}@example.com" for _ in range(2)]
+
+    def submit_claim(email: str) -> Response:
+        return client.post(
+            "/api/auth/claim",
+            json={"email": email, "password": "testpassword123"},
+            headers=headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(submit_claim, emails))
+
+    assert sorted(response.status_code for response in responses) == [200, 400]
+    identities = identity_rows_for_username(username)
+    assert len(identities) == 1
+    assert identities[0][0] == NATIVE_AUTH_PROVIDER
+    assert identities[0][1] in emails
 
 
 def test_claim_duplicate_email_returns_409(client):

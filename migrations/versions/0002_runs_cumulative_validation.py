@@ -1,6 +1,6 @@
 """runs, cumulative scoring, and validated-run schema
 
-Phase 1 of the validated-runs / cumulative-scoring feature (see specs.md).
+Phase 1 of the validated-runs / cumulative-scoring feature (see docs/specs.md).
 All changes are additive with safe defaults so existing rows and modes need
 no backfill:
 
@@ -12,7 +12,7 @@ no backfill:
 Structural DDL ONLY. Grants are deliberately NOT here: prod runs as a single
 owner role that has no `leaderboard_app`, so a `GRANT ... TO leaderboard_app`
 in a revision would error on prod and (under release-phase migrations) abort
-the deploy. Grants live in db/role.sql, applied per-environment. See specs.md
+the deploy. Grants live in db/role.sql, applied per-environment. See docs/specs.md
 "Grants and the migration/grant split".
 
 Revision ID: 0002_runs_cumulative_validation

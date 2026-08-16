@@ -1,25 +1,31 @@
+import logging
+import os
 from contextlib import asynccontextmanager
+
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.db import init_db, close_db
-from app.cache import init_cache, close_cache
-from app.env import load_environment, validate_environment
-from app.leaderboard_routes import router as leaderboard_router, CrossRouteError
-from app.view_routes import router as view_router
-from app.auth_routes import router as auth_router
-from app.limiter import limiter
-from app import spa_routes
-import os
-import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from slowapi.middleware import SlowAPIMiddleware
 
-import logging
+from app import spa_routes
+from app.auth_routes import router as auth_router
+from app.cache import close_cache, init_cache
+from app.db import close_db, init_db
+from app.env import load_environment, validate_environment
+from app.leaderboard_routes import CrossRouteError
+from app.leaderboard_routes import router as leaderboard_router
+from app.limiter import limiter
+from app.vault.settings import vault_enabled
+from app.view_routes import router as view_router
+
+
 logger = logging.getLogger(__name__)
 
 # Browser origins allowed to call public leaderboard GET endpoints.
@@ -70,14 +76,38 @@ async def lifespan(app: FastAPI):
             send_default_pii=False,  # don't ship request headers/bodies by default
         )
 
+    vault_is_enabled = False
     await init_db()
-    init_cache()
-    yield
-    await close_db()
-    await close_cache()
+    try:
+        init_cache()
+        vault_is_enabled = vault_enabled()
+        if vault_is_enabled:
+            from app.vault.db import close_vault_db, init_vault_db
+            from app.vault.embedding_runtime import (
+                close_vault_embeddings,
+                init_vault_embeddings,
+            )
+
+            await init_vault_db()
+            # Only after the engine is up: a provider with no corpus to search
+            # is not a useful thing to have running.
+            await init_vault_embeddings()
+        yield
+    finally:
+        if vault_is_enabled:
+            await close_vault_embeddings()
+            await close_vault_db()
+        await close_db()
+        await close_cache()
 
 
 def create_app() -> FastAPI:
+    # Route registration is decided here, before lifespan runs, so .env has to
+    # be loaded now for VAULT_ENABLED to be visible. load_environment is cached
+    # and uses override=False, so the later lifespan call is a no-op and the
+    # process environment still wins over .env.
+    load_environment()
+
     app = FastAPI(title="Leaderboard API", lifespan=lifespan)
 
     app.state.limiter = limiter
@@ -93,7 +123,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(CORS_ALLOWED_ORIGINS),
-        # OPTIONS not required but included for clarity
+        # Browser CORS is for the public leaderboard/auth surfaces. Vault
+        # writers are operator-issued machine clients, so PUT/DELETE are
+        # intentionally absent; see the vault configuration guide.
+        # OPTIONS not required but included for clarity.
         allow_methods=["GET", "OPTIONS", "POST"],
         # With allow_credentials=False the browser won't attach cookies on cross-origin
         # requests, so a permissive allow_headers can't be combined with ambient auth
@@ -101,7 +134,7 @@ def create_app() -> FastAPI:
         # possess them, so allowing "*" here is safe for this API.
         allow_headers=["*"],
         # allow_credentials=False is intentional: identity is provided, if needed,
-        # through bearer tokens. 
+        # through bearer tokens.
         allow_credentials=False,
         max_age=600,  # cache preflight for 10 min — keeps repeat fetches snappy
     )
@@ -112,11 +145,21 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard_router, prefix="/api/leaderboard")
     # 3. Authentication routes
     app.include_router(auth_router, prefix="/api/auth")
-    # 4. SPA assets mount — MUST come before the SPA catch-all router below.
+    # 4. Vault routes — registered only when the vault runtime is on,
+    #    so a disabled vault publishes no schema and no endpoints.
+    if vault_enabled():
+        from app.vault.routes import router as vault_router
+        from app.vault.routes import vault_saturation_handler
+
+        # SQLAlchemy is the vault's dependency alone. Keep this handler behind
+        # the same gate so disabled startup never imports the vault route stack.
+        app.add_exception_handler(SQLAlchemyTimeoutError, vault_saturation_handler)
+        app.include_router(vault_router, prefix="/api/v1/vault")
+    # 5. SPA assets mount — MUST come before the SPA catch-all router below.
     spa_routes.mount_spa_assets(app)
-    # 5. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.
+    # 6. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.
     app.include_router(spa_routes.router)
-    # 6. Static files (served at root, so this goes last to avoid shadowing API and view routes)
+    # 7. Static files (served at root, so this goes last to avoid shadowing API and view routes)
     app.mount("/", StaticFiles(directory="public", html=True), name="public")
     return app
 

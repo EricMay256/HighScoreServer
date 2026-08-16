@@ -18,9 +18,9 @@ import logging
 import os
 import sys
 
-from app.env import load_environment
-
 import psycopg
+
+from app.env import load_environment
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ def main() -> None:
         logger.info("No expired refresh tokens found")
     else:
         logger.info("Deleted %d refresh token(s)", deleted)
-    
+
 if __name__ == "__main__":
     logging.basicConfig(
     level=logging.INFO,

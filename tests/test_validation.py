@@ -9,10 +9,10 @@ from app.validation import ModeBounds, RunRecord, TieredValidator
 
 
 def _run(**overrides) -> RunRecord:
-    base = dict(
-        id=1, user_id=1, game_mode="m", scenario_version=1, seed=7,
-        actions=[{"a": 1}], claimed_score=100,
-    )
+    base = {
+        "id": 1, "user_id": 1, "game_mode": "m", "scenario_version": 1,
+        "seed": 7, "actions": [{"a": 1}], "claimed_score": 100,
+    }
     base.update(overrides)
     return RunRecord(**base)
 

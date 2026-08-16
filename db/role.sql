@@ -12,6 +12,21 @@
 -- This is dev-enforced (a missing grant fails loudly when the app connects as
 -- leaderboard_app) and prod-documentary (kept accurate for any future
 -- environment that can host the restricted role).
+--
+-- SCOPE: the leaderboard schema only. This file deliberately grants NOTHING on
+-- the `vault` schema, even though the vault currently shares this database.
+-- The vault is a separate bounded context on its way out of this repository
+-- (see app/vault/docs/vault-extraction-manifest.md), and giving the leaderboard
+-- role standing access to its tables would create exactly the coupling the
+-- schema separation exists to prevent -- a grant nobody would remember to
+-- revoke at extraction.
+--
+-- The consequence is concrete, so it is stated rather than discovered: a dev or
+-- CI environment that connects as leaderboard_app with VAULT_ENABLED=true will
+-- fail on every vault query. Neither path hits it today -- production runs as
+-- the owner, and CI connects as postgres -- but a future restricted-role
+-- environment that wants the vault needs its own grants, authored alongside the
+-- vault's own role rather than bolted onto this one.
 
 -- You are encouraged to replace the password and role below.
 -- It is granted permission to read and write individual scores, but nothing too destructive.
@@ -45,6 +60,12 @@ GRANT USAGE, SELECT ON SEQUENCE users_id_seq TO leaderboard_app;
 
 GRANT SELECT, INSERT, DELETE ON TABLE refresh_tokens TO leaderboard_app;
 GRANT USAGE, SELECT ON SEQUENCE refresh_tokens_id_seq TO leaderboard_app;
+
+-- Auth identities map provider-specific login subjects (ubear email, SteamID64,
+-- Epic account id, etc.) to the canonical users row. The app resolves and links
+-- identities, but does not update them in place.
+GRANT SELECT, INSERT ON TABLE auth_identities TO leaderboard_app;
+GRANT USAGE, SELECT ON SEQUENCE auth_identities_id_seq TO leaderboard_app;
 
 -- Validated runs (see specs.md Phase 1). The app inserts a pending run and
 -- later UPDATEs it with the server-computed canonical_score/tier/status, so it

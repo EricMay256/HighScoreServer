@@ -18,9 +18,10 @@ import logging
 import os
 import sys
 
+import psycopg
+
 from app.env import load_environment
 
-import psycopg
 
 logger = logging.getLogger(__name__)
 
@@ -97,4 +98,3 @@ if __name__ == "__main__":
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
     main()
-    

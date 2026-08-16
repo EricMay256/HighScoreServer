@@ -1,9 +1,12 @@
 import logging
-from app.periods import get_period_start
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+
 from app.db import get_pool
+from app.periods import get_period_start
+
 
 router = APIRouter(tags=["views"])
 logger = logging.getLogger(__name__)

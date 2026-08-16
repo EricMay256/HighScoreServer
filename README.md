@@ -23,27 +23,42 @@ There are multiple clients for the HighScoreServer, aimed at providing coverage 
 flowchart LR
     Unity["Unity Client<br/>(C#)"]
     Browser["Web Browser"]
-    subgraph Heroku["Heroku (single dyno)"]
-        API["FastAPI<br/>api_routes + view_routes"]
+    Agent["Agent client<br/>(vault credential)"]
+    subgraph Heroku["Heroku (single dyno, 2 gunicorn workers)"]
+        API["FastAPI<br/>leaderboard + auth + Jinja2 + SPA"]
         Cache["In-process TTL cache<br/>(cachetools)"]
-        Postgres[("PostgreSQL")]
+        Vault["app/vault/<br/>gated by VAULT_ENABLED<br/>(off in production)"]
+        Postgres[("PostgreSQL<br/>public + vault schemas")]
     end
     Sentry["Sentry<br/>(error monitoring)"]
+    Embeddings["Embedding provider<br/>(OpenAI REST)"]
+    Steam["Steam Web API"]
     Unity -->|JSON over HTTPS| API
     Browser -->|server-rendered HTML<br/>Jinja2| API
     Browser -->|SPA shell + JSON<br/>React/Vite| API
+    Agent -.->|only when enabled| Vault
     API --> Postgres
     API --> Cache
+    API -.->|ticket validation| Steam
+    Vault -.-> Postgres
+    Vault -.-> Embeddings
     API -.->|errors| Sentry
     classDef external fill:#e8e8e8,stroke:#888,color:#000
     classDef infra fill:#d4e6f1,stroke:#2874a6,color:#000
     classDef ephemeral fill:#fcf3cf,stroke:#b9770e,color:#000
     classDef monitoring fill:#fdebd0,stroke:#b9770e,color:#000
-    class Unity,Browser external
+    classDef gated fill:#eaeaea,stroke:#aaa,color:#555
+    class Unity,Browser,Agent,Steam,Embeddings external
     class API,Postgres infra
     class Cache ephemeral
     class Sentry monitoring
+    class Vault gated
 ```
+
+> **The vault is deployed but dark.** `VAULT_ENABLED` defaults to false, so in the
+> running app there are no vault routes, no vault engine, and no vault schema —
+> the dashed path above does not exist in production today. See
+> [Deployment](#deployment).
 
 > **Cache backend.** The deployed configuration uses an in-process TTL cache (`CACHE_BACKEND=memory`). Redis is opt-in using the same cache interface and can be re-enabled by provisioning the Heroku Redis add-on and setting `CACHE_BACKEND=redis` — no code changes required. At a single dyno with a single worker, the two backends are behaviorally equivalent, so the add-on was removed to reduce cost with no side-effects.
 
@@ -68,8 +83,16 @@ flowchart LR
   and a points mode are treated symmetrically.
 - **Rank and percentile** — computed server-side via SQL window functions. Every
   score response includes the player's rank and percentile standing.
+- **External identities** — `users` is the durable leaderboard identity and
+  `auth_identities` is the set of ways it can be proven, so a provider is a row
+  rather than a nullable column per vendor. Native email/password is the `ubear`
+  provider; Steam is validated server-side against the Steam Web API, never from
+  a client-supplied SteamID (see [ADR 0015](docs/adr/0015-auth-identities-over-provider-columns.md)).
+  Steam is optional and inert until its three config variables are set.
 - **Public leaderboard** — server-rendered HTML view at `/leaderboard` with
-  per-mode tabs, rank, percentile, and medal highlights for the top three.
+  per-mode tabs, rank, percentile, and medal highlights for the top three, plus a
+  React/TanStack Query SPA at `/app` served from the same origin. The Jinja2
+  views remain the canonical no-JavaScript path rather than a fallback.
 - **Unity C# client** — drop-in `LeaderboardService.cs` with coroutine-based
   API calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
   errors without exceptions. Handles the full auth lifecycle including silent
@@ -78,6 +101,63 @@ flowchart LR
   request context. Configured to sample 20% of requests for performance tracing 
   without saturating the free tier. The DSN is treated as optional monitoring config 
   so the app starts cleanly in environments where Sentry isn't provisioned.
+
+### Knowledge-platform bounded context
+
+The cloud knowledge platform is staged in this service as an isolated `app/vault/` package,
+with its own decision log of 20 ADRs under
+[`app/vault/docs/adr/`](app/vault/docs/adr/). It exposes an authenticated HTTP adapter —
+hybrid lexical and vector search fused by reciprocal rank, fetch by id, and a governed write
+path covering contribution, replacement, and retirement — over one application-service layer.
+Access is by operator-issued agent credentials, not by player JWTs or the leaderboard API key.
+It uses SQLAlchemy Core (not the ORM) for vault persistence, and keeps all knowledge content
+in PostgreSQL rather than in this public repository.
+
+The routes are registered only when `VAULT_ENABLED` is true, so a default deployment publishes
+no vault schema and no vault endpoints. An MCP adapter is intended over the same service layer
+but is **not built** — it is the reason the layer is separate from the HTTP surface, not
+something the package currently ships.
+
+The package boundary is also an extraction seam: the eventual target keeps HSS and the private
+knowledge runtime in focused repositories and lets private composition CI build the combined
+deployment. HSS never fetches the private repository.
+[`app/vault/docs/vault-extraction-manifest.md`](app/vault/docs/vault-extraction-manifest.md)
+records what leaves and what has to be edited when it does.
+
+The initial deployment reuses the existing Postgres add-on but places vault objects in
+the explicitly qualified `vault` schema. Setting `VAULT_DATABASE_URL` to another Postgres
+add-on moves the same schema and migration lineage to a physically separate database.
+Its documentation and decision records live with the package, in
+[`app/vault/docs/`](app/vault/docs/vault-architecture.md), so they leave with it.
+
+#### What co-hosting costs HSS, and what returns on extraction
+
+Staging the vault here is not free, and the costs are deliberately the reversible
+kind. Listing them in one place keeps the bill visible while it is being paid, and
+makes extraction a subtraction rather than an excavation.
+[`vault-extraction-manifest.md`](app/vault/docs/vault-extraction-manifest.md) is the
+executable checklist; this is the summary of what changes for HSS.
+
+| Cost today | On extraction |
+| --- | --- |
+| **HSS runs a smaller connection pool.** 4 per worker instead of the 10 it used, so the vault's 2 fit inside one 20-connection plan. | The whole plan is HSS's again. Raise `HSS_DB_POOL_MAX_SIZE` — but see the caveat below. |
+| **A shared-budget check runs at startup**, with `HSS_PROCESS_COUNT` and `DB_OPERATIONAL_CONNECTION_RESERVE` to feed it. | `validate_connection_budget` and the `VAULT_*` budget variables go away; the arithmetic collapses to one consumer. |
+| **Two Alembic lineages**, `alembic-vault.ini`, and a release phase that gates one of them on a feature flag. | Back to a single lineage. `scripts/release.sh` loses its gated block, and the `Procfile` could return to `release: alembic upgrade head`. |
+| **`pgvector` is a production dependency** and CI layers it onto the Postgres image. | Leaves entirely. Nothing in HSS imports it. |
+| **A `vault` schema in the leaderboard database**, and a note in `db/role.sql` explaining why the restricted role deliberately cannot see it. | Schema dropped; the note becomes moot. |
+| **Vault wiring in `app/main.py`** — lifespan hooks, the route gate, and a 503 handler for SQLAlchemy pool timeouts that only the vault can raise. | All removed. Check `load_environment()` at the top of `create_app` before deleting it: it is there so the route gate can be evaluated. |
+
+Two dependencies look like they should leave and do not. **SQLAlchemy** stays —
+HSS needs it as Alembic's engine layer regardless, and [ADR 0002](docs/adr/0002-raw-sql-over-orm.md)'s
+raw-SQL stance is about the ORM, which neither side uses. **slowapi** stays because
+HSS had it first; the vault simply builds its own independent `Limiter`.
+
+**One thing that should not revert.** The pool was 10 per worker because nobody had
+done the arithmetic: across two workers that allocated the entire 20-connection
+limit, leaving nothing for the release dyno or for `heroku pg:psql` during an
+incident. The vault forced the calculation, and the calculation was overdue. When
+the constraint lifts, the right move is a measured pool with a deliberate reserve —
+not a return to 10.
 
 
 ## Local Setup
@@ -141,6 +221,13 @@ hand-written DDL — no SQLAlchemy models, no autogenerate). `db/schema.sql` is 
 labeled bootstrap snapshot for orientation, **not** the source of truth; every
 schema change lands as a revision in `migrations/versions/`.
 
+Vault schema changes use a separate Alembic lineage under `vault_migrations/` so they can
+target either the existing database or a separate vault database without running
+leaderboard migrations against it. `VAULT_DATABASE_URL` selects a separate database and
+falls back to `DATABASE_URL` for the initial colocated deployment. Vault tables remain in
+the `vault` PostgreSQL schema in both modes. Core `Table` definitions are query metadata,
+not a deployment mechanism: production code never calls `MetaData.create_all()`.
+
 Alembic reads `DATABASE_URL` from the environment. `migrations/env.py` loads
 `.env` with `override=False`, so a `DATABASE_URL` already exported in the shell
 (e.g. for a one-off throwaway DB) wins over `.env` — handy for pointing a
@@ -169,14 +256,99 @@ alembic downgrade -1          # revert the most recent revision (local/test only
 ```
 
 > **Heroku auto-migrates on deploy.** The `Procfile` carries
-> `release: alembic upgrade head`, so every release applies pending migrations
+> `release: bash scripts/release.sh`, so every release applies pending migrations
 > before the new code goes live; a failed migration aborts the release. There is
-> no manual migration step on deploy.
+> no manual migration step on deploy. The script runs the leaderboard lineage
+> unconditionally and the vault lineage only when `VAULT_ENABLED=true`, because
+> the vault's first migration runs `CREATE EXTENSION vector` and running it
+> unconditionally would make every deploy depend on pgvector being available.
+
+### Production rollback after a migration
+
+Do **not** use `heroku rollback` to a slug whose source tree predates a migration
+already recorded in production. The old slug's release phase cannot construct
+the newer revision graph; for example, a database at `0004_auth_identities`
+cannot be handled by `main`, whose graph ends at `0003_max_score_claimed_tier`.
+Do not solve that mismatch with a production downgrade: `0004`'s downgrade drops
+identity data and is explicitly local/test-only.
+
+Use a roll-forward application rollback instead:
+
+1. Branch from the currently deployed revision so both Alembic lineages and the
+   current `scripts/release.sh` remain present.
+2. Revert only the application behavior implicated in the incident. Keep every
+   applied migration file. Preserve compatibility writes required by the newer
+   schema (for `0004`, native registration and claim must continue populating
+   `auth_identities`) unless the recovery change also supplies a safe backfill.
+3. Run the full tests, both empty-database upgrade paths, and a production-shaped
+   boot against a database already at the current heads.
+4. Deploy that new commit as a normal release and verify `alembic current` before
+   directing traffic to it.
+
+This recovery pattern was rehearsed on 2026-08-16 against a throwaway PostgreSQL
+database by
+`test_roll_forward_application_rollback_keeps_both_migration_graphs`: both
+lineages were advanced to head, then the recovery release's two `upgrade head`
+operations were rerun and remained at `0004_auth_identities` and
+`0009_request_digest_v3`. Keep that test in the release gate. A production
+incident still uses a new release, never a destructive downgrade or a rollback
+to a slug whose graph predates an applied revision.
 
 > **Grants are not in migrations.** Production runs as a single owner role, so a
 > `GRANT ... TO leaderboard_app` inside a revision would error there and abort
 > the release. Role grants live in `db/role.sql`, applied per-environment (see
 > [Deployment](#deployment)).
+
+
+## Deployment
+
+Only three variables are required at boot — `DATABASE_URL`, `API_KEY`, and
+`JWT_SECRET` (`REQUIRED_ENV_VARS` in `app/env.py`). Everything else has a
+default, which is what makes the section below possible rather than dangerous.
+
+### Configuration added since the last merge to `main` is not set on Heroku
+
+Twenty-three variables have been added to `.env.example` since `main`, covering
+the connection budget, Steam authentication, and the vault. **None of them are
+configured on the app.** That is deliberate and safe — nothing new is
+boot-required, so a merge deploys without touching config — but it has three
+consequences worth knowing before the merge rather than after.
+
+**1. The HSS connection pool shrinks, with no config change.** `main` hardcodes
+`max_size=10` per worker; the pool is now configurable and defaults to **4**.
+Across two workers that is 20 connections → 8. This is a fix rather than a
+regression: at 10 per worker the app was allocating the entire 20-connection
+Essential-0 limit, leaving nothing for the release dyno or for `heroku pg:psql`
+during an incident. But it is a real reduction in per-worker concurrency, and it
+is the one change here that takes effect silently. Set `HSS_DB_POOL_MAX_SIZE`
+explicitly if 4 proves tight — and recalculate the budget in `.env.example` if
+you do, because the vault's share is sized against it.
+
+**2. Steam authentication stays unavailable.** `STEAM_WEB_API_KEY`,
+`STEAM_APP_ID`, and `STEAM_AUTH_IDENTITY` are read lazily, so the endpoints
+raise `SteamAuthConfigError` when called and nothing else is affected.
+`STEAM_WEB_API_KEY` is a publisher key: Heroku config only, never a tracked file.
+
+**3. The vault ships dark, and that is the intended first release.**
+`VAULT_ENABLED` defaults to false, so no vault routes are registered, no vault
+OpenAPI schema is published, no vault engine is created, and the release phase
+skips the vault migration lineage entirely. Every `VAULT_*` variable is inert
+until the flag is set. Enabling it is a separate, reviewed change — see
+[`app/vault/docs/vault-configuration.md`](app/vault/docs/vault-configuration.md),
+which carries the `heroku config:set` block and the connection-budget arithmetic.
+
+Verify the current state before a release rather than trusting this list:
+
+```bash
+heroku config --app high-score-server
+```
+
+### Role grants
+
+`db/role.sql` is applied per environment, never from a migration. Production
+runs as the database owner and never executes it; it exists for environments
+that can host a restricted `leaderboard_app` role. It deliberately grants nothing
+on the `vault` schema — the file explains why.
 
 
 ## Architecture Diagrams

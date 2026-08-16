@@ -21,7 +21,7 @@ safe, repeatable, ordered representation. The workflow had no notion of "apply
 the changes since the last known state" — only "build from nothing" or
 "hand-write a one-off `ALTER` and hope every environment ran it."
 
-The validated-runs / cumulative-scoring feature (see `specs.md`) being applied
+The validated-runs / cumulative-scoring feature (see `docs/specs.md`) being applied
 to a live database non-destructively (it contains actual user info now) is the
 forcing function: it is the first change that *alters deployed production tables*:
 adding columns to `game_modes` and `scores`, and introducing new `runs` and

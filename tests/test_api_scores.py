@@ -1,5 +1,7 @@
 import os
 import secrets
+from datetime import UTC
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -55,9 +57,8 @@ def mode(request, classic_mode, speedrun_mode):
     """
     if request.param == "desc":
         return {"name": classic_mode, "better": 2000, "worse": 500}
-    else:
-        return {"name": speedrun_mode, "better": 300, "worse": 500}
-    
+    return {"name": speedrun_mode, "better": 300, "worse": 500}
+
 
 @pytest.fixture(scope="module")
 def requires_claimed_account_mode(client: TestClient, api_key: str) -> str:
@@ -320,7 +321,8 @@ def test_expired_token_returns_401(client, classic_mode):
     """A correctly signed but expired token should return 401.
     Depending on FastAPI/Starlette version it could return 403 instead. """
     import os
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta
+
     from jose import jwt
 
     expired_token = jwt.encode(
@@ -328,8 +330,8 @@ def test_expired_token_returns_401(client, classic_mode):
             "sub": "1",
             "username": "testuser",
             "is_guest": False,
-            "exp": datetime.now(timezone.utc) - timedelta(minutes=1),
-            "iat": datetime.now(timezone.utc) - timedelta(minutes=61),
+            "exp": datetime.now(UTC) - timedelta(minutes=1),
+            "iat": datetime.now(UTC) - timedelta(minutes=61),
         },
         os.environ["JWT_SECRET"],
         algorithm="HS256",
@@ -517,7 +519,7 @@ def test_percentile_last_place_with_two_players(client, classic_mode):
     With two players, rank 2 percentile should be 50.0.
     Formula: round((1 - (rank - 1) / total) * 100, 2)
     rank=2, total=2 → (1 - 1/2) * 100 = 50.0
-    
+
     This test documents the actual formula behavior rather than asserting
     an intuitive value — worth verifying explicitly since percentile edge
     cases are easy to get wrong.
