@@ -63,20 +63,23 @@ new dynos fail to boot mid-deploy.
 Do not apply these settings as part of Phase 1 development. Apply them in the
 reviewed release that first enables the vault runtime:
 
-```powershell
-heroku config:set `
-  HSS_DB_POOL_MIN_SIZE=1 `
-  HSS_DB_POOL_MAX_SIZE=4 `
-  HSS_PROCESS_COUNT=2 `
-  DATABASE_CONNECTION_LIMIT=20 `
-  DB_OPERATIONAL_CONNECTION_RESERVE=2 `
-  VAULT_DB_POOL_SIZE=2 `
-  VAULT_DB_POOL_TIMEOUT_SECONDS=5 `
-  VAULT_EMBEDDING_TIMEOUT_SECONDS=5 `
-  VAULT_TEXT_SEARCH_CONFIG=english `
-  VAULT_ENABLED=true `
+```bash
+heroku config:set \
+  HSS_DB_POOL_MIN_SIZE=1 \
+  HSS_DB_POOL_MAX_SIZE=4 \
+  HSS_PROCESS_COUNT=2 \
+  DATABASE_CONNECTION_LIMIT=20 \
+  DB_OPERATIONAL_CONNECTION_RESERVE=2 \
+  VAULT_DB_POOL_SIZE=2 \
+  VAULT_DB_POOL_TIMEOUT_SECONDS=5 \
+  VAULT_EMBEDDING_TIMEOUT_SECONDS=5 \
+  VAULT_TEXT_SEARCH_CONFIG=english \
+  VAULT_ENABLED=true \
   --app high-score-server
 ```
+
+In PowerShell the line-continuation character is a backtick (`` ` ``) rather
+than `\`; the arguments are otherwise identical.
 
 `VAULT_EMBEDDING_TIMEOUT_SECONDS` is listed here, not only with the other
 embedding settings below, because it is **per attempt** and a plausible-looking
@@ -144,10 +147,10 @@ before matching, so a long query does not require every term to be present; see
 The initial topology uses the existing Heroku-managed `DATABASE_URL`. Leave
 `VAULT_DATABASE_URL` and `VAULT_DATABASE_CONNECTION_LIMIT` unset:
 
-```powershell
-heroku config:unset `
-  VAULT_DATABASE_URL `
-  VAULT_DATABASE_CONNECTION_LIMIT `
+```bash
+heroku config:unset \
+  VAULT_DATABASE_URL \
+  VAULT_DATABASE_CONNECTION_LIMIT \
   --app high-score-server
 ```
 
@@ -180,14 +183,14 @@ contains placeholders and non-secret defaults only.
 The leaderboard lineage owns `public.*` and records its revision in
 `public.alembic_version`:
 
-```powershell
+```bash
 alembic upgrade head
 ```
 
 The vault lineage owns `vault.*` and records its revision in
 `vault.vault_alembic_version`:
 
-```powershell
+```bash
 alembic -c alembic-vault.ini upgrade head
 ```
 
@@ -214,7 +217,7 @@ knowledge-platform repository.
 
 After authenticating the Heroku CLI:
 
-```powershell
+```bash
 heroku pg:info --app high-score-server
 heroku pg:psql --app high-score-server
 ```
