@@ -26,6 +26,18 @@ alembic upgrade head
 # Verify pgvector on the target plan before flipping the flag:
 #   heroku pg:psql --app <app> -c \
 #     "SELECT name, installed_version FROM pg_available_extensions WHERE name='vector';"
-if [ "${VAULT_ENABLED:-false}" = "true" ]; then
-    alembic -c alembic-vault.ini upgrade head
-fi
+vault_enabled_value="${VAULT_ENABLED-false}"
+vault_enabled_value="${vault_enabled_value#"${vault_enabled_value%%[![:space:]]*}"}"
+vault_enabled_value="${vault_enabled_value%"${vault_enabled_value##*[![:space:]]}"}"
+
+case "${vault_enabled_value,,}" in
+    1|true|yes|on)
+        alembic -c alembic-vault.ini upgrade head
+        ;;
+    0|false|no|off)
+        ;;
+    *)
+        echo "Invalid boolean value for VAULT_ENABLED: '${VAULT_ENABLED-}'" >&2
+        exit 1
+        ;;
+esac

@@ -1,8 +1,10 @@
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
 from fastapi.testclient import TestClient
+from httpx import Response
 from jose import jwt
 
 from app.auth_identities import NATIVE_AUTH_PROVIDER
@@ -551,6 +553,49 @@ def test_claim_already_claimed_returns_400(client):
         headers=bearer(tokens["access_token"]),
     )
     assert response.status_code == 400
+
+
+def test_claim_rejects_replay_of_original_guest_token(client):
+    tokens = guest(client)
+    headers = bearer(tokens["access_token"])
+
+    first = client.post(
+        "/api/auth/claim",
+        json={"email": f"claim_{secrets.token_hex(4)}@example.com", "password": "testpassword123"},
+        headers=headers,
+    )
+    replay = client.post(
+        "/api/auth/claim",
+        json={"email": f"replay_{secrets.token_hex(4)}@example.com", "password": "different-password"},
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert replay.status_code == 400
+    assert replay.json()["detail"] == "Account is already claimed"
+
+
+def test_concurrent_guest_claims_allow_exactly_one_winner(client):
+    tokens = guest(client)
+    username = decode_token(tokens["access_token"])["username"]
+    headers = bearer(tokens["access_token"])
+    emails = [f"claim_{secrets.token_hex(4)}@example.com" for _ in range(2)]
+
+    def submit_claim(email: str) -> Response:
+        return client.post(
+            "/api/auth/claim",
+            json={"email": email, "password": "testpassword123"},
+            headers=headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(submit_claim, emails))
+
+    assert sorted(response.status_code for response in responses) == [200, 400]
+    identities = identity_rows_for_username(username)
+    assert len(identities) == 1
+    assert identities[0][0] == NATIVE_AUTH_PROVIDER
+    assert identities[0][1] in emails
 
 
 def test_claim_duplicate_email_returns_409(client):

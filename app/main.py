@@ -22,10 +22,6 @@ from app.env import load_environment, validate_environment
 from app.leaderboard_routes import CrossRouteError
 from app.leaderboard_routes import router as leaderboard_router
 from app.limiter import limiter
-from app.vault.db import close_vault_db, init_vault_db
-from app.vault.embedding_runtime import close_vault_embeddings, init_vault_embeddings
-from app.vault.routes import router as vault_router
-from app.vault.routes import vault_saturation_handler
 from app.vault.settings import vault_enabled
 from app.view_routes import router as view_router
 
@@ -80,18 +76,27 @@ async def lifespan(app: FastAPI):
             send_default_pii=False,  # don't ship request headers/bodies by default
         )
 
+    vault_is_enabled = False
     await init_db()
     try:
         init_cache()
-        await init_vault_db()
-        if vault_enabled():
+        vault_is_enabled = vault_enabled()
+        if vault_is_enabled:
+            from app.vault.db import close_vault_db, init_vault_db
+            from app.vault.embedding_runtime import (
+                close_vault_embeddings,
+                init_vault_embeddings,
+            )
+
+            await init_vault_db()
             # Only after the engine is up: a provider with no corpus to search
             # is not a useful thing to have running.
             await init_vault_embeddings()
         yield
     finally:
-        await close_vault_embeddings()
-        await close_vault_db()
+        if vault_is_enabled:
+            await close_vault_embeddings()
+            await close_vault_db()
         await close_db()
         await close_cache()
 
@@ -108,10 +113,6 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
     app.add_exception_handler(CrossRouteError, _cross_route_handler)
-    # Vault pool saturation is a 503, not a 500. SQLAlchemy is the vault's
-    # dependency alone, so this cannot mask an HSS failure, and a disabled
-    # vault has no engine to raise it -- hence no need to gate registration.
-    app.add_exception_handler(SQLAlchemyTimeoutError, vault_saturation_handler)
     app.add_middleware(SlowAPIMiddleware)
 
     # Register CORS after SlowAPI (Starlette uses reverse registration order)
@@ -122,7 +123,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(CORS_ALLOWED_ORIGINS),
-        # OPTIONS not required but included for clarity
+        # Browser CORS is for the public leaderboard/auth surfaces. Vault
+        # writers are operator-issued machine clients, so PUT/DELETE are
+        # intentionally absent; see the vault configuration guide.
+        # OPTIONS not required but included for clarity.
         allow_methods=["GET", "OPTIONS", "POST"],
         # With allow_credentials=False the browser won't attach cookies on cross-origin
         # requests, so a permissive allow_headers can't be combined with ambient auth
@@ -141,9 +145,15 @@ def create_app() -> FastAPI:
     app.include_router(leaderboard_router, prefix="/api/leaderboard")
     # 3. Authentication routes
     app.include_router(auth_router, prefix="/api/auth")
-    # 4. Vault read-only routes — registered only when the vault runtime is on,
+    # 4. Vault routes — registered only when the vault runtime is on,
     #    so a disabled vault publishes no schema and no endpoints.
     if vault_enabled():
+        from app.vault.routes import router as vault_router
+        from app.vault.routes import vault_saturation_handler
+
+        # SQLAlchemy is the vault's dependency alone. Keep this handler behind
+        # the same gate so disabled startup never imports the vault route stack.
+        app.add_exception_handler(SQLAlchemyTimeoutError, vault_saturation_handler)
         app.include_router(vault_router, prefix="/api/v1/vault")
     # 5. SPA assets mount — MUST come before the SPA catch-all router below.
     spa_routes.mount_spa_assets(app)

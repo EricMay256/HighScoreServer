@@ -338,6 +338,7 @@ async def claim(
         )
 
     password_hash = await hash_password(body.password)
+    existing_user = None
     try:
         async with get_pool().connection() as conn:
             async with conn.cursor() as cur:
@@ -348,6 +349,7 @@ async def claim(
                         password_hash = %s,
                         is_guest      = FALSE
                     WHERE id = %s
+                      AND is_guest = TRUE
                     RETURNING username
                     """,
                     (body.email, password_hash, user_id),
@@ -361,6 +363,12 @@ async def claim(
                         """,
                         (user_id, NATIVE_AUTH_PROVIDER, body.email),
                     )
+                else:
+                    await cur.execute(
+                        "SELECT is_guest FROM users WHERE id = %s",
+                        (user_id,),
+                    )
+                    existing_user = await cur.fetchone()
     except Exception as e:
         if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
@@ -371,7 +379,12 @@ async def claim(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        if existing_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account is already claimed",
+        )
 
     return TokenResponse(
         access_token=create_access_token(user_id, row[0], is_guest=False),

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from .domain import PoolSnapshot
-from .settings import VaultSettings
+from .settings import VaultSettings, vault_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -148,9 +148,12 @@ async def init_vault_db() -> None:
     """Initialize the worker-local vault engine when explicitly enabled."""
 
     global _engine, _observer
-    settings = VaultSettings.from_environment()
-    if not settings.enabled:
+    # The feature gate is the only VAULT_* setting that may be parsed while the
+    # package is disabled. This keeps dormant, malformed configuration inert as
+    # promised by the host deployment contract.
+    if not vault_enabled():
         return
+    settings = VaultSettings.from_environment()
     if _engine is not None:
         raise RuntimeError("Vault database engine is already initialized")
 
