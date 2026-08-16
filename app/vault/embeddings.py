@@ -47,6 +47,10 @@ class EmbeddingUnavailable(EmbeddingError):
     """
 
 
+class EmbeddingInputTooLong(EmbeddingError):
+    """The provider permanently rejected an input above its context limit."""
+
+
 class EmbeddingDimensionMismatch(EmbeddingError):
     """The provider returned a vector the persisted schema cannot store.
 

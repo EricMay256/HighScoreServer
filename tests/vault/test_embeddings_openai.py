@@ -8,6 +8,7 @@ from app.vault.constants import DEFAULT_EMBEDDING_TIMEOUT_SECONDS
 from app.vault.embeddings import (
     EmbeddingDimensionMismatch,
     EmbeddingInputKind,
+    EmbeddingInputTooLong,
     EmbeddingProviderNotConfigured,
     EmbeddingUnavailable,
     embed_one,
@@ -283,6 +284,38 @@ def test_client_error_is_not_retried() -> None:
             await provider.aclose()
 
     with pytest.raises(EmbeddingUnavailable, match="HTTP 400"):
+        asyncio.run(exercise())
+
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": "context_length_exceeded", "message": "input is too long"},
+        {
+            "code": None,
+            "message": "The maximum context length is 8192 tokens.",
+        },
+    ],
+)
+def test_context_length_error_is_a_permanent_input_failure(
+    error: dict[str, object],
+) -> None:
+    attempts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(1)
+        return httpx.Response(400, json={"error": error})
+
+    async def exercise() -> None:
+        provider = make_provider(handler)
+        try:
+            await provider.embed(["too long"], EmbeddingInputKind.DOCUMENT)
+        finally:
+            await provider.aclose()
+
+    with pytest.raises(EmbeddingInputTooLong):
         asyncio.run(exercise())
 
     assert len(attempts) == 1

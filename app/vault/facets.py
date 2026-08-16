@@ -47,6 +47,10 @@ MAX_VALUES_PER_FACET = 16
 MAX_FACETS_PER_DOCUMENT = 8
 
 
+class FacetNameCollision(ValueError):
+    """Two distinct input names collapse to one normalized facet name."""
+
+
 def normalize_facets(facets: dict[str, list[str]]) -> dict[str, list[str]]:
     """Strip, drop blanks, de-duplicate, and sort each facet's values.
 
@@ -64,7 +68,12 @@ def normalize_facets(facets: dict[str, list[str]]) -> dict[str, list[str]]:
     for name, values in facets.items():
         cleaned = sorted({value.strip() for value in values if value.strip()})
         if cleaned:
-            normalized[name.strip()] = cleaned
+            normalized_name = name.strip()
+            if normalized_name in normalized:
+                raise FacetNameCollision(
+                    f"facet names collide after normalization: {normalized_name!r}"
+                )
+            normalized[normalized_name] = cleaned
     return normalized
 
 

@@ -13,6 +13,7 @@ move — and the integration spec is explicit that player JWTs and the global
 leaderboard ``API_KEY`` are not vault credentials.
 """
 
+import json
 import logging
 from hashlib import sha256
 from uuid import uuid4
@@ -45,7 +46,7 @@ from .constants import resolve_text_search_config
 from .db import get_vault_engine
 from .domain import VaultDocument
 from .embedding_runtime import get_embedding_provider
-from .embeddings import EmbeddingError
+from .embeddings import EmbeddingError, EmbeddingInputTooLong
 from .rate_limit import enforce_preauth_ip_limit, get_limiter
 from .read_policy import READABLE_STATUSES
 from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
@@ -369,7 +370,12 @@ def _canonical_request_digest(body: VaultContributionRequest) -> bytes:
     kept.
     """
 
-    canonical = body.model_dump_json(exclude_unset=True)
+    canonical = json.dumps(
+        body.model_dump(mode="json", exclude_unset=True),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     return sha256(canonical.encode("utf-8")).digest()
 
 
@@ -430,6 +436,11 @@ async def contribute(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Contribution is unavailable: no embedding provider configured",
+        ) from exc
+    except EmbeddingInputTooLong as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document exceeds the embedding model input limit",
         ) from exc
     except EmbeddingError as exc:
         # Type only, never the message: an embedding exception can carry the
@@ -537,6 +548,11 @@ async def update_vault_document(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Update is unavailable: no embedding provider configured",
+        ) from exc
+    except EmbeddingInputTooLong as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document exceeds the embedding model input limit",
         ) from exc
     except EmbeddingError as exc:
         # Type only, never the message: an embedding exception can carry the

@@ -246,7 +246,7 @@ vault_documents = Table(
         ForeignKey(
             "vault.vault_compile_runs.id",
             name="vault_documents_compile_run_id_fkey",
-            ondelete="SET NULL",
+            ondelete="RESTRICT",
         ),
     ),
     Column("compiled_by", Text),
@@ -415,7 +415,7 @@ vault_write_requests = Table(
         "digest_version",
         SmallInteger,
         nullable=False,
-        server_default=text("1"),
+        server_default=text("3"),
     ),
     Column(
         "state",

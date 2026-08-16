@@ -10,9 +10,9 @@ Create Date: 2026-07-25
 """
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
-from app.vault.constants import resolve_text_search_config
+from vault_migrations.helpers import resolve_text_search_config
 
 
 revision = "0001_vault_foundation"
@@ -36,6 +36,11 @@ def _text_search_config() -> str:
     """
 
     config = resolve_text_search_config()
+    if context.is_offline_mode():
+        # Offline rendering has no live catalog. The resolver has already
+        # constrained this interpolated value to an identifier-shaped name;
+        # online execution retains the existence check below.
+        return config
     existing = (
         op.get_bind()
         .execute(

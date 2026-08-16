@@ -18,13 +18,40 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select, update
+from sqlalchemy import text as text_sql
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.vault.api_models import VaultContributionRequest
 from app.vault.auth import VaultScope  # noqa: E402  (grouped with vault imports)
 from app.vault.constants import EMBEDDING_DIMENSIONS
-from app.vault.embeddings import EmbeddingInputKind, EmbeddingVector
+from app.vault.domain import (
+    DocumentEmbedding,
+    DocumentKind,
+    DocumentStatus,
+    NewVaultDocument,
+    ReviewState,
+)
+from app.vault.embedding_text import assemble_embedding_text, embedding_text_digest
+from app.vault.embeddings import (
+    EmbeddingInputKind,
+    EmbeddingInputTooLong,
+    EmbeddingVector,
+)
+from app.vault.repository import (
+    VaultDocumentEmbeddingRepository,
+    VaultDocumentRepository,
+    VaultReviewCaseRepository,
+)
 from app.vault.routes import _canonical_request_digest
-from app.vault.service import REQUEST_DIGEST_VERSION
+from app.vault.service import (
+    _CONTRIBUTION_LOCK_KEY,
+    REQUEST_DIGEST_VERSION,
+    DocumentUnderReview,
+    RetireRequest,
+    UpdateRequest,
+    VaultDocumentRetireService,
+    VaultDocumentUpdateService,
+)
 from app.vault.settings import vault_enabled
 from app.vault.tables import (
     vault_audit_events,
@@ -58,12 +85,17 @@ class StubEmbeddingProvider:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.reject_input_over_chars: int | None = None
 
     async def embed(
         self, texts, kind: EmbeddingInputKind
     ) -> tuple[EmbeddingVector, ...]:
         del kind
         self.calls += 1
+        if self.reject_input_over_chars is not None and any(
+            len(text) > self.reject_input_over_chars for text in texts
+        ):
+            raise EmbeddingInputTooLong("stub context limit exceeded")
         return tuple(self._vector(text) for text in texts)
 
     @staticmethod
@@ -205,21 +237,63 @@ def test_replaying_an_idempotency_key_does_not_write_twice(
 ) -> None:
     """A retry must be a no-op, not a second note that flags as its own dupe."""
 
-    headers = {"Authorization": f"Bearer {write_token}"}
+    first_headers = {
+        "Authorization": f"Bearer {write_token}",
+        "X-Request-Id": "contribution-first-attempt",
+    }
+    replay_headers = {
+        "Authorization": f"Bearer {write_token}",
+        "X-Request-Id": "contribution-replay-attempt",
+    }
     body = _payload()
 
     try:
-        first = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        first = client.post(
+            "/api/v1/vault/contributions", json=body, headers=first_headers
+        )
         assert first.status_code == 200, first.text
         calls_after_first = provider.calls
 
-        second = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        second = client.post(
+            "/api/v1/vault/contributions", json=body, headers=replay_headers
+        )
 
         assert second.status_code == 200
         assert second.json()["note_id"] == first.json()["note_id"]
         assert second.json()["idempotent_replay"] is True
         # A replay must not buy an embedding call.
         assert provider.calls == calls_after_first
+        assert _count(vault_documents, id=first.json()["note_id"]) == 1
+        assert _count(
+            vault_write_requests, idempotency_key=body["idempotency_key"]
+        ) == 1
+
+        service, engine = vault_service()
+
+        async def audit_attempts() -> list[tuple[str, str]]:
+            async with service.transaction() as connection:
+                result = await connection.execute(
+                    select(
+                        vault_audit_events.c.request_id,
+                        vault_audit_events.c.outcome,
+                    )
+                    .where(
+                        vault_audit_events.c.idempotency_key
+                        == body["idempotency_key"]
+                    )
+                    .order_by(vault_audit_events.c.id)
+                )
+                return [(str(row[0]), str(row[1])) for row in result.all()]
+
+        try:
+            attempts = asyncio.run(audit_attempts())
+        finally:
+            asyncio.run(engine.dispose())
+
+        assert attempts == [
+            ("contribution-first-attempt", "inserted"),
+            ("contribution-replay-attempt", "replayed"),
+        ]
     finally:
         _cleanup()
 
@@ -227,19 +301,55 @@ def test_replaying_an_idempotency_key_does_not_write_twice(
 def test_reusing_a_key_for_a_different_body_is_a_conflict(
     client: TestClient, write_token: str, provider: StubEmbeddingProvider
 ) -> None:
-    headers = {"Authorization": f"Bearer {write_token}"}
+    first_headers = {
+        "Authorization": f"Bearer {write_token}",
+        "X-Request-Id": "idempotency-original-attempt",
+    }
+    conflict_headers = {
+        "Authorization": f"Bearer {write_token}",
+        "X-Request-Id": "idempotency-conflicting-attempt",
+    }
     body = _payload()
 
     try:
-        first = client.post("/api/v1/vault/contributions", json=body, headers=headers)
+        first = client.post(
+            "/api/v1/vault/contributions", json=body, headers=first_headers
+        )
         assert first.status_code == 200, first.text
 
         conflicting = {**body, "body": "Entirely different content."}
         response = client.post(
-            "/api/v1/vault/contributions", json=conflicting, headers=headers
+            "/api/v1/vault/contributions", json=conflicting, headers=conflict_headers
         )
 
         assert response.status_code == 409
+
+        service, engine = vault_service()
+
+        async def audit_attempts() -> list[tuple[str, str]]:
+            async with service.transaction() as connection:
+                result = await connection.execute(
+                    select(
+                        vault_audit_events.c.request_id,
+                        vault_audit_events.c.outcome,
+                    )
+                    .where(
+                        vault_audit_events.c.idempotency_key
+                        == body["idempotency_key"]
+                    )
+                    .order_by(vault_audit_events.c.id)
+                )
+                return [(str(row[0]), str(row[1])) for row in result.all()]
+
+        try:
+            attempts = asyncio.run(audit_attempts())
+        finally:
+            asyncio.run(engine.dispose())
+
+        assert attempts == [
+            ("idempotency-original-attempt", "inserted"),
+            ("idempotency-conflicting-attempt", "conflict"),
+        ]
     finally:
         _cleanup()
 
@@ -292,15 +402,41 @@ def test_the_digest_ignores_fields_the_caller_did_not_send() -> None:
         "idempotency_key": f"key-{uuid4().hex}",
     }
     model = VaultContributionRequest.model_validate(supplied)
-    canonical = model.model_dump_json(exclude_unset=True)
+    canonical = model.model_dump(mode="json", exclude_unset=True)
 
-    assert set(json.loads(canonical)) == set(supplied)
+    assert set(canonical) == set(supplied)
     for unsent in ("summary", "aliases", "facets", "related_ids", "source_ids"):
         assert unsent not in canonical
 
-    assert (
-        _canonical_request_digest(model) == sha256(canonical.encode("utf-8")).digest()
+    expected = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )
+    assert _canonical_request_digest(model) == sha256(expected.encode("utf-8")).digest()
+
+
+def test_the_digest_recursively_sorts_nested_object_keys() -> None:
+    key = f"key-{uuid4().hex}"
+    first = VaultContributionRequest.model_validate(
+        {
+            "title": "Nested order",
+            "body": "Same semantic request.",
+            "facets": {"project": ["hss"], "area": ["backend"]},
+            "idempotency_key": key,
+        }
+    )
+    reversed_order = VaultContributionRequest.model_validate(
+        {
+            "title": "Nested order",
+            "body": "Same semantic request.",
+            "facets": {"area": ["backend"], "project": ["hss"]},
+            "idempotency_key": key,
+        }
+    )
+
+    assert _canonical_request_digest(first) == _canonical_request_digest(reversed_order)
 
 
 # A payload frozen against the digest it must produce. Every declared field is
@@ -318,8 +454,8 @@ _GOLDEN_PAYLOAD: dict[str, object] = {
     "source_url": "https://example.test/golden",
     "idempotency_key": "golden-key-0001",
 }
-_GOLDEN_DIGEST_VERSION = 2
-_GOLDEN_DIGEST_HEX = "2dcc9875331153c7c9d566de0152bd89aeb2b3333962ec56a363ae74914a0230"
+_GOLDEN_DIGEST_VERSION = 3
+_GOLDEN_DIGEST_HEX = "2b7e68311aae9c1fa1049af871e9b80b58da127ce07201e548886aec23ccdc88"
 
 
 def test_the_digest_rule_is_pinned_to_a_golden_value() -> None:
@@ -622,6 +758,33 @@ def test_transport_validation_still_rejects_a_malformed_request(
     assert duplicate_tags.status_code == 422
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("aliases", ["   "]),
+        ("aliases", ["same", "same"]),
+        ("related_ids", ["   "]),
+        ("related_ids", ["same", "same"]),
+        ("source_ids", ["   "]),
+        ("source_ids", ["same", "same"]),
+    ],
+)
+def test_update_shares_create_time_collection_validation(
+    client: TestClient,
+    write_token: str,
+    provider: StubEmbeddingProvider,
+    field: str,
+    value: list[str],
+) -> None:
+    response = client.put(
+        "/api/v1/vault/notes/not-reached",
+        json=_update_payload(**{field: value}),
+        headers={"Authorization": f"Bearer {write_token}"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_facets_and_relations_round_trip_through_the_write_path(
     client: TestClient, write_token: str, provider: StubEmbeddingProvider
 ) -> None:
@@ -713,6 +876,31 @@ def test_a_scalar_facet_value_is_refused_at_the_transport_boundary(
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("method", ["post", "put"])
+def test_facet_names_that_collide_after_normalization_are_refused(
+    client: TestClient,
+    write_token: str,
+    provider: StubEmbeddingProvider,
+    method: str,
+) -> None:
+    payload = _payload(facets={" project": ["first"], "project": ["second"]})
+    path = "/api/v1/vault/contributions"
+    if method == "put":
+        payload = _update_payload(
+            facets={" project": ["first"], "project": ["second"]}
+        )
+        path = "/api/v1/vault/notes/not-reached"
+
+    response = client.request(
+        method,
+        path,
+        json=payload,
+        headers={"Authorization": f"Bearer {write_token}"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_facets_are_normalized_before_storage(
     client: TestClient, write_token: str, provider: StubEmbeddingProvider
 ) -> None:
@@ -760,6 +948,34 @@ def _contribute(client: TestClient, token: str, **overrides) -> str:
     note_id = response.json()["note_id"]
     assert note_id is not None
     return note_id
+
+
+def test_embedding_context_rejection_is_422_for_create_and_update(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    headers = {"Authorization": f"Bearer {write_token}"}
+
+    try:
+        note_id = _contribute(client, write_token)
+        provider.reject_input_over_chars = 100
+
+        create = client.post(
+            "/api/v1/vault/contributions",
+            json=_payload(body="x" * 200),
+            headers=headers,
+        )
+        replacement = client.put(
+            f"/api/v1/vault/notes/{note_id}",
+            json=_update_payload(body="x" * 200),
+            headers=headers,
+        )
+
+        assert create.status_code == 422
+        assert replacement.status_code == 422
+        assert "embedding model input limit" in create.json()["detail"]
+        assert "embedding model input limit" in replacement.json()["detail"]
+    finally:
+        _cleanup()
 
 
 def test_an_update_replaces_content_and_re_embeds(
@@ -828,6 +1044,100 @@ def test_an_update_touching_only_unembedded_fields_does_not_re_embed(
 
         fetched = client.get(f"/api/v1/vault/notes/{note_id}", headers=headers)
         assert fetched.json()["facets"] == {"project": ["highscoreserver"]}
+    finally:
+        _cleanup()
+
+
+def test_concurrent_updates_keep_final_text_and_embedding_together(
+    client: TestClient,
+    write_token: str,
+    provider: StubEmbeddingProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale no-reembed decision must not preserve another update's vector."""
+
+    original = _payload()
+    try:
+        created = client.post(
+            "/api/v1/vault/contributions",
+            json=original,
+            headers={"Authorization": f"Bearer {write_token}"},
+        )
+        assert created.status_code == 200, created.text
+        note_id = created.json()["note_id"]
+
+        async def exercise() -> None:
+            transactions, engine = vault_service()
+            updater = VaultDocumentUpdateService(transactions, provider)
+            original_get = VaultDocumentEmbeddingRepository.get
+            stale_snapshot_loaded = asyncio.Event()
+            release_stale_update = asyncio.Event()
+
+            async def delayed_get(
+                repository: VaultDocumentEmbeddingRepository,
+                connection: AsyncConnection,
+                document_id: str,
+                profile_id: str,
+            ) -> DocumentEmbedding | None:
+                stored = await original_get(
+                    repository, connection, document_id, profile_id
+                )
+                task = asyncio.current_task()
+                if task is not None and task.get_name() == "restore-update":
+                    stale_snapshot_loaded.set()
+                    await release_stale_update.wait()
+                return stored
+
+            monkeypatch.setattr(VaultDocumentEmbeddingRepository, "get", delayed_get)
+
+            restore = UpdateRequest(
+                document_id=note_id,
+                title=original["title"],
+                body=original["body"],
+                tags=tuple(original["tags"]),
+                facets={"project": ["highscoreserver"]},
+                principal_id="test-principal-race",
+                request_id="restore-update",
+            )
+            changed = UpdateRequest(
+                document_id=note_id,
+                title="Concurrent replacement",
+                body="The competing update changes the embedding text.",
+                tags=("testing",),
+                principal_id="test-principal-race",
+                request_id="changed-update",
+            )
+
+            restore_task = asyncio.create_task(
+                updater.update(restore), name="restore-update"
+            )
+            try:
+                await stale_snapshot_loaded.wait()
+                changed_outcome = await updater.update(changed)
+                assert changed_outcome.re_embedded is True
+            finally:
+                release_stale_update.set()
+
+            restore_outcome = await restore_task
+            assert restore_outcome.re_embedded is False
+
+            documents = VaultDocumentRepository()
+            embeddings = VaultDocumentEmbeddingRepository()
+            async with transactions.transaction() as connection:
+                final_document = await documents.get_by_id(connection, note_id)
+                final_embedding = await embeddings.get(
+                    connection, note_id, provider.profile_id
+                )
+
+            assert final_document is not None
+            assert final_embedding is not None
+            assert final_document.title == original["title"]
+            final_text = assemble_embedding_text(final_document)
+            assert final_embedding.text_sha256 == embedding_text_digest(final_text)
+            assert final_embedding.vector == provider._vector(final_text)
+            await engine.dispose()
+
+        asyncio.run(exercise())
     finally:
         _cleanup()
 
@@ -1191,6 +1501,203 @@ def test_a_document_under_review_cannot_be_retired(
         # review surface, which is unbuilt.
         assert response.status_code in (404, 409)
         assert _count(vault_documents, id=candidate) == 1
+    finally:
+        _cleanup()
+
+
+def test_review_evidence_document_cannot_be_retired(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    headers = {"Authorization": f"Bearer {write_token}"}
+    body = _payload()
+
+    try:
+        original = client.post(
+            "/api/v1/vault/contributions", json=body, headers=headers
+        )
+        duplicate = client.post(
+            "/api/v1/vault/contributions",
+            json={**body, "idempotency_key": f"key-{uuid4().hex}"},
+            headers=headers,
+        )
+        assert original.status_code == 200, original.text
+        assert duplicate.json()["status"] == "flagged"
+
+        original_id = original.json()["note_id"]
+        response = client.delete(
+            f"/api/v1/vault/notes/{original_id}", headers=headers
+        )
+
+        assert response.status_code == 409, response.text
+        assert _count(vault_documents, id=original_id) == 1
+    finally:
+        _cleanup()
+
+
+def test_resolved_candidate_document_still_cannot_be_retired(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    note_id = _contribute(client, write_token)
+
+    try:
+
+        async def add_resolved_case() -> None:
+            transactions, engine = vault_service()
+            try:
+                async with transactions.transaction() as connection:
+                    await VaultReviewCaseRepository().insert_pending(
+                        connection,
+                        candidate_document_id=note_id,
+                        reason="Resolved candidate remains durable review history",
+                        similar_documents=[],
+                    )
+                    await connection.execute(
+                        update(vault_review_cases)
+                        .where(
+                            vault_review_cases.c.candidate_document_id == note_id
+                        )
+                        .values(
+                            state=ReviewState.ACCEPTED.value,
+                            decided_at=func.now(),
+                            decided_by="test:reviewer",
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(add_resolved_case())
+        response = client.delete(
+            f"/api/v1/vault/notes/{note_id}",
+            headers={"Authorization": f"Bearer {write_token}"},
+        )
+
+        assert response.status_code == 409, response.text
+        assert _count(vault_documents, id=note_id) == 1
+    finally:
+        _cleanup()
+
+
+def test_resolved_review_evidence_no_longer_blocks_retirement(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    evidence_id = _contribute(client, write_token)
+    candidate_id = f"resolved-evidence-{uuid4().hex}"
+
+    try:
+
+        async def add_resolved_case() -> None:
+            transactions, engine = vault_service()
+            try:
+                async with transactions.transaction() as connection:
+                    await VaultDocumentRepository().insert(
+                        connection,
+                        NewVaultDocument(
+                            id=candidate_id,
+                            kind=DocumentKind.NOTE,
+                            vault_path=f"Agent/notes/{candidate_id}.md",
+                            status=DocumentStatus.FLAGGED,
+                            title="Resolved review candidate",
+                            body="A settled case may release its supporting evidence.",
+                            contributed_by="agent:test-principal-resolved-evidence",
+                            provenance={"fixture": True},
+                        ),
+                    )
+                    await VaultReviewCaseRepository().insert_pending(
+                        connection,
+                        candidate_document_id=candidate_id,
+                        reason="Resolved evidence fixture",
+                        similar_documents=[
+                            {
+                                "note_id": evidence_id,
+                                "title": "Evidence",
+                                "score": 1.0,
+                            }
+                        ],
+                    )
+                    await connection.execute(
+                        update(vault_review_cases)
+                        .where(
+                            vault_review_cases.c.candidate_document_id == candidate_id
+                        )
+                        .values(
+                            state=ReviewState.REJECTED.value,
+                            decided_at=func.now(),
+                            decided_by="test:reviewer",
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(add_resolved_case())
+        response = client.delete(
+            f"/api/v1/vault/notes/{evidence_id}",
+            headers={"Authorization": f"Bearer {write_token}"},
+        )
+
+        assert response.status_code == 204, response.text
+        assert _count(vault_documents, id=evidence_id) == 0
+    finally:
+        _cleanup()
+
+
+def test_retirement_serializes_with_creation_of_review_evidence(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    original_id = _contribute(client, write_token)
+
+    try:
+        async def exercise() -> None:
+            transactions, engine = vault_service()
+            retire = VaultDocumentRetireService(transactions)
+            candidate_id = f"race-candidate-{uuid4().hex}"
+
+            try:
+                async with transactions.transaction() as connection:
+                    await connection.execute(
+                        text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                        {"key": _CONTRIBUTION_LOCK_KEY},
+                    )
+                    retirement = asyncio.create_task(
+                        retire.retire(
+                            RetireRequest(
+                                document_id=original_id,
+                                principal_id="test-principal-race",
+                                request_id="concurrent-retire",
+                            )
+                        )
+                    )
+                    await asyncio.sleep(0.05)
+                    assert retirement.done() is False
+
+                    await VaultDocumentRepository().insert(
+                        connection,
+                        NewVaultDocument(
+                            id=candidate_id,
+                            kind=DocumentKind.NOTE,
+                            vault_path=f"Agent/notes/{candidate_id}.md",
+                            status=DocumentStatus.FLAGGED,
+                            title="Concurrent review candidate",
+                            body="Created while retirement waits for the corpus lock.",
+                            contributed_by="agent:test-principal-race",
+                            provenance={"fixture": True},
+                        ),
+                    )
+                    await VaultReviewCaseRepository().insert_pending(
+                        connection,
+                        candidate_document_id=candidate_id,
+                        reason="Concurrent evidence race",
+                        similar_documents=[
+                            {"note_id": original_id, "title": "Original", "score": 1.0}
+                        ],
+                    )
+
+                with pytest.raises(DocumentUnderReview):
+                    await retirement
+            finally:
+                await engine.dispose()
+
+        asyncio.run(exercise())
+        assert _count(vault_documents, id=original_id) == 1
     finally:
         _cleanup()
 

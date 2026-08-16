@@ -328,6 +328,32 @@ def test_lexical_search_excludes_documents_that_are_not_active(
     asyncio.run(exercise())
 
 
+def test_hydration_rechecks_active_status(
+    configure_test_env: None,
+) -> None:
+    """Ranked IDs may change status before the hydration query executes."""
+
+    async def exercise() -> None:
+        service, engine = vault_service()
+        repository = VaultSearchRepository()
+        run_id = uuid4().hex
+        ids = await seed_corpus(service, run_id)
+
+        try:
+            async with service.transaction() as connection:
+                hydrated = await repository.fetch_documents(
+                    connection,
+                    [ids["alpha"], ids["gamma"], ids["delta"]],
+                )
+
+            assert set(hydrated) == {ids["alpha"]}
+        finally:
+            await clear_corpus(service, ids)
+            await engine.dispose()
+
+    asyncio.run(exercise())
+
+
 def test_lexical_search_disjoins_terms_so_long_queries_still_match(
     configure_test_env: None,
 ) -> None:

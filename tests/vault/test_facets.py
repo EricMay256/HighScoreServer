@@ -16,6 +16,7 @@ from app.vault.facets import (
     FACET_NAMES,
     MAX_FACETS_PER_DOCUMENT,
     MAX_VALUES_PER_FACET,
+    FacetNameCollision,
     normalize_facets,
     validate_facets,
 )
@@ -95,6 +96,10 @@ class TestNormalizeFacets:
 
     def test_an_empty_map_stays_empty(self) -> None:
         assert normalize_facets({}) == {}
+
+    def test_names_that_collide_after_stripping_are_rejected(self) -> None:
+        with pytest.raises(FacetNameCollision, match="collide after normalization"):
+            normalize_facets({" project": ["first"], "project": ["second"]})
 
 
 class TestValidateFacets:

@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, insert, or_, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -268,17 +268,32 @@ class VaultDocumentRepository:
         )
         return bool(result.rowcount)
 
-    async def count_review_cases(
+    async def count_retirement_blocking_review_references(
         self,
         connection: AsyncConnection,
         document_id: str,
     ) -> int:
-        """How many review cases name this document as their candidate."""
+        """Count review references that prevent retiring a document.
+
+        Candidate references block in every state because the database foreign
+        key is durable and non-cascading. JSON evidence has no foreign key and
+        blocks only while the review remains unresolved.
+        """
 
         result = await connection.execute(
             select(func.count())
             .select_from(vault_review_cases)
-            .where(vault_review_cases.c.candidate_document_id == document_id)
+            .where(
+                or_(
+                    vault_review_cases.c.candidate_document_id == document_id,
+                    and_(
+                        vault_review_cases.c.state == ReviewState.PENDING.value,
+                        vault_review_cases.c.similar_documents.contains(
+                            [{"note_id": document_id}]
+                        ),
+                    ),
+                ),
+            )
         )
         return int(result.scalar_one())
 

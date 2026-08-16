@@ -25,7 +25,7 @@ from .embeddings import (
     EmbeddingProvider,
     embed_one,
 )
-from .facets import normalize_facets, validate_facets
+from .facets import FacetNameCollision, normalize_facets, validate_facets
 from .governance import (
     DEFAULT_POLICY,
     Action,
@@ -217,8 +217,11 @@ class VaultSearchService:
 #    their defaults, so the digest moved whenever the request model gained a
 #    field. Retired by migration 0006.
 # 2: sha256 of model_dump_json(exclude_unset=True) -- covers only what the
-#    caller sent, and is therefore stable across additive schema change.
-REQUEST_DIGEST_VERSION = 2
+#    caller sent, and is therefore stable across additive schema change, but
+#    nested object keys retained caller insertion order.
+# 3: sha256 of compact JSON over the JSON-mode model dump, recursively sorting
+#    object keys while preserving list order.
+REQUEST_DIGEST_VERSION = 3
 
 
 class IdempotencyConflict(Exception):
@@ -228,6 +231,10 @@ class IdempotencyConflict(Exception):
     the caller reused a key for something else, which is a client mistake to
     refuse rather than guess at.
     """
+
+    def __init__(self, message: str, document_id: str | None) -> None:
+        super().__init__(message)
+        self.document_id = document_id
 
 
 class DedupUnavailable(Exception):
@@ -299,6 +306,28 @@ class VaultContributionService:
         self._similar_limit = similar_limit
 
     async def contribute(self, request: ContributionRequest) -> ContributionOutcome:
+        """Run a contribution and durably audit any idempotency conflict."""
+
+        try:
+            return await self._contribute(request)
+        except IdempotencyConflict as exc:
+            # The transaction that detects the mismatch rolls back when the
+            # exception leaves it. Record the refused attempt separately so
+            # raising the route's 409 cannot roll back its audit evidence.
+            async with self._transactions.transaction() as connection:
+                await VaultAuditEventRepository().record(
+                    connection,
+                    operation="vault.contribute",
+                    outcome="conflict",
+                    request_id=request.request_id,
+                    principal_id=request.principal_id,
+                    target_type="document" if exc.document_id else None,
+                    target_id=exc.document_id,
+                    idempotency_key=request.idempotency_key,
+                )
+            raise
+
+    async def _contribute(self, request: ContributionRequest) -> ContributionOutcome:
         writes = VaultWriteRequestRepository()
         search = VaultSearchRepository()
 
@@ -317,7 +346,15 @@ class VaultContributionService:
                 "No embedding provider is configured; refusing to write without dedup"
             )
 
-        candidate = self._build_candidate(request)
+        try:
+            candidate = self._build_candidate(request)
+        except FacetNameCollision as exc:
+            return ContributionOutcome(
+                status="invalid",
+                note_id=None,
+                message="contribution failed validation",
+                errors=(str(exc),),
+            )
 
         # Governance validation and facet vocabulary are reported together, so
         # a contribution learns everything wrong with it in one round trip
@@ -442,9 +479,20 @@ class VaultContributionService:
             )
         elif prior.request_sha256 != request.request_sha256:
             raise IdempotencyConflict(
-                "idempotency key was already used for a different request body"
+                "idempotency key was already used for a different request body",
+                document_id=prior.document_id,
             )
         stored = prior.response or {}
+        await VaultAuditEventRepository().record(
+            connection,
+            operation="vault.contribute",
+            outcome="replayed",
+            request_id=request.request_id,
+            principal_id=request.principal_id,
+            target_type="document" if prior.document_id else None,
+            target_id=prior.document_id,
+            idempotency_key=request.idempotency_key,
+        )
         return ContributionOutcome(
             status=stored.get("status", prior.state),
             note_id=prior.document_id,
@@ -730,7 +778,15 @@ class VaultDocumentUpdateService:
         if existing is None:
             raise DocumentNotFound(request.document_id)
 
-        candidate = self._build_candidate(existing, request)
+        try:
+            candidate = self._build_candidate(existing, request)
+        except FacetNameCollision as exc:
+            return UpdateOutcome(
+                note_id=request.document_id,
+                message="update failed validation",
+                re_embedded=False,
+                errors=(str(exc),),
+            )
 
         errors = validate(candidate) + validate_facets(candidate.facets)
         if errors:
@@ -792,16 +848,20 @@ class VaultDocumentUpdateService:
                 # surface it as the 404 it is.
                 raise DocumentNotFound(request.document_id)
 
-            if re_embed:
-                await embeddings.upsert(
-                    connection,
-                    DocumentEmbedding(
-                        document_id=request.document_id,
-                        profile_id=self._provider.profile_id,
-                        vector=vector,
-                        text_sha256=text_digest,
-                    ),
-                )
+            # Always persist the candidate vector, even when producing it did
+            # not require a provider call. ``re_embed`` was decided from a
+            # pre-lock snapshot; another update may have changed both text and
+            # vector while this request waited. Re-applying the candidate's
+            # already-known vector keeps the final row and embedding atomic.
+            await embeddings.upsert(
+                connection,
+                DocumentEmbedding(
+                    document_id=request.document_id,
+                    profile_id=self._provider.profile_id,
+                    vector=vector,
+                    text_sha256=text_digest,
+                ),
+            )
 
             await VaultAuditEventRepository().record(
                 connection,
@@ -866,7 +926,7 @@ class RetireRequest:
 
 
 class DocumentUnderReview(Exception):
-    """A review case still names this document as its candidate."""
+    """A review case prevents retiring this candidate or pending evidence."""
 
 
 class VaultDocumentRetireService:
@@ -888,10 +948,14 @@ class VaultDocumentRetireService:
         documents = VaultDocumentRepository()
 
         async with self._transactions.transaction() as connection:
-            # No advisory lock. The contribution lock exists to make
-            # check-dedup-then-write atomic; a delete has no such span, and
-            # taking it would serialize retirement behind every contribution
-            # for no benefit.
+            # Contributions create review evidence under this same corpus lock.
+            # Retirement must serialize with that write or it can check first,
+            # delete an evidence document, and let the pending case commit with
+            # a dangling JSON reference immediately afterwards.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
             existing = await documents.get_by_id(
                 connection,
                 request.document_id,
@@ -901,16 +965,17 @@ class VaultDocumentRetireService:
             if existing is None:
                 raise DocumentNotFound(request.document_id)
 
-            # A review case is an audit record of a judgement, and its FK does
-            # not cascade. Deleting the document under it would either fail on
-            # the constraint or, if forced, leave a decision pointing at
-            # nothing. Refuse and let the review surface settle it first.
-            open_cases = await documents.count_review_cases(
-                connection, request.document_id
+            # A candidate reference is a durable, non-cascading FK in every
+            # state. Similar-document evidence is JSON without an FK and blocks
+            # while pending, when deleting it would destroy unresolved context.
+            blocking_cases = (
+                await documents.count_retirement_blocking_review_references(
+                    connection, request.document_id
+                )
             )
-            if open_cases:
+            if blocking_cases:
                 raise DocumentUnderReview(
-                    f"{open_cases} review case(s) reference this document"
+                    f"{blocking_cases} review case(s) reference this document"
                 )
 
             # Audit first: the event has to survive the row it describes, and

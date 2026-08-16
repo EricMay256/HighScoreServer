@@ -28,9 +28,9 @@ Create Date: 2026-07-29
 """
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
-from app.vault.constants import resolve_text_search_config
+from vault_migrations.helpers import resolve_text_search_config
 
 
 revision = "0004_reconciliation"
@@ -47,6 +47,10 @@ def _text_search_config() -> str:
     """
 
     config = resolve_text_search_config()
+    if context.is_offline_mode():
+        # A mock offline connection cannot query pg_ts_config. Identifier
+        # validation still runs above; real upgrades retain the catalog check.
+        return config
     existing = (
         op.get_bind()
         .execute(

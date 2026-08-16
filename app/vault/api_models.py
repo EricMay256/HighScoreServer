@@ -14,10 +14,11 @@ from typing import Any
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
 from .domain import DocumentKind, DocumentStatus, VectorSearchStatus
+from .facets import normalize_facets
 
 
-class VaultContributionRequest(BaseModel):
-    """Transport-neutral contribution input from the v1 tool contract."""
+class VaultDocumentContentRequest(BaseModel):
+    """Content fields and normalization shared by create and replacement."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -65,11 +66,6 @@ class VaultContributionRequest(BaseModel):
         description="Ids of notes this one was derived from.",
     )
     source_url: AnyUrl | None = None
-    idempotency_key: str = Field(
-        min_length=8,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9._:-]+$",
-    )
 
     @field_validator("tags")
     @classmethod
@@ -101,7 +97,7 @@ class VaultContributionRequest(BaseModel):
     @field_validator("facets")
     @classmethod
     def validate_facet_shape(cls, facets: dict[str, list[str]]) -> dict[str, list[str]]:
-        """Transport-level shape only.
+        """Transport-level shape and lossless normalization.
 
         Which facet *names* are legal is governance, checked in
         ``facets.validate_facets`` at the write boundary so that adding one
@@ -109,6 +105,10 @@ class VaultContributionRequest(BaseModel):
         deliberate: accepting both {"project": "hss"} and {"project": ["hss"]}
         would make every reader handle two shapes, and a containment query
         written for one silently misses the other.
+
+        Normalization is safe only when it is one-to-one. Two distinct keys
+        that both strip to ``project`` are rejected instead of allowing the
+        later assignment to discard the earlier values.
         """
 
         for name, values in facets.items():
@@ -118,10 +118,20 @@ class VaultContributionRequest(BaseModel):
                 )
             if any(not str(value).strip() for value in values):
                 raise ValueError(f"facet {name!r} must not contain empty values")
-        return facets
+        return normalize_facets(facets)
 
 
-class VaultDocumentUpdateRequest(BaseModel):
+class VaultContributionRequest(VaultDocumentContentRequest):
+    """Transport-neutral contribution input from the v1 tool contract."""
+
+    idempotency_key: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
+
+
+class VaultDocumentUpdateRequest(VaultDocumentContentRequest):
     """Full replacement of one document's caller-supplied content.
 
     Deliberately a replacement rather than a patch. A patch would need a way to
@@ -135,27 +145,6 @@ class VaultDocumentUpdateRequest(BaseModel):
     sending it twice converges, which is what PUT means. The contribution path
     needs a key because it mints identity and must not mint it twice.
     """
-
-    model_config = ConfigDict(extra="forbid")
-
-    title: str = Field(min_length=1, max_length=300)
-    body: str = Field(min_length=1, max_length=100_000)
-    summary: str | None = Field(default=None, max_length=2_000)
-    tags: list[str] = Field(default_factory=list, max_length=50)
-    aliases: list[str] = Field(default_factory=list, max_length=20)
-    facets: dict[str, list[str]] = Field(default_factory=dict)
-    related_ids: list[str] = Field(default_factory=list, max_length=50)
-    source_ids: list[str] = Field(default_factory=list, max_length=50)
-    source_url: AnyUrl | None = None
-
-    @field_validator("tags")
-    @classmethod
-    def validate_tags(cls, tags: list[str]) -> list[str]:
-        if any(not tag for tag in tags):
-            raise ValueError("tags must not contain empty values")
-        if len(set(tags)) != len(tags):
-            raise ValueError("tags must be unique")
-        return tags
 
 
 class VaultSimilarNote(BaseModel):

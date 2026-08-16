@@ -24,6 +24,7 @@ from .constants import (
 from .embeddings import (
     EmbeddingDimensionMismatch,
     EmbeddingInputKind,
+    EmbeddingInputTooLong,
     EmbeddingProviderNotConfigured,
     EmbeddingUnavailable,
     EmbeddingVector,
@@ -213,6 +214,13 @@ class OpenAIEmbeddingProvider:
             if response.status_code < 400:
                 return response
 
+            if response.status_code == 400 and self._is_input_too_long(response):
+                # Permanent input failure. Retrying cannot change the token
+                # count, and callers map this separately to 422.
+                raise EmbeddingInputTooLong(
+                    "OpenAI embeddings input exceeds the model context limit"
+                )
+
             if (
                 response.status_code in _RETRY_STATUS_CODES
                 and attempt < _MAX_ATTEMPTS
@@ -242,6 +250,27 @@ class OpenAIEmbeddingProvider:
             "OpenAI embeddings request failed after "
             f"{_MAX_ATTEMPTS} attempt{'' if _MAX_ATTEMPTS == 1 else 's'}"
         ) from last_error
+
+    @staticmethod
+    def _is_input_too_long(response: httpx.Response) -> bool:
+        """Recognize OpenAI's context-limit 400 without retaining its message."""
+
+        try:
+            error = response.json().get("error", {})
+        except (ValueError, AttributeError):
+            return False
+        if not isinstance(error, dict):
+            return False
+
+        code = error.get("code")
+        if code == "context_length_exceeded":
+            return True
+
+        message = error.get("message")
+        if not isinstance(message, str):
+            return False
+        lowered = message.lower()
+        return "maximum context length" in lowered and "token" in lowered
 
     @staticmethod
     async def _sleep_before_retry(attempt: int, retry_after: str | None) -> None:

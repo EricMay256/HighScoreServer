@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ from app.vault.repository import (
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings
 from app.vault.tables import (
+    vault_compile_runs,
     vault_document_embeddings,
     vault_documents,
     vault_review_cases,
@@ -147,6 +149,65 @@ def test_service_exception_rolls_back_all_repository_writes(
             await engine.dispose()
 
         assert observer.snapshot().checkout_failures == 0
+
+    asyncio.run(exercise())
+
+
+def test_referenced_compile_run_cannot_be_deleted(
+    configure_test_env: None,
+) -> None:
+    async def exercise() -> None:
+        settings = replace(VaultSettings.from_environment(), enabled=True)
+        engine, observer = create_vault_engine(settings)
+        service = VaultTransactionService(engine, observer)
+        documents = VaultDocumentRepository()
+        run_id = uuid4()
+        document_id = f"wiki-{uuid4().hex}"
+
+        try:
+            async with service.transaction() as connection:
+                await connection.execute(
+                    vault_compile_runs.insert().values(
+                        id=run_id,
+                        compiler_principal_id="test:compiler",
+                    )
+                )
+                await documents.insert(
+                    connection,
+                    NewVaultDocument(
+                        id=document_id,
+                        kind=DocumentKind.WIKI,
+                        vault_path=f"Wiki/{document_id}.md",
+                        status=DocumentStatus.ACTIVE,
+                        title="Durable compile provenance",
+                        body="The compile run must outlive this wiki document.",
+                        contributed_by="test:compiler",
+                        provenance={"fixture": True},
+                        compile_run_id=run_id,
+                        compiled_by="test:compiler",
+                        compiled_at=datetime.now(UTC),
+                    ),
+                )
+
+            with pytest.raises(IntegrityError) as exc_info:
+                async with service.transaction() as connection:
+                    await connection.execute(
+                        delete(vault_compile_runs).where(
+                            vault_compile_runs.c.id == run_id
+                        )
+                    )
+
+            assert getattr(exc_info.value.orig, "sqlstate", None) == "23503"
+
+            async with service.transaction() as connection:
+                await connection.execute(
+                    delete(vault_documents).where(vault_documents.c.id == document_id)
+                )
+                await connection.execute(
+                    delete(vault_compile_runs).where(vault_compile_runs.c.id == run_id)
+                )
+        finally:
+            await engine.dispose()
 
     asyncio.run(exercise())
 

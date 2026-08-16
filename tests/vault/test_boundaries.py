@@ -3,6 +3,8 @@ from pathlib import Path
 
 
 VAULT_PACKAGE = Path(__file__).resolve().parents[2] / "app" / "vault"
+HOST_PACKAGE = VAULT_PACKAGE.parent
+HOST_VAULT_IMPORT_ALLOWLIST = {HOST_PACKAGE / "main.py"}
 
 # rglob, not glob: the package is flat today, so the two are equivalent and the
 # distinction looks academic. It stops being academic the moment anyone adds a
@@ -51,6 +53,21 @@ def test_vault_package_has_no_leaderboard_domain_imports() -> None:
         for module, _names in imported_names(tree):
             if module.startswith(FORBIDDEN_IMPORT_PREFIXES):
                 violations.append(f"{path.name}: {module}")
+
+    assert violations == []
+
+
+def test_host_modules_do_not_import_vault_internals() -> None:
+    """Only the composition root may know the staged vault package exists."""
+
+    violations: list[str] = []
+    for path in HOST_PACKAGE.rglob("*.py"):
+        if VAULT_PACKAGE in path.parents or path in HOST_VAULT_IMPORT_ALLOWLIST:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for module, _names in imported_names(tree):
+            if module == "app.vault" or module.startswith("app.vault."):
+                violations.append(f"{path.relative_to(HOST_PACKAGE)}: {module}")
 
     assert violations == []
 

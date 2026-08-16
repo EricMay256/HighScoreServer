@@ -22,6 +22,26 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+def test_browser_preflight_does_not_advertise_vault_write_methods(
+    client: TestClient,
+    method: str,
+) -> None:
+    """Vault writes are machine-client APIs, outside the host browser CORS contract."""
+
+    response = client.options(
+        "/api/v1/vault/notes/example",
+        headers={
+            "Origin": "https://ericmay256.github.io",
+            "Access-Control-Request-Method": method,
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 400
+    assert method not in response.headers["access-control-allow-methods"]
+
+
 def _issue(scopes: tuple[str, ...] = (VaultScope.READ,), **overrides) -> tuple[str, str]:
     """Insert a credential and return (credential_id, bearer token)."""
 

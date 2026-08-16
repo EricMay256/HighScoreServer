@@ -328,6 +328,7 @@ class VaultSearchRepository:
 
         statement = select(*DOCUMENT_DOMAIN_COLUMNS).where(
             vault_documents.c.id.in_(list(document_ids)),
+            vault_documents.c.status == DocumentStatus.ACTIVE.value,
             readable_path_predicate(),
         )
         result = await connection.execute(statement)
