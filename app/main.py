@@ -82,23 +82,36 @@ async def lifespan(app: FastAPI):
         init_cache()
         vault_is_enabled = vault_enabled()
         if vault_is_enabled:
-            from app.vault.db import close_vault_db, init_vault_db
+            from app.vault.db import (
+                close_vault_db,
+                init_vault_db,
+                report_vault_pool,
+            )
             from app.vault.embedding_runtime import (
                 close_vault_embeddings,
                 init_vault_embeddings,
             )
+            from app.vault.mcp import vault_mcp_lifespan
 
             await init_vault_db()
             # Only after the engine is up: a provider with no corpus to search
             # is not a useful thing to have running.
             await init_vault_embeddings()
 
-            # A mount does not run the mounted app's lifespan, so the MCP
-            # transport's session manager has to be started here or every tool
-            # call fails on a task group that was never entered.
-            from app.vault.mcp import vault_mcp_lifespan
-
-            async with vault_mcp_lifespan(app.state.vault_mcp_app):
+            # Two context managers, both required and both easy to omit:
+            #
+            # report_vault_pool logs this worker's connection high-water mark on
+            # the way out, which is the evidence the vault-enablement review
+            # asks for and cannot be reconstructed after the process exits. It
+            # wraps the inner one so its closing line lands after everything
+            # that could check out a connection has stopped.
+            #
+            # vault_mcp_lifespan starts the MCP transport's session manager. A
+            # mount does not run the mounted app's lifespan, so without this
+            # every tool call fails on a task group that was never entered.
+            async with report_vault_pool(), vault_mcp_lifespan(
+                app.state.vault_mcp_app
+            ):
                 yield
         else:
             yield
