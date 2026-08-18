@@ -12,7 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 from app import spa_routes
 from app.auth_routes import router as auth_router
@@ -92,7 +92,16 @@ async def lifespan(app: FastAPI):
             # Only after the engine is up: a provider with no corpus to search
             # is not a useful thing to have running.
             await init_vault_embeddings()
-        yield
+
+            # A mount does not run the mounted app's lifespan, so the MCP
+            # transport's session manager has to be started here or every tool
+            # call fails on a task group that was never entered.
+            from app.vault.mcp import vault_mcp_lifespan
+
+            async with vault_mcp_lifespan(app.state.vault_mcp_app):
+                yield
+        else:
+            yield
     finally:
         if vault_is_enabled:
             await close_vault_embeddings()
@@ -155,6 +164,36 @@ def create_app() -> FastAPI:
         # the same gate so disabled startup never imports the vault route stack.
         app.add_exception_handler(SQLAlchemyTimeoutError, vault_saturation_handler)
         app.include_router(vault_router, prefix="/api/v1/vault")
+
+        # The MCP adapter over the same services. Mounted rather than included
+        # because it is a whole ASGI application, not a router -- which is also
+        # why it carries its own authentication and pre-auth guard: a mount
+        # inherits neither the router's dependencies nor the host's exception
+        # handlers. See app/vault/mcp.py.
+        from app.vault.mcp import build_vault_mcp_app
+
+        # Registered before the mount so the exact path matches here. A mount
+        # answers only its trailing-slash form, and the bare form falls through
+        # to a bare 405 -- which is precisely the URL an operator types when
+        # configuring a client. 307 preserves the method and body, so a POSTed
+        # JSON-RPC call survives the hop.
+        #
+        # It deliberately does no work and touches no credential, so running
+        # ahead of the vault's pre-auth guard costs nothing; everything is
+        # enforced at the target.
+        @app.api_route(
+            "/api/v1/vault/mcp",
+            methods=["GET", "POST", "DELETE"],
+            include_in_schema=False,
+        )
+        async def vault_mcp_canonical_path() -> RedirectResponse:
+            return RedirectResponse("/api/v1/vault/mcp/", status_code=307)
+
+        # Held on app state, not in a module-level cache: the transport's
+        # session manager refuses a second run() on the same instance, so each
+        # application must own its own.
+        app.state.vault_mcp_app = build_vault_mcp_app()
+        app.mount("/api/v1/vault/mcp", app.state.vault_mcp_app)
     # 5. SPA assets mount — MUST come before the SPA catch-all router below.
     spa_routes.mount_spa_assets(app)
     # 6. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.
