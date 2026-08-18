@@ -467,10 +467,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--sample-dsn",
-        default=os.environ.get("VAULT_LOAD_PROBE_DSN"),
+        default=os.environ.get("VAULT_LOAD_PROBE_DSN")
+        or os.environ.get("DATABASE_URL"),
         help=(
             "Optional database URL. Samples pg_stat_activity during the run, "
-            "which is the only view of the database-wide total."
+            "which is the only view of the database-wide total. Defaults to "
+            "VAULT_LOAD_PROBE_DSN, then DATABASE_URL -- which is already set on "
+            "a Heroku one-off dyno, so the flag is unnecessary there and the "
+            "URL never has to pass through a shell."
         ),
     )
     arguments = parser.parse_args()
