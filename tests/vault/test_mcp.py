@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from app.vault.auth import VaultScope
 from app.vault.mcp import derive_idempotency_key
@@ -174,8 +175,19 @@ def test_a_withheld_tool_is_still_refused_when_called_directly(
     finally:
         _drop(credential_id)
 
-    rendered = json.dumps(payload)
-    assert "vault:delete" in rendered or "isError" in rendered
+    # Must be an actual refusal. Substring-matching the serialized response
+    # passes on a *successful* call too, because `isError` appears in a success
+    # payload with the value false -- the assertion would then hold whether or
+    # not the boundary worked, which is the one thing it must not do.
+    assert not isinstance(payload, Response), (
+        f"expected a JSON-RPC response, got HTTP {getattr(payload, 'status_code', '?')}"
+    )
+    if "error" in payload:
+        message = payload["error"]["message"]
+    else:
+        assert payload["result"]["isError"] is True
+        message = payload["result"]["content"][0]["text"]
+    assert VaultScope.DELETE in message
 
 
 def test_search_over_mcp_returns_the_same_shape_as_http(client: TestClient) -> None:
@@ -229,6 +241,34 @@ def test_derived_key_is_stable_across_key_order() -> None:
     reordered = derive_idempotency_key({"tags": ["x"], "body": "B", "title": "T"})
 
     assert first == reordered
+
+
+def test_derived_key_is_stable_across_nested_key_order() -> None:
+    """Sorting has to be as deep as the data, and facets are the realistic case.
+
+    A first implementation sorted only the top level, so two contributions
+    differing solely in the key order of `facets` derived different keys and
+    wrote two notes for one contribution -- precisely the duplicate this
+    function exists to prevent, and invisible to a top-level-only test.
+    """
+
+    first = derive_idempotency_key(
+        {"title": "T", "body": "B", "facets": {"project": ["hss"], "lang": ["py"]}}
+    )
+    reordered = derive_idempotency_key(
+        {"title": "T", "body": "B", "facets": {"lang": ["py"], "project": ["hss"]}}
+    )
+
+    assert first == reordered
+
+
+def test_derived_key_still_changes_when_nested_values_change() -> None:
+    """Order-insensitivity must not become value-insensitivity."""
+
+    first = derive_idempotency_key({"title": "T", "body": "B", "facets": {"p": ["a"]}})
+    changed = derive_idempotency_key({"title": "T", "body": "B", "facets": {"p": ["b"]}})
+
+    assert first != changed
 
 
 def test_derived_key_changes_with_content() -> None:

@@ -48,6 +48,7 @@ on the vault with no bouncer -- and it fails silently, since everything works
 until someone hammers it.
 """
 
+import json
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
@@ -167,12 +168,17 @@ class VaultMCPAuthMiddleware:
 
         try:
             await enforce_preauth_ip_limit(request=request)
-        except RateLimitExceeded:
+        except RateLimitExceeded as exc:
             # The host's slowapi handler is registered on the outer app and does
-            # not see exceptions raised inside a mount, so render it here.
+            # not see exceptions raised inside a mount, so render it here -- and
+            # render it the *same way*, carrying slowapi's own detail (which
+            # names the limit that was hit) and any headers it set. An operator
+            # reading a 429 should not be able to tell which transport produced
+            # it, and "Rate limit exceeded" with no number is not actionable.
             await JSONResponse(
-                {"detail": "Rate limit exceeded"},
+                {"detail": f"Rate limit exceeded: {exc.detail}"},
                 status_code=429,
+                headers=dict(exc.headers) if exc.headers else None,
             )(scope, receive, send)
             return
 
@@ -271,7 +277,18 @@ def derive_idempotency_key(payload: dict[str, Any]) -> str:
     *against*.
     """
 
-    canonical = repr(sorted((k, repr(v)) for k, v in payload.items()))
+    # json.dumps with sort_keys sorts *recursively*, which repr() does not.
+    # An earlier version hashed repr(sorted(payload.items())), which sorted only
+    # the top level: two contributions differing solely in the key order of a
+    # nested dict -- facets is the realistic case -- derived different keys and
+    # so wrote two notes for one contribution, the exact failure this function
+    # exists to prevent. Sorting must be as deep as the data.
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     digest = sha256(canonical.encode("utf-8")).hexdigest()
     # Prefixed so an operator reading vault_write_requests can tell a derived
     # key from a client-chosen one. Hex plus a hyphen satisfies the contract's

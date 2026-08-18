@@ -34,6 +34,8 @@ tools appear depends on that credential's scopes — see vault ADR 0021.
 import asyncio
 import sys
 
+from starlette.applications import Starlette
+
 
 # Local-Windows-dev only, and a no-op everywhere else. psycopg3's async pool
 # drives sockets with loop.add_reader/add_writer, which only SelectorEventLoop
@@ -48,7 +50,7 @@ if sys.platform == "win32":
 MCP_PATH = "/mcp"
 
 
-def build_standalone_app():
+def build_standalone_app() -> Starlette:
     """Serve the vault MCP application with the vault lifecycle around it.
 
     The MCP app is mounted inside a thin outer application rather than served
@@ -61,7 +63,6 @@ def build_standalone_app():
 
     from contextlib import asynccontextmanager
 
-    from starlette.applications import Starlette
     from starlette.routing import Mount
 
     from app.vault.db import close_vault_db, init_vault_db
