@@ -52,6 +52,15 @@ easy to overlook:
 | Package | Used by |
 | ------- | ------- |
 | `pgvector` | `app/vault/tables.py` only. Nothing in HSS imports it. |
+| `mcp` | `app/vault/mcp.py` only. Nothing in HSS imports it. |
+| `mcp-types` | Transitive under `mcp`. |
+| `httpx2`, `httpcore2` | Transitive under `mcp`. **Not** the `httpx` HSS already uses — a second, independently versioned HTTP stack that installs alongside it rather than replacing it. Both remain resident while the vault is hosted here. |
+| `opentelemetry-api` | Transitive under `mcp`. HSS's tracing is Sentry; nothing in the leaderboard emits OTel. |
+| `truststore` | Transitive under `mcp`. |
+
+Installing `mcp` also raised the pinned `idna` from 3.11 to 3.18. That one is genuinely
+shared — `httpx`, `email-validator`, and `anyio` all reach it — so it does **not** leave with
+the package, and the bump stays in HSS's manifest after extraction.
 
 `SQLAlchemy` is shared: the vault uses Core directly, and HSS needs it as Alembic's engine
 layer. It stays in both.

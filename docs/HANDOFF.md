@@ -455,8 +455,29 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    The paths were rewritten to their WSL locations on 2026-08-15, which removed the Windows
    username but not the disclosure. Untracking them is a separate call.
 
-**Blocked / out of scope until re-approved:** MCP (`mcp` is not an approved dependency);
-`VAULT_ENABLED=true` in production; partial HNSW index per profile; dimension-change DDL.
+**Blocked / out of scope until re-approved:** partial HNSW index per profile;
+dimension-change DDL.
+
+**MCP** left this list on 2026-08-16: it was re-approved and landed, and `mcp` is now an
+approved, vault-owned dependency (see vault ADR 0021).
+
+**`VAULT_ENABLED=true` in production is unresolved, not resolved.** Two facts are both true
+and they disagree, so this entry stays until someone reconciles them:
+
+- The config var **is set to `true`** on `high-score-server`, and agents have been reading and
+  writing the live production vault over HTTP.
+- The readiness review of 2026-08-16 classifies production vault enablement **NO-GO** pending
+  two operational observations it describes as intentionally open — a credential inventory
+  repeated *after* the vault migrations, and a connection-pool review *after* real vault
+  traffic. Neither can be performed while the vault is dark, which is why they were deferred
+  rather than closed.
+
+So either the gate was cleared and the review was not updated, or the vault was enabled ahead
+of it. Do not treat the running config as evidence that the conditions were met.
+
+The MCP endpoint is mounted behind this same gate, which means **it inherits this question
+rather than raising a new one**: it is live in production exactly where and when the vault is,
+with no separate process and no Procfile entry.
 
 **Deferred decision #1 (whole-vault read permissions) still blocks any human-layer import.**
 `folders.yml` governs `ai_write` and has no `ai_read`; one `vault:read` scope reads everything

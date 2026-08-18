@@ -8,12 +8,14 @@ Persistence records and SQLAlchemy table definitions intentionally live in
 separate modules.
 """
 
+import json
 from datetime import datetime
+from hashlib import sha256
 from typing import Any
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
-from .domain import DocumentKind, DocumentStatus, VectorSearchStatus
+from .domain import DocumentKind, DocumentStatus, VaultDocument, VectorSearchStatus
 from .facets import normalize_facets
 
 
@@ -313,3 +315,69 @@ class VaultSearchResponse(BaseModel):
         )
     )
     hits: list[VaultSearchHit]
+
+
+def document_detail(document: VaultDocument) -> VaultDocumentDetail:
+    """Project a domain record onto the public read model.
+
+    Deliberately a subset: the domain record carries persistence concerns the
+    transport has no business publishing. Shared by both adapters for the same
+    reason ``canonical_request_digest`` is -- two copies would let the HTTP and
+    MCP read surfaces drift into disagreeing about what a note is.
+    """
+
+    return VaultDocumentDetail(
+        note_id=document.id,
+        kind=document.kind,
+        doc_type=document.doc_type,
+        vault_path=document.vault_path,
+        status=document.status,
+        doc_status=document.doc_status,
+        title=document.title,
+        summary=document.summary,
+        body=document.body,
+        tags=list(document.tags),
+        aliases=list(document.aliases),
+        facets={name: list(values) for name, values in document.facets.items()},
+        related_ids=list(document.related_ids),
+        source_ids=list(document.source_ids),
+        source_url=document.source_url,
+        created_at=document.created_at,
+        updated_at=document.updated_at,
+    )
+
+
+def canonical_request_digest(body: VaultContributionRequest) -> bytes:
+    """Hash a contribution request so a reused idempotency key can be checked.
+
+    Hashes the validated model rather than the raw bytes: two JSON documents
+    differing only in key order or whitespace are the same request, and
+    treating them as a conflict would refuse a legitimate retry.
+
+    Only the fields the caller actually supplied are covered. Serializing unset
+    fields at their defaults made the digest a function of the *server's* schema
+    as well as of the request, so adding an optional field silently changed the
+    digest of every request that had ever been made -- see migration 0006 and
+    ADR 0016's amendment. ``exclude_unset`` keeps the key-order and whitespace
+    property above while making additive schema change a non-event.
+
+    Any change to this function is a new ``service.REQUEST_DIGEST_VERSION``,
+    because stored digests are not recomputable: the payloads that produced them
+    were never kept.
+
+    It lives here, beside the model it hashes, rather than in either adapter.
+    Both the HTTP routes and the MCP tools must produce byte-identical digests
+    for the same request -- a second copy in the second adapter is a silent
+    idempotency bug waiting for the two to drift. It cannot live in ``service``
+    next to ``REQUEST_DIGEST_VERSION``, its other half, because services take
+    domain records and never Pydantic API models; that layer separation is the
+    one this package guards most closely.
+    """
+
+    canonical = json.dumps(
+        body.model_dump(mode="json", exclude_unset=True),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(canonical.encode("utf-8")).digest()

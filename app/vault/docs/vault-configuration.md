@@ -281,9 +281,18 @@ with it and remove it from HSS's manifest. Existing leaderboard code must not
 import it.
 
 The embedding adapter adds no package: it uses `httpx`, which HSS already
-depends on for Steam ticket validation, so `httpx` stays in both manifests. An
-`mcp` dependency is not present — the read-only transport is HTTP only, and MCP
-remains unapproved.
+depends on for Steam ticket validation, so `httpx` stays in both manifests.
+
+The `mcp` package is required only by `app/vault/mcp.py` and leaves with the
+package, along with its transitive `mcp-types`, `opentelemetry-api`,
+`truststore`, and `httpx2`/`httpcore2` — the last being a *second* HTTP stack
+that installs alongside `httpx` rather than replacing it. See ADR 0021 and the
+extraction manifest.
+
+`VAULT_MCP_ALLOWED_HOSTS` is optional and unset by default. Naming hosts in it
+(comma-separated) turns on the transport's DNS-rebinding protection, restricted
+to those values. It is off by default because the SDK validates `Host` against
+`127.0.0.1`, which would reject every request to a public deployment with 421.
 
 ## Changing embedding model or dimensions
 
@@ -587,3 +596,44 @@ would tell the caller not to retry something purely transient, and an error
 tracker to report a bug where the truth is that the vault is busy. A rise in
 these is a signal to raise `VAULT_DB_POOL_SIZE`, which means revisiting the
 budget above.
+
+### Observing the pool
+
+`VaultPoolObserver` counts checkouts per worker and the application logs it, so
+the enablement review's "repeat the connection review under vault traffic" is a
+log search rather than a load-testing exercise:
+
+```bash
+heroku logs --app high-score-server --tail | grep "Vault pool"
+```
+
+```text
+Vault pool interval: peak 2/2 concurrent, 0 failures
+Vault pool final: peak 2/2 concurrent, 0 failures
+```
+
+Two fields carry the answer. **`peak` is a running maximum of simultaneous
+checkouts**, not a sample — it is recorded at the moment it happens, because a
+peak cannot be recovered afterwards by polling a gauge. **`failures` counts
+checkouts that waited out `pool_timeout` and were refused**, which is the path
+that becomes a `503`; a non-zero value raises the line to `WARNING`, so
+`grep -i "vault pool.*[1-9] failures"` finds every occurrence without reading
+numbers. Peak at capacity with zero failures means the pool was fully used and
+still sufficient; any failures mean it was not.
+
+`VAULT_POOL_LOG_INTERVAL_SECONDS` sets the cadence, default 300. Because the
+maxima are cumulative, the interval decides how much trend you see rather than
+whether the peak is captured — a peak at any point appears in every later line.
+Set `0` to log only at shutdown.
+
+**Two limitations, both structural.** The counters are **per worker**: each
+process sees only its own checkouts, which matches how the budget is expressed
+(pool size × workers) but means the database-wide total — including the release
+dyno and any operator session — is invisible here. Use `pg_stat_activity` for
+that. And the closing line depends on a **graceful** shutdown; Heroku's `SIGTERM`
+produces one, but a dyno killed after the grace period expires loses it, which
+is the reason to keep the interval lines rather than relying on shutdown alone.
+
+```bash
+heroku pg:psql --app high-score-server -c "SELECT count(*) AS total, count(*) FILTER (WHERE state='active') AS active FROM pg_stat_activity WHERE datname = current_database();"
+```

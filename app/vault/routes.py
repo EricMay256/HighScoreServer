@@ -13,9 +13,7 @@ move — and the integration spec is explicit that player JWTs and the global
 leaderboard ``API_KEY`` are not vault credentials.
 """
 
-import json
 import logging
-from hashlib import sha256
 from uuid import uuid4
 
 from fastapi import (
@@ -40,16 +38,24 @@ from .api_models import (
     VaultSearchHit,
     VaultSearchResponse,
     VaultSimilarNote,
+    canonical_request_digest,
+    document_detail,
 )
-from .auth import VaultCredential, VaultScope, authorize, parse_token
+from .auth import VaultCredential, VaultScope
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
-from .domain import VaultDocument
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError, EmbeddingInputTooLong
-from .rate_limit import enforce_preauth_ip_limit, get_limiter
+from .principal import (
+    VaultAuthError,
+    VaultQuotaExceeded,
+    VaultScopeError,
+    charge_quota,
+    resolve_credential,
+)
+from .rate_limit import enforce_preauth_ip_limit
 from .read_policy import READABLE_STATUSES
-from .repository import VaultAgentCredentialRepository, VaultDocumentRepository
+from .repository import VaultDocumentRepository
 from .service import (
     REQUEST_DIGEST_VERSION,
     ContributionRequest,
@@ -134,75 +140,49 @@ async def _authenticated(
     required_scopes: tuple[str, ...],
     credentials: HTTPAuthorizationCredentials | None,
 ) -> VaultCredential:
-    """Verify a bearer token and its scopes, or raise.
+    """Render ``principal.resolve_credential`` as HTTP.
 
     401 and 403 are distinguished because they mean different things to an
     operator: a bad token is a client that cannot talk to us, a missing scope
     is a client we deliberately did not grant something. Neither response says
     which check failed.
+
+    The verification itself lives in ``principal`` so the MCP adapter can reach
+    it without FastAPI's dependency system; this function is the HTTP rendering
+    of the errors it raises and nothing more.
     """
 
-    unauthorized = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid vault credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-    parsed = parse_token(credentials.credentials) if credentials else None
-    if parsed is None:
-        raise unauthorized
-
-    repository = VaultAgentCredentialRepository()
-    transactions = VaultTransactionService(get_vault_engine())
-    async with transactions.transaction() as connection:
-        credential = await repository.get(connection, parsed.credential_id)
-        failure = authorize(credential, parsed.secret, required_scopes)
-        if failure is None and credential is not None:
-            await repository.touch(connection, credential.id)
-
-    if failure == "scope" and credential is not None:
-        # Never log the token; the credential ID is the non-secret half and is
-        # what an operator needs to find the row.
-        logger.warning(
-            "Vault credential lacks a required scope",
-            extra={
-                "credential_id": credential.id,
-                "principal_id": credential.principal_id,
-                "required_scopes": list(required_scopes),
-            },
+    try:
+        return await resolve_credential(
+            credentials.credentials if credentials else None,
+            required_scopes,
         )
+    except VaultScopeError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Credential lacks the required scope",
-        )
-    if failure is not None:
-        raise unauthorized
-    if credential is None:  # unreachable; authorize() returns "invalid" first
-        raise unauthorized
-    return credential
+        ) from exc
+    except VaultAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid vault credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
 
 
 async def _enforce_quota(credential: VaultCredential, operation: str) -> None:
     """Charge one request against the principal's quota for this operation."""
 
-    retry_after = await get_limiter().check(credential.principal_id, operation)
-    if retry_after is None:
-        return
-    logger.warning(
-        "Vault rate limit exceeded",
-        extra={
-            "principal_id": credential.principal_id,
-            "operation": operation,
-            "retry_after": retry_after,
-        },
-    )
-    raise HTTPException(
-        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        detail="Rate limit exceeded",
-        # Integer seconds: Retry-After has no fractional form, and rounding
-        # down would invite a retry that is refused again.
-        headers={"Retry-After": str(int(retry_after + 0.999))},
-    )
+    try:
+        await charge_quota(credential, operation)
+    except VaultQuotaExceeded as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded",
+            # Integer seconds: Retry-After has no fractional form, and rounding
+            # down would invite a retry that is refused again.
+            headers={"Retry-After": str(int(exc.retry_after + 0.999))},
+        ) from exc
 
 
 async def require_read_scope(
@@ -253,28 +233,6 @@ def _search_service() -> VaultSearchService:
     )
 
 
-def _to_detail(document: VaultDocument) -> VaultDocumentDetail:
-    return VaultDocumentDetail(
-        note_id=document.id,
-        kind=document.kind,
-        doc_type=document.doc_type,
-        vault_path=document.vault_path,
-        status=document.status,
-        doc_status=document.doc_status,
-        title=document.title,
-        summary=document.summary,
-        body=document.body,
-        tags=list(document.tags),
-        aliases=list(document.aliases),
-        facets={name: list(values) for name, values in document.facets.items()},
-        related_ids=list(document.related_ids),
-        source_ids=list(document.source_ids),
-        source_url=document.source_url,
-        created_at=document.created_at,
-        updated_at=document.updated_at,
-    )
-
-
 @router.get(
     "/search",
     response_model=VaultSearchResponse,
@@ -306,7 +264,7 @@ async def search_vault(
         vector_status=outcome.vector_status,
         hits=[
             VaultSearchHit(
-                **_to_detail(result.document).model_dump(),
+                **document_detail(result.document).model_dump(),
                 score=result.score,
                 lexical_rank=result.lexical_rank,
                 vector_rank=result.vector_rank,
@@ -341,7 +299,7 @@ async def get_vault_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Note not found",
         )
-    return _to_detail(document)
+    return document_detail(document)
 
 
 async def write_quota(
@@ -349,34 +307,6 @@ async def write_quota(
 ) -> VaultCredential:
     await _enforce_quota(credential, "contribute")
     return credential
-
-
-def _canonical_request_digest(body: VaultContributionRequest) -> bytes:
-    """Hash the request so a reused idempotency key can be checked against it.
-
-    Hashes the validated model rather than the raw bytes: two JSON documents
-    differing only in key order or whitespace are the same request, and
-    treating them as a conflict would refuse a legitimate retry.
-
-    Only the fields the caller actually supplied are covered. Serializing unset
-    fields at their defaults made the digest a function of the *server's* schema
-    as well as of the request, so adding an optional field silently changed the
-    digest of every request that had ever been made -- see migration 0006 and
-    ADR 0016's amendment. ``exclude_unset`` keeps the key-order and whitespace
-    property above while making additive schema change a non-event.
-
-    Any change to this function is a new REQUEST_DIGEST_VERSION, because stored
-    digests are not recomputable: the payloads that produced them were never
-    kept.
-    """
-
-    canonical = json.dumps(
-        body.model_dump(mode="json", exclude_unset=True),
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return sha256(canonical.encode("utf-8")).digest()
 
 
 @router.post(
@@ -410,7 +340,7 @@ async def contribute(
         contributed_by=f"agent:{credential.principal_id}",
         principal_id=credential.principal_id,
         idempotency_key=body.idempotency_key,
-        request_sha256=_canonical_request_digest(body),
+        request_sha256=canonical_request_digest(body),
         digest_version=REQUEST_DIGEST_VERSION,
         request_id=request.headers.get("X-Request-Id") or uuid4().hex,
         tags=tuple(body.tags),

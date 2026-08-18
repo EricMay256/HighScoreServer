@@ -161,6 +161,7 @@ class VaultReviewCase:
 class PoolSnapshot:
     pool_size: int
     checked_out: int
+    maximum_checked_out: int
     checkout_count: int
     checkin_count: int
     checkout_failures: int

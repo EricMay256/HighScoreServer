@@ -1,8 +1,10 @@
 """Async SQLAlchemy engine lifecycle for vault persistence."""
 
+import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from threading import Lock
 from time import perf_counter
 
@@ -40,6 +42,7 @@ class VaultPoolObserver:
     def __init__(self, pool_size: int) -> None:
         self._pool_size = pool_size
         self._checked_out = 0
+        self._maximum_checked_out = 0
         self._checkout_count = 0
         self._checkin_count = 0
         self._checkout_failures = 0
@@ -52,6 +55,17 @@ class VaultPoolObserver:
         with self._lock:
             self._checked_out += 1
             self._checkout_count += 1
+            # The high-water mark is taken here, inside the lock, because it
+            # cannot be recovered afterwards. ``checked_out`` is an
+            # instantaneous gauge: sampling it reports whatever the pool held at
+            # the moment somebody looked, and a peak that lasted 40ms under load
+            # is invisible to any polling interval. A running maximum is
+            # sampling-immune -- read it whenever you like and it still answers
+            # "what is the most this worker ever held at once", which is the
+            # question the connection budget is actually about.
+            self._maximum_checked_out = max(
+                self._maximum_checked_out, self._checked_out
+            )
 
     def checked_in(self) -> None:
         with self._lock:
@@ -77,6 +91,7 @@ class VaultPoolObserver:
             return PoolSnapshot(
                 pool_size=self._pool_size,
                 checked_out=self._checked_out,
+                maximum_checked_out=self._maximum_checked_out,
                 checkout_count=self._checkout_count,
                 checkin_count=self._checkin_count,
                 checkout_failures=self._checkout_failures,
@@ -188,6 +203,99 @@ def get_vault_pool_snapshot() -> PoolSnapshot:
     if _observer is None:
         raise RuntimeError("Vault database engine is not initialized")
     return _observer.snapshot()
+
+
+# Default cadence for the periodic pool line. The maxima it reports are
+# cumulative, so the interval decides how much *trend* you get, not whether the
+# peak is captured -- a peak that happened at any point still appears in every
+# later line and in the final one. Five minutes is therefore a readability
+# choice rather than a fidelity one. Set 0 to log only at shutdown.
+_DEFAULT_POOL_LOG_INTERVAL_SECONDS = 300.0
+
+
+def log_vault_pool_snapshot(reason: str) -> None:
+    """Emit one pool line, at WARNING when the pool has actually refused work.
+
+    ``checkout_failures`` is the number that decides whether the pool is big
+    enough: it counts requests that waited out ``pool_timeout`` and were
+    refused, which is the path the saturation handler turns into a 503. A
+    deployment with zero of those has headroom regardless of how busy it looked;
+    one with any has already failed a caller. So the level is chosen by that
+    field rather than fixed, and a log search for the warning finds every
+    occurrence without reading the numbers.
+
+    Per worker, necessarily -- the observer counts one process's checkouts and
+    knows nothing of its siblings. The connection budget is expressed the same
+    way (per-worker pool size times worker count), so these line up; what they
+    cannot see is the database-wide total, which includes the release dyno and
+    any operator session. Pair with pg_stat_activity for that.
+    """
+
+    if _observer is None:
+        return
+    snapshot = _observer.snapshot()
+    level = logging.WARNING if snapshot.checkout_failures else logging.INFO
+    logger.log(
+        level,
+        "Vault pool %s: peak %d/%d concurrent, %d failures",
+        reason,
+        snapshot.maximum_checked_out,
+        snapshot.pool_size,
+        snapshot.checkout_failures,
+        extra={
+            "vault_pool_reason": reason,
+            "vault_pool_size": snapshot.pool_size,
+            "vault_pool_checked_out": snapshot.checked_out,
+            "vault_pool_maximum_checked_out": snapshot.maximum_checked_out,
+            "vault_pool_checkout_count": snapshot.checkout_count,
+            "vault_pool_checkout_failures": snapshot.checkout_failures,
+            "vault_pool_maximum_wait_seconds": snapshot.maximum_checkout_seconds,
+        },
+    )
+
+
+@asynccontextmanager
+async def report_vault_pool(
+    interval_seconds: float | None = None,
+) -> AsyncIterator[None]:
+    """Log the pool periodically, and once more on the way out.
+
+    The closing line is the one that matters and is why this is a context
+    manager rather than a bare task: it runs on shutdown, after the worker has
+    served whatever it was going to serve, so it carries the final high-water
+    mark for that process. A deploy or a dyno restart therefore leaves the
+    complete answer in the log even if nobody was watching.
+
+    Failures here must never take the application down -- this is
+    instrumentation, and a broken log line is not worth a failed boot.
+    """
+
+    if interval_seconds is None:
+        interval_seconds = float(
+            os.environ.get(
+                "VAULT_POOL_LOG_INTERVAL_SECONDS",
+                _DEFAULT_POOL_LOG_INTERVAL_SECONDS,
+            )
+        )
+
+    async def report_periodically() -> None:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            log_vault_pool_snapshot("interval")
+
+    task = (
+        asyncio.create_task(report_periodically()) if interval_seconds > 0 else None
+    )
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            # Suppressed rather than awaited bare: cancellation is the expected
+            # end of this task, not an error to surface during shutdown.
+            with suppress(asyncio.CancelledError):
+                await task
+        log_vault_pool_snapshot("final")
 
 
 @asynccontextmanager

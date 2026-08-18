@@ -131,9 +131,11 @@ tests/
 alembic-vault.ini            dedicated vault migration lineage
 ```
 
-The tree above is an inventory, not a target diagram. `mcp.py` and `export.py`
-do not exist. An MCP adapter and consistent export/projector snapshot remain
-planned surfaces; add them to this inventory only when implementations land.
+The tree above is an inventory, not a target diagram. `export.py` does not
+exist; a consistent export/projector snapshot remains a planned surface, to be
+added to this inventory only when an implementation lands. `mcp.py` landed on
+2026-08-16 — the MCP adapter over the same services, mounted at
+`/api/v1/vault/mcp`. See ADR 0021.
 
 Documentation lives under the package rather than in the host repository's `docs/`, so
 extraction moves it automatically. `vault_migrations/` and `alembic-vault.ini` sit at the

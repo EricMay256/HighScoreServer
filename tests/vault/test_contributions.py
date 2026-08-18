@@ -22,6 +22,7 @@ from sqlalchemy import text as text_sql
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.vault.api_models import VaultContributionRequest
+from app.vault.api_models import canonical_request_digest as _canonical_request_digest
 from app.vault.auth import VaultScope  # noqa: E402  (grouped with vault imports)
 from app.vault.constants import EMBEDDING_DIMENSIONS
 from app.vault.domain import (
@@ -42,7 +43,6 @@ from app.vault.repository import (
     VaultDocumentRepository,
     VaultReviewCaseRepository,
 )
-from app.vault.routes import _canonical_request_digest
 from app.vault.service import (
     _CONTRIBUTION_LOCK_KEY,
     REQUEST_DIGEST_VERSION,
