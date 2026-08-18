@@ -281,9 +281,18 @@ with it and remove it from HSS's manifest. Existing leaderboard code must not
 import it.
 
 The embedding adapter adds no package: it uses `httpx`, which HSS already
-depends on for Steam ticket validation, so `httpx` stays in both manifests. An
-`mcp` dependency is not present — the read-only transport is HTTP only, and MCP
-remains unapproved.
+depends on for Steam ticket validation, so `httpx` stays in both manifests.
+
+The `mcp` package is required only by `app/vault/mcp.py` and leaves with the
+package, along with its transitive `mcp-types`, `opentelemetry-api`,
+`truststore`, and `httpx2`/`httpcore2` — the last being a *second* HTTP stack
+that installs alongside `httpx` rather than replacing it. See ADR 0021 and the
+extraction manifest.
+
+`VAULT_MCP_ALLOWED_HOSTS` is optional and unset by default. Naming hosts in it
+(comma-separated) turns on the transport's DNS-rebinding protection, restricted
+to those values. It is off by default because the SDK validates `Host` against
+`127.0.0.1`, which would reject every request to a public deployment with 421.
 
 ## Changing embedding model or dimensions
 

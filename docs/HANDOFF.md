@@ -455,8 +455,15 @@ Index shapes are in place: GIN `text[]` for `tags` (`&&`, `@>`), GIN `jsonb_path
    The paths were rewritten to their WSL locations on 2026-08-15, which removed the Windows
    username but not the disclosure. Untracking them is a separate call.
 
-**Blocked / out of scope until re-approved:** MCP (`mcp` is not an approved dependency);
-`VAULT_ENABLED=true` in production; partial HNSW index per profile; dimension-change DDL.
+**Blocked / out of scope until re-approved:** partial HNSW index per profile;
+dimension-change DDL.
+
+Two entries left this list on 2026-08-16. **MCP** was re-approved and landed; `mcp` is now an
+approved, vault-owned dependency (see vault ADR 0021). **`VAULT_ENABLED=true` in production**
+was already true and the line was simply stale — the config var is set on `high-score-server`,
+and agents have been reading and writing the live vault over HTTP. The MCP endpoint is mounted
+behind the same gate, so it is live in production wherever the vault is, with no separate
+process and no Procfile entry.
 
 **Deferred decision #1 (whole-vault read permissions) still blocks any human-layer import.**
 `folders.yml` governs `ai_write` and has no `ai_read`; one `vault:read` scope reads everything

@@ -6,8 +6,8 @@ the package; the host repository's `AGENTS.md` governs everything outside these 
 ## What this is
 
 The knowledge-platform bounded context: its own API models, domain records, Core tables,
-repositories, services, auth, embeddings, and HTTP routes. An MCP adapter is planned but does
-not exist yet. The package holds runtime code and schema definitions only — never corpus
+repositories, services, auth, embeddings, and two transports — HTTP routes and an MCP
+adapter. The package holds runtime code and schema definitions only — never corpus
 content, credentials, exports, or vectors.
 
 It is currently hosted inside HighScoreServer, which is a staging location rather than
@@ -213,6 +213,38 @@ be edited when it does.
   granting it, and "retire" reads as reversible when ADR 0019 makes it not.
 - *What* a credential may read is ADR 0014's path policy, a property of the
   folder rather than of the credential.
+
+## The MCP adapter
+
+- **`routes.py` and `mcp.py` are two thin adapters over one service layer**, and neither may
+  import the other. Anything both need — `canonical_request_digest`, `document_detail` —
+  lives in `api_models.py`. A second copy in the second adapter is a silent drift bug: the
+  digest decides idempotency, so two of them eventually disagree about what "the same
+  request" is.
+- **`list_tools` is filtered by the credential's scopes, and that is a security boundary.**
+  The corpus is untrusted input written by agents and read by agents; a note carrying
+  injected instructions is read *inside* an already-authenticated session, where no scope
+  check intercepts it. What stops it is the destructive tool being absent from the surface
+  the injected text can name. Do not advertise a tool the caller cannot use, and do not
+  remove the per-tool scope check either — listing decides what an agent can see, the tool
+  decides what it can do, and neither carries the boundary alone. See ADR 0021.
+- **The mount inherits nothing from the host.** Not the router's pre-auth guard, not the
+  exception handlers. `VaultMCPAuthMiddleware` carries the guard itself; removing it makes
+  the MCP endpoint the only unbounded door on the vault, and nothing fails until someone
+  hammers it.
+- **The mounted app's lifespan does not run**, so `app.main` enters `vault_mcp_lifespan`
+  explicitly. The session manager also refuses a second `run()`, which is why the app is
+  built per `create_app()` and held on app state rather than cached at module level.
+- **DNS-rebinding protection is off unless `VAULT_MCP_ALLOWED_HOSTS` is set.** The SDK
+  default validates `Host` against `127.0.0.1` and would 421 every request to a public
+  deployment. Do not "restore" the default.
+- **The contribution tool derives its idempotency key from content.** A model asked for one
+  invents a fresh value per attempt, which turns a retry into a duplicate note. It must hash
+  the same canonical form `canonical_request_digest` does.
+- The SDK's `token_verifier` is deliberately unused: it requires `AuthSettings.issuer_url`,
+  which would publish OAuth discovery metadata for an authorization server that does not
+  exist. That is the arm to replace if OAuth lands — `principal.resolve_credential` already
+  has the `TokenVerifier` shape.
 
 ## The write path
 
