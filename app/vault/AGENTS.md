@@ -308,6 +308,17 @@ be edited when it does.
   `X-Forwarded-For` value: Heroku appends the address it observes after caller-controlled
   prefixes. If another proxy is placed in front of Heroku, revisit this assumption rather than
   guessing at a different list position.
+- **A principal may be granted a wider quota, in code and never in configuration.**
+  `PRINCIPAL_LIMITS` widens named operations for a named principal; `limit_for` is
+  the single lookup and still raises on an operation `LIMITS` does not register, so
+  an override cannot invent one. Today it grants `importer` bulk headroom on
+  `contribute` and `update` only -- import writes, it does not search -- because the
+  shared limits describe an interactive agent and at 30/min a 500-note corpus takes
+  over four hours. Keying on the name is safe only because `docs/HANDOFF.md` already
+  requires the importer to run as that principal; the write ledger is keyed
+  `(principal_id, idempotency_key)`, so a different name bypasses the duplicate
+  guard regardless. Do not move this to an environment variable: a quota a
+  deployment can widen is a way to unlimit production by accident.
 - **Unknown quota operations fail closed.** Every route operation must be registered in
   `LIMITS`; a typo or new operation without a deliberate quota is a programming error, not an
   unlimited bucket.

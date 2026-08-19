@@ -17,11 +17,13 @@ from starlette.responses import JSONResponse
 
 from app.vault.rate_limit import (
     LIMITS,
+    PRINCIPAL_LIMITS,
     Limit,
     TokenBucketLimiter,
     build_preauth_dependency,
     client_ip,
     enforce_preauth_ip_limit,
+    limit_for,
 )
 
 
@@ -312,3 +314,52 @@ def test_the_client_key_tolerates_a_missing_peer() -> None:
     request = Request({"type": "http", "headers": [], "client": None})
 
     assert client_ip(request) == "unknown"
+
+
+def test_importer_gets_a_wider_contribution_quota() -> None:
+    """Bulk import is a different workload from an interactive agent.
+
+    At the shared 30/min a 500-note corpus takes over four hours, which is
+    friction rather than a safety property. The grant is to one named principal
+    on the write operations only.
+    """
+
+    assert limit_for("importer", "contribute").per_minute > LIMITS["contribute"].per_minute
+    assert limit_for("importer", "update").per_minute > LIMITS["update"].per_minute
+
+
+def test_the_override_does_not_touch_reads() -> None:
+    """Import writes; it does not search."""
+
+    for operation in ("search", "get_note"):
+        assert limit_for("importer", operation) is LIMITS[operation]
+
+
+def test_every_other_principal_keeps_the_shared_quota() -> None:
+    for operation in LIMITS:
+        assert limit_for("some-other-agent", operation) is LIMITS[operation]
+
+
+def test_an_override_cannot_invent_an_operation() -> None:
+    """The base table stays the single statement of which operations exist.
+
+    A principal override widens a known quota; it must not create a bucket for
+    an operation nothing registered, or the fail-closed property that catches a
+    typo would depend on which principal made the call.
+    """
+
+    with pytest.raises(ValueError, match="Unknown vault quota operation"):
+        limit_for("importer", "not-an-operation")
+
+
+def test_every_overridden_operation_is_a_real_one() -> None:
+    """A typo in the override table would otherwise be silent.
+
+    ``limit_for`` falls back to the base limit for an unknown key, so an
+    override naming ``contrbute`` would simply never apply and the importer
+    would quietly stay throttled.
+    """
+
+    for principal, overrides in PRINCIPAL_LIMITS.items():
+        for operation in overrides:
+            assert operation in LIMITS, f"{principal} overrides unknown {operation!r}"
