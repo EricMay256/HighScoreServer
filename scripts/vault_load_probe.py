@@ -140,11 +140,26 @@ class Results:
 
 
 def percentile(values: list[float], fraction: float) -> float:
+    """Nearest-rank percentile.
+
+    Byte-identical to the helpers in measure_embedding_latency.py and
+    measure_dedup_similarity.py, deliberately. An earlier version here indexed
+    with int(len(values) * fraction), which reports a different number for the
+    same input -- p50 of [10, 20, 90, 100] came out as 90 rather than 20 -- so
+    two scripts in one repository disagreed about what p50 means while sharing
+    the name and the signature.
+
+    Not interpolated, for the reason those two record: at these sample sizes an
+    interpolated percentile is a number invented between two observations
+    rather than an observed one, and the decision it feeds deserves a real
+    measurement.
+    """
+
     if not values:
-        return 0.0
+        raise ValueError("percentile of an empty sample")
     ordered = sorted(values)
-    index = min(len(ordered) - 1, int(len(ordered) * fraction))
-    return ordered[index]
+    rank = max(1, min(len(ordered), int(-(-fraction * len(ordered) // 1))))
+    return ordered[rank - 1]
 
 
 async def discover_note_ids(
@@ -483,6 +498,11 @@ def main() -> int:
         parser.error("--concurrency must be at least 1")
     if arguments.duration <= 0:
         parser.error("--duration must be positive")
+    if arguments.rate < 0:
+        # rate <= 0 disables pacing, so a typed minus sign turns a capped run
+        # into an unbounded one against a live deployment. 0 stays meaningful
+        # and explicit; a negative is only ever a mistake.
+        parser.error("--rate must be zero (unbounded) or positive")
 
     # psycopg3's async connection drives sockets with loop.add_reader/add_writer,
     # which Windows' default ProactorEventLoop does not implement. The same guard
