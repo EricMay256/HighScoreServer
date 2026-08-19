@@ -59,6 +59,7 @@ from dataclasses import replace
 from app.env import load_environment
 from app.vault.embedding_runtime import create_embedding_provider
 from app.vault.embeddings import EmbeddingError, EmbeddingInputKind
+from app.vault.measurement import percentile
 from app.vault.settings import EmbeddingSettings
 
 
@@ -90,21 +91,6 @@ BATCH_DOCUMENT = (
     "at runtime, and a deployment without one serves lexical-only results and "
     "reports that fact rather than failing the request. "
 ) * 4
-
-
-def percentile(values: list[float], fraction: float) -> float:
-    """Nearest-rank percentile.
-
-    Deliberately not interpolated: at the sample sizes this script runs, an
-    interpolated p99 is a number invented between two observations rather than
-    an observed one, and the decision it feeds deserves a real measurement.
-    """
-
-    if not values:
-        raise ValueError("percentile of an empty sample")
-    ordered = sorted(values)
-    rank = max(1, min(len(ordered), int(-(-fraction * len(ordered) // 1))))
-    return ordered[rank - 1]
 
 
 def report(label: str, timings: list[float], failures: int) -> None:

@@ -82,6 +82,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from app.vault.measurement import percentile
+
 
 # Well under the 600/min pre-auth IP guard, leaving room for the sampler and for
 # whatever ordinary traffic the deployment is already serving.
@@ -137,29 +139,6 @@ class Results:
     outcomes: list[Outcome] = field(default_factory=list)
     samples: list[tuple[int, int]] = field(default_factory=list)
     created_note_id: str | None = None
-
-
-def percentile(values: list[float], fraction: float) -> float:
-    """Nearest-rank percentile.
-
-    Byte-identical to the helpers in measure_embedding_latency.py and
-    measure_dedup_similarity.py, deliberately. An earlier version here indexed
-    with int(len(values) * fraction), which reports a different number for the
-    same input -- p50 of [10, 20, 90, 100] came out as 90 rather than 20 -- so
-    two scripts in one repository disagreed about what p50 means while sharing
-    the name and the signature.
-
-    Not interpolated, for the reason those two record: at these sample sizes an
-    interpolated percentile is a number invented between two observations
-    rather than an observed one, and the decision it feeds deserves a real
-    measurement.
-    """
-
-    if not values:
-        raise ValueError("percentile of an empty sample")
-    ordered = sorted(values)
-    rank = max(1, min(len(ordered), int(-(-fraction * len(ordered) // 1))))
-    return ordered[rank - 1]
 
 
 async def discover_note_ids(

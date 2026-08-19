@@ -72,6 +72,7 @@ from app.vault.domain import DocumentStatus
 from app.vault.embedding_runtime import create_embedding_provider
 from app.vault.embedding_text import assemble_embedding_text
 from app.vault.embeddings import EmbeddingError, EmbeddingInputKind, EmbeddingProvider
+from app.vault.measurement import percentile
 from app.vault.read_policy import readable_path_predicate
 from app.vault.settings import EmbeddingSettings, VaultSettings
 from app.vault.tables import vault_document_embeddings, vault_documents
@@ -98,16 +99,6 @@ def cosine(left: list[float], right: list[float]) -> float:
     if left_norm == 0.0 or right_norm == 0.0:
         return 0.0
     return dot / (left_norm * right_norm)
-
-
-def percentile(values: list[float], fraction: float) -> float:
-    """Nearest-rank percentile — an observed value, never an interpolated one."""
-
-    if not values:
-        raise ValueError("percentile of an empty sample")
-    ordered = sorted(values)
-    rank = max(1, min(len(ordered), int(-(-fraction * len(ordered) // 1))))
-    return ordered[rank - 1]
 
 
 async def load_corpus(
