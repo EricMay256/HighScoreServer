@@ -138,3 +138,43 @@ in the **other** repository. Do it before anything relies on either side.
   changes, 0022 is superseded rather than amended, because single-writer is the whole of it.
 - The `contributor` credential (`ff61acae905044a8`) is still active and its full token was
   pasted into a chat transcript on 2026-08-17.
+
+---
+
+## Session-opening prompt
+
+Paste this to start the session this handoff was written for. It lives here so it cannot
+drift from the document it refers to.
+
+```text
+I'm continuing work on the HighScoreServer knowledge vault. Start by reading
+docs/HANDOFF-EXPORT-AND-COMPILATION.md — it is the execution plan and it names
+everything else you need.
+
+The goal: agents reach the corpus only through the vault service, and a librarian
+compiles it into a markdown Obsidian vault I can browse and analyse by hand. Today
+the service is lossier than writing markdown directly — doc_type and doc_status are
+hardcoded, and there is no exporter — which is the gap this work closes.
+
+Read in this order before writing code:
+  1. docs/HANDOFF-EXPORT-AND-COMPILATION.md
+  2. app/vault/docs/adr/0022-two-trees-one-writer-each.md — the governing decision
+  3. app/vault/AGENTS.md — in full, not skimmed
+  4. The governance documents in my private knowledge-platform repository that the
+     handoff names: AI Contribution Policy, Promotion Policy, types.yml, folders.yml
+
+Those governance documents outrank both the ADR and the handoff. An earlier draft of
+this plan contradicted the Promotion Policy, and only reading the policy itself caught
+it — do not work from the handoff's summary of them.
+
+Begin with Phase 1, the exporter. Check in with me when it is working and before
+starting Phase 2: Phase 2 retires the Stage A write path and reaches into the other
+repository, and I want to look at real exported output before anything depends on it.
+
+Verify rather than assume — this codebase has repeatedly turned out to differ from what
+a reasonable reading would predict, and running the thing has caught what reading it
+did not. Tell me what you actually checked and what you could not.
+
+Flag anything needing an Alembic revision or a new dependency instead of just doing it,
+and propose an ADR for decisions that are material rather than local.
+```
