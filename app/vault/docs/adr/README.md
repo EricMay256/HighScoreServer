@@ -30,3 +30,4 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0019 | [Retiring a document deletes it, and the ledger outlives it](0019-retiring-a-document-deletes-it.md) | Accepted |
 | 0020 | [`vault:write` narrows to contribute; update and delete are their own scopes](0020-write-scopes-split-by-verb.md) | Accepted |
 | 0021 | [MCP is a second adapter, and a credential's scopes shape its tool surface](0021-mcp-is-a-second-adapter-with-scope-shaped-tools.md) | Accepted |
+| 0022 | [Two trees, one writer each: humans author markdown, agents author through the service](0022-two-trees-one-writer-each.md) | Accepted |
