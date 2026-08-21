@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import delete, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -209,6 +209,36 @@ class VaultDocumentRepository:
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
 
+    async def set_status(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        status: DocumentStatus,
+        doc_status: str | None,
+    ) -> VaultDocument | None:
+        """Move a document's visibility state and its Status Map value together.
+
+        The two are different things (ADR 0011) and neither derives from the
+        other, which is precisely why they move in one statement: a review
+        decision changes both, and leaving one behind would publish a note
+        still labelled ``Flagged`` or label an unpublished one ``Active``.
+
+        Content is untouched -- this is not a small ``replace_content``, and
+        ``updated_at`` deliberately does not move: adjudicating a note is not
+        editing it, and the export would otherwise churn every reviewed file.
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .values(status=status.value, doc_status=doc_status)
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
     async def get_by_id(
         self,
         connection: AsyncConnection,
@@ -333,6 +363,14 @@ class VaultDocumentRepository:
             .where(vault_write_requests.c.document_id == document_id)
             .values(document_id=None)
         )
+        # Review cases follow the same rule for the same reason: the judgement
+        # is durable and the thing judged need not be. Nullable since migration
+        # 0011; before it, a flagged note could never be deleted at all.
+        await connection.execute(
+            update(vault_review_cases)
+            .where(vault_review_cases.c.candidate_document_id == document_id)
+            .values(candidate_document_id=None)
+        )
         result = await connection.execute(
             delete(vault_documents).where(vault_documents.c.id == document_id)
         )
@@ -345,22 +383,32 @@ class VaultDocumentRepository:
     ) -> int:
         """Count review references that prevent retiring a document.
 
-        Candidate references block in every state because the database foreign
-        key is durable and non-cascading. JSON evidence has no foreign key and
-        blocks only while the review remains unresolved.
+        **Only an unresolved case blocks.** ADR 0019 originally blocked on a
+        candidate reference in every state, because the foreign key was durable
+        and non-cascading and a decided case would have passed the service check
+        only to fail at the constraint. Migration 0011 made the pointer nullable
+        and ``delete`` clears it, so that mechanical reason is gone -- and with
+        it the consequence, that a note flagged once could never be deleted.
+
+        What remains is a judgement rather than a constraint: a review still in
+        progress needs its subject, so retiring it out from under the reviewer
+        is refused. A settled one does not, and its record survives the deletion
+        with a null candidate.
+
+        JSON evidence is unchanged and blocks on the same rule it always did --
+        it names what a pending judgement was reached against, and has no
+        foreign key to enforce it.
         """
 
         result = await connection.execute(
             select(func.count())
             .select_from(vault_review_cases)
             .where(
+                vault_review_cases.c.state == ReviewState.PENDING.value,
                 or_(
                     vault_review_cases.c.candidate_document_id == document_id,
-                    and_(
-                        vault_review_cases.c.state == ReviewState.PENDING.value,
-                        vault_review_cases.c.similar_documents.contains(
-                            [{"note_id": document_id}]
-                        ),
+                    vault_review_cases.c.similar_documents.contains(
+                        [{"note_id": document_id}]
                     ),
                 ),
             )
@@ -450,6 +498,83 @@ class VaultReviewCaseRepository:
         )
         result = await connection.execute(statement)
         return _review_case_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        review_case_id: UUID,
+    ) -> VaultReviewCase | None:
+        result = await connection.execute(
+            select(*vault_review_cases.c).where(
+                vault_review_cases.c.id == review_case_id
+            )
+        )
+        row = result.mappings().one_or_none()
+        return _review_case_from_row(row) if row is not None else None
+
+    async def list_pending(
+        self,
+        connection: AsyncConnection,
+        limit: int = 50,
+    ) -> tuple[VaultReviewCase, ...]:
+        """Unresolved cases, oldest first.
+
+        Oldest first because a review queue is a backlog rather than a feed:
+        the case most at risk of being forgotten is the one that has waited
+        longest. ``idx_vault_review_cases_state_created`` serves exactly this
+        ordering and predicate -- it was created with the schema, before
+        anything queried it.
+        """
+
+        result = await connection.execute(
+            select(*vault_review_cases.c)
+            .where(vault_review_cases.c.state == ReviewState.PENDING.value)
+            .order_by(vault_review_cases.c.created_at, vault_review_cases.c.id)
+            .limit(limit)
+        )
+        return tuple(_review_case_from_row(row) for row in result.mappings())
+
+    async def decide(
+        self,
+        connection: AsyncConnection,
+        review_case_id: UUID,
+        *,
+        state: ReviewState,
+        decided_by: str,
+        decision_note: str | None = None,
+    ) -> VaultReviewCase | None:
+        """Settle a pending case. Returns None when no *pending* row matched.
+
+        The state filter is the concurrency guard, not a convenience: two
+        reviewers deciding the same case at once must not both believe they
+        won, because each decision also moves the document. The loser gets None
+        and the caller reports a conflict.
+
+        ``decided_by`` comes from the credential rather than the body, for the
+        reason ``contributed_by`` does -- a reviewer must not be able to sign
+        someone else's name to a judgement.
+        """
+
+        if state is ReviewState.PENDING:
+            raise ValueError("a decision cannot leave a case pending")
+
+        statement = (
+            update(vault_review_cases)
+            .where(
+                vault_review_cases.c.id == review_case_id,
+                vault_review_cases.c.state == ReviewState.PENDING.value,
+            )
+            .values(
+                state=state.value,
+                decided_at=func.now(),
+                decided_by=decided_by,
+                decision_note=decision_note,
+            )
+            .returning(*vault_review_cases.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _review_case_from_row(row) if row is not None else None
 
 
 class VaultAgentCredentialRepository:

@@ -259,6 +259,105 @@ Expected production facts:
 - `vector` is available;
 - the two version tables contain heads from different Alembic lineages.
 
+## Corpus migration: replacing the imported notes
+
+Written from the 2026-08-21 run that carried `origin` and slug paths into production. Follow
+it whenever the corpus has to be re-imported — the shape is the same even when the reason is
+not.
+
+**The one thing that governs everything else: find out what is native first.** Notes
+contributed directly through the live service exist *only* in the database. A re-import
+cannot recreate them, and an unfiltered wipe destroys them. The August run found one, and it
+was a good note. Census before you plan, not after:
+
+```sql
+SELECT contributed_by, count(*) FROM vault.vault_documents GROUP BY 1 ORDER BY 2 DESC;
+```
+
+### Order, and why it is not negotiable
+
+1. **Census** (read-only). Counts by contributor, `vault_path` shapes, review cases,
+   credentials. Nothing is decided until this comes back.
+2. **Back up, *after* the deploy.** A backup taken before the release captures the
+   pre-migration schema, so restoring it leaves the database a revision behind the running
+   code and needs `alembic -c alembic-vault.ini upgrade head` before the app works again.
+   The data is safe either way; the rollback is only one step if the backup is post-deploy.
+   `heroku pg:backups:capture --app <app>`.
+3. **Deploy.** The release phase runs the vault lineage. **This must precede the import**:
+   `VaultContributionRequest` sets `extra="forbid"`, so an import sending a field the
+   deployed model does not know is a 422 on every note.
+4. **Verify the deploy in two places.** The migration (`vault.vault_alembic_version`, plus
+   the columns and constraints it added) *and* the running code — fetch `/openapi.json` and
+   confirm the request model carries the new field. A migration that landed while the dynos
+   still run old code looks fine from the database side.
+5. **Export the corpus as it stands.** A readable snapshot on disk, before anything
+   destructive, including the native notes. Validate it: `python -m vault_governance.cli
+   validate --vault <snapshot-root>` with a copy of `00 Governance/` beside the `Agent/`
+   tree.
+6. **Issue a fresh import principal.** Not the previous one. The ledger is keyed
+   `(principal_id, idempotency_key)` and the import re-sends the same keys, so reusing the
+   old principal makes every note either a silent replay or — once the request body has
+   changed, which is usually the point — a `409` conflict on all of them. A new principal
+   sidesteps both and leaves the old ledger intact for ADR 0019's reasons.
+7. **Dry-run the importer before wiping.** It reports exactly what each note would send and
+   what, if anything, is dropped. Doing this after the wipe means discovering a payload bug
+   with an empty corpus.
+8. **Wipe, filtered to the import principal.** Delete through
+   `VaultDocumentRepository.delete`, never raw SQL: it clears the write-request and
+   review-case pointers so the ledger and any judgements survive with a null reference. Raw
+   `DELETE` either trips the foreign keys or takes the audit trail with it.
+9. **Import.** ~2s per note is the built-in pacing and matches the sustained contribute
+   quota, so a 60-note corpus takes about two minutes. Pass `--map` so the
+   original-id → new-id mapping does not live only in scrollback.
+10. **Verify.** Counts, provenance coverage, path shapes, embeddings, no orphan documents.
+    Export again and re-run the governance validator; a second export immediately after
+    should report every file unchanged, which is what proves the projection is stable.
+11. **Revoke the import credential**, and any other write credential that has outlived its
+    purpose.
+
+### If the import fails partway
+
+**Do not re-wipe.** The importer is idempotent per `(principal, key)`, so re-running it
+resumes and skips what already landed. Wiping again throws away the partial progress and
+starts the clock over.
+
+### Credential tokens are printed once, to stdout
+
+`issue_vault_credential` prints the token and cannot recover it. When an agent or a shared
+session runs the command, that token lands in a transcript — which has already happened once
+to a still-live production credential. Prefer issuing the credential yourself in your own
+shell, or redirect the output to a file you control. Revoke anything that leaks:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
+```
+
+### `heroku run` eats flags meant for your script
+
+`heroku run -a <app> python -m scripts.x --id abc` fails with `Nonexistent flags: -m, --id`:
+Heroku's own parser claims them before the remote command sees them. Quote the whole remote
+command as a single argument:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
+```
+
+### PowerShell has no inline environment prefix
+
+`DATABASE_URL=... python x.py` is a bash-ism. In PowerShell, set the variables as their own
+statements first, use the venv interpreter explicitly, and clear them afterwards so a later
+command in the same session does not quietly address production:
+
+```powershell
+$env:DATABASE_URL = (heroku config:get DATABASE_URL --app <app>)
+$env:VAULT_ENABLED = 'true'; $env:PYTHONPATH = '.'
+.\.venv\Scripts\python.exe <script>.py --apply
+Remove-Item Env:DATABASE_URL, Env:VAULT_ENABLED, Env:PYTHONPATH
+```
+
+Reading the URL from `heroku config:get` beats pasting it: one fewer copy of a live
+credential, and it survives rotation.
+
 ## Later move to a separate database
 
 Provisioning or attaching another database is deliberately outside Phase 1.
@@ -453,7 +552,8 @@ credential into the wrong database is silent.
 | `vault:write` | Contribute a new note — **and nothing else** |
 | `vault:update` | Replace an existing note's content |
 | `vault:delete` | Retire a note, **destroying it** (vault ADR 0019) |
-| `vault:review`, `vault:compile`, `vault:export` | Recognised, granted by no route yet |
+| `vault:review` | List, read, and decide near-duplicate review cases. **The only scope that serves `flagged` content**, so grant it narrowly |
+| `vault:compile`, `vault:export` | Recognised, granted by no route yet |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
 ADR 0020.

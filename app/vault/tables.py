@@ -371,6 +371,11 @@ vault_review_cases = Table(
     "vault_review_cases",
     metadata,
     Column("id", UUID(as_uuid=True), primary_key=True),
+    # Nullable, and not unique. The pointer is cleared when a candidate is
+    # retired, so the judgement outlives what it judged -- the same shape
+    # `vault_write_requests.document_id` uses for the same reason. Not unique
+    # because a decision that turns out wrong needs a second case rather than
+    # an overwrite of the first. See migration 0011 and ADR 0019's amendment.
     Column(
         "candidate_document_id",
         Text,
@@ -378,7 +383,6 @@ vault_review_cases = Table(
             "vault.vault_documents.id",
             name="vault_review_cases_candidate_document_id_fkey",
         ),
-        nullable=False,
     ),
     Column(
         "state",
@@ -402,10 +406,6 @@ vault_review_cases = Table(
     Column("decided_at", DateTime(timezone=True)),
     Column("decided_by", Text),
     Column("decision_note", Text),
-    UniqueConstraint(
-        "candidate_document_id",
-        name="vault_review_cases_candidate_document_id_key",
-    ),
     CheckConstraint(
         "btrim(reason) <> ''",
         name="vault_review_cases_reason_nonempty",

@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import text as text_sql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -16,7 +16,9 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    ReviewState,
     VaultDocument,
+    VaultReviewCase,
     VectorSearchStatus,
 )
 from .embedding_text import assemble_embedding_text, embedding_text_digest
@@ -1053,3 +1055,172 @@ class VaultDocumentRetireService:
             removed = await documents.delete(connection, request.document_id)
             if not removed:
                 raise DocumentNotFound(request.document_id)
+
+
+class ReviewCaseNotFound(Exception):
+    """No review case carries that id."""
+
+
+class ReviewCaseAlreadyDecided(Exception):
+    """The case was settled before this decision reached it."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewDecisionRequest:
+    review_case_id: UUID
+    state: ReviewState
+    principal_id: str
+    request_id: str
+    decision_note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewDecisionOutcome:
+    """What the decision did, in the terms the caller reports."""
+
+    review_case: VaultReviewCase
+    # The candidate's fate: ``published`` for an accepted note now serving from
+    # search, ``deleted`` for a rejected duplicate, ``absent`` when the
+    # candidate was already gone.
+    candidate: str
+
+
+class VaultReviewService:
+    """Adjudicate the near-duplicate cases the write path opened.
+
+    **A candidate is always a brand-new note.** ``insert_pending`` is called
+    from one place -- the contribute path's ``Flag`` branch -- with the note it
+    has just written; the notes it resembles appear only as evidence, and the
+    update path refuses on collision rather than opening a case. Every decision
+    is therefore about content that has never been endorsed, which is what makes
+    the two outcomes what they are:
+
+    - ``ACCEPTED`` -- the flag was a false positive. The note goes ``active``
+      and rejoins search and the dedup corpus.
+    - ``REJECTED`` -- it really is a duplicate. The note is **deleted**, per ADR
+      0019's line between archiving what is overtaken and deleting what is
+      wrong. A duplicate judged redundant at birth has no history worth keeping,
+      and its content is by definition already in the corpus: that is what the
+      case said.
+
+    The case survives either way. On a rejection the candidate pointer goes null
+    (migration 0011) rather than the judgement going with the note.
+
+    Reading a case means serving ``flagged`` content, which is the least-vetted
+    text in the corpus. That is why this is a REST-only surface gated on
+    ``vault:review`` and deliberately absent from the MCP tool list: ADR 0021's
+    defence against injected instructions is the privileged tool not being there
+    to name.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def list_pending(self, limit: int = 50) -> tuple[VaultReviewCase, ...]:
+        async with self._transactions.transaction() as connection:
+            return await VaultReviewCaseRepository().list_pending(connection, limit)
+
+    async def get(
+        self,
+        review_case_id: UUID,
+    ) -> tuple[VaultReviewCase, VaultDocument | None]:
+        """One case and its candidate, which may be gone.
+
+        The document is fetched unfiltered on purpose. ``READABLE_STATUSES``
+        withholds ``flagged`` from the read surface (ADR 0008), and a reviewer
+        needs precisely the content that rule hides -- adjudicating a note you
+        cannot read is not a review. The restriction stays at the public
+        surface; this one is gated on its own scope instead.
+        """
+
+        async with self._transactions.transaction() as connection:
+            case = await VaultReviewCaseRepository().get(connection, review_case_id)
+            if case is None:
+                raise ReviewCaseNotFound(str(review_case_id))
+            candidate = (
+                await VaultDocumentRepository().get_by_id(
+                    connection, case.candidate_document_id
+                )
+                if case.candidate_document_id is not None
+                else None
+            )
+            return case, candidate
+
+    async def decide(self, request: ReviewDecisionRequest) -> ReviewDecisionOutcome:
+        cases = VaultReviewCaseRepository()
+        documents = VaultDocumentRepository()
+
+        async with self._transactions.transaction() as connection:
+            # The same corpus lock contribution and retirement take. A decision
+            # both settles the case and moves the document, and a concurrent
+            # retirement checks for pending cases -- without serializing, a
+            # retire could observe no pending case while this one is mid-flight.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+
+            existing = await cases.get(connection, request.review_case_id)
+            if existing is None:
+                raise ReviewCaseNotFound(str(request.review_case_id))
+
+            decided = await cases.decide(
+                connection,
+                request.review_case_id,
+                state=request.state,
+                # From the credential, never the body: a reviewer must not be
+                # able to sign someone else's name to a judgement.
+                decided_by=f"agent:{request.principal_id}",
+                decision_note=request.decision_note,
+            )
+            if decided is None:
+                # The row exists but was not pending, so another reviewer
+                # settled it first. Reported rather than silently overwritten.
+                raise ReviewCaseAlreadyDecided(str(request.review_case_id))
+
+            candidate_id = existing.candidate_document_id
+            candidate = "absent"
+            if candidate_id is not None:
+                if request.state is ReviewState.ACCEPTED:
+                    published = await documents.set_status(
+                        connection,
+                        candidate_id,
+                        status=DocumentStatus.ACTIVE,
+                        doc_status="Active",
+                    )
+                    candidate = "published" if published is not None else "absent"
+                elif request.state is ReviewState.REJECTED:
+                    # Audit before the delete, in the same transaction: the
+                    # event outlives its subject and must never be observable
+                    # without the deletion, or the reverse. See ADR 0019.
+                    await VaultAuditEventRepository().record(
+                        connection,
+                        operation="vault.review",
+                        outcome="candidate_deleted",
+                        request_id=request.request_id,
+                        principal_id=request.principal_id,
+                        target_type="document",
+                        target_id=candidate_id,
+                    )
+                    removed = await documents.delete(connection, candidate_id)
+                    candidate = "deleted" if removed else "absent"
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.review",
+                outcome=request.state.value,
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="review_case",
+                target_id=str(request.review_case_id),
+            )
+            # Re-read: the UPDATE above has to run first, because its
+            # pending-state filter is the concurrency guard, but deleting a
+            # rejected candidate then clears the case's pointer underneath it.
+            # Returning the row as it was mid-transaction would report a
+            # candidate that no longer exists.
+            settled = await cases.get(connection, request.review_case_id)
+            return ReviewDecisionOutcome(
+                review_case=settled if settled is not None else decided,
+                candidate=candidate,
+            )
