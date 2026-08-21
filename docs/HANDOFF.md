@@ -461,19 +461,28 @@ dimension-change DDL.
 **MCP** left this list on 2026-08-16: it was re-approved and landed, and `mcp` is now an
 approved, vault-owned dependency (see vault ADR 0021).
 
-**`VAULT_ENABLED=true` in production is unresolved, not resolved.** Two facts are both true
-and they disagree, so this entry stays until someone reconciles them:
+**`VAULT_ENABLED=true` in production — RESOLVED 2026-08-21.** This entry previously recorded a
+contradiction: the config var was set to `true` and agents were using the live vault, while the
+readiness review of 2026-08-16 still classified enablement **NO-GO** pending two observations
+it called intentionally open. Both were things that could only be done once the vault was
+enabled, which is why they had been deferred rather than closed.
 
-- The config var **is set to `true`** on `high-score-server`, and agents have been reading and
-  writing the live production vault over HTTP.
-- The readiness review of 2026-08-16 classifies production vault enablement **NO-GO** pending
-  two operational observations it describes as intentionally open — a credential inventory
-  repeated *after* the vault migrations, and a connection-pool review *after* real vault
-  traffic. Neither can be performed while the vault is dark, which is why they were deferred
-  rather than closed.
+Both are now done, by observation rather than by argument:
 
-So either the gate was cleared and the review was not updated, or the vault was enabled ahead
-of it. Do not treat the running config as evidence that the conditions were met.
+- **Connection-pool review after real traffic.** `scripts/vault_load_probe.py` drove concurrent
+  load and `VaultPoolObserver` reported peak 1–2 concurrent checkouts and 0 checkout failures.
+  `VAULT_DB_POOL_SIZE` moved to 2 because at 1 a second concurrent request on a worker failed
+  on the pool timeout — that is the finding the review was waiting for.
+- **Credential inventory after the vault migrations.** Taken 2026-08-21 across twelve
+  credentials. Everything but two working credentials is revoked, including the `contributor`
+  token whose secret had been pasted into a session transcript on 2026-08-17.
+
+Beyond those, the vault has since carried a full corpus migration in production — 56 rows
+deleted and 61 re-imported through the governed write path, verified against the governance
+validator with zero findings. That is a stronger enablement signal than either observation
+asked for.
+
+Treat enablement as settled. What is *not* settled is deferred decision #1 below.
 
 The MCP endpoint is mounted behind this same gate, which means **it inherits this question
 rather than raising a new one**: it is live in production exactly where and when the vault is,
