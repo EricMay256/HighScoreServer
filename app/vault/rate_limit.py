@@ -91,6 +91,52 @@ LIMITS: dict[str, Limit] = {
 }
 
 
+# Per-principal overrides, for workloads whose shape differs from the one the
+# table above is sized for.
+#
+# The default limits describe an *interactive agent*: retrieve a little, think,
+# contribute one note. A bulk import is a different animal -- it is a queue of
+# known-good content drained as fast as the write path allows -- and at 30/min
+# a 500-note corpus takes over four hours, which is not a safety property,
+# just friction.
+#
+# Deliberately code rather than configuration, for the same reason unknown
+# operations fail closed: an environment variable that widens a quota is a way
+# to unlimit production by accident, and this is a considered grant to one
+# named principal rather than a knob.
+#
+# 'importer' is that principal by documented convention -- HANDOFF requires the
+# importer run under it because vault_write_requests is keyed
+# (principal_id, idempotency_key), so a different name silently bypasses the
+# only duplicate guard. That requirement is what makes the name safe to key on
+# here.
+#
+# Read operations are untouched. Import writes; it does not search.
+PRINCIPAL_LIMITS: dict[str, dict[str, Limit]] = {
+    "importer": {
+        "contribute": Limit(per_minute=300, burst=60),
+        # Re-import and backfill replace rather than insert (ADR 0018), so the
+        # update path carries the same bulk shape and needs the same headroom.
+        "update": Limit(per_minute=300, burst=60),
+    },
+}
+
+
+def limit_for(principal_id: str, operation: str) -> Limit:
+    """The quota governing one principal's use of one operation.
+
+    An override never *invents* an operation: the base table is still the
+    single statement of which operations exist, and an unregistered one raises
+    here exactly as it did before. Widening a known quota for a known principal
+    is the only thing this can do.
+    """
+
+    limit = LIMITS.get(operation)
+    if limit is None:
+        raise ValueError(f"Unknown vault quota operation: {operation}")
+    return PRINCIPAL_LIMITS.get(principal_id, {}).get(operation, limit)
+
+
 # Buckets are tiny and principals are few, so pruning is a housekeeping detail
 # rather than a memory strategy. The threshold only keeps the scan off the hot
 # path in the ordinary case.
@@ -129,9 +175,7 @@ class TokenBucketLimiter:
         immediate retry.
         """
 
-        limit = LIMITS.get(operation)
-        if limit is None:
-            raise ValueError(f"Unknown vault quota operation: {operation}")
+        limit = limit_for(principal_id, operation)
 
         moment = time.monotonic() if now is None else now
         key = (principal_id, operation)
@@ -165,15 +209,34 @@ class TokenBucketLimiter:
         """Drop buckets that have provably refilled to capacity.
 
         Called only when the dict has grown, because it is a scan. Correctness
-        does not depend on it running: a retained full bucket behaves exactly
-        like an absent one.
+        does not depend on it *running*: a retained full bucket behaves exactly
+        like an absent one. It does depend on this asking the same question
+        ``check`` did -- ``limit_for``, not ``LIMITS`` -- because a bucket is
+        charged against the effective quota and must be forgiven on the same
+        one.
+
+        Reading the base table here was safe only by arithmetic accident. The
+        shipped override widens burst 3x and rate 10x, so its bucket refills in
+        12s where the base takes 40s, and pruning late merely retains it. An
+        override that raised burst faster than rate would invert that: at
+        ``per_minute=60, burst=200`` a bucket refills in 200s while this would
+        drop it at 40s, one-fifth full, silently refunding the 160 requests it
+        had already charged. That is exactly the refund the class docstring
+        promises not to make, so the guard belongs in the code rather than in
+        the choice of constants.
+
+        An operation absent from ``LIMITS`` is skipped rather than raised on:
+        ``check`` resolves ``limit_for`` before it creates a bucket, so such a
+        key cannot exist, and housekeeping must not be the thing that turns an
+        impossible state into a failed request.
         """
 
         stale = [
             key
             for key, bucket in self._buckets.items()
-            if (limit := LIMITS.get(key[1])) is not None
-            and moment - bucket.updated_at >= limit.burst / limit.refill_per_second
+            if key[1] in LIMITS
+            and moment - bucket.updated_at
+            >= (limit := limit_for(*key)).burst / limit.refill_per_second
         ]
         for key in stale:
             del self._buckets[key]

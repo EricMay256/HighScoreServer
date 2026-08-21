@@ -347,6 +347,7 @@ async def contribute(
         summary=body.summary,
         aliases=tuple(body.aliases),
         facets=body.facets,
+        origin=body.origin,
         related_ids=tuple(body.related_ids),
         source_ids=tuple(body.source_ids),
         source_url=str(body.source_url) if body.source_url else None,

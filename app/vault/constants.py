@@ -24,6 +24,15 @@ DEFAULT_TEXT_SEARCH_CONFIG = "english"
 MAX_FACET_NAME_LENGTH = 64
 MAX_FACET_VALUE_LENGTH = 128
 
+# The governance note-document schema a row was created under, per `types.yml`
+# and `vault_governance.validate`. This is the *document* schema -- the shape of
+# a note's frontmatter -- and not a version of the database row or of the request
+# contract. Those are versioned by Alembic and by REQUEST_DIGEST_VERSION
+# respectively, and conflating the three is how `vault_documents.schema_version`
+# came to read 1 on every row while the corpus it replicated said 2.
+NOTE_SCHEMA_VERSION = 2
+WIKI_SCHEMA_VERSION = 1
+
 # The default per-request embedding timeout, in seconds.
 #
 # Not a persistence contract like the two above, but it lives here for the same

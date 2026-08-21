@@ -54,6 +54,7 @@ DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.aliases,
     vault_documents.c.frontmatter,
     vault_documents.c.facets,
+    vault_documents.c.origin,
     vault_documents.c.source_sha256,
     vault_documents.c.related_ids,
     vault_documents.c.source_ids,
@@ -84,6 +85,7 @@ def document_from_row(row: RowMapping) -> VaultDocument:
         aliases=tuple(row["aliases"]),
         frontmatter=dict(row["frontmatter"]),
         facets={k: list(v) for k, v in dict(row["facets"]).items()},
+        origin=dict(row["origin"]),
         source_sha256=row["source_sha256"],
         related_ids=tuple(row["related_ids"]),
         source_ids=tuple(row["source_ids"]),
@@ -150,6 +152,7 @@ class VaultDocumentRepository:
                 aliases=list(document.aliases),
                 frontmatter=document.frontmatter,
                 facets=document.facets,
+                origin=document.origin,
                 source_sha256=document.source_sha256,
                 related_ids=list(document.related_ids),
                 source_ids=list(document.source_ids),
@@ -238,7 +241,74 @@ class VaultDocumentRepository:
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
 
+    async def list_under_path_prefixes(
+        self,
+        connection: AsyncConnection,
+        prefixes: Sequence[str],
+        after_vault_path: str | None = None,
+        limit: int = 200,
+    ) -> tuple[VaultDocument, ...]:
+        """One ordered page of the documents living under any of ``prefixes``.
 
+        Ordered by ``vault_path`` and paged by keyset rather than OFFSET, so a
+        full walk is stable under concurrent writes and never revisits a row.
+        ``vault_path`` is UNIQUE, which is what makes it a total order and a
+        legal cursor.
+
+        Unfiltered by status and by ``ai_read``, for the reason ``get_by_id``
+        gives: which rows a surface may see is that surface's policy. The
+        projection this serves writes files for a human, not answers for an
+        agent.
+        """
+
+        if not prefixes:
+            return ()
+
+        statement = (
+            select(*self._domain_columns)
+            .where(
+                or_(
+                    *(
+                        vault_documents.c.vault_path.startswith(
+                            prefix, autoescape=True
+                        )
+                        for prefix in prefixes
+                    )
+                )
+            )
+            .order_by(vault_documents.c.vault_path)
+            .limit(limit)
+        )
+        if after_vault_path is not None:
+            statement = statement.where(
+                vault_documents.c.vault_path > after_vault_path
+            )
+        result = await connection.execute(statement)
+        return tuple(document_from_row(row) for row in result.mappings())
+
+    async def vault_paths_under(
+        self,
+        connection: AsyncConnection,
+        directory: str,
+    ) -> set[str]:
+        """Every ``vault_path`` already taken directly under ``directory``.
+
+        Feeds ``slug.resolve_vault_path``, which needs to know what is taken
+        before it can pick a free name. Returns the whole set rather than
+        probing one candidate at a time: the alternative is a query per
+        collision, inside the corpus-wide advisory lock, to answer a question
+        one round trip already answers.
+
+        Path-only, so this stays cheap as the corpus grows and can be served by
+        the ``text_pattern_ops`` index from ADR 0010.
+        """
+
+        result = await connection.execute(
+            select(vault_documents.c.vault_path).where(
+                vault_documents.c.vault_path.startswith(directory, autoescape=True)
+            )
+        )
+        return set(result.scalars())
 
     async def delete(
         self,

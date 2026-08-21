@@ -17,11 +17,14 @@ from starlette.responses import JSONResponse
 
 from app.vault.rate_limit import (
     LIMITS,
+    PRINCIPAL_LIMITS,
     Limit,
     TokenBucketLimiter,
+    _Bucket,
     build_preauth_dependency,
     client_ip,
     enforce_preauth_ip_limit,
+    limit_for,
 )
 
 
@@ -312,3 +315,150 @@ def test_the_client_key_tolerates_a_missing_peer() -> None:
     request = Request({"type": "http", "headers": [], "client": None})
 
     assert client_ip(request) == "unknown"
+
+
+def test_importer_gets_a_wider_contribution_quota() -> None:
+    """Bulk import is a different workload from an interactive agent.
+
+    At the shared 30/min a 500-note corpus takes over four hours, which is
+    friction rather than a safety property. The grant is to one named principal
+    on the write operations only.
+    """
+
+    assert limit_for("importer", "contribute").per_minute > LIMITS["contribute"].per_minute
+    assert limit_for("importer", "update").per_minute > LIMITS["update"].per_minute
+
+
+def test_the_override_does_not_touch_reads() -> None:
+    """Import writes; it does not search."""
+
+    for operation in ("search", "get_note"):
+        assert limit_for("importer", operation) is LIMITS[operation]
+
+
+def test_every_other_principal_keeps_the_shared_quota() -> None:
+    for operation in LIMITS:
+        assert limit_for("some-other-agent", operation) is LIMITS[operation]
+
+
+def test_an_override_cannot_invent_an_operation() -> None:
+    """The base table stays the single statement of which operations exist.
+
+    A principal override widens a known quota; it must not create a bucket for
+    an operation nothing registered, or the fail-closed property that catches a
+    typo would depend on which principal made the call.
+    """
+
+    with pytest.raises(ValueError, match="Unknown vault quota operation"):
+        limit_for("importer", "not-an-operation")
+
+
+def test_every_overridden_operation_is_a_real_one() -> None:
+    """A typo in the override table would otherwise be silent.
+
+    ``limit_for`` falls back to the base limit for an unknown key, so an
+    override naming ``contrbute`` would simply never apply and the importer
+    would quietly stay throttled.
+    """
+
+    for principal, overrides in PRINCIPAL_LIMITS.items():
+        for operation in overrides:
+            assert operation in LIMITS, f"{principal} overrides unknown {operation!r}"
+
+
+def test_pruning_uses_the_effective_quota_not_the_base_one() -> None:
+    """A bucket charged against an override must be forgiven on the same one.
+
+    ``_prune`` used to read ``LIMITS`` while ``check`` read ``limit_for``. With
+    today's constants that is merely conservative -- the importer's bucket
+    refills in 12s and pruning waits 40s -- so nothing observable was wrong.
+    This pins the direction that *is* wrong: an override whose burst grows
+    faster than its rate refills more slowly than the base, and pruning on the
+    base would drop it partly drained.
+    """
+
+    limiter = TokenBucketLimiter()
+    # Deliberately not a shipped override: burst 10x with rate only 2x, so the
+    # effective bucket takes 200s to refill where the base takes 40s.
+    slow = Limit(per_minute=60, burst=200)
+    base = LIMITS["contribute"]
+    base_full_refill = base.burst / base.refill_per_second
+    slow_full_refill = slow.burst / slow.refill_per_second
+    assert slow_full_refill > base_full_refill
+
+    async def exercise(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(PRINCIPAL_LIMITS, "bulk-writer", {"contribute": slow})
+
+        for _ in range(slow.burst):
+            assert await limiter.check("bulk-writer", "contribute", now=0.0) is None
+        assert await limiter.check("bulk-writer", "contribute", now=0.0) is not None
+
+        # Long enough to refill the *base* bucket, nowhere near the override's.
+        limiter._prune(base_full_refill)
+        assert limiter._buckets, "a partly drained bucket was dropped"
+
+        # It survived as a partly refilled bucket rather than a fresh full one.
+        # 40s at one token per second is 40 of the 200 it needs to be at
+        # capacity; had it been dropped, this would find all 200 back.
+        assert (
+            await limiter.check("bulk-writer", "contribute", now=base_full_refill)
+            is None
+        )
+        surviving = limiter._buckets[("bulk-writer", "contribute")]
+        assert surviving.tokens == pytest.approx(base_full_refill - 1.0)
+
+        # And it does go once the effective quota proves it would have refilled.
+        # Measured from the bucket's own last touch, which the check above
+        # moved to base_full_refill -- not from zero.
+        limiter._prune(surviving.updated_at + slow_full_refill)
+        assert limiter._buckets == {}
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        asyncio.run(exercise(monkeypatch))
+    finally:
+        monkeypatch.undo()
+
+
+def test_an_overridden_bucket_is_pruned_on_its_own_refill_time() -> None:
+    """The benign direction, which the shipped override actually takes.
+
+    The importer's contribute bucket refills in 12s rather than the base 40s,
+    so it becomes prunable sooner. Retaining it longer was never a correctness
+    bug, but pruning on the effective quota is what makes that a property of
+    the code instead of the constants.
+    """
+
+    limiter = TokenBucketLimiter()
+    override = limit_for("importer", "contribute")
+    base = LIMITS["contribute"]
+    override_full_refill = override.burst / override.refill_per_second
+    assert override_full_refill < base.burst / base.refill_per_second
+
+    async def exercise() -> None:
+        await limiter.check("importer", "contribute", now=0.0)
+        assert limiter._buckets
+
+        limiter._prune(override_full_refill)
+        assert limiter._buckets == {}
+
+    asyncio.run(exercise())
+
+
+def test_pruning_skips_an_operation_the_base_table_does_not_know() -> None:
+    """Housekeeping must not raise.
+
+    ``check`` resolves ``limit_for`` before creating a bucket, so a key for an
+    unregistered operation cannot occur in practice. If one ever did, the scan
+    has to step over it rather than turn an impossible state into a failed
+    request for whoever happened to trigger the prune.
+    """
+
+    limiter = TokenBucketLimiter()
+    limiter._buckets[("agent", "not-an-operation")] = _Bucket(
+        tokens=0.0, updated_at=0.0
+    )
+
+    limiter._prune(10_000.0)
+
+    assert ("agent", "not-an-operation") in limiter._buckets

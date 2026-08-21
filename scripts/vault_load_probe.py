@@ -413,8 +413,12 @@ def report(arguments: argparse.Namespace, results: Results) -> None:
         print(f"Created one note: {results.created_note_id}")
         print("Retire it with a vault:delete credential when the rehearsal is done.")
         print(
-            "If any contribution came back flagged, retirement is refused"
-            "\nuntil the review case is settled -- see ADR 0019."
+            "If any contribution came back flagged, that note cannot be retired"
+            "\nat all: vault_review_cases.candidate_document_id blocks retirement in"
+            "\nEVERY review state (ADR 0019), and there is no endpoint that settles a"
+            "\ncase. Clearing it needs direct database access. The run id above is"
+            "\nwhat keeps that from happening -- if you see a flag, say so rather"
+            "\nthan working around it."
         )
 
 

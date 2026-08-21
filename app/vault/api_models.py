@@ -131,6 +131,28 @@ class VaultContributionRequest(VaultDocumentContentRequest):
         max_length=128,
         pattern=r"^[A-Za-z0-9._:-]+$",
     )
+    origin: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Where this content came from before it reached the vault, for "
+            "content with a life before this contribution -- "
+            '{"author": "agent:codex", "created_at": "2026-07-30T18:54:39Z", '
+            '"reference": "...", "run_id": "..."}. Leave it empty when the '
+            "contributing credential is also the author, which is the ordinary "
+            "case. It never affects where the note is stored, and the vault's "
+            "own contributed_by and created_at are unaffected by it."
+        ),
+    )
+
+    @field_validator("origin")
+    @classmethod
+    def validate_origin_shape(cls, origin: dict[str, str]) -> dict[str, str]:
+        # Only the closed key set and the timestamp shape, both checked in the
+        # service alongside facets so a contribution learns everything wrong
+        # with it at once. Here we only refuse what the model layer owns.
+        if any(not isinstance(value, str) for value in origin.values()):
+            raise ValueError("origin values must be strings")
+        return origin
 
 
 class VaultDocumentUpdateRequest(VaultDocumentContentRequest):
