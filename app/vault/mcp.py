@@ -503,6 +503,7 @@ def build_vault_mcp_server() -> VaultMCPServer:
             summary=model.summary,
             aliases=tuple(model.aliases),
             facets=model.facets,
+            origin=model.origin,
             related_ids=tuple(model.related_ids),
             source_ids=tuple(model.source_ids),
             source_url=str(model.source_url) if model.source_url else None,

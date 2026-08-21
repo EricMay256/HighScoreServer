@@ -4,7 +4,11 @@ Date: 2026-08-19
 
 ## Status
 
-Accepted.
+Accepted. Amended 2026-08-20: `vault_path`'s leaf name is the title's slug (see
+"Amendment: the leaf name is a slug" below), which narrows the "no code path from
+contributor input to `vault_path`" statement in the consequences to "no code path from
+contributor input to the *folder*". Refined by ADR 0023, which says which folders under
+`Agent/` the export projects.
 
 Depends on ADR 0010 (`vault_path` is the only policy key), ADR 0011 (`status` and
 `doc_status` are different things), ADR 0012 (markdown layers reconcile by mark-and-sweep),
@@ -103,6 +107,49 @@ lives in the other repository.
 Humans lose the ability to edit agent notes as text. That is the point — it is what makes the
 tree single-writer — but it is a real change in how the vault is used, and it means a
 correction to an agent note goes through the service's update verb rather than an editor.
+
+## Amendment: the leaf name is a slug (2026-08-20)
+
+The original decision left `vault_path` as `Agent/notes/<uuid>.md`, which is what
+`service.py` already produced. Exporting that produces a folder of hex: a human browsing the
+projected vault sees no title until they open a file. The Stage-A engine reached the same
+conclusion and shipped `reslug_vault.py` to rename its own uuid-named notes.
+
+The exporter cannot fix this. ADR 0010 requires `vault_path` to be byte-identical to the
+governance scanner's `rel_path`, so a projection that writes some *other* name breaks the
+property that makes `vault_path` the policy key. The name has to be right in the database.
+
+**`vault_path` is therefore `Agent/notes/<title-slug>.md`**, assigned by the service through
+`slug.resolve_vault_path`, with `-2`, `-3` … suffixes on collision resolved under the
+corpus-wide advisory lock — the same lock that already serializes check-dedup-then-write,
+because `vault_path` is UNIQUE and the answer is only true while the lock is held.
+
+### This narrows the privilege statement, and the narrowing is the point
+
+The consequences section above says "there is no code path from contributor input to
+`vault_path`". That is now false as written, because the slug derives from the caller's
+title. What the argument actually needed is narrower, and survives intact:
+
+> An agent must not be able to choose the **folder** its note lands in, because folders are
+> what `folders.yml` grants `ai_write` on and what the AI Contribution Policy forbids.
+
+`slugify` collapses every run of non-alphanumeric characters to a single hyphen, so `/`,
+`\`, `:`, and `..` cannot survive a title into a path; the directory is a module constant
+supplied by the service. A contributor may influence the leaf name inside a service-chosen
+folder, and nothing else. `tests/vault/test_slug.py` asserts that directly rather than
+leaving it to inspection.
+
+`proposed_doc_type` remains a hint that is reported and never enacted. That decision was
+never about slugs — it was about a type selecting a *destination*, which is the folder case
+this amendment leaves untouched.
+
+### A retitled note keeps its path
+
+`replace_content` already leaves `vault_path` alone, and it stays that way. A path that
+followed the title would rename the exported file on every retitle, turning a one-line
+frontmatter change into a delete-plus-create in git history — and the export exists to be an
+audit log. The slug is the name the note was born with, not a derived view of its current
+title.
 
 ### What this does not decide
 

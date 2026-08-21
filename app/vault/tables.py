@@ -211,6 +211,17 @@ vault_documents = Table(
         nullable=False,
         server_default=text("'{}'::jsonb"),
     ),
+    # Where the content came from before it was contributed here: the upstream
+    # author, timestamps, source reference and run id. Distinct from
+    # `provenance`, which is the service's record of how the row got here and is
+    # never caller-supplied. Empty means this vault is the origin. See ADR 0016
+    # on why `contributed_by` cannot carry the author, and migration 0010.
+    Column(
+        "origin",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
     Column("schema_version", Integer, nullable=False),
     Column(
         "created_at",
@@ -296,6 +307,11 @@ vault_documents = Table(
     CheckConstraint(
         "vault.jsonb_is_facet_map(facets)",
         name="vault_documents_facets_shape",
+    ),
+    # Shape only, same construction and the same reason. See migration 0010.
+    CheckConstraint(
+        "vault.jsonb_is_origin_map(origin)",
+        name="vault_documents_origin_shape",
     ),
     UniqueConstraint("vault_path", name="vault_documents_vault_path_key"),
     CheckConstraint(

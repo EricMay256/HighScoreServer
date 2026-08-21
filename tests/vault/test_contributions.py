@@ -53,6 +53,7 @@ from app.vault.service import (
     VaultDocumentUpdateService,
 )
 from app.vault.settings import vault_enabled
+from app.vault.slug import slugify
 from app.vault.tables import (
     vault_audit_events,
     vault_document_embeddings,
@@ -217,14 +218,16 @@ def test_a_contribution_is_inserted_and_becomes_retrievable(
         assert payload["status"] == "inserted"
         assert payload["idempotent_replay"] is False
 
-        # The write path assigns identity and path; the caller does not.
+        # The write path assigns identity and path; the caller does not. The
+        # leaf name is the title's slug so the exported tree is browsable, but
+        # the folder is the service's -- see ADR 0022's 2026-08-20 amendment.
         fetched = client.get(
             f"/api/v1/vault/notes/{payload['note_id']}", headers=headers
         )
         assert fetched.status_code == 200
         detail = fetched.json()
         assert detail["title"] == body["title"]
-        assert detail["vault_path"] == f"Agent/notes/{payload['note_id']}.md"
+        assert detail["vault_path"] == f"Agent/notes/{slugify(body['title'])}.md"
         # types.yml constrains Agent/notes/** to exactly this type.
         assert detail["doc_type"] == "Agent Note"
         assert detail["status"] == "active"

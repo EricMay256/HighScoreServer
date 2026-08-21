@@ -87,6 +87,10 @@ class VaultDocument:
     # Classification relating this note to others -- {"project": ["hss"]}.
     # Outside the embedding text by construction. See ADR 0017.
     facets: dict[str, list[str]] = field(default_factory=dict)
+    # Upstream provenance for content authored before it reached this vault --
+    # {"author": "agent:codex", "created_at": "..."}. Empty means this vault is
+    # the origin. See origin.py and migration 0010.
+    origin: dict[str, str] = field(default_factory=dict)
     # SHA-256 of the upstream file; None when the row has no upstream file
     # because it was authored here. See ADR 0012.
     source_sha256: bytes | None = None
@@ -117,6 +121,7 @@ class NewVaultDocument:
     frontmatter: dict[str, Any] = field(default_factory=dict)
     # See ADR 0017. Never reaches assemble_embedding_text.
     facets: dict[str, list[str]] = field(default_factory=dict)
+    origin: dict[str, str] = field(default_factory=dict)
     source_sha256: bytes | None = None
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()

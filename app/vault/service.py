@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import text as text_sql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from .constants import NOTE_SCHEMA_VERSION
 from .db import VaultPoolObserver, acquire_vault_connection
 from .domain import (
     DocumentEmbedding,
@@ -40,6 +41,7 @@ from .governance import (
     decide,
     validate,
 )
+from .origin import normalize_origin, validate_origin
 from .read_policy import READABLE_STATUSES
 from .repository import (
     VaultAuditEventRepository,
@@ -56,9 +58,16 @@ from .search import (
     document_ids,
     reciprocal_rank_fusion,
 )
+from .slug import resolve_vault_path
 
 
 logger = logging.getLogger(__name__)
+
+
+# Where a contributed agent note lives. Supplied by the service and never
+# derived from caller input -- that separation is the whole of ADR 0022's
+# privilege argument, and types.yml constrains this folder to "Agent Note".
+AGENT_NOTES_DIRECTORY = "Agent/notes/"
 
 
 class VaultTransactionService:
@@ -277,6 +286,9 @@ class ContributionRequest:
     aliases: tuple[str, ...] = ()
     # {name: [values]}. Never reaches the embedding text -- see ADR 0017.
     facets: dict[str, list[str]] = field(default_factory=dict)
+    # Upstream provenance for content authored before it reached the vault.
+    # Empty for an ordinary contribution. See origin.py.
+    origin: dict[str, str] = field(default_factory=dict)
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     source_url: str | None = None
@@ -359,7 +371,11 @@ class VaultContributionService:
         # Governance validation and facet vocabulary are reported together, so
         # a contribution learns everything wrong with it in one round trip
         # rather than one problem at a time.
-        errors = validate(candidate) + validate_facets(candidate.facets)
+        errors = (
+            validate(candidate)
+            + validate_facets(candidate.facets)
+            + validate_origin(candidate.origin)
+        )
         if errors:
             return ContributionOutcome(
                 status="invalid",
@@ -412,7 +428,16 @@ class VaultContributionService:
 
         The caller supplies content; the service owns identity. ``vault_path``
         matches what the Stage-A engine produces for an agent note, so the
-        projector and the importer agree on where a contributed note lives.
+        projector and the importer agree on where a contributed note lives --
+        including the title slug, so the exported tree is browsable by a human
+        rather than a folder of hex (ADR 0022's 2026-08-20 amendment).
+
+        The path assigned here is the *uncontended* one. Collision suffixing
+        needs to know what is already taken, which is a query whose answer only
+        stays true under the corpus lock, so ``_resolve_path`` settles it later.
+        Nothing between here and there reads ``vault_path``: governance
+        validation checks content, and the embedding text is title, aliases,
+        tags, summary, and body (ADR 0013).
         """
 
         document_id = uuid4().hex
@@ -421,7 +446,11 @@ class VaultContributionService:
             kind=DocumentKind.NOTE,
             # types.yml constrains Agent/notes/** to exactly this type.
             doc_type="Agent Note",
-            vault_path=f"Agent/notes/{document_id}.md",
+            # The governance document schema this note is written under.
+            # Assigned here rather than left to NewVaultDocument's default,
+            # which said 1 while every note in the corpus said 2.
+            schema_version=NOTE_SCHEMA_VERSION,
+            vault_path=resolve_vault_path(AGENT_NOTES_DIRECTORY, request.title, ()),
             status=DocumentStatus.ACTIVE,
             doc_status="Active",
             title=request.title,
@@ -433,6 +462,10 @@ class VaultContributionService:
             # contribution arriving through some future non-HTTP caller is
             # stored the same way. See ADR 0017.
             facets=normalize_facets(request.facets),
+            # Normalized here rather than at the transport boundary, for the
+            # same reason facets are: a contribution arriving through a future
+            # non-HTTP caller must be stored the same way.
+            origin=normalize_origin(request.origin),
             related_ids=request.related_ids,
             source_ids=request.source_ids,
             contributed_by=request.contributed_by,
@@ -559,6 +592,32 @@ class VaultContributionService:
         )
         return outcome
 
+    @staticmethod
+    async def _resolve_path(
+        connection: AsyncConnection,
+        note: NewVaultDocument,
+    ) -> NewVaultDocument:
+        """Settle the note's slug against the paths already taken.
+
+        Called under the corpus-wide advisory lock, which is the only place the
+        answer stays true between reading it and inserting on it. Two notes may
+        legitimately carry one title -- the dedup gate scores meaning, not
+        titles -- and ``vault_path`` is UNIQUE, so an unsuffixed second one is
+        an IntegrityError rather than a rare event.
+
+        The directory is the service's, never the caller's: ``slugify``
+        collapses every non-alphanumeric run to a hyphen, so no separator
+        survives a title into the path.
+        """
+
+        taken = await VaultDocumentRepository().vault_paths_under(
+            connection, AGENT_NOTES_DIRECTORY
+        )
+        resolved = resolve_vault_path(AGENT_NOTES_DIRECTORY, note.title, taken)
+        return note if resolved == note.vault_path else replace(
+            note, vault_path=resolved
+        )
+
     async def _store(
         self,
         connection: AsyncConnection,
@@ -566,6 +625,7 @@ class VaultContributionService:
         vector: tuple[float, ...],
         text_digest: bytes,
     ) -> str:
+        note = await self._resolve_path(connection, note)
         stored = await VaultDocumentRepository().insert(connection, note)
         await VaultDocumentEmbeddingRepository().upsert(
             connection,

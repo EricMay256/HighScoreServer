@@ -97,6 +97,32 @@ be edited when it does.
   closed set in `facets.py`; values are open, per ADR 0009's precedent. A facet must never gate
   a read — it is authored content, so ADR 0010 keeps `vault_path` the only policy key. See
   ADR 0017.
+- **`origin` carries upstream provenance; `contributed_by` and `created_at` stay the
+  vault's.** When a corpus is replayed here, the credential that transmits a note is not the
+  agent that wrote it and the moment the row lands is not when it was authored. `origin`
+  JSONB holds the upstream `ContributedBy`, `CreatedAt`, `LastUpdated`, `Source` and
+  `ClientRunID`; empty means this vault is the origin. Do **not** "fix" the import by letting
+  the body set `contributed_by` — ADR 0016 takes it from the credential precisely so one
+  principal cannot write under another's name — and do not backdate `created_at`, which would
+  make the write ledger disagree with itself. Shape is a CHECK; the key set is closed in
+  `origin.py` at the write boundary, per ADR 0009's precedent. Timestamps are stored as the
+  ISO-8601 **text** they arrived as, so the export re-emits them verbatim. Contribution only:
+  an update is a new body for an existing row, not a new provenance for it. See migration
+  0010.
+- **Adding an optional field to `VaultContributionRequest` does not need a
+  `REQUEST_DIGEST_VERSION` bump.** `canonical_request_digest` dumps with `exclude_unset=True`
+  since migration 0006, so a request that does not mention the new field serializes exactly as
+  before. `tests/vault/test_origin.py` pins two pre-existing digests as the guard. Changing the
+  digest *function* is still a bump; growing the model is not.
+- **`vault_path`'s leaf name is the title's slug, and the folder is never caller-derived.**
+  ADR 0022's 2026-08-20 amendment: a uuid filename makes the exported tree unbrowsable, and the
+  exporter cannot rename it because ADR 0010 requires `vault_path` to equal the scanner's
+  `rel_path`. `slug.slugify` collapses every non-alphanumeric run to a hyphen, so no separator
+  survives a title into a path; the directory is a module constant. Collisions get `-2`, `-3`
+  suffixes resolved **under the corpus advisory lock**, because `vault_path` is UNIQUE and the
+  answer is only true while the lock is held — do not move that back to `_build_candidate`. A
+  retitled note keeps its path: `replace_content` leaves it alone, and a path that followed the
+  title would turn a frontmatter edit into a delete-plus-create in the export's git history.
 - **`related_ids` / `source_ids` are opaque and unvalidated on purpose.** A contribution may
   reference a note that is archived, flagged, or not yet written; a foreign key would fail the
   write for the reason ADR 0002 already rejected for audit events.
