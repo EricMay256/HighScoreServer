@@ -87,6 +87,13 @@ LIMITS: dict[str, Limit] = {
     # Retirement is rare and irreversible, so it gets a deliberately tight
     # bucket: a loop that deletes is worse than a loop that writes.
     "retire": Limit(per_minute=10, burst=5),
+    # Review is a human at a queue, not an agent in a loop. Listing and reading
+    # are generous enough to page through a backlog; deciding is as tight as
+    # retiring, because an accepted case publishes content and a rejected one
+    # destroys it.
+    "review_list": Limit(per_minute=60, burst=20),
+    "review_read": Limit(per_minute=60, burst=20),
+    "review_decide": Limit(per_minute=10, burst=5),
     "snapshot": Limit(per_minute=2 / 60, burst=1),  # 2/hour
 }
 

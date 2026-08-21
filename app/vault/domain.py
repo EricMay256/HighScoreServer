@@ -19,9 +19,34 @@ class DocumentStatus(str, Enum):
 
 
 class ReviewState(str, Enum):
+    """What a human decided about a flagged contribution.
+
+    The enum shipped with the schema carrying no defined meaning, which is how
+    it came to be read two ways. These are the definitions, and they are about
+    **the note**, not about the case -- matching the only other use of
+    "rejected" in this package, where a rejected contribution is one the write
+    path refused.
+
+    A candidate is always a *brand-new* note. ``insert_pending`` is called from
+    exactly one place, the contribute path's ``Flag`` branch, with the note it
+    has just written; pre-existing notes appear only as evidence inside
+    ``similar_documents``, and the update path refuses on collision rather than
+    opening a case. So a decision is always about content that has never been
+    endorsed, which is what makes ``REJECTED`` a deletion rather than an
+    archival: ADR 0019 archives what is overtaken and deletes what is wrong, and
+    a duplicate judged redundant at birth has no history to preserve.
+    """
+
     PENDING = "pending"
+    # The flag was a false positive: the note is legitimate. It becomes active
+    # and re-enters search and the dedup corpus.
     ACCEPTED = "accepted"
+    # The note really is a duplicate of something already in the corpus. It is
+    # deleted, and this case survives with a null candidate to say so.
     REJECTED = "rejected"
+    # Reserved. No decision path sets it, and none should until someone has a
+    # case that needs it and a reason to write down -- an enum with invented
+    # semantics is what this docstring exists to correct.
     SUPERSEDED = "superseded"
 
 
@@ -152,7 +177,9 @@ class DocumentEmbedding:
 @dataclass(frozen=True, slots=True)
 class VaultReviewCase:
     id: UUID
-    candidate_document_id: str
+    # None once the candidate has been retired. The judgement is the durable
+    # record; what it judged is allowed to be gone. See migration 0011.
+    candidate_document_id: str | None
     state: ReviewState
     reason: str
     similar_documents: tuple[dict[str, Any], ...]

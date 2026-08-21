@@ -14,7 +14,7 @@ leaderboard ``API_KEY`` are not vault credentials.
 """
 
 import logging
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -35,15 +35,21 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultReviewCaseResponse,
+    VaultReviewDecisionRequest,
+    VaultReviewDecisionResponse,
+    VaultReviewQueueResponse,
     VaultSearchHit,
     VaultSearchResponse,
     VaultSimilarNote,
     canonical_request_digest,
     document_detail,
+    review_case_summary,
 )
 from .auth import VaultCredential, VaultScope
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
+from .domain import ReviewState
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError, EmbeddingInputTooLong
 from .principal import (
@@ -64,11 +70,15 @@ from .service import (
     DocumentUnderReview,
     IdempotencyConflict,
     RetireRequest,
+    ReviewCaseAlreadyDecided,
+    ReviewCaseNotFound,
+    ReviewDecisionRequest,
     UpdateRequest,
     UpdateWouldDuplicate,
     VaultContributionService,
     VaultDocumentRetireService,
     VaultDocumentUpdateService,
+    VaultReviewService,
     VaultSearchService,
     VaultTransactionService,
 )
@@ -564,3 +574,139 @@ async def retire_vault_document(
         ) from exc
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def require_review_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.REVIEW,), credentials)
+
+
+async def review_list_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "review_list")
+    return credential
+
+
+async def review_read_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "review_read")
+    return credential
+
+
+async def review_decide_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "review_decide")
+    return credential
+
+
+def _review_service() -> VaultReviewService:
+    return VaultReviewService(VaultTransactionService(get_vault_engine()))
+
+
+@router.get(
+    "/reviews",
+    response_model=VaultReviewQueueResponse,
+    dependencies=[Depends(review_list_quota)],
+    summary="List near-duplicate cases awaiting a decision",
+)
+async def list_review_queue(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> VaultReviewQueueResponse:
+    """The unresolved review backlog, oldest first.
+
+    Oldest first because this is a backlog rather than a feed: the case most at
+    risk of being forgotten is the one that has waited longest.
+    """
+
+    cases = await _review_service().list_pending(limit)
+    return VaultReviewQueueResponse(
+        pending=[review_case_summary(case) for case in cases],
+        count=len(cases),
+    )
+
+
+@router.get(
+    "/reviews/{review_case_id}",
+    response_model=VaultReviewCaseResponse,
+    dependencies=[Depends(review_read_quota)],
+    summary="Read one review case and the note it concerns",
+)
+async def read_review_case(review_case_id: UUID) -> VaultReviewCaseResponse:
+    """One case, with the flagged note in full.
+
+    This is the only surface that serves ``flagged`` content. ADR 0008 withholds
+    it everywhere else because the consumer there is a model that will not check
+    the status field; a reviewer is the opposite consumer, and cannot adjudicate
+    a note they cannot read. That is also why the whole review surface is gated
+    on its own scope and stays off the MCP tool list (ADR 0021).
+    """
+
+    try:
+        case, candidate = await _review_service().get(review_case_id)
+    except ReviewCaseNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Review case not found",
+        ) from exc
+
+    return VaultReviewCaseResponse(
+        review_case=review_case_summary(case),
+        candidate=document_detail(candidate) if candidate is not None else None,
+    )
+
+
+@router.post(
+    "/reviews/{review_case_id}/decision",
+    response_model=VaultReviewDecisionResponse,
+    dependencies=[Depends(review_decide_quota)],
+    summary="Settle one review case",
+)
+async def decide_review_case(
+    request: Request,
+    body: VaultReviewDecisionRequest,
+    review_case_id: UUID,
+    credential: VaultCredential = Depends(review_decide_quota),
+) -> VaultReviewDecisionResponse:
+    """Accept or reject a flagged contribution.
+
+    ``accepted`` publishes the note. ``rejected`` **deletes** it: a review
+    candidate is always a brand-new note, so a duplicate judged redundant at
+    birth has no history to preserve and its content is already in the corpus.
+    ADR 0019 archives what is overtaken and deletes what is wrong.
+
+    The decision is recorded either way. A rejected case survives with a null
+    candidate pointer rather than vanishing with the note.
+    """
+
+    try:
+        outcome = await _review_service().decide(
+            ReviewDecisionRequest(
+                review_case_id=review_case_id,
+                state=ReviewState(body.decision),
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+                decision_note=body.decision_note,
+            )
+        )
+    except ReviewCaseNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Review case not found",
+        ) from exc
+    except ReviewCaseAlreadyDecided as exc:
+        # 409 rather than 404: the case exists and someone else settled it.
+        # Nothing was changed by this request, and the caller should re-read
+        # rather than retry.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Review case has already been decided",
+        ) from exc
+
+    return VaultReviewDecisionResponse(
+        review_case=review_case_summary(outcome.review_case),
+        candidate=outcome.candidate,
+    )

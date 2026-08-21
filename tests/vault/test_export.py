@@ -556,3 +556,45 @@ def test_list_under_path_prefixes_pages_the_agent_tree(
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+def test_prune_leaves_a_prefix_the_corpus_does_not_populate(tmp_path: Path) -> None:
+    """The hazard this guard exists for, caught against the real corpus.
+
+    ``Agent/wiki/`` is an exported prefix, but the service holds no wiki
+    documents -- compilation is not built yet, and the Stage-A librarian still
+    owns 15 compiled pages there. Without this guard, one ``--apply --prune``
+    against the live vault deletes every one of them, because no row accounts
+    for any of them.
+
+    ADR 0012 answers the same question the same way for reconciliation: sweep
+    only after a complete walk, and refuse an implausible one.
+    """
+
+    wiki = tmp_path / "Agent" / "wiki"
+    wiki.mkdir(parents=True)
+    for name in ("_index.md", "compiled-page.md"):
+        (wiki / name).write_text("written by another librarian\n", encoding="utf-8")
+
+    # A corpus of notes only -- nothing under Agent/wiki/.
+    report = export_to(tmp_path, (make_document(),), apply=True, prune=True)
+
+    assert report.prunable == []
+    assert report.pruned == 0
+    assert (wiki / "_index.md").exists()
+    assert (wiki / "compiled-page.md").exists()
+
+
+def test_prune_still_sweeps_a_prefix_the_corpus_does_populate(tmp_path: Path) -> None:
+    """The guard narrows the sweep; it does not disable it."""
+
+    retired = make_document(
+        id="deaddeaddeaddeaddeaddeaddeaddead",
+        vault_path="Agent/notes/deaddeaddeaddeaddeaddeaddeaddead.md",
+    )
+    export_to(tmp_path, (make_document(), retired), apply=True)
+
+    report = export_to(tmp_path, (make_document(),), apply=True, prune=True)
+
+    assert report.pruned == 1
+    assert not (tmp_path / retired.vault_path).exists()

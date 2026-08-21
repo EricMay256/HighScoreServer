@@ -123,6 +123,20 @@ be edited when it does.
   answer is only true while the lock is held — do not move that back to `_build_candidate`. A
   retitled note keeps its path: `replace_content` leaves it alone, and a path that followed the
   title would turn a frontmatter edit into a delete-plus-create in the export's git history.
+- **A review candidate is always a brand-new note, and a settled case releases it.**
+  `insert_pending` has one production caller: the contribute path's `Flag` branch, with the
+  note it just wrote. Pre-existing notes appear only as JSON evidence, and the update path
+  refuses on collision rather than opening a case. That is what licenses `rejected` to
+  **delete** rather than archive — a candidate was never endorsed and its substance is
+  already in the corpus. `candidate_document_id` is nullable and non-unique since migration
+  0011: `delete` clears it so a judgement outlives what it judged, and a second case can be
+  opened rather than overwriting the first. Only a **pending** case blocks retirement now;
+  ADR 0019's "every state" rule made a flagged note permanently undeletable. `superseded` is
+  reserved and unreachable — do not give it a meaning without a case that needs one.
+- **The review surface is REST-only and stays off the MCP tool list.** Reading a case serves
+  `flagged` content, the least-vetted text in the corpus, and deciding publishes or destroys
+  a note. ADR 0021's defence is the privileged tool being absent from the surface injected
+  text can name. A separate admin MCP is where these belong if they ever move.
 - **`related_ids` / `source_ids` are opaque and unvalidated on purpose.** A contribution may
   reference a note that is archived, flagged, or not yet written; a foreign key would fail the
   write for the reason ADR 0002 already rejected for audit events.

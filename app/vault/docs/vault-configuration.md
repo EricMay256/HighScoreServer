@@ -259,6 +259,105 @@ Expected production facts:
 - `vector` is available;
 - the two version tables contain heads from different Alembic lineages.
 
+## Corpus migration: replacing the imported notes
+
+Written from the 2026-08-21 run that carried `origin` and slug paths into production. Follow
+it whenever the corpus has to be re-imported — the shape is the same even when the reason is
+not.
+
+**The one thing that governs everything else: find out what is native first.** Notes
+contributed directly through the live service exist *only* in the database. A re-import
+cannot recreate them, and an unfiltered wipe destroys them. The August run found one, and it
+was a good note. Census before you plan, not after:
+
+```sql
+SELECT contributed_by, count(*) FROM vault.vault_documents GROUP BY 1 ORDER BY 2 DESC;
+```
+
+### Order, and why it is not negotiable
+
+1. **Census** (read-only). Counts by contributor, `vault_path` shapes, review cases,
+   credentials. Nothing is decided until this comes back.
+2. **Back up, *after* the deploy.** A backup taken before the release captures the
+   pre-migration schema, so restoring it leaves the database a revision behind the running
+   code and needs `alembic -c alembic-vault.ini upgrade head` before the app works again.
+   The data is safe either way; the rollback is only one step if the backup is post-deploy.
+   `heroku pg:backups:capture --app <app>`.
+3. **Deploy.** The release phase runs the vault lineage. **This must precede the import**:
+   `VaultContributionRequest` sets `extra="forbid"`, so an import sending a field the
+   deployed model does not know is a 422 on every note.
+4. **Verify the deploy in two places.** The migration (`vault.vault_alembic_version`, plus
+   the columns and constraints it added) *and* the running code — fetch `/openapi.json` and
+   confirm the request model carries the new field. A migration that landed while the dynos
+   still run old code looks fine from the database side.
+5. **Export the corpus as it stands.** A readable snapshot on disk, before anything
+   destructive, including the native notes. Validate it: `python -m vault_governance.cli
+   validate --vault <snapshot-root>` with a copy of `00 Governance/` beside the `Agent/`
+   tree.
+6. **Issue a fresh import principal.** Not the previous one. The ledger is keyed
+   `(principal_id, idempotency_key)` and the import re-sends the same keys, so reusing the
+   old principal makes every note either a silent replay or — once the request body has
+   changed, which is usually the point — a `409` conflict on all of them. A new principal
+   sidesteps both and leaves the old ledger intact for ADR 0019's reasons.
+7. **Dry-run the importer before wiping.** It reports exactly what each note would send and
+   what, if anything, is dropped. Doing this after the wipe means discovering a payload bug
+   with an empty corpus.
+8. **Wipe, filtered to the import principal.** Delete through
+   `VaultDocumentRepository.delete`, never raw SQL: it clears the write-request and
+   review-case pointers so the ledger and any judgements survive with a null reference. Raw
+   `DELETE` either trips the foreign keys or takes the audit trail with it.
+9. **Import.** ~2s per note is the built-in pacing and matches the sustained contribute
+   quota, so a 60-note corpus takes about two minutes. Pass `--map` so the
+   original-id → new-id mapping does not live only in scrollback.
+10. **Verify.** Counts, provenance coverage, path shapes, embeddings, no orphan documents.
+    Export again and re-run the governance validator; a second export immediately after
+    should report every file unchanged, which is what proves the projection is stable.
+11. **Revoke the import credential**, and any other write credential that has outlived its
+    purpose.
+
+### If the import fails partway
+
+**Do not re-wipe.** The importer is idempotent per `(principal, key)`, so re-running it
+resumes and skips what already landed. Wiping again throws away the partial progress and
+starts the clock over.
+
+### Credential tokens are printed once, to stdout
+
+`issue_vault_credential` prints the token and cannot recover it. When an agent or a shared
+session runs the command, that token lands in a transcript — which has already happened once
+to a still-live production credential. Prefer issuing the credential yourself in your own
+shell, or redirect the output to a file you control. Revoke anything that leaks:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
+```
+
+### `heroku run` eats flags meant for your script
+
+`heroku run -a <app> python -m scripts.x --id abc` fails with `Nonexistent flags: -m, --id`:
+Heroku's own parser claims them before the remote command sees them. Quote the whole remote
+command as a single argument:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
+```
+
+### PowerShell has no inline environment prefix
+
+`DATABASE_URL=... python x.py` is a bash-ism. In PowerShell, set the variables as their own
+statements first, use the venv interpreter explicitly, and clear them afterwards so a later
+command in the same session does not quietly address production:
+
+```powershell
+$env:DATABASE_URL = (heroku config:get DATABASE_URL --app <app>)
+$env:VAULT_ENABLED = 'true'; $env:PYTHONPATH = '.'
+.\.venv\Scripts\python.exe <script>.py --apply
+Remove-Item Env:DATABASE_URL, Env:VAULT_ENABLED, Env:PYTHONPATH
+```
+
+Reading the URL from `heroku config:get` beats pasting it: one fewer copy of a live
+credential, and it survives rotation.
+
 ## Later move to a separate database
 
 Provisioning or attaching another database is deliberately outside Phase 1.
@@ -453,7 +552,8 @@ credential into the wrong database is silent.
 | `vault:write` | Contribute a new note — **and nothing else** |
 | `vault:update` | Replace an existing note's content |
 | `vault:delete` | Retire a note, **destroying it** (vault ADR 0019) |
-| `vault:review`, `vault:compile`, `vault:export` | Recognised, granted by no route yet |
+| `vault:review` | List, read, and decide near-duplicate review cases. **The only scope that serves `flagged` content**, so grant it narrowly |
+| `vault:compile`, `vault:export` | Recognised, granted by no route yet |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
 ADR 0020.
@@ -586,6 +686,143 @@ limit at all, which is the point at which a shared backend becomes necessary
 rather than tidier. The pre-auth guard can already take one via
 `VAULT_RATE_LIMIT_STORAGE_URI`; the quota cannot, and would need the same
 treatment.
+
+## Granting an agent access, end to end
+
+Everything from "someone wants to use the vault" to "their agent is contributing
+notes". Do it once per person or per machine.
+
+### 1. Decide the scopes
+
+Scopes are verbs, one per route (vault ADR 0020), and they are what shapes the
+MCP tool surface a caller can see (ADR 0021). Grant the narrowest set that does
+the job:
+
+| Who | Scopes | Why |
+| --- | ------ | --- |
+| An ordinary agent or person contributing notes | `vault:read vault:write` | Search, fetch, contribute. The common case |
+| A read-only consumer | `vault:read` | Retrieval with no way to write |
+| A corpus import or backfill | `vault:read vault:write vault:update` | Replacement is a separate verb |
+| A reviewer adjudicating flagged notes | `vault:read vault:review` | **Serves `flagged` content**, the least-vetted text in the corpus |
+| Nobody, by default | `vault:delete` | Retirement destroys a note (ADR 0019). Grant per incident, revoke after |
+
+Withholding a scope is a **prompt-injection boundary, not tidiness**. The MCP
+tool list is filtered by the caller's scopes, so a credential without
+`vault:delete` has no `vault_retire_note` on its surface at all — there is no
+tool for injected text in a note to name. Do not fold scopes together because
+issuing two looks like ceremony; that is exactly how `vault:write` came to mean
+"may destroy any note" before ADR 0020 split it.
+
+### 2. Mint the credential
+
+```bash
+python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write
+```
+
+Against production, set `DATABASE_URL` explicitly for the command — issuing into
+the wrong database is silent. On a dyno it is already set:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write"
+```
+
+Quote the whole remote command. `heroku run` parses the line first and claims
+`-m` and `--scopes` for itself otherwise, reporting `Nonexistent flags` about
+flags that are perfectly valid for your script.
+
+**Name it per person or per machine, never per team.** `contributed_by` is
+derived from the principal and never from the request body, so the name becomes
+the note's `ContributedBy` — one credential per person gives per-person
+provenance in the corpus and per-person revocation, both for free. A shared
+credential gives up both and cannot be taken back from one user.
+
+`--days N` sets an expiry. Omit it for none.
+
+**The token prints once and is not recoverable** — only `sha256(secret)` is
+stored. Two consequences:
+
+- Have the *person* run this in their own shell. An agent that runs it has read
+  the secret into its transcript, and from there into summaries and logs. This
+  has already happened twice to live production credentials.
+- If it leaks, revoke and reissue. Do not reason about how exposed it is.
+
+### 3. Register the MCP server (preferred)
+
+```bash
+claude mcp add --transport http vault https://<host>/api/v1/vault/mcp/ \
+  --header "Authorization: Bearer hssv1_<credential-id>_<secret>"
+```
+
+**Note the trailing slash.** The bare form 307-redirects to it, so both work and
+the slash saves a hop.
+
+This only stores a URL and a header — nothing is launched. The vault MCP server
+is an ASGI app mounted into the host application, so it is already running
+wherever the host runs; there is no process to start and no Procfile entry.
+
+The credential lives in the client's configuration and the transport attaches
+it, so **the agent never handles the token**. That is the reason to prefer this
+over REST: not convenience, but that there is no secret in the session to leak.
+
+### 4. Or configure REST (fallback)
+
+For agents without MCP — Codex, CI, one-off scripts. The token goes in an
+environment variable the process inherits:
+
+```bash
+export VAULT_API_TOKEN='hssv1_<credential-id>_<secret>'
+```
+
+Never on a command line: argv is readable by every process on the host. Never in
+a file the agent writes, and never printed.
+
+Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
+`POST /api/v1/vault/contributions`, `PUT /api/v1/vault/notes/{id}`, and
+`DELETE /api/v1/vault/notes/{id}`, all taking `Authorization: Bearer <token>`.
+
+### 5. Verify
+
+```bash
+curl -sS -H "Authorization: Bearer $VAULT_API_TOKEN" \
+  "https://<host>/api/v1/vault/search?q=idempotency&limit=3"
+```
+
+A working credential returns results and a `vector_status`. For MCP, the check
+is that the tools appear at all, and that the ones that appear match the scopes
+granted — a `vault:read vault:write` credential should show `vault_search`,
+`vault_get_note`, and `vault_contribute`, and nothing else.
+
+### 6. Rotate and revoke
+
+```bash
+python -m scripts.issue_vault_credential list
+python -m scripts.issue_vault_credential revoke --id <credential-id>
+```
+
+`list` shows each credential's principal, scopes, creation, expiry, revocation,
+and `last_used_at` — which means "last used", not "last attempted", because it
+is written only on success. A credential that has never been used shows `never`,
+which is how a registration that silently failed becomes visible.
+
+Rotation is revoke-then-issue; there is no re-key, because the secret was never
+stored.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| ------- | ----- |
+| `401` | Bad, expired, or revoked credential. The response deliberately does not say which |
+| `403` | Valid credential, missing scope. Check the grant against the table above |
+| MCP tools missing entirely | Server not registered for this client, or the header is wrong. The mount carries its own auth — it inherits none of the host router's guards |
+| Some MCP tools missing | Working as designed: the tool list is filtered by scope |
+| `421` on every MCP request | `VAULT_MCP_ALLOWED_HOSTS` is set and does not name this host. Unset it, or add the host. It is off by default because the SDK's default validates `Host` against `127.0.0.1` and would reject every request to a public deployment |
+| `429` | Quota, per principal per operation. Buckets are per process, so the real ceiling is the limit times the worker count |
+| `503` on a write | No embedding provider, so the dedup gate cannot run. The write path refuses rather than inserting un-deduplicated content |
+| `409` on a contribution | An idempotency key was reused for different content. Change one or the other; do not loop |
+
+A `flagged` result is **not** an error. It is a settled `200` outcome meaning the
+note was written for review, and retrying it creates a second note that flags
+against the first.
 
 ## Saturation
 

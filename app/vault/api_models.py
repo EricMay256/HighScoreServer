@@ -1,8 +1,9 @@
 """Pydantic models for the vault transport boundary.
 
 Search and document retrieval over HTTP, plus the governed write path:
-contribution (ADR 0016) and full replacement (ADR 0018). Review, compile, and
-export have models in neither this module nor the router yet.
+contribution (ADR 0016), full replacement (ADR 0018), and the review queue
+(ADR 0019's amendment). Compile and export have models in neither this module
+nor the router yet.
 
 Persistence records and SQLAlchemy table definitions intentionally live in
 separate modules.
@@ -11,11 +12,18 @@ separate modules.
 import json
 from datetime import datetime
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
-from .domain import DocumentKind, DocumentStatus, VaultDocument, VectorSearchStatus
+from .domain import (
+    DocumentKind,
+    DocumentStatus,
+    VaultDocument,
+    VaultReviewCase,
+    VectorSearchStatus,
+)
 from .facets import normalize_facets
 
 
@@ -403,3 +411,105 @@ def canonical_request_digest(body: VaultContributionRequest) -> bytes:
         sort_keys=True,
     )
     return sha256(canonical.encode("utf-8")).digest()
+
+
+class VaultSimilarEvidence(BaseModel):
+    """One note a flagged contribution scored against.
+
+    Shaped like ``VaultSimilarNote`` but read from stored JSON rather than a
+    live query, so the fields are what the write path recorded at decision time
+    and not what the corpus says now. A reviewer is judging the comparison that
+    was actually made.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    note_id: str | None = None
+    title: str | None = None
+    score: float | None = None
+
+
+class VaultReviewCaseSummary(BaseModel):
+    """One case as it appears in the queue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_case_id: UUID
+    # None once the candidate has been deleted by a rejection.
+    candidate_note_id: str | None
+    state: str
+    reason: str
+    similar: list[VaultSimilarEvidence] = Field(default_factory=list)
+    created_at: datetime
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    decision_note: str | None = None
+
+
+class VaultReviewQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pending: list[VaultReviewCaseSummary]
+    count: int
+
+
+class VaultReviewCaseResponse(BaseModel):
+    """A case plus the content being judged.
+
+    ``candidate`` is the flagged note in full. The public read surface withholds
+    ``flagged`` (ADR 0008) because its consumer is a model that will not check
+    the status field; a reviewer is the opposite consumer and cannot adjudicate
+    what they cannot read.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_case: VaultReviewCaseSummary
+    candidate: VaultDocumentDetail | None
+
+
+class VaultReviewDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accepted", "rejected"] = Field(
+        description=(
+            "'accepted': the flag was a false positive, so the note is "
+            "published and rejoins search and dedup. 'rejected': the note "
+            "really is a duplicate, so it is DELETED -- its content is already "
+            "in the corpus, which is what the case said. 'superseded' exists in "
+            "the schema but is reserved and not accepted here."
+        ),
+    )
+    decision_note: str | None = Field(default=None, max_length=2_000)
+
+
+class VaultReviewDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    review_case: VaultReviewCaseSummary
+    candidate: Literal["published", "deleted", "absent"] = Field(
+        description=(
+            "What happened to the note: 'published' if it is now active, "
+            "'deleted' if it was removed, 'absent' if it was already gone."
+        ),
+    )
+
+
+def review_case_summary(case: VaultReviewCase) -> VaultReviewCaseSummary:
+    """Project a domain review case onto its transport shape.
+
+    Here rather than in either adapter, for the reason ``document_detail`` is:
+    two copies eventually disagree about what a case looks like.
+    """
+
+    return VaultReviewCaseSummary(
+        review_case_id=case.id,
+        candidate_note_id=case.candidate_document_id,
+        state=case.state.value,
+        reason=case.reason,
+        similar=[VaultSimilarEvidence.model_validate(item) for item in case.similar_documents],
+        created_at=case.created_at,
+        decided_at=case.decided_at,
+        decided_by=case.decided_by,
+        decision_note=case.decision_note,
+    )

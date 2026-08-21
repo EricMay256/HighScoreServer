@@ -1537,9 +1537,20 @@ def test_review_evidence_document_cannot_be_retired(
         _cleanup()
 
 
-def test_resolved_candidate_document_still_cannot_be_retired(
+def test_a_settled_case_no_longer_blocks_retiring_its_candidate(
     client: TestClient, write_token: str, provider: StubEmbeddingProvider
 ) -> None:
+    """The behaviour migration 0011 and ADR 0019's amendment changed.
+
+    A candidate reference used to block retirement in *every* state, because
+    the foreign key was durable and non-cascading. The consequence went
+    unnoticed: a note flagged once could never be deleted, which the load probe
+    hit in practice and which is a data-protection problem the day a flagged
+    note holds a secret. The pointer is nullable now and ``delete`` clears it,
+    so only an *unresolved* case blocks -- a reviewer still needs its subject,
+    a finished one does not.
+    """
+
     note_id = _contribute(client, write_token)
 
     try:
@@ -1569,6 +1580,48 @@ def test_resolved_candidate_document_still_cannot_be_retired(
                 await engine.dispose()
 
         asyncio.run(add_resolved_case())
+        response = client.delete(
+            f"/api/v1/vault/notes/{note_id}",
+            headers={"Authorization": f"Bearer {write_token}"},
+        )
+
+        assert response.status_code == 204, response.text
+        assert _count(vault_documents, id=note_id) == 0
+        # The judgement survives the note it judged, with a null pointer -- the
+        # same shape vault_write_requests.document_id has used all along.
+        assert _count(vault_review_cases, candidate_document_id=note_id) == 0
+    finally:
+        _cleanup()
+
+
+def test_an_unresolved_case_still_blocks_retiring_its_candidate(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The half of the old rule that survives, and for a different reason.
+
+    Not a foreign-key mechanic any more but a judgement: retiring a note out
+    from under a reviewer who is still deciding about it destroys the thing
+    they are deciding about.
+    """
+
+    note_id = _contribute(client, write_token)
+
+    try:
+
+        async def add_pending_case() -> None:
+            transactions, engine = vault_service()
+            try:
+                async with transactions.transaction() as connection:
+                    await VaultReviewCaseRepository().insert_pending(
+                        connection,
+                        candidate_document_id=note_id,
+                        reason="Still being decided",
+                        similar_documents=[],
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(add_pending_case())
         response = client.delete(
             f"/api/v1/vault/notes/{note_id}",
             headers={"Authorization": f"Bearer {write_token}"},
