@@ -209,15 +209,34 @@ class TokenBucketLimiter:
         """Drop buckets that have provably refilled to capacity.
 
         Called only when the dict has grown, because it is a scan. Correctness
-        does not depend on it running: a retained full bucket behaves exactly
-        like an absent one.
+        does not depend on it *running*: a retained full bucket behaves exactly
+        like an absent one. It does depend on this asking the same question
+        ``check`` did -- ``limit_for``, not ``LIMITS`` -- because a bucket is
+        charged against the effective quota and must be forgiven on the same
+        one.
+
+        Reading the base table here was safe only by arithmetic accident. The
+        shipped override widens burst 3x and rate 10x, so its bucket refills in
+        12s where the base takes 40s, and pruning late merely retains it. An
+        override that raised burst faster than rate would invert that: at
+        ``per_minute=60, burst=200`` a bucket refills in 200s while this would
+        drop it at 40s, one-fifth full, silently refunding the 160 requests it
+        had already charged. That is exactly the refund the class docstring
+        promises not to make, so the guard belongs in the code rather than in
+        the choice of constants.
+
+        An operation absent from ``LIMITS`` is skipped rather than raised on:
+        ``check`` resolves ``limit_for`` before it creates a bucket, so such a
+        key cannot exist, and housekeeping must not be the thing that turns an
+        impossible state into a failed request.
         """
 
         stale = [
             key
             for key, bucket in self._buckets.items()
-            if (limit := LIMITS.get(key[1])) is not None
-            and moment - bucket.updated_at >= limit.burst / limit.refill_per_second
+            if key[1] in LIMITS
+            and moment - bucket.updated_at
+            >= (limit := limit_for(*key)).burst / limit.refill_per_second
         ]
         for key in stale:
             del self._buckets[key]
