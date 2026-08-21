@@ -105,7 +105,7 @@ flowchart LR
 ### Knowledge-platform bounded context
 
 The cloud knowledge platform is staged in this service as an isolated `app/vault/` package,
-with its own decision log of 20 ADRs under
+with its own decision log of 23 ADRs under
 [`app/vault/docs/adr/`](app/vault/docs/adr/). It exposes an authenticated HTTP adapter —
 hybrid lexical and vector search fused by reciprocal rank, fetch by id, and a governed write
 path covering contribution, replacement, and retirement — over one application-service layer.
@@ -114,9 +114,16 @@ It uses SQLAlchemy Core (not the ORM) for vault persistence, and keeps all knowl
 in PostgreSQL rather than in this public repository.
 
 The routes are registered only when `VAULT_ENABLED` is true, so a default deployment publishes
-no vault schema and no vault endpoints. An MCP adapter is intended over the same service layer
-but is **not built** — it is the reason the layer is separate from the HTTP surface, not
-something the package currently ships.
+no vault schema and no vault endpoints. A second adapter — MCP, mounted at
+`/api/v1/vault/mcp/` — sits over the same application-service layer, which is why that layer
+is separate from the HTTP surface. Which tools a caller can see is decided by its credential's
+scopes, and that filtering is a security boundary rather than tidiness: see
+[ADR 0021](app/vault/docs/adr/0021-mcp-is-a-second-adapter-with-scope-shaped-tools.md).
+
+Granting someone access — choosing scopes, minting a credential, registering the MCP server or
+configuring REST, verifying, and revoking — is documented end to end under "Granting an agent
+access" in
+[`app/vault/docs/vault-configuration.md`](app/vault/docs/vault-configuration.md).
 
 The package boundary is also an extraction seam: the eventual target keeps HSS and the private
 knowledge runtime in focused repositories and lets private composition CI build the combined

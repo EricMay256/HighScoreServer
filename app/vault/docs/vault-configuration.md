@@ -687,6 +687,143 @@ rather than tidier. The pre-auth guard can already take one via
 `VAULT_RATE_LIMIT_STORAGE_URI`; the quota cannot, and would need the same
 treatment.
 
+## Granting an agent access, end to end
+
+Everything from "someone wants to use the vault" to "their agent is contributing
+notes". Do it once per person or per machine.
+
+### 1. Decide the scopes
+
+Scopes are verbs, one per route (vault ADR 0020), and they are what shapes the
+MCP tool surface a caller can see (ADR 0021). Grant the narrowest set that does
+the job:
+
+| Who | Scopes | Why |
+| --- | ------ | --- |
+| An ordinary agent or person contributing notes | `vault:read vault:write` | Search, fetch, contribute. The common case |
+| A read-only consumer | `vault:read` | Retrieval with no way to write |
+| A corpus import or backfill | `vault:read vault:write vault:update` | Replacement is a separate verb |
+| A reviewer adjudicating flagged notes | `vault:read vault:review` | **Serves `flagged` content**, the least-vetted text in the corpus |
+| Nobody, by default | `vault:delete` | Retirement destroys a note (ADR 0019). Grant per incident, revoke after |
+
+Withholding a scope is a **prompt-injection boundary, not tidiness**. The MCP
+tool list is filtered by the caller's scopes, so a credential without
+`vault:delete` has no `vault_retire_note` on its surface at all — there is no
+tool for injected text in a note to name. Do not fold scopes together because
+issuing two looks like ceremony; that is exactly how `vault:write` came to mean
+"may destroy any note" before ADR 0020 split it.
+
+### 2. Mint the credential
+
+```bash
+python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write
+```
+
+Against production, set `DATABASE_URL` explicitly for the command — issuing into
+the wrong database is silent. On a dyno it is already set:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write"
+```
+
+Quote the whole remote command. `heroku run` parses the line first and claims
+`-m` and `--scopes` for itself otherwise, reporting `Nonexistent flags` about
+flags that are perfectly valid for your script.
+
+**Name it per person or per machine, never per team.** `contributed_by` is
+derived from the principal and never from the request body, so the name becomes
+the note's `ContributedBy` — one credential per person gives per-person
+provenance in the corpus and per-person revocation, both for free. A shared
+credential gives up both and cannot be taken back from one user.
+
+`--days N` sets an expiry. Omit it for none.
+
+**The token prints once and is not recoverable** — only `sha256(secret)` is
+stored. Two consequences:
+
+- Have the *person* run this in their own shell. An agent that runs it has read
+  the secret into its transcript, and from there into summaries and logs. This
+  has already happened twice to live production credentials.
+- If it leaks, revoke and reissue. Do not reason about how exposed it is.
+
+### 3. Register the MCP server (preferred)
+
+```bash
+claude mcp add --transport http vault https://<host>/api/v1/vault/mcp/ \
+  --header "Authorization: Bearer hssv1_<credential-id>_<secret>"
+```
+
+**Note the trailing slash.** The bare form 307-redirects to it, so both work and
+the slash saves a hop.
+
+This only stores a URL and a header — nothing is launched. The vault MCP server
+is an ASGI app mounted into the host application, so it is already running
+wherever the host runs; there is no process to start and no Procfile entry.
+
+The credential lives in the client's configuration and the transport attaches
+it, so **the agent never handles the token**. That is the reason to prefer this
+over REST: not convenience, but that there is no secret in the session to leak.
+
+### 4. Or configure REST (fallback)
+
+For agents without MCP — Codex, CI, one-off scripts. The token goes in an
+environment variable the process inherits:
+
+```bash
+export VAULT_API_TOKEN='hssv1_<credential-id>_<secret>'
+```
+
+Never on a command line: argv is readable by every process on the host. Never in
+a file the agent writes, and never printed.
+
+Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
+`POST /api/v1/vault/contributions`, `PUT /api/v1/vault/notes/{id}`, and
+`DELETE /api/v1/vault/notes/{id}`, all taking `Authorization: Bearer <token>`.
+
+### 5. Verify
+
+```bash
+curl -sS -H "Authorization: Bearer $VAULT_API_TOKEN" \
+  "https://<host>/api/v1/vault/search?q=idempotency&limit=3"
+```
+
+A working credential returns results and a `vector_status`. For MCP, the check
+is that the tools appear at all, and that the ones that appear match the scopes
+granted — a `vault:read vault:write` credential should show `vault_search`,
+`vault_get_note`, and `vault_contribute`, and nothing else.
+
+### 6. Rotate and revoke
+
+```bash
+python -m scripts.issue_vault_credential list
+python -m scripts.issue_vault_credential revoke --id <credential-id>
+```
+
+`list` shows each credential's principal, scopes, creation, expiry, revocation,
+and `last_used_at` — which means "last used", not "last attempted", because it
+is written only on success. A credential that has never been used shows `never`,
+which is how a registration that silently failed becomes visible.
+
+Rotation is revoke-then-issue; there is no re-key, because the secret was never
+stored.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| ------- | ----- |
+| `401` | Bad, expired, or revoked credential. The response deliberately does not say which |
+| `403` | Valid credential, missing scope. Check the grant against the table above |
+| MCP tools missing entirely | Server not registered for this client, or the header is wrong. The mount carries its own auth — it inherits none of the host router's guards |
+| Some MCP tools missing | Working as designed: the tool list is filtered by scope |
+| `421` on every MCP request | `VAULT_MCP_ALLOWED_HOSTS` is set and does not name this host. Unset it, or add the host. It is off by default because the SDK's default validates `Host` against `127.0.0.1` and would reject every request to a public deployment |
+| `429` | Quota, per principal per operation. Buckets are per process, so the real ceiling is the limit times the worker count |
+| `503` on a write | No embedding provider, so the dedup gate cannot run. The write path refuses rather than inserting un-deduplicated content |
+| `409` on a contribution | An idempotency key was reused for different content. Change one or the other; do not loop |
+
+A `flagged` result is **not** an error. It is a settled `200` outcome meaning the
+note was written for review, and retrying it creates a second note that flags
+against the first.
+
 ## Saturation
 
 An exhausted vault pool — every connection checked out, `pool_timeout` elapsed —
