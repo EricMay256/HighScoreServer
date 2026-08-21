@@ -748,13 +748,26 @@ stored. Two consequences:
 
 ### 3. Register the MCP server (preferred)
 
-```bash
-claude mcp add --transport http vault https://<host>/api/v1/vault/mcp/ \
-  --header "Authorization: Bearer hssv1_<credential-id>_<secret>"
+**One line. No continuation character.**
+
+```
+claude mcp add --transport http --scope user vault https://example.herokuapp.com/api/v1/vault/mcp/ --header "Authorization: Bearer hssv1_<credential-id>_<secret>"
 ```
 
-**Note the trailing slash.** The bare form 307-redirects to it, so both work and
-the slash saves a hop.
+A trailing `\` is a bash-ism PowerShell does not honour. The command truncates
+there, the server registers *without* the `--header`, and the only symptom is a
+later `✘ Failed to connect` that names nothing useful. That has already happened
+once, from this very runbook — which at the time also carried a section warning
+that PowerShell needs different syntax.
+
+Substitute the real host. A literal `<host>` registers as a literal `<host>`,
+which is the second half of the same incident.
+
+`--scope user` makes the server available in every project. The default is
+`local`, meaning the current project only — rarely what you want for a vault.
+
+**Note the trailing slash** on the URL. The bare form 307-redirects to it, so
+both work and the slash saves a hop.
 
 This only stores a URL and a header — nothing is launched. The vault MCP server
 is an ASGI app mounted into the host application, so it is already running
@@ -783,14 +796,35 @@ Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
 ### 5. Verify
 
 ```bash
-curl -sS -H "Authorization: Bearer $VAULT_API_TOKEN" \
-  "https://<host>/api/v1/vault/search?q=idempotency&limit=3"
+curl -sS -H "Authorization: Bearer $VAULT_API_TOKEN" "https://<host>/api/v1/vault/search?q=idempotency&limit=3"
 ```
 
-A working credential returns results and a `vector_status`. For MCP, the check
-is that the tools appear at all, and that the ones that appear match the scopes
-granted — a `vault:read vault:write` credential should show `vault_search`,
-`vault_get_note`, and `vault_contribute`, and nothing else.
+On PowerShell that is `curl.exe` — the bare `curl` is an alias for
+`Invoke-WebRequest`, which takes different arguments and throws on a non-2xx
+rather than printing the body. Use `$env:VAULT_API_TOKEN` for the variable.
+
+A working credential returns results and a `vector_status`.
+
+For MCP, check the registration itself first:
+
+```
+claude mcp list
+```
+
+`✔ Connected` means the URL and header both landed. `✘ Failed to connect` most
+often means the header did not — see the truncation trap above.
+
+There is **no edit subcommand**. Changing a registration is remove-then-add:
+
+```
+claude mcp remove vault
+```
+
+Then check the tools: the ones that appear should match the scopes granted — a
+`vault:read vault:write` credential shows `vault_search`, `vault_get_note`, and
+`vault_contribute`, and nothing else. **A server added mid-session does not
+appear in that session**; the tool set is fixed at startup, so restart the agent
+before concluding the registration failed.
 
 ### 6. Rotate and revoke
 
