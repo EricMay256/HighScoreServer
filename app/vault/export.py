@@ -546,7 +546,19 @@ class VaultExportService:
                 _write_text(target, item.content)
 
         resolved_root = root.resolve()
-        for orphan in _orphaned_files(root, expected):
+        # Only sweep a prefix the corpus actually populates. A prefix with no
+        # rows is far more likely to mean "the database is not authoritative
+        # for this folder yet" than "every file in it was retired" -- and today
+        # it means exactly that for `Agent/wiki/`, where the Stage-A librarian
+        # still owns 15 compiled pages the service has never held. ADR 0012
+        # settles the same question the same way for reconciliation: sweep only
+        # after a complete walk, and refuse an implausible one.
+        populated = {
+            prefix
+            for prefix in EXPORTED_PATH_PREFIXES
+            if any(item.vault_path.startswith(prefix) for item in rendered)
+        }
+        for orphan in _orphaned_files(root, expected, populated):
             report.prunable.append(orphan.relative_to(resolved_root).as_posix())
             if prune and apply:
                 orphan.unlink()
@@ -569,17 +581,23 @@ def _write_text(path: Path, content: str) -> None:
         handle.write(content)
 
 
-def _orphaned_files(root: Path, expected: set[Path]) -> tuple[Path, ...]:
-    """Markdown files under the exported prefixes that no row accounts for.
+def _orphaned_files(
+    root: Path,
+    expected: set[Path],
+    prefixes: Iterable[str],
+) -> tuple[Path, ...]:
+    """Markdown files under the given prefixes that no row accounts for.
 
     Scoped to the prefixes this module owns, so a file the engine never wrote --
     ``Agent/INDEX.md``, anything under ``Agent/Promotion Candidates/`` -- is
-    never a deletion candidate, whatever the corpus contains.
+    never a deletion candidate, whatever the corpus contains. Narrowed again by
+    the caller to prefixes the corpus populates, so an empty one is left alone
+    rather than emptied.
     """
 
     resolved_root = root.resolve()
     orphans: list[Path] = []
-    for prefix in EXPORTED_PATH_PREFIXES:
+    for prefix in prefixes:
         directory = resolved_root / Path(*PurePosixPath(prefix).parts)
         if not directory.is_dir():
             continue
