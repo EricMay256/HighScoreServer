@@ -159,8 +159,18 @@ folder. `promotion_status` is a closed enum set by a reviewer, not free text fro
 contributor, and it selects between two service-chosen folders. No caller gains a way to
 choose where its note lands.
 
+### Who sets it
+
+`promotion_status` is gated on **`vault:review`**, and its tool belongs on the **admin MCP
+surface**, not the general mount — the same answer the review flow got, for the same reason.
+Proposing a note for promotion and adjudicating a flagged one are both judgements about what
+the corpus should contain, made by a person, and neither belongs on a surface that untrusted
+note text can name (ADR 0021).
+
+That makes `vault:review` the scope for two verbs rather than one, which is the right
+granularity: a credential that may triage the review queue is the same credential that may
+triage the promotion queue, and an ordinary contributor holds neither.
+
 ### What this does not decide
 
-Who may set `promotion_status`, and through which surface. It is a review-shaped verb, so
-`vault:review` is the obvious scope and the admin MCP the obvious home — but that is the same
-open question the review flow left, and it should be answered once for both.
+The shape of the admin MCP server itself, which remains unstarted and its own decision.
