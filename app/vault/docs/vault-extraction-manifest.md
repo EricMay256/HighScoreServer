@@ -21,7 +21,7 @@ durable than removability comments scattered across modules, which go stale sile
 
 | Owner | Current tests | Extraction action |
 | ---- | ---- | ---- |
-| Vault package | `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_governance.py`, `test_origin.py`, `test_promotion.py`, `test_read_policy.py`, `test_repositories.py`, `test_reviews.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
+| Vault package | `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_governance.py`, `test_oauth_store.py`, `test_origin.py`, `test_passwords.py`, `test_promotion.py`, `test_read_policy.py`, `test_repositories.py`, `test_reviews.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
 | Private composition | `test_contributions.py`, `test_routes.py`, `test_rate_limit.py`, `test_schema_drift.py`, `tests/vault/conftest.py` | Move to the composing application or split package-only cases out. Replace HSS's global `TestClient(app.main.app)` with a standalone vault application factory; provide package-owned migrated Postgres/pgvector and credential fixtures. |
 | HSS host | `test_hss_pool_config.py` | Keep in HSS and move out of `tests/vault/`; it verifies `app.db`, not the extracted package. |
 | Dual-lineage composition | `test_migrations.py`, `migration_helpers.py` | Keep the shared-vs-separate topology cases with the composition owner. Move vault-only upgrade/downgrade, offline-render, and extracted revision-graph cases with the vault lineage. |
@@ -80,6 +80,12 @@ validation. It stays in both.
 from a root `templates/` directory and the vault will render its own from
 `app/vault/templates/`, with separate environments and no shared base template. Two independent
 users of one library, like `slowapi` — it stays in both, and the vault repo must declare it.
+
+`bcrypt` is shared as of ADR 0024's operator login: `app/vault/passwords.py` hashes the operator
+password with it, and `app/auth.py` hashes user passwords. Two independent users again, and the
+duplication is deliberate — `app/vault/` may contain no `from app.`, so the vault carries its own
+ten-line wrapper rather than a host dependency the package could not take with it. It stays in
+both, and the vault repo must declare it.
 
 **No embedding client appears here.** Vault ADR 0005 selected OpenAI and deliberately called the
 REST endpoint through `httpx` rather than the `openai` SDK, so the adapter added no package. If

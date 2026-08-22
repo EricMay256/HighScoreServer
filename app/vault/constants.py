@@ -117,3 +117,34 @@ def resolve_text_search_config() -> str:
             f"got {value!r}"
         )
     return value
+
+
+# ── The OAuth authorization server (ADR 0024) ──────────────────────────────
+
+# What a self-registering client receives, and the most it may request. ADR
+# 0024 makes this a *baseline*, not a ceiling: a client can never ask for more,
+# so `vault:update`, `vault:delete` and `vault:review` are unreachable by
+# request rather than by an operator declining on a consent screen -- but the
+# credential OAuth mints is an ordinary row, and an operator may widen a
+# specific one afterwards. Above-baseline scopes are granted deliberately,
+# never requested.
+#
+# Restricting the web path to read and write is a security decision rather than
+# a convenience one: ADR 0021's defence against injected instructions is that a
+# destructive tool is absent from the surface untrusted note text can name, and
+# a web-authorized client has no retire tool to be talked into using.
+OAUTH_BASELINE_SCOPES: tuple[str, ...] = ("vault:read", "vault:write")
+
+# How long an authorization may sit waiting for the operator to finish the login
+# form. Generous for a person reading a consent screen and typing a password,
+# short enough that an abandoned attempt is not a standing invitation. Not
+# configurable: a deployment that widened it would be weakening a security
+# boundary through an environment variable, which is the mistake
+# PRINCIPAL_LIMITS is kept out of configuration to avoid.
+PENDING_AUTHORIZATION_TTL_SECONDS = 300
+
+# How long a minted authorization code survives before /token must redeem it.
+# RFC 6749 recommends a maximum of ten minutes and "a maximum of 1 minute" for
+# new work; the redemption is a machine-to-machine round trip that happens
+# immediately, so 60s is generous rather than tight.
+AUTHORIZATION_CODE_TTL_SECONDS = 60

@@ -6,9 +6,20 @@ Date: 2026-08-21
 
 Accepted 2026-08-22.
 
-Design settled; implementation outstanding. The 2026-08-22 spike confirmed `/authorize` runs
-in the operator's system browser, so both identity methods are reachable, and left three
-constraints recorded under "Consequences".
+Design settled. The 2026-08-22 spike confirmed `/authorize` runs in the operator's system
+browser, so both identity methods are reachable, and left three constraints recorded under
+"Consequences".
+
+**Persistence landed 2026-08-21** in migration `0013_oauth_authorization_server`: three tables
+(`vault_oauth_clients`, `vault_oauth_pending_authorizations`,
+`vault_oauth_authorization_codes`), their repositories, and `app/vault/passwords.py` for the
+operator password. There is deliberately no fourth table for tokens, which is this ADR's whole
+point. Two implementation choices are recorded under "Consequences" below: where the operator
+hash lives, and why the code table's scope CHECK is wider than the baseline.
+
+Still outstanding: the provider itself, the login page and its template, CSRF, the
+login-specific rate limit, the `grant`/`revoke-scope` subcommand this ADR requires, and
+deleting `oauth_spike.py`.
 
 Supersedes the OAuth deferral in ADR 0021, which recorded that the SDK's `token_verifier` was
 left unused because it requires `AuthSettings.issuer_url`, and setting that would publish
@@ -256,6 +267,23 @@ residual risk is re-authorization initiated from mobile, which the password meth
 
 Both identity methods stay in the decision regardless. What this measurement settles is which
 one to reach for first, and it is Google.
+
+### Two things the persistence layer had to settle (2026-08-21)
+
+**The operator hash is configuration, not a table.** The decision above says "from config or
+its own table" without choosing. It is `VAULT_OPERATOR_PASSWORD_HASH`, because there is exactly
+one secret, it has no lifecycle a schema would model, rotation is `heroku config:set` — which
+is also the revocation story — and a database's backups circulate more widely than a config
+var's do. Unset is a supported state meaning the password method is not configured for this
+deployment, and it must never be read as "any password works": the login refuses outright, the
+way `VAULT_ENABLED` defaulting to false serves no vault rather than an unguarded one.
+
+**The authorization-code table's scope CHECK mirrors `vault_agent_credentials`, not the OAuth
+baseline.** The baseline is what a *client may request*, and this ADR is explicit that an
+operator may widen a specific credential afterwards — "expected rather than exceptional". A
+CHECK constraining the column to `vault:read` and `vault:write` would forbid the widened case
+at a layer no application code could permit, turning a supported operation into an integrity
+error. The narrower rule belongs where it is enforceable and overridable: application code.
 
 ### Existing credentials are unaffected
 

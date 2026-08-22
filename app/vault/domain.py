@@ -240,3 +240,65 @@ class PoolSnapshot:
     latest_checkout_seconds: float | None
     maximum_checkout_seconds: float | None
     total_checkout_seconds: float = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredOAuthClient:
+    """One dynamically registered OAuth client.
+
+    ``client_info`` is the SDK's ``OAuthClientInformationFull`` as plain JSON,
+    not a parsed model: persistence must not import a transport package, and
+    RFC 7591 lets a registration carry metadata this schema never anticipated.
+    The provider validates it back into the SDK model at its own boundary,
+    which is the same division ``frontmatter`` JSONB already draws.
+
+    ``expires_at`` is the client secret's expiry. Open registration means
+    unbounded rows, so they are pruned; None is a client that does not expire,
+    which is an operator's deliberate choice rather than a default.
+    """
+
+    client_id: str
+    client_info: dict[str, Any]
+    registered_at: datetime
+    expires_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingAuthorization:
+    """An authorization waiting for the operator to return from the login form.
+
+    The vault mints a nonce, redirects to its own page carrying it, and finds
+    this row again when the form posts back. Only ``sha256(nonce)`` is stored
+    (ADR 0015's rule for machine-generated secrets), and redemption is a
+    ``DELETE ... RETURNING`` so a replay finds nothing.
+
+    ``params`` holds the SDK's ``AuthorizationParams`` as JSON -- including the
+    PKCE ``code_challenge``, which waits here until ``/token`` redeems the code
+    this becomes.
+    """
+
+    client_id: str
+    params: dict[str, Any]
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredAuthorizationCode:
+    """A minted authorization code, between the login form and ``/token``.
+
+    Field-for-field the SDK's ``AuthorizationCode`` minus the code itself,
+    which is never stored in the clear. ``subject`` records which identity
+    method authenticated the operator, so an audit can tell a Google login from
+    a password one after the fact.
+    """
+
+    client_id: str
+    scopes: tuple[str, ...]
+    code_challenge: str
+    redirect_uri: str
+    redirect_uri_provided_explicitly: bool
+    created_at: datetime
+    expires_at: datetime
+    resource: str | None = None
+    subject: str | None = None

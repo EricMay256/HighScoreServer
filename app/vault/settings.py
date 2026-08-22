@@ -104,6 +104,33 @@ def vault_enabled() -> bool:
     return _parse_bool(os.environ.get("VAULT_ENABLED", "false"))
 
 
+def operator_password_hash() -> str | None:
+    """The bcrypt hash the login form verifies against, or None if unset.
+
+    Configuration rather than a table, which is a deliberate fork. There is
+    exactly one operator secret, it has no lifecycle a schema would model, and
+    rotating it is ``heroku config:set`` -- which is also the revocation story.
+    A row would additionally put a human password hash into a database whose
+    backups circulate more widely than a config var does.
+
+    None is a supported state, and it means the password identity method is not
+    configured for this deployment. It must never be treated as "any password
+    works": the caller refuses the login outright, in the same way
+    ``vault_enabled`` defaulting to false serves no vault rather than an
+    unguarded one. Returning None rather than raising keeps this checkable
+    without making an unconfigured deployment fail at startup, since ADR 0024
+    also builds a Google path that needs no password at all.
+
+    Shape is not validated here. A malformed hash is caught by
+    ``passwords.verify_password``, which logs the fault and reports a failed
+    login -- one message for every failure, per ADR 0024. Validating at startup
+    would be a second place to keep the bcrypt format definition.
+    """
+
+    value = (os.environ.get("VAULT_OPERATOR_PASSWORD_HASH") or "").strip()
+    return value or None
+
+
 def normalize_sqlalchemy_url(url: str) -> str:
     """Normalize a PostgreSQL URL for SQLAlchemy's psycopg dialect."""
 

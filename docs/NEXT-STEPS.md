@@ -7,14 +7,16 @@ this list assumes — inherited state, the conventions that bite, what is unsett
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** on `dev`. Suite green (433 vault, 675 full). PR #14 merges the
+**State:** on `dev`. Suite green (461 vault, 703 full). PR #14 merges the
 22-commit gap into `main` and is open for review.
 
-**Production is one revision behind `dev`'s schema:** it sits at vault lineage
+**Production is two revisions behind `dev`'s schema:** it sits at vault lineage
 `0011_review_candidate_optional` with 70 documents, all active, none flagged,
 none unembedded, every path a title slug. The review flow shipped in release
-v64. `0012_document_promotion_status` deploys with the next release — it adds a
-nullable column and creates one enum, so it is additive and needs no backfill.
+v64. `0012_document_promotion_status` and `0013_oauth_authorization_server`
+deploy with the next release. Both are additive and need no backfill — 0012 adds
+one nullable column and one enum, 0013 adds three empty tables — and neither
+changes any running behaviour, since nothing calls the new code yet.
 
 **ADRs 0023, 0024 and 0025 are all Accepted as of 2026-08-22.** What remains is
 implementation, listed below; no decision blocks it.
@@ -54,9 +56,24 @@ four code pieces landed 2026-08-21:
 No longer blocks Phase 4: candidates live where `vault_path` says, and item 5 can
 read that.
 
-## 3. Implement ADR 0024 — the authorization server
+## 3. Implement ADR 0024 — the authorization server — **persistence landed**
 
-Accepted; the provider is unwritten.
+Accepted. Migration `0013_oauth_authorization_server` and its repositories are in,
+along with `app/vault/passwords.py`; the provider is still unwritten.
+
+Done:
+
+- ✅ `vault_oauth_clients` — registrations, `client_info` as JSONB so an RFC 7591
+  field nobody modelled survives the round trip
+- ✅ `vault_oauth_pending_authorizations` — the nonce store, PKCE challenge
+  included, redeemed by `DELETE ... RETURNING`
+- ✅ `vault_oauth_authorization_codes` — same idiom, shorter TTL. `load` does not
+  consume; `redeem` does
+- ✅ `app/vault/passwords.py` — bcrypt, offloaded to a thread, and
+  `VAULT_OPERATOR_PASSWORD_HASH` in config rather than a table
+
+**No token table, and there will not be one.** An access token is a
+`vault_agent_credentials` row — that is the whole of ADR 0024.
 
 The 2026-08-22 spike answered the question that blocked it — `/authorize` runs in
 the operator's system browser, so Google login is viable — and left three
@@ -90,17 +107,14 @@ Google login replaces the middle two steps with a redirect to Google and a
 callback; everything either side is identical. Build the password path first —
 it needs no external registration, so it can be exercised end to end locally.
 
-What to build, roughly in order:
+What is left to build, roughly in order:
 
-1. **The pending-authorization store.** A table holding the `AuthorizationParams`
-   against a nonce, with an expiry — a few minutes is generous. Postgres, not
-   memory, for the reason client registrations are: the redirect out to the form
-   and back may cross workers. This is also where the PKCE `code_challenge` waits
-   until `/token` redeems it.
-2. **The operator credential.** One bcrypt hash, from config or its own table.
-   `app/auth.py` already has `hash_password`/`verify_password` — but `app/vault/`
-   may contain no `from app.`, so the vault needs its own thin wrapper and
-   `bcrypt` listed in the extraction manifest.
+1. ~~**The pending-authorization store.**~~ Done — `vault_oauth_pending_authorizations`,
+   redeemed atomically, with the PKCE `code_challenge` inside `params`.
+2. ~~**The operator credential.**~~ Done — `app/vault/passwords.py` and
+   `VAULT_OPERATOR_PASSWORD_HASH`. Config rather than a table: one secret, no
+   lifecycle to model, rotation is `heroku config:set`. `bcrypt` is now listed in
+   the extraction manifest as staying in both repos.
 3. **The template — vault-owned.** `app/vault/templates/`, with the vault building
    its own Jinja2 environment. **Do not extend HSS's `templates/base.html`**: the
    package moves as a directory and a host asset does not move with it. This is

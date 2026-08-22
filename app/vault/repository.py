@@ -2,7 +2,8 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -12,13 +13,20 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .auth import VaultCredential
+from .constants import (
+    AUTHORIZATION_CODE_TTL_SECONDS,
+    PENDING_AUTHORIZATION_TTL_SECONDS,
+)
 from .domain import (
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    PendingAuthorization,
     PromotionStatus,
+    RegisteredOAuthClient,
     ReviewState,
+    StoredAuthorizationCode,
     VaultDocument,
     VaultReviewCase,
 )
@@ -28,6 +36,9 @@ from .tables import (
     vault_audit_events,
     vault_document_embeddings,
     vault_documents,
+    vault_oauth_authorization_codes,
+    vault_oauth_clients,
+    vault_oauth_pending_authorizations,
     vault_review_cases,
     vault_write_requests,
 )
@@ -870,3 +881,305 @@ class VaultAuditEventRepository:
                 latency_ms=latency_ms,
             )
         )
+
+
+def _registered_client_from_row(row: RowMapping) -> RegisteredOAuthClient:
+    return RegisteredOAuthClient(
+        client_id=row["client_id"],
+        client_info=dict(row["client_info"]),
+        registered_at=row["registered_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def _pending_authorization_from_row(row: RowMapping) -> PendingAuthorization:
+    return PendingAuthorization(
+        client_id=row["client_id"],
+        params=dict(row["params"]),
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def _authorization_code_from_row(row: RowMapping) -> StoredAuthorizationCode:
+    return StoredAuthorizationCode(
+        client_id=row["client_id"],
+        scopes=tuple(row["scopes"]),
+        code_challenge=row["code_challenge"],
+        redirect_uri=row["redirect_uri"],
+        redirect_uri_provided_explicitly=row["redirect_uri_provided_explicitly"],
+        resource=row["resource"],
+        subject=row["subject"],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def hash_oauth_secret(secret: str) -> bytes:
+    """The 32 bytes stored for a nonce or an authorization code.
+
+    Deliberately the same construction ``auth.hash_secret`` uses for agent
+    secrets, and correct for the same reason: both are machine-generated with
+    full entropy, so there is no dictionary a work factor would slow down. It
+    is emphatically *not* the right tool for the operator password, which is
+    why ``passwords.py`` exists and uses bcrypt instead.
+
+    A separate function rather than an import from ``auth`` because these are
+    different secrets with different lifetimes; if one ever needs a different
+    construction, the other should not silently follow.
+    """
+
+    return sha256(secret.encode("utf-8")).digest()
+
+
+class VaultOAuthClientRepository:
+    """Dynamically registered OAuth clients.
+
+    Registration is open by decision (ADR 0024) -- the web client has no client
+    id to present and the specification expects it to self-register -- which is
+    why a registration grants nothing on its own. What gates access is the
+    authorization an operator personally approves, and the scopes the resulting
+    credential carries.
+    """
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        client_id: str,
+    ) -> RegisteredOAuthClient | None:
+        result = await connection.execute(
+            select(vault_oauth_clients).where(
+                vault_oauth_clients.c.client_id == client_id
+            )
+        )
+        row = result.mappings().one_or_none()
+        return _registered_client_from_row(row) if row is not None else None
+
+    async def upsert(
+        self,
+        connection: AsyncConnection,
+        *,
+        client_id: str,
+        client_info: Mapping[str, Any],
+        expires_at: datetime | None = None,
+    ) -> RegisteredOAuthClient:
+        """Store a registration, replacing any earlier one for the same id.
+
+        Upsert rather than insert because the SDK generates the client id and a
+        client may legitimately re-register -- one that lost its secret repeats
+        the flow, and refusing would leave it permanently unable to reconnect
+        under an id it still holds. Nothing is lost: a registration carries no
+        history and grants no privilege, so the current one is the only one
+        that matters.
+        """
+
+        statement = (
+            pg_insert(vault_oauth_clients)
+            .values(
+                client_id=client_id,
+                client_info=dict(client_info),
+                expires_at=expires_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[vault_oauth_clients.c.client_id],
+                set_={
+                    "client_info": dict(client_info),
+                    "expires_at": expires_at,
+                },
+            )
+            .returning(*vault_oauth_clients.c)
+        )
+        result = await connection.execute(statement)
+        return _registered_client_from_row(result.mappings().one())
+
+    async def delete_expired(
+        self,
+        connection: AsyncConnection,
+    ) -> int:
+        """Remove registrations whose secret has expired.
+
+        Open registration means unbounded rows, so a pruning story is required
+        rather than optional (ADR 0024). Cascades to any pending authorization
+        or unredeemed code for the client, which is correct: neither can
+        complete once the client is gone.
+        """
+
+        result = await connection.execute(
+            delete(vault_oauth_clients)
+            .where(vault_oauth_clients.c.expires_at.is_not(None))
+            .where(vault_oauth_clients.c.expires_at <= func.now())
+        )
+        return result.rowcount or 0
+
+
+class VaultOAuthPendingAuthorizationRepository:
+    """Authorizations in flight between ``/authorize`` and the login form.
+
+    In Postgres and not in a dict, which is the constraint the 2026-08-22 spike
+    established rather than assumed: registration arrives server-to-server from
+    the vendor's backend while ``/authorize`` is a browser navigation, so the
+    two halves reliably land on different Gunicorn workers. An in-memory store
+    fails deterministically, and only in production.
+    """
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        nonce: str,
+        client_id: str,
+        params: Mapping[str, Any],
+        ttl_seconds: int = PENDING_AUTHORIZATION_TTL_SECONDS,
+    ) -> PendingAuthorization:
+        statement = (
+            insert(vault_oauth_pending_authorizations)
+            .values(
+                nonce_sha256=hash_oauth_secret(nonce),
+                client_id=client_id,
+                params=dict(params),
+                expires_at=func.now() + timedelta(seconds=ttl_seconds),
+            )
+            .returning(*vault_oauth_pending_authorizations.c)
+        )
+        result = await connection.execute(statement)
+        return _pending_authorization_from_row(result.mappings().one())
+
+    async def redeem(
+        self,
+        connection: AsyncConnection,
+        nonce: str,
+    ) -> PendingAuthorization | None:
+        """Consume one pending authorization, or return None.
+
+        ``DELETE ... RETURNING`` with the expiry in the predicate, so single use
+        is one atomic statement. A check-then-delete is two that a concurrent
+        redemption can interleave, and this is the step that mints an
+        authorization code -- letting it run twice would issue two codes for one
+        approval.
+
+        None covers an unknown nonce, an expired one, and one already redeemed,
+        and the caller must not tell them apart: ADR 0024 renders one failure
+        message for every outcome, because a page distinguishing "bad password"
+        from "unknown request" hands an attacker a probe for valid attempts.
+        """
+
+        statement = (
+            delete(vault_oauth_pending_authorizations)
+            .where(
+                vault_oauth_pending_authorizations.c.nonce_sha256
+                == hash_oauth_secret(nonce)
+            )
+            .where(vault_oauth_pending_authorizations.c.expires_at > func.now())
+            .returning(*vault_oauth_pending_authorizations.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _pending_authorization_from_row(row) if row is not None else None
+
+    async def delete_expired(self, connection: AsyncConnection) -> int:
+        result = await connection.execute(
+            delete(vault_oauth_pending_authorizations).where(
+                vault_oauth_pending_authorizations.c.expires_at <= func.now()
+            )
+        )
+        return result.rowcount or 0
+
+
+class VaultOAuthAuthorizationCodeRepository:
+    """Minted authorization codes, between the login form and ``/token``.
+
+    Same single-use idiom and same hashing as the pending store above, for the
+    same reasons. The TTL is much shorter because redeeming a code is a
+    machine-to-machine round trip that happens immediately, where a pending
+    authorization waits on a person reading a consent screen.
+    """
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        code: str,
+        client_id: str,
+        scopes: Sequence[str],
+        code_challenge: str,
+        redirect_uri: str,
+        redirect_uri_provided_explicitly: bool,
+        resource: str | None = None,
+        subject: str | None = None,
+        ttl_seconds: int = AUTHORIZATION_CODE_TTL_SECONDS,
+    ) -> StoredAuthorizationCode:
+        statement = (
+            insert(vault_oauth_authorization_codes)
+            .values(
+                code_sha256=hash_oauth_secret(code),
+                client_id=client_id,
+                scopes=list(scopes),
+                code_challenge=code_challenge,
+                redirect_uri=redirect_uri,
+                redirect_uri_provided_explicitly=redirect_uri_provided_explicitly,
+                resource=resource,
+                subject=subject,
+                expires_at=func.now() + timedelta(seconds=ttl_seconds),
+            )
+            .returning(*vault_oauth_authorization_codes.c)
+        )
+        result = await connection.execute(statement)
+        return _authorization_code_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        code: str,
+    ) -> StoredAuthorizationCode | None:
+        """Look a code up without consuming it.
+
+        The SDK's protocol splits ``load_authorization_code`` from
+        ``exchange_authorization_code``, so the load must not be the redemption:
+        a failed exchange after a consuming load would destroy a code the client
+        is still entitled to use. Redemption is ``redeem`` below, called from
+        the exchange.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_authorization_codes)
+            .where(
+                vault_oauth_authorization_codes.c.code_sha256
+                == hash_oauth_secret(code)
+            )
+            .where(vault_oauth_authorization_codes.c.expires_at > func.now())
+        )
+        row = result.mappings().one_or_none()
+        return _authorization_code_from_row(row) if row is not None else None
+
+    async def redeem(
+        self,
+        connection: AsyncConnection,
+        code: str,
+    ) -> StoredAuthorizationCode | None:
+        """Consume one code, atomically, or return None.
+
+        RFC 6749 requires an authorization code be single-use. This statement is
+        what makes reuse detectable at all: the second redemption returns None
+        because the first deleted the row, rather than both succeeding.
+        """
+
+        statement = (
+            delete(vault_oauth_authorization_codes)
+            .where(
+                vault_oauth_authorization_codes.c.code_sha256
+                == hash_oauth_secret(code)
+            )
+            .where(vault_oauth_authorization_codes.c.expires_at > func.now())
+            .returning(*vault_oauth_authorization_codes.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _authorization_code_from_row(row) if row is not None else None
+
+    async def delete_expired(self, connection: AsyncConnection) -> int:
+        result = await connection.execute(
+            delete(vault_oauth_authorization_codes).where(
+                vault_oauth_authorization_codes.c.expires_at <= func.now()
+            )
+        )
+        return result.rowcount or 0

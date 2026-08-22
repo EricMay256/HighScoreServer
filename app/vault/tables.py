@@ -9,6 +9,7 @@ from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
     ARRAY,
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     Computed,
@@ -545,6 +546,153 @@ vault_agent_credentials = Table(
     ),
 )
 
+# The OAuth authorization server's state, per ADR 0024. Deliberately *not* a
+# token store: an issued access token is a `vault_agent_credentials` row, so
+# scopes, revocation, quotas and attribution keep working through one mechanism
+# instead of two that could disagree.
+#
+# All three live in Postgres rather than process memory because registration
+# arrives server-to-server from the vendor's backend while `/authorize` is a
+# browser navigation, and the two halves land on different workers. See
+# migration 0013.
+vault_oauth_clients = Table(
+    "vault_oauth_clients",
+    metadata,
+    Column("client_id", Text, primary_key=True),
+    # The SDK's OAuthClientInformationFull, dumped faithfully. JSONB rather
+    # than a column per field: RFC 7591 registrations carry metadata this
+    # schema did not anticipate, and projecting into columns would drop
+    # whatever did not fit. Same reasoning as vault_documents.frontmatter.
+    Column("client_info", JSONB, nullable=False),
+    Column(
+        "registered_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    # Open registration means unbounded rows, so they expire and get pruned.
+    # NULL is a client that does not, which an operator may create deliberately.
+    Column("expires_at", DateTime(timezone=True)),
+    CheckConstraint(
+        "btrim(client_id) <> ''",
+        name="vault_oauth_clients_client_id_nonempty",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(client_info) = 'object'",
+        name="vault_oauth_clients_info_is_object",
+    ),
+)
+
+# One in-flight authorization, waiting for the operator to come back from the
+# login form. Keyed by the SHA-256 of a nonce the vault mints, never the nonce
+# itself (ADR 0015's rule for machine-generated secrets). Redeemed by
+# DELETE ... RETURNING, which is why there is no `consumed_at`: a
+# check-then-mark is two statements a concurrent redemption can interleave.
+vault_oauth_pending_authorizations = Table(
+    "vault_oauth_pending_authorizations",
+    metadata,
+    Column("nonce_sha256", LargeBinary, primary_key=True),
+    Column(
+        "client_id",
+        Text,
+        ForeignKey(
+            "vault.vault_oauth_clients.client_id",
+            name="vault_oauth_pending_authorizations_client_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    # The SDK's AuthorizationParams, including the PKCE code_challenge, which
+    # waits here until /token redeems the code this becomes.
+    Column("params", JSONB, nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "octet_length(nonce_sha256) = 32",
+        name="vault_oauth_pending_nonce_length",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(params) = 'object'",
+        name="vault_oauth_pending_params_is_object",
+    ),
+    CheckConstraint(
+        "expires_at > created_at",
+        name="vault_oauth_pending_expires_after_creation",
+    ),
+)
+
+# An authorization code between the login form and /token. Same hashing and
+# same single-use idiom as the pending authorization above.
+vault_oauth_authorization_codes = Table(
+    "vault_oauth_authorization_codes",
+    metadata,
+    Column("code_sha256", LargeBinary, primary_key=True),
+    Column(
+        "client_id",
+        Text,
+        ForeignKey(
+            "vault.vault_oauth_clients.client_id",
+            name="vault_oauth_authorization_codes_client_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    # A column rather than a key inside a blob, unlike client_info: this set is
+    # the vault's own and is copied straight onto vault_agent_credentials.scopes
+    # when the code is redeemed, so the two carry the same shape.
+    Column(
+        "scopes",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column("code_challenge", Text, nullable=False),
+    Column("redirect_uri", Text, nullable=False),
+    Column("redirect_uri_provided_explicitly", Boolean, nullable=False),
+    Column("resource", Text),
+    Column("subject", Text),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "octet_length(code_sha256) = 32",
+        name="vault_oauth_codes_code_length",
+    ),
+    CheckConstraint(
+        "btrim(code_challenge) <> ''",
+        name="vault_oauth_codes_challenge_nonempty",
+    ),
+    CheckConstraint(
+        "btrim(redirect_uri) <> ''",
+        name="vault_oauth_codes_redirect_uri_nonempty",
+    ),
+    CheckConstraint(
+        "expires_at > created_at",
+        name="vault_oauth_codes_expires_after_creation",
+    ),
+    # Mirrors vault_agent_credentials_scopes_known rather than the narrower
+    # OAuth baseline. ADR 0024 makes the baseline what a client may *request*,
+    # enforced in application code, while an operator may widen a specific
+    # credential afterwards -- a stricter constraint here would forbid a code
+    # minted for a widened client, which the ADR calls expected rather than
+    # exceptional.
+    CheckConstraint(
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
+        "'vault:delete', 'vault:review', 'vault:compile', "
+        "'vault:export']::text[]",
+        name="vault_oauth_codes_scopes_known",
+    ),
+)
+
 vault_audit_events = Table(
     "vault_audit_events",
     metadata,
@@ -681,4 +829,22 @@ Index(
     "idx_vault_compile_runs_state_started",
     vault_compile_runs.c.state,
     vault_compile_runs.c.started_at.desc(),
+)
+
+# Pruning walks all three OAuth tables by expiry. The clients index is partial
+# because a client with no expiry is never a pruning candidate, and indexing
+# those rows would cost writes to answer nothing; the other two columns are NOT
+# NULL, so a partial index there would exclude nothing.
+Index(
+    "vault_oauth_clients_expires_at_idx",
+    vault_oauth_clients.c.expires_at,
+    postgresql_where=vault_oauth_clients.c.expires_at.is_not(None),
+)
+Index(
+    "vault_oauth_pending_expires_at_idx",
+    vault_oauth_pending_authorizations.c.expires_at,
+)
+Index(
+    "vault_oauth_codes_expires_at_idx",
+    vault_oauth_authorization_codes.c.expires_at,
 )

@@ -280,6 +280,51 @@ be edited when it does.
 - *What* a credential may read is ADR 0014's path policy, a property of the
   folder rather than of the credential.
 
+### The OAuth authorization server (ADR 0024)
+
+- **An issued access token *is* a `vault_agent_credentials` row.** That is the load-bearing
+  choice and everything else follows: `contributed_by` derives from the principal, revocation
+  and the credential census work unchanged, scopes stay on the credential, and quota buckets
+  key on a principal an OAuth client has like any other. There is deliberately **no token
+  table** — a parallel identity type would duplicate scopes, revocation, quotas and
+  attribution, and every duplicate is somewhere the two paths could disagree.
+- **All OAuth state lives in Postgres, never in process memory.** Registration arrives
+  server-to-server from the vendor's backend while `/authorize` is a browser navigation, so the
+  two halves reliably land on different Gunicorn workers. The spike used a dict and failed
+  exactly there — deterministically, and only in production. Do not "optimise" any of the three
+  stores into a cache.
+- **`vault_oauth_clients.client_info` is JSONB, and must stay so.** RFC 7591 registrations carry
+  metadata neither this schema nor the SDK's `OAuthClientInformationFull` anticipated;
+  projecting into columns would drop whatever did not fit and need a migration each time the
+  SDK grew a field. Persistence never imports the SDK model — the provider validates the blob
+  at its own boundary, the same division `vault_documents.frontmatter` already draws.
+- **Nonces and authorization codes are stored as SHA-256, and single use is
+  `DELETE ... RETURNING`.** A check-then-mark is two statements a concurrent redemption can
+  interleave, and redeeming a pending authorization is what mints a code — running it twice
+  would issue two codes for one approval. Neither table has a `consumed_at`, on purpose.
+  `load_authorization_code` must **not** consume: the SDK splits load from exchange, and a
+  consuming load would destroy a code on a failed exchange the client is still entitled to
+  retry.
+- **`vault_oauth_authorization_codes.scopes` mirrors `vault_agent_credentials_scopes_known`,
+  not the OAuth baseline.** `OAUTH_BASELINE_SCOPES` is what a client may *request*, enforced in
+  application code; an operator may widen a specific credential afterwards, which ADR 0024 calls
+  expected rather than exceptional. Tightening the column CHECK to the baseline would forbid the
+  widened case at a layer no application code could permit.
+- **`passwords.py` is bcrypt and duplicates `app/auth.py` on purpose.** `app/vault/` may contain
+  no `from app.`, so a ten-line wrapper is cheaper than a host dependency the package cannot
+  take with it. bcrypt rather than `auth.hash_secret`'s SHA-256 because ADR 0015's
+  full-entropy reasoning does not transfer to a password a person chose — and because this runs
+  once per authorization, not once per request. It is offloaded with `asyncio.to_thread`;
+  bcrypt releases the GIL while hashing, so that genuinely moves the work rather than yielding.
+- **The operator hash is configuration, not a row.** `VAULT_OPERATOR_PASSWORD_HASH`, because
+  there is one of them, it has no lifecycle a table would model, and a database's backups
+  circulate more widely than a config var. Unset means the password method is not configured
+  and the login **refuses** — never "any password works".
+- **One failure message, whatever failed.** A wrong password, an expired nonce and a nonce that
+  never existed render identically, which is why `redeem` returns None for all three rather
+  than distinguishing them. A page that told them apart would hand an attacker a probe for
+  valid authorization attempts.
+
 ## The MCP adapter
 
 - **`routes.py` and `mcp.py` are two thin adapters over one service layer**, and neither may

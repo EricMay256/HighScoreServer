@@ -185,10 +185,56 @@ two, both listed below.
   `vault.vault_agent_credentials` and are issued with
   `scripts/issue_vault_credential.py`; only the SHA-256 of each secret is
   stored. See vault ADR 0015.
+- `VAULT_OPERATOR_PASSWORD_HASH` is introduced by the OAuth authorization
+  server (vault ADR 0024). It holds a **bcrypt hash**, never the password, and
+  it is the one human credential the vault has. See below.
 - Never use `heroku config` output in CI logs or documentation.
 
 Local secrets belong in `.env`, which is already ignored by Git. `.env.example`
 contains placeholders and non-secret defaults only.
+
+### `VAULT_OPERATOR_PASSWORD_HASH`
+
+The secret the OAuth login page verifies against, when a client authorizes
+itself against the vault. Configuration rather than a table, deliberately:
+there is exactly one, it has no lifecycle a schema would model, rotation is
+`heroku config:set`, and a config var's backups circulate less widely than a
+database's do.
+
+Unset is a supported state and means the password identity method is not
+configured for this deployment. It is never treated as "any password works" —
+the login refuses outright, the same way `VAULT_ENABLED` defaulting to false
+serves no vault rather than an unguarded one.
+
+Generate the hash locally and paste only the hash:
+
+```bash
+python -c "import asyncio, app.vault.passwords as p; print(asyncio.run(p.hash_password(input('password: '))))"
+```
+
+```bash
+heroku config:set VAULT_OPERATOR_PASSWORD_HASH='$2b$...' --app high-score-server
+```
+
+Three things that go wrong:
+
+- **Single-quote it.** A bcrypt hash begins `$2b$` and contains more `$`
+  characters; an unquoted value has them expanded to empty by the shell, and the
+  result looks like a wrong password rather than a mangled config var.
+- **bcrypt truncates at 72 bytes**, so `passwords.py` refuses a longer password
+  outright rather than hashing a prefix that would let a different passphrase
+  verify. The limit is *bytes*: a passphrase of accented characters reaches it
+  sooner than its length suggests.
+- **A malformed hash reads as a wrong password.** The application logs
+  `vault operator password hash is not a valid bcrypt hash` at ERROR and reports
+  an ordinary login failure — one message for every failure is ADR 0024's rule,
+  so the log is where the real cause is findable.
+
+This is bcrypt and not the SHA-256 the rest of the package uses. Agent secrets
+are machine-generated with full entropy, so a plain digest is correct for them
+and a work factor would buy nothing; an operator password is chosen by a person,
+so the work factor is the point. ADR 0015 says explicitly not to carry the
+SHA-256 reasoning across, and this is where that matters.
 
 ## Migration lineages
 
