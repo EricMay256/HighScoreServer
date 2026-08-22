@@ -89,19 +89,44 @@ construction rather than by judgement. Widening a specific client beyond the def
 deliberate act on its credential row, the same manual decision migration `0007` already
 requires.
 
-### The operator authenticates with a password, and that is swappable
+### Two identity methods, both built, chosen by configuration
 
-`/authorize` must authenticate a human, and the vault has never had human authentication.
-It gets one: a single operator password, bcrypt-hashed, verified at the authorization step.
+`/authorize` must authenticate a human, and the vault has never had human authentication. It
+gets two, because neither is reliably available everywhere the vault needs to be reachable:
 
-Chosen over delegating to GitHub or Google — both free at this scale and both viable — because
-it keeps the vault self-contained, which is the property the extraction manifest exists to
-protect. Delegated login is a change to `authorize` alone, so this is reversible at the cost of
-one method.
+- **Google (OIDC).** `authorize` redirects to Google; the callback verifies the returned
+  `id_token` and treats a verified `email` on a configured allowlist as the operator. Free at
+  any scale this reaches.
+- **Operator password.** A single bcrypt-hashed secret, verified against a form the vault
+  serves itself.
+
+Both end the same way — a redirect back to the client carrying an authorization code — so the
+method is a property of the deployment rather than of the protocol, and the rest of the
+provider is indifferent to which ran.
+
+Neither is "the fallback", and that is deliberate. **Google refuses OAuth inside embedded
+webviews**, returning `disallowed_useragent`. It is enforced on Google's side, has been since
+2021 and tightened in 2023, and there is no setting that disables it. So if a client performs
+connector authorization in an in-app webview rather than a system browser, Google login is
+impossible there and the password form — being the vault's own page — is the only method that
+works. If it uses a system browser, Google is the lower-friction one, materially so on a phone,
+where typing a long password is exactly the friction being removed.
+
+Which method is preferable is therefore an empirical property of the client, not something to
+settle by argument. Build both; let the deployment choose. **Verify the target client before
+building the provider**: if the intended one blocks Google, that is worth knowing while it is
+still a configuration question rather than a rewrite.
+
+Neither method needs a new dependency, which was checked rather than assumed: `python-jose` and
+`cryptography` verify the `id_token` against Google's JWKS, `httpx` makes the outbound call, and
+`bcrypt` is already used by `app/auth.py`. `app/steam_auth.py` is the house pattern for
+verifying a third-party identity over HTTP — async `httpx`, explicit timeout, typed handling of
+`HTTPStatusError` separately from transport failure — and the Google callback should look like
+it.
 
 Plain SHA-256 is correct for `hssv1_` secrets because they are machine-generated with full
-entropy (ADR 0015). It is **not** correct here, and the distinction is the whole reason bcrypt
-is used for this one credential.
+entropy (ADR 0015). It is **not** correct for a human-chosen password, and that distinction is
+the whole reason bcrypt appears here.
 
 ### It mounts on this server
 
@@ -129,6 +154,22 @@ Open registration means unbounded rows. `ClientRegistrationOptions.client_secret
 exists for this, and the credential rows OAuth mints should carry `expires_at` rather than
 living forever like an operator-issued one. A pruning story is required, not optional — this is
 the same shape as `prune_idempotency_keys.py`.
+
+### The mobile premise rests on one unverified fact
+
+Reaching the vault from a phone is the reason web access matters at all, and it depends on
+whether the target client authorizes connectors in a system browser or an embedded webview.
+Google works in the first and is refused in the second.
+
+That is cheap to determine and expensive to assume, so determine it first: register the Google
+client, wire `authorize` to redirect and the callback to log what comes back, and try it from
+the device that matters. Everything else in this ADR is unaffected by the answer -- the
+provider, the credential mapping, the scope bounds -- which is precisely why the check should
+come before them rather than after.
+
+If the answer is "embedded webview", the password form still works and mobile contribution
+still happens; it is just less pleasant than hoped. The premise survives either way. What does
+not survive is building the Google path, shipping it, and discovering the block from a phone.
 
 ### Existing credentials are unaffected
 

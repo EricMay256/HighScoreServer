@@ -66,9 +66,16 @@ already ships `create_auth_routes()` with `/authorize`, `/token`, `/register`,
 the `TokenVerifier` shape ADR 0015 left for it; `bcrypt` is already a dependency.
 The work is one ten-method provider protocol, the operator password, and wiring.
 
-Do **not** ship the `resource_metadata` challenge before the server works -- that
-header is the vault advertising an authorization server, and pointing at one that
-does not answer is worse than the current honest dead end.
+Two ordering constraints, both cheap to honour and expensive to discover late:
+
+- **Verify the mobile flow before building the provider.** Mobile contribution is
+  the reason this matters, and Google refuses OAuth in embedded webviews with no
+  way to disable it. Register the Google client, wire `authorize` to redirect,
+  and try it from the phone. If that client uses an in-app webview, the password
+  form is the method that works -- which is why ADR 0024 builds both.
+- **Do not ship the `resource_metadata` challenge before the server answers.**
+  That header is the vault advertising an authorization server; pointing at one
+  that is not there is worse than the current honest dead end.
 
 ## 5. Compilation (Phase 4)
 
