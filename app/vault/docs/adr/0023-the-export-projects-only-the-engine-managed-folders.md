@@ -4,7 +4,16 @@ Date: 2026-08-19. Substantially revised 2026-08-22.
 
 ## Status
 
-Proposed.
+Accepted 2026-08-22.
+
+The governance changes this required are applied (knowledge-platform `d40bdfc`): the folder is
+`canonical: true`, `engine_managed: true`, `ai_write: engine_only`, `validation_mode: agent`,
+`allowed_types: ["Agent Note", "Wiki Page"]`; both types carry the folder in `folder_globs`;
+and the Promotion Policy describes a projection rather than a drop box. The live vault
+validates clean and the engine's schema tests pass against it.
+
+Implementation is outstanding: the `promotion_status` column, the export routing, and the
+prune-guard fix in "Consequences" below.
 
 Refines ADR 0022 (two trees, one writer each), which said the exporter "projects `Agent/`
 only" without saying which parts of `Agent/`. Depends on ADR 0010 (`vault_path` is the only

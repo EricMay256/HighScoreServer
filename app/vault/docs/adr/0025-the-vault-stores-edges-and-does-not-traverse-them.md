@@ -4,7 +4,7 @@ Date: 2026-08-22
 
 ## Status
 
-Proposed.
+Accepted 2026-08-22.
 
 Names a structure that eight earlier ADRs use without defining. Depends on ADR 0008
 (fetch-by-id resolves archived, withholds flagged), ADR 0014 (`ai_read` excludes at import and
@@ -171,10 +171,35 @@ page back to the notes it synthesized. Compilation must write those ids from ser
 rather than filenames, and the FK on `compile_run_id` means a run cannot be deleted out from
 under the pages it produced.
 
+### Planned and deferred: batch fetch, not `neighbours`
+
+Client-side traversal costs a round trip per hop, and that is the only real complaint against
+it. Two shapes would fix it, and they are not equally good.
+
+**A `neighbours` endpoint** — give it an id, get its one-hop neighbourhood — is the obvious
+one, and it has a problem worth naming: it is a **quota multiplier**. One request charges one
+unit and performs N lookups, so the correspondence between what a caller spends and what the
+server does breaks, and it breaks in favour of the caller. `LIMITS` is sized on the assumption
+that a request is a bounded amount of work. It also re-creates the traversal surface this ADR
+argues against, bounded at first — and `depth=2` is the obvious next request once `depth=1`
+exists.
+
+**Batch fetch by id** — `GET /notes?ids=a,b,c` — solves the same problem without either
+defect. The client reads `related_ids` itself and asks for exactly what it wants, so the vault
+still never walks the graph; the work is bounded by construction because the caller enumerates
+it; the read policy applies per id exactly as fetch-by-id already does; and quota can charge
+per id rather than per call, keeping cost and charge aligned.
+
+The one thing `neighbours` offers that batch does not is saving a caller that has not already
+fetched the note. In practice it has — that is where the ids came from.
+
+**So: batch fetch is the planned surface, and it is deferred until something needs it.**
+Whichever ships, the policy constraint is settled and not negotiable: `readable_only=True` and
+`READABLE_STATUSES` apply to every id, individually, exactly as they do on a single fetch.
+
 ### What this leaves open
 
-Whether the service ever offers a bounded, policy-checked traversal — a `neighbours` endpoint
-returning one hop with the same filters fetch-by-id applies. That is a coherent middle ground
-between here and a graph API, and it is a smaller decision than it looks because the policy
-question is already answered: any such surface applies `readable_only=True` and
-`READABLE_STATUSES` at every hop, or it is not shippable.
+Whether a typed reverse query is ever wanted — "what depends on this" rather than "what
+mentions this" — which the import deliberately flattens into `related_ids` while preserving the
+distinction in `frontmatter`. Answering it means reading JSONB rather than an array, and it
+should wait for a caller that needs the type rather than the edge.

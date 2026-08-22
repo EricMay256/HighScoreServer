@@ -12,8 +12,8 @@ vault, 642 full).
 `0011_review_candidate_optional`, 70 documents, all active, none flagged, none
 unembedded, every path a title slug. The review flow shipped in release v64.
 
-**Two ADRs are `Proposed`, and both gate work below:** 0023 (what the export may
-touch) and 0024 (the OAuth authorization server).
+**ADRs 0023, 0024 and 0025 are all Accepted as of 2026-08-22.** What remains is
+implementation, listed below; no decision blocks it.
 
 ---
 
@@ -26,23 +26,26 @@ non-default branch is documentation nobody reads.
 
 Nothing on Heroku tracks `main`, so this changes no running behaviour.
 
-## 2. Settle ADR 0023
+## 2. Implement ADR 0023 — promotion candidacy
 
 "The export projects only the engine-managed folders, not all of `Agent/`."
 
-It contradicts the compilation plan in `HANDOFF-EXPORT-AND-COMPILATION.md`, which
-assumed proposed-type notes would be *exported into* `Agent/Promotion Candidates/`.
-The Promotion Policy calls that folder a human-curated queue kept outside the
-engine, and `folders.yml` marks it `engine_managed: false`; the ADR sides with the
-governance documents. **Phase 4 cannot be designed until this is decided**, and
-the exporter already behaves as the ADR describes — so leaving it `Proposed` means
-shipped code whose governing decision is unsettled.
+The governance side is done (knowledge-platform `d40bdfc`): the folder is now
+canonical, engine-managed, and typed for `Agent Note` and `Wiki Page`. Four pieces
+of code are outstanding:
 
-## 3. Settle ADR 0024, then build the authorization server
+- `promotion_status` enum column and its migration
+- export routing on it — candidate to `Agent/Promotion Candidates/`, otherwise
+  `Agent/notes/`
+- the prune-guard fix: an explicit owned-prefix set, because occupancy is the
+  wrong ownership signal and the last candidate would otherwise strand its file
+- the `vault:review`-gated verb to set it, which lands with the admin MCP
 
-"The vault runs its own authorization server, and an OAuth token is a credential
-row." The design is settled in the ADR; what remains is accepting it and writing
-the provider.
+Blocks Phase 4, which needs to know where candidates live.
+
+## 3. Implement ADR 0024 — the authorization server
+
+Accepted; the provider is unwritten.
 
 The 2026-08-22 spike answered the question that blocked it — `/authorize` runs in
 the operator's system browser, so Google login is viable — and left three
@@ -57,6 +60,10 @@ constraints the implementation must honour:
 - **The SDK's routes break handler introspection.** slowapi reads
   `handler.__name__`; the SDK wraps some endpoints in `CORSMiddleware`, which has
   none. Label them, or the first request raises inside the rate limiter.
+
+Plus the login page: one Jinja2 template combining consent and password, a
+pending-authorization store in Postgres, CSRF on the form POST (HSS has none
+today), and a login-specific rate limit tighter than the pre-auth guard.
 
 **A `grant`/`revoke-scope` subcommand on `issue_vault_credential` must land with
 it.** OAuth clients all start at the read+write baseline and some will need more;
@@ -114,3 +121,8 @@ Leave it that way until there is a case that needs it and a reason to write down
 **The knowledge-vault skill's compile loop is its last Stage-A writer.** Note
 contribution moved to the service; wiki compilation did not, and cannot until
 item 5 lands.
+
+**Batch fetch by id is planned and deferred** (ADR 0025). `GET /notes?ids=a,b,c`
+removes the round trip per hop without letting the vault walk the graph, and
+without the quota multiplier a `neighbours` endpoint would introduce. Build it
+when a caller needs it.

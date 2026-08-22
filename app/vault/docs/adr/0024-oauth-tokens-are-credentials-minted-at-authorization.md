@@ -4,7 +4,11 @@ Date: 2026-08-21
 
 ## Status
 
-Proposed.
+Accepted 2026-08-22.
+
+Design settled; implementation outstanding. The 2026-08-22 spike confirmed `/authorize` runs
+in the operator's system browser, so both identity methods are reachable, and left three
+constraints recorded under "Consequences".
 
 Supersedes the OAuth deferral in ADR 0021, which recorded that the SDK's `token_verifier` was
 left unused because it requires `AuthSettings.issuer_url`, and setting that would publish
@@ -139,6 +143,44 @@ it.
 Plain SHA-256 is correct for `hssv1_` secrets because they are machine-generated with full
 entropy (ADR 0015). It is **not** correct for a human-chosen password, and that distinction is
 the whole reason bcrypt appears here.
+
+### What the password step looks like
+
+A page this server renders. `authorize` does not authenticate inline — it returns a redirect,
+which is the SDK's own pattern for handing off to a third party, and works the same handing
+off to ourselves:
+
+```
+GET /authorize            client arrives; the SDK validates and calls provider.authorize()
+  -> redirect             to the vault's own login page, carrying a nonce
+GET  /vault/login?req=..  an HTML form: what is being authorized, and a password field
+POST /vault/login         bcrypt verify, mint the authorization code
+  -> redirect             to the client's redirect_uri with code and state
+```
+
+HSS already renders Jinja2 templates and has a `base.html`, so this is one template rather
+than a new capability.
+
+**Login and consent are the same page.** It names the client and the scopes it asked for above
+the password field, because a scope grant the operator never sees is a scope grant the operator
+did not make — and ADR 0021's whole argument is that what a credential holds decides what tool
+surface exists.
+
+Three things it needs that do not exist yet:
+
+- **A pending-authorization store.** The request parameters have to survive the redirect out to
+  the form and back. Postgres, for the reason client registrations are: the two halves may land
+  on different workers.
+- **CSRF protection on the form POST.** HSS has none today, and this is a public unauthenticated
+  form.
+- **Its own rate limit, tighter than the pre-auth guard.** A public password endpoint is a
+  brute-force target. Bcrypt's cost factor is the first defence and the IP guard the second, but
+  a login-specific bucket is the one sized for this.
+
+**Stateless: the password is entered per authorization, with no session cookie.** Authorizing a
+client is rare, and a session would be a third credential type with its own lifetime, storage,
+and revocation story — none of which this needs. If it ever becomes tedious, that is the moment
+to reconsider, not before.
 
 ### It mounts on this server
 
