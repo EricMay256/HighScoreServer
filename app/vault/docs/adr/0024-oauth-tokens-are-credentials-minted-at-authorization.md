@@ -158,8 +158,20 @@ POST /vault/login         bcrypt verify, mint the authorization code
   -> redirect             to the client's redirect_uri with code and state
 ```
 
-HSS already renders Jinja2 templates and has a `base.html`, so this is one template rather
-than a new capability.
+**The template is the vault's own, not the host's.** HSS renders Jinja2 from a root-level
+`templates/` directory, and reaching for its `base.html` would be the exact comingling the
+extraction manifest exists to prevent: `app/vault/` moves as a directory, and a page depending
+on a host asset does not move with it. So the vault carries `app/vault/templates/` and builds
+its own environment, the same way it builds its own `Limiter` rather than sharing HSS's.
+
+That makes this the first non-documentation asset inside the package, and the manifest has to
+say so — the extraction is a directory move only for as long as everything the package needs
+is inside it. `jinja2` joins `httpx`, `SQLAlchemy` and `slowapi` as a dependency that stays in
+both rather than leaving.
+
+Rendering one form without a template engine at all is a legitimate alternative — it is one
+page — and the reason not to is that a login page is exactly where HTML-escaping mistakes turn
+into injected markup on a form that takes a password.
 
 **Login and consent are the same page.** It names the client and the scopes it asked for above
 the password field, because a scope grant the operator never sees is a scope grant the operator

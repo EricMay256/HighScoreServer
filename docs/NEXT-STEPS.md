@@ -90,9 +90,14 @@ What to build, roughly in order:
    `app/auth.py` already has `hash_password`/`verify_password` — but `app/vault/`
    may contain no `from app.`, so the vault needs its own thin wrapper and
    `bcrypt` listed in the extraction manifest.
-3. **The template.** One Jinja2 page extending `base.html`. It must name the
-   **client and the scopes requested** above the password field: a scope grant the
-   operator never sees is one they did not make.
+3. **The template — vault-owned.** `app/vault/templates/`, with the vault building
+   its own Jinja2 environment. **Do not extend HSS's `templates/base.html`**: the
+   package moves as a directory and a host asset does not move with it. This is
+   the first non-doc asset in the package, so the extraction manifest needs a row
+   for it, and `jinja2` joins the dependencies that stay in both repos.
+
+   It must name the **client and the scopes requested** above the password field:
+   a scope grant the operator never sees is one they did not make.
 4. **CSRF on the POST.** HSS has none today and this is a public unauthenticated
    form. A signed hidden token tied to the nonce is enough; there is no session to
    hang one off.

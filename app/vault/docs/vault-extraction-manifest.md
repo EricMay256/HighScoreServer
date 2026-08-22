@@ -13,6 +13,7 @@ durable than removability comments scattered across modules, which go stale sile
 | `app/vault/` | package root | Intra-package imports are already relative, so this is a directory move, not a rewrite. `tests/vault/test_boundaries.py` enforces the property. |
 | `app/vault/AGENTS.md` | package root | Already inside the package; needs no edit. |
 | `app/vault/docs/` | package docs | Architecture, configuration runbook, extraction manifest, and the vault ADR lineage. |
+| `app/vault/templates/` | package assets | **Planned, not yet built** (vault ADR 0024). The operator login page for the OAuth authorization server. Deliberately the vault's own rather than HSS's root `templates/`: a page extending the host's `base.html` would not move with the package, which is the one property this manifest exists to keep. |
 | `app/vault/docs/adr/` | package docs | Independent lineage starting at 0001. Does not interleave with HSS's `docs/adr/`. |
 | Vault-owned tests listed below | package tests | Package tests currently import `app.vault.…`; repoint those imports and provide the standalone fixtures described below. Do **not** move the directory wholesale. |
 
@@ -74,6 +75,11 @@ HSS's alone. It stays in both. The vault repo must declare it; nothing else chan
 
 `httpx` is shared: the vault's embedding adapter uses it, and HSS uses it for Steam ticket
 validation. It stays in both.
+
+`Jinja2` will be shared once vault ADR 0024's login page exists: HSS renders its Jinja2 views
+from a root `templates/` directory and the vault will render its own from
+`app/vault/templates/`, with separate environments and no shared base template. Two independent
+users of one library, like `slowapi` — it stays in both, and the vault repo must declare it.
 
 **No embedding client appears here.** Vault ADR 0005 selected OpenAI and deliberately called the
 REST endpoint through `httpx` rather than the `openai` SDK, so the adapter added no package. If
