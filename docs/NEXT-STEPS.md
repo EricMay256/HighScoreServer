@@ -61,9 +61,52 @@ constraints the implementation must honour:
   `handler.__name__`; the SDK wraps some endpoints in `CORSMiddleware`, which has
   none. Label them, or the first request raises inside the rate limiter.
 
-Plus the login page: one Jinja2 template combining consent and password, a
-pending-authorization store in Postgres, CSRF on the form POST (HSS has none
-today), and a login-specific rate limit tighter than the pre-auth guard.
+### The operator login page
+
+`authorize` never authenticates inline. It returns a redirect — the SDK's own
+pattern for handing off to a third party, and it works the same handing off to
+ourselves:
+
+```
+GET  /authorize             SDK validates params, calls provider.authorize()
+  -> redirect               to the vault's login page, carrying a nonce
+GET  /vault/login?req=...   consent + password on one screen
+POST /vault/login           bcrypt verify, mint the authorization code
+  -> redirect               to the client's redirect_uri with code and state
+```
+
+Google login replaces the middle two steps with a redirect to Google and a
+callback; everything either side is identical. Build the password path first —
+it needs no external registration, so it can be exercised end to end locally.
+
+What to build, roughly in order:
+
+1. **The pending-authorization store.** A table holding the `AuthorizationParams`
+   against a nonce, with an expiry — a few minutes is generous. Postgres, not
+   memory, for the reason client registrations are: the redirect out to the form
+   and back may cross workers. This is also where the PKCE `code_challenge` waits
+   until `/token` redeems it.
+2. **The operator credential.** One bcrypt hash, from config or its own table.
+   `app/auth.py` already has `hash_password`/`verify_password` — but `app/vault/`
+   may contain no `from app.`, so the vault needs its own thin wrapper and
+   `bcrypt` listed in the extraction manifest.
+3. **The template.** One Jinja2 page extending `base.html`. It must name the
+   **client and the scopes requested** above the password field: a scope grant the
+   operator never sees is one they did not make.
+4. **CSRF on the POST.** HSS has none today and this is a public unauthenticated
+   form. A signed hidden token tied to the nonce is enough; there is no session to
+   hang one off.
+5. **A login-specific rate limit**, tighter than the 600/min pre-auth guard. A
+   public password endpoint is a brute-force target; bcrypt's cost is the first
+   defence, the IP guard the second, and neither is sized for this.
+
+Stateless by decision (ADR 0024): the password is entered per authorization, with
+no session cookie. Authorizing a client is rare, and a session would be a third
+credential type with its own lifetime and revocation story.
+
+Two things to get right that are easy to miss: the redirect back to the client
+must carry `state` unmodified or the client rejects it, and a failed password must
+not reveal whether the nonce was valid — one message for both.
 
 **A `grant`/`revoke-scope` subcommand on `issue_vault_credential` must land with
 it.** OAuth clients all start at the read+write baseline and some will need more;

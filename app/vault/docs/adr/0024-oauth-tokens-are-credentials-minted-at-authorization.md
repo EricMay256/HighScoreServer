@@ -182,6 +182,13 @@ client is rare, and a session would be a third credential type with its own life
 and revocation story — none of which this needs. If it ever becomes tedious, that is the moment
 to reconsider, not before.
 
+**One failure message, whatever failed.** A wrong password, an expired nonce, and a nonce that
+never existed all render identically. This is ADR 0015's rule about `401` and `403` applied to
+a form: the vault already refuses to say *which* check failed, and a login page that
+distinguishes "bad password" from "unknown request" hands an attacker a probe for valid
+authorization attempts. The operator loses nothing — they know which of the two they just
+did.
+
 ### It mounts on this server
 
 Not a separate deployment. The authorization server, the resource server, and the MCP adapter
