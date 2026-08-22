@@ -27,7 +27,7 @@ all arrive at once.
 
 ### What is actually an edge
 
-Two vocabularies exist, and they do not currently meet.
+Two vocabularies exist. Today they do not meet; the decision below translates between them.
 
 **Id-based, in the database, used by the service:**
 
@@ -88,27 +88,72 @@ judgement depends on rather than association: compile provenance must not silent
 (ADR 0019), and a review case must not outlive its subject unnoticed (ADR 0023's amendment
 made that pointer nullable rather than removing the constraint).
 
-### The two vocabularies stay separate
+### The database is uniformly id-based; each tree keeps its own idiom
 
-Wikilinks are not rewritten into ids, and ids are not rendered as wikilinks. A `[[Some Note]]`
-in a Human note means what Obsidian says it means; a uuid in `source_ids` means what the
-service says. Unifying them would require the service to resolve titles — which are neither
-unique nor stable — and would make every retitle a graph mutation.
+Neither vocabulary wins, and neither is abandoned. They are translated at the two boundaries
+that already exist, so that **inside the database every edge is an id**, while a human writing
+markdown still writes `[[Some Note]]` and never sees a uuid.
 
-They meet in exactly one place, and only by convention: a promoted Human note carries
-`SourceIDs` naming the agent notes it came from (ADR 0023), which is an id-based edge written
-into markdown. That is the bridge, and it is one-directional on purpose.
+**On import, `Human/` wikilinks resolve to ids.** `Parent`, `DependsOn`, and `SeeAlso` all
+land in `related_ids`, and the original typed frontmatter is preserved verbatim in
+`frontmatter` JSONB — so the distinction between "depends on" and "see also" is not destroyed,
+it is simply not indexed separately. If a typed query is ever needed, the frontmatter is where
+it already lives. Resolution happens once, at import, which converts a fragile *name*
+reference into a stable *id* reference.
 
-### There is no reverse index, and backlinks are not a supported query
+A wikilink that resolves to nothing is dropped from `related_ids` rather than stored — an
+unresolved name is not an id, and `related_ids` holds ids. Nothing is lost, because the
+unresolved link is still in `frontmatter` exactly as written.
+
+**On export, agent `related_ids` render as wikilinks.** The exporter holds every id-to-slug
+pair for the run before it writes anything, so it emits `SeeAlso: ["[[slug]]"]` alongside the
+engine-owned `RelatedIDs`. That is not duplication: the Metadata Standard makes `SeeAlso` a
+universal `List<WikiLink>` for readers and `RelatedIDs` Agent Note plumbing for the engine.
+Without it, an exported relation is a uuid that Obsidian cannot follow, so the graph a human
+opens the vault to browse is invisible in both directions.
+
+Ids that do not resolve within the run are omitted from `SeeAlso`, and so are ids pointing
+outside the exported prefixes. A broken wikilink is worse than an absent one, and dangling
+edges are legal here (below).
+
+**The prerequisite, which ADR 0012 already named.** A human note brings no identity of its
+own, so its id is manufactured and "stable only as long as the row survives — a rename-plus-edit
+will break references to it." The bridge inherits that limitation rather than creating it, and
+it becomes more visible once edges point *at* human notes. The available fix is the one Stage A
+made for agent notes: assign an `ID` on first import and write it into the file, turning an
+identity-less source into one with durable identity. That is a decision for the human importer,
+which does not exist yet, and it should be made before the first inbound edge does.
+
+### There is no reverse index, and here is when to add one
 
 `related_ids` and `source_ids` carry no GIN index, so "what points at this note" is a
-sequential scan. That is acceptable at the current corpus size and is the reason backlinks are
-not offered as a surface: an unindexed reverse lookup that works at seventy documents and
-degrades silently is worse than one that does not exist.
+sequential scan. Measured against production on 2026-08-22:
 
-Adding it is a real option later — `related_ids @> ARRAY[id]` with a GIN index answers it —
-but it is a schema change with an index to maintain, and it should be made because something
-needs backlinks rather than because the graph looks incomplete without them.
+```
+notes with related_ids : 3        total edges : 7
+backlink query         : Seq Scan, 70 rows removed, 0.036 ms
+```
+
+An index optimising that would be maintained on every `contribute` and `update` — the hot
+paths — to save microseconds on a query nothing runs. So: not yet.
+
+**The signal to watch is document count, not edge count.** A sequential scan reads every row
+whether or not it has edges, so the cost grows with the corpus while the benefit stays flat.
+Re-measure and add the index when any of these becomes true:
+
+- a backlink lookup enters a request path rather than being a one-off — anything issuing one
+  per result, or per hop of a client-side walk, multiplies the scan by the fan-out;
+- the same `EXPLAIN ANALYZE` above crosses roughly a millisecond, which on this shape means
+  tens of thousands of documents;
+- compilation starts asking "which pages cite this note", which is the reverse of `source_ids`
+  and the first genuinely recurring reverse query the roadmap contains.
+
+When that happens the change is small and self-contained: `CREATE INDEX ... USING gin
+(related_ids)`, and `source_ids` separately if the compile query is the trigger. `tags` already
+carries exactly this shape of index, so it introduces no new concept. Index the arrays rather
+than building an edge table — a table would be a second source of truth for a fact the arrays
+already hold and the wire contract already exposes, and one carrying foreign keys could not
+hold the dangling edges this ADR deliberately permits.
 
 ## Consequences
 
