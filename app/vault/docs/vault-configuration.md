@@ -981,7 +981,7 @@ Then check the tools: the ones that appear should match the scopes granted — a
 appear in that session**; the tool set is fixed at startup, so restart the agent
 before concluding the registration failed.
 
-### 6. Rotate and revoke
+### 6. Rotate, revoke, and change scopes
 
 ```bash
 python -m scripts.issue_vault_credential list
@@ -995,6 +995,48 @@ which is how a registration that silently failed becomes visible.
 
 Rotation is revoke-then-issue; there is no re-key, because the secret was never
 stored.
+
+#### Widening and narrowing without rotating
+
+```bash
+python -m scripts.issue_vault_credential grant --id <credential-id> --scopes vault:update
+python -m scripts.issue_vault_credential revoke-scope --id <credential-id> --scopes vault:update
+```
+
+Both change what an existing credential may do and leave its secret alone, so
+nothing has to be redistributed — that is the difference from revoke-then-issue,
+and the reason to reach for these instead.
+
+Both print the scope set before and after. Both are additive/subtractive rather
+than a replacement: `grant` never removes a scope the operator did not name, and
+naming a scope already held (or already absent) reports `No change` and writes
+nothing.
+
+**This is the only supported way an OAuth client receives an above-baseline
+scope.** Vault ADR 0024 caps what a client may *request* at `vault:read` and
+`vault:write`, so `vault:update`, `vault:delete` and `vault:review` are
+unreachable through the authorization flow by construction. An operator grants
+them deliberately, to one named credential, with this command. Before it existed
+the documented method was a hand-written `UPDATE` on the `scopes` column, which
+is not something that should become routine against production.
+
+Three refusals worth knowing about:
+
+- **A revoked credential is refused, not widened.** Scopes on a revoked row grant
+  nothing, and an operator reaching for `grant` there is plausibly hoping it will
+  un-revoke the credential. It will not, so the command says so instead of
+  succeeding silently. Issue a new credential.
+- **An expired credential is refused** for the same reason. A credential whose
+  expiry is still in the future is fine — every OAuth-minted credential has one,
+  and those are exactly the rows this command exists for.
+- **An unknown scope name is refused before any write**, with the list of real
+  ones. The database CHECK would catch it too, but as an integrity error naming a
+  constraint.
+
+Removing every scope is allowed and is **not** the same as revoking: the
+credential still authenticates, and each route then refuses it with `403` rather
+than `401`. The command says so when it happens, because an operator who meant to
+revoke needs to know they have not.
 
 ### Troubleshooting
 

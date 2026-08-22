@@ -10,8 +10,9 @@ Design settled. The 2026-08-22 spike confirmed `/authorize` runs in the operator
 browser, so both identity methods are reachable, and left three constraints recorded under
 "Consequences".
 
-**Implemented 2026-08-21**, except the `grant`/`revoke-scope` subcommand this ADR requires,
-which must land before OAuth is enabled in production.
+**Implemented 2026-08-21.** Nothing in this ADR is outstanding; enabling it in production is
+a configuration step (`VAULT_PUBLIC_URL` and `VAULT_OPERATOR_PASSWORD_HASH`), documented in
+`docs/vault-configuration.md`.
 
 - Migration `0013_oauth_authorization_server` — `vault_oauth_clients`,
   `vault_oauth_pending_authorizations`, `vault_oauth_authorization_codes`, and
@@ -25,6 +26,9 @@ which must land before OAuth is enabled in production.
   vault's own Jinja2 environment, the first non-documentation asset in the package.
 - `oauth_spike.py` is deleted, its two reusable parts — the route wiring and the slowapi
   labelling workaround — carried into `oauth_routes.py`.
+- `scripts/issue_vault_credential.py` gains `grant` and `revoke-scope`, which this ADR requires:
+  they are the only supported way an above-baseline scope reaches an OAuth client, and they
+  replace the hand-written `UPDATE` on `scopes` that did not scale to a routine operation.
 
 Four implementation choices are recorded under "Consequences": where the operator hash lives,
 why the code table's scope CHECK is wider than the baseline, why absence of `VAULT_PUBLIC_URL`

@@ -7,7 +7,7 @@ this list assumes — inherited state, the conventions that bite, what is unsett
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** on `dev`. Suite green (489 vault, 731 full). PR #14 merges the
+**State:** on `dev`. Suite green (504 vault, 746 full). PR #14 merges the
 22-commit gap into `main` and is open for review.
 
 **Production is three revisions behind `dev`'s schema:** it sits at vault lineage
@@ -57,7 +57,7 @@ four code pieces landed 2026-08-21:
 No longer blocks Phase 4: candidates live where `vault_path` says, and item 5 can
 read that.
 
-## 3. Implement ADR 0024 — the authorization server — **built, one thing left**
+## 3. Implement ADR 0024 — the authorization server — **done**
 
 The flow works end to end: register, authorize, log in, redeem a code, use the
 token against the real vault surface, refresh, and have a replayed refresh token
@@ -71,10 +71,9 @@ revoke its whole family. 21 tests drive it over HTTP.
 - ✅ a login-specific rate limit (`VAULT_LOGIN_RATE_LIMIT`, default `10/minute`)
 - ✅ `oauth_spike.py` deleted; its route wiring and slowapi labelling survive in
   `oauth_routes.py`
-- ⬜ **the `grant`/`revoke-scope` subcommand on `issue_vault_credential`.** ADR
-  0024 requires it *before* OAuth ships: every OAuth client starts at the
-  read+write baseline, some will need more, and the only documented way to widen
-  is a raw `UPDATE` on `scopes`. That does not survive becoming routine.
+- ✅ `grant` / `revoke-scope` on `issue_vault_credential` — the only supported
+  way an above-baseline scope reaches an OAuth client, replacing the raw
+  `UPDATE` on `scopes` that ADR 0024 said would not survive becoming routine
 
 **Two decisions this made that the ADR had left open**, both now amendments in it:
 
@@ -89,11 +88,17 @@ revoke its whole family. 21 tests drive it over HTTP.
   — a third secret to configure and rotate — while a row already exists per
   authorization to hang a random token on, single-use for free.
 
-**Enabling it in production needs `VAULT_PUBLIC_URL`**, which is the on/off
-switch: every URL in the discovery metadata is absolute, so a deployment that
-cannot state its own origin publishes nothing rather than something wrong. See
-`app/vault/docs/vault-configuration.md` for the runbook and the troubleshooting
-table. Do not set it until the scope subcommand above lands.
+**Enabling it in production is now a configuration step**, and nothing in the
+code blocks it. Set `VAULT_OPERATOR_PASSWORD_HASH` (generate it with
+`python -m scripts.hash_vault_operator_password`) and then `VAULT_PUBLIC_URL`,
+which is the on/off switch: every URL in the discovery metadata is absolute, so
+a deployment that cannot state its own origin publishes nothing rather than
+something wrong. `app/vault/docs/vault-configuration.md` has the runbook and a
+troubleshooting table.
+
+Set the password hash **first**. With `VAULT_PUBLIC_URL` set and no hash, the
+discovery documents advertise an authorization server whose login refuses every
+attempt.
 
 ## 4. Revoke the `importer` credential — **done**
 
