@@ -196,45 +196,85 @@ contains placeholders and non-secret defaults only.
 ### `VAULT_OPERATOR_PASSWORD_HASH`
 
 The secret the OAuth login page verifies against, when a client authorizes
-itself against the vault. Configuration rather than a table, deliberately:
-there is exactly one, it has no lifecycle a schema would model, rotation is
-`heroku config:set`, and a config var's backups circulate less widely than a
-database's do.
+itself against the vault.
+
+**It holds a bcrypt hash, never the password.** The value looks like this — a
+bcrypt modular-crypt string, ASCII, 60 characters, `$`-delimited:
+
+```
+$2b$12$H8choNzlGRYACnlz.LgT1O3sn7Kt7PwtaP7sJKAnIqamtAS/LCeFi
+ │  │  └── 22-char salt + 31-char digest, bcrypt's base64 alphabet
+ │  └───── cost factor (work exponent), from bcrypt.gensalt()'s default
+ └──────── algorithm identifier
+```
+
+There is no separate encoding step and nothing to base64 by hand: the string
+above *is* the config value, verbatim. Setting the plaintext password here does
+not work — it would be compared as though it were a hash and fail every login.
+
+Configuration rather than a table, deliberately: there is exactly one, it has no
+lifecycle a schema would model, rotation is `heroku config:set`, and a config
+var's backups circulate less widely than a database's do.
 
 Unset is a supported state and means the password identity method is not
 configured for this deployment. It is never treated as "any password works" —
 the login refuses outright, the same way `VAULT_ENABLED` defaulting to false
 serves no vault rather than an unguarded one.
 
-Generate the hash locally and paste only the hash:
+#### Generating it
 
 ```bash
-python -c "import asyncio, app.vault.passwords as p; print(asyncio.run(p.hash_password(input('password: '))))"
+python -m scripts.hash_vault_operator_password
 ```
+
+It prompts twice without echo, prints the hash, and touches nothing — no
+database, no `DATABASE_URL`, no writes. Copy the printed line.
+
+Use the script rather than an inline `python -c`. One that reads with `input()`
+prints the password to the terminal; one that takes it as an argument leaves it
+in shell history and in the process table. `getpass` avoids both, and on Windows
+it reads the console directly — which also means the script cannot be driven by
+piping into it, on purpose.
+
+#### Setting it
 
 ```bash
-heroku config:set VAULT_OPERATOR_PASSWORD_HASH='$2b$...' --app high-score-server
+heroku config:set VAULT_OPERATOR_PASSWORD_HASH='$2b$12$H8choNzlGRYACnlz.LgT1O3sn7Kt7PwtaP7sJKAnIqamtAS/LCeFi' --app high-score-server
 ```
 
-Three things that go wrong:
+**Single-quote the value.** A bcrypt hash contains `$` characters that bash and
+`zsh` expand as variables — unquoted, `$2b$12$...` becomes a mangled fragment,
+and the symptom is a login that rejects the correct password rather than any
+error naming the config var. PowerShell does not expand `$` inside single
+quotes either, so the same form is correct there.
 
-- **Single-quote it.** A bcrypt hash begins `$2b$` and contains more `$`
-  characters; an unquoted value has them expanded to empty by the shell, and the
-  result looks like a wrong password rather than a mangled config var.
+Locally the same value goes in `.env`, unquoted, since `.env` is read by the
+application rather than by a shell.
+
+#### Three things that go wrong
+
+- **The plaintext password was set instead of the hash.** It will not verify.
+  The value must start `$2`.
 - **bcrypt truncates at 72 bytes**, so `passwords.py` refuses a longer password
   outright rather than hashing a prefix that would let a different passphrase
   verify. The limit is *bytes*: a passphrase of accented characters reaches it
-  sooner than its length suggests.
+  sooner than its length suggests, and the script says so rather than silently
+  shortening.
 - **A malformed hash reads as a wrong password.** The application logs
   `vault operator password hash is not a valid bcrypt hash` at ERROR and reports
   an ordinary login failure — one message for every failure is ADR 0024's rule,
-  so the log is where the real cause is findable.
+  so the log is where the real cause is findable. If a correct password is being
+  rejected, look there before assuming the password is wrong.
 
-This is bcrypt and not the SHA-256 the rest of the package uses. Agent secrets
-are machine-generated with full entropy, so a plain digest is correct for them
-and a work factor would buy nothing; an operator password is chosen by a person,
-so the work factor is the point. ADR 0015 says explicitly not to carry the
-SHA-256 reasoning across, and this is where that matters.
+#### Why bcrypt here and SHA-256 everywhere else
+
+Agent secrets (`hssv1_…`) are machine-generated with full entropy, so a plain
+digest is correct for them: there is no dictionary a work factor would slow
+down, and the read surface cannot afford a deliberately slow hash per request.
+An operator password is chosen by a person, so the work factor is exactly the
+point, and it runs once per authorization rather than once per request. Vault
+ADR 0015 says explicitly not to carry the SHA-256 reasoning across to
+human-chosen passwords; this is where that matters.
 
 ## Migration lineages
 
