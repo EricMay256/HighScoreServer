@@ -54,7 +54,23 @@ vault:update` and has no remaining purpose — the 2026-08-21 re-import ran unde
 
 Not urgent, but it is a live write credential whose job is finished.
 
-## 4. Compilation (Phase 4)
+## 4. OAuth, if web access matters
+
+Vault ADR 0024 (`Proposed`) settles the design: the vault hosts its own
+authorization server, and an issued token is backed by a `vault_agent_credentials`
+row rather than a parallel identity. Decide the ADR, then build.
+
+Smaller than it sounds, and that was checked rather than assumed. The MCP SDK
+already ships `create_auth_routes()` with `/authorize`, `/token`, `/register`,
+`/revoke` and both metadata documents; `principal.resolve_credential` already has
+the `TokenVerifier` shape ADR 0015 left for it; `bcrypt` is already a dependency.
+The work is one ten-method provider protocol, the operator password, and wiring.
+
+Do **not** ship the `resource_metadata` challenge before the server works -- that
+header is the vault advertising an authorization server, and pointing at one that
+does not answer is worse than the current honest dead end.
+
+## 5. Compilation (Phase 4)
 
 The last markdown writer. `Agent/wiki/` is still produced by the Stage-A
 librarian loop in the knowledge-platform engine, because the service has no
@@ -68,7 +84,7 @@ Two things to carry into that work:
   load-bearing the moment the service holds wiki documents.
 - Wiki `SourceIDs` now have to come from service note ids, not filenames.
 
-## 5. The admin MCP surface
+## 6. The admin MCP surface
 
 The review routes are REST-only on purpose (vault ADR 0019's amendment, ADR 0021's
 reasoning): reading a case serves `flagged` content and deciding one publishes or
