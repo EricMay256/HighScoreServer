@@ -77,17 +77,29 @@ the specification expects to self-register. That means **anyone can register a c
 is by design and is why it grants nothing on its own: a registered client still has to complete
 an authorization the operator personally approves.
 
-`ClientRegistrationOptions` bounds what a registering client may hold:
+`ClientRegistrationOptions` sets read and write as the **baseline**, not a ceiling:
 
-- `valid_scopes`: `vault:read`, `vault:write`
-- `default_scopes`: `vault:read`, `vault:write`
+- `default_scopes`: `vault:read`, `vault:write` — what a self-registering client receives
+- `valid_scopes`: `vault:read`, `vault:write` — the most a client may *request*
 
-`vault:update`, `vault:delete`, and `vault:review` are **not obtainable through OAuth**. They
-stay operator-issued, for ADR 0020's reason — retirement destroys a note and review serves
-`flagged` content — and because a self-registering client asking for them should be refused by
-construction rather than by judgement. Widening a specific client beyond the defaults is a
-deliberate act on its credential row, the same manual decision migration `0007` already
-requires.
+The distinction matters. A client can never ask for more than the baseline, so
+`vault:update`, `vault:delete`, and `vault:review` are unreachable by request — a
+self-registering client asking for them is refused by construction rather than by an operator
+noticing on a consent screen. But the credential row is an ordinary row, and an operator may
+widen a *specific* one afterwards.
+
+That asymmetry is the point: above-baseline scopes are **granted deliberately, never
+requested**. It is the same rule migration `0007` established when it split the write verbs and
+deliberately granted nothing — "a migration reruns, and one that re-applies privilege would
+silently restore permissions on every rebuild, rollback, or staging refresh."
+
+Widening is therefore expected rather than exceptional, which it was not before: every OAuth
+client starts at the baseline, and some will need more. `issue_vault_credential` has no
+subcommand for it — the documented method is a raw `UPDATE` on `scopes` — and that does not
+scale to a routine operation against production. **This ADR requires a supported
+grant/revoke-scope command** before OAuth ships. The `scopes` column already carries a CHECK
+constraining it to the known set, so the command is thin; what it buys is that changing a
+privilege stops being hand-written SQL.
 
 ### Two identity methods, both built, chosen by configuration
 
