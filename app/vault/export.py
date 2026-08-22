@@ -17,14 +17,28 @@ two machines unless the exporter converts. That was observed on the real corpus,
 not assumed.
 
 **What is projected.** ``EXPORTED_PATH_PREFIXES`` mirrors the ``Agent/`` rules
-that ``folders.yml`` marks ``engine_managed: true``. That deliberately excludes
-``Agent/Promotion Candidates/``, which ``folders.yml`` marks
-``engine_managed: false`` and the Promotion Policy calls "a human-curated queue,
-**not** an engine-managed store ... kept outside the engine's dedup gate on
-purpose". Writing files there would make this a second writer to a folder whose
-whole point is human judgment. Nothing here touches ``Human/``: agents may not
-write there at all, and the ``check-policy`` gate on ``ai/`` branches enforces
-it.
+that ``folders.yml`` marks ``engine_managed: true``, which since ADR 0023
+includes ``Agent/Promotion Candidates/``. That folder was originally excluded on
+the grounds that it was a human-curated drop box; it is now a projection of
+``promotion_status``, and dragging a file into it by hand does nothing, because
+the row still names its own path and the next export rewrites the original. The
+exporter is not a second writer there -- it is the only one. Nothing here
+touches ``Human/``: agents may not write there at all, and the ``check-policy``
+gate on ``ai/`` branches enforces it.
+
+**Candidacy routes through ``vault_path``, not through a directory this module
+computes.** ADR 0010 requires ``vault_path`` to be byte-identical to the
+governance scanner's ``rel_path``, so the row and the file must agree about
+which folder rule applies. ``VaultPromotionService`` moves the two together;
+this module writes wherever the row says, exactly as it does for every other
+note.
+
+**Pruning is narrower than writing.** ``CORPUS_OWNED_PATH_PREFIXES`` is the
+subset the service is authoritative for, and only those are swept. It is an
+explicit set rather than "prefixes the corpus populates", because occupancy is
+the wrong ownership signal: when the last candidate is promoted or retracted the
+folder goes empty, and an occupancy test would skip it and strand the final file
+showing a candidate that is no longer one. See ``VaultExportService.export``.
 
 **Flagged notes are exported.** ADR 0008 withholds ``flagged`` from *agents*,
 because the consumer is a model that will not check the ``status`` field. A
@@ -77,9 +91,28 @@ from .service import VaultTransactionService
 # governance decision, and a deployment must not be able to opt into projecting
 # into one the governance layer reserved for a human.
 EXPORTED_PATH_PREFIXES: tuple[str, ...] = (
+    "Agent/Promotion Candidates/",
     "Agent/notes/",
     "Agent/review/",
     "Agent/wiki/",
+)
+
+# Which of those the corpus *owns*, and may therefore delete files from. A
+# narrower set than what may be written, and the difference is deliberate:
+# `Agent/wiki/` is still produced by the Stage-A librarian loop, which holds 15
+# compiled pages the service has never seen, so an export that swept it would
+# delete another writer's work. It joins this set when compilation moves to the
+# service (NEXT-STEPS item 5) and stops being a shared folder.
+#
+# Explicit rather than derived from occupancy, per ADR 0023. "Sweep the
+# prefixes that have rows" looks equivalent and is not: an owned folder is
+# legitimately empty -- `Agent/Promotion Candidates/` between the last
+# candidate settling and the next one being proposed, `Agent/review/` today --
+# and skipping it there strands exactly the file that most needs removing.
+CORPUS_OWNED_PATH_PREFIXES: tuple[str, ...] = (
+    "Agent/Promotion Candidates/",
+    "Agent/notes/",
+    "Agent/review/",
 )
 
 # Ported from vault_contrib.vault_frontmatter.SCHEMA_ORDER, with four keys the
@@ -546,19 +579,16 @@ class VaultExportService:
                 _write_text(target, item.content)
 
         resolved_root = root.resolve()
-        # Only sweep a prefix the corpus actually populates. A prefix with no
-        # rows is far more likely to mean "the database is not authoritative
-        # for this folder yet" than "every file in it was retired" -- and today
-        # it means exactly that for `Agent/wiki/`, where the Stage-A librarian
-        # still owns 15 compiled pages the service has never held. ADR 0012
-        # settles the same question the same way for reconciliation: sweep only
-        # after a complete walk, and refuse an implausible one.
-        populated = {
-            prefix
-            for prefix in EXPORTED_PATH_PREFIXES
-            if any(item.vault_path.startswith(prefix) for item in rendered)
-        }
-        for orphan in _orphaned_files(root, expected, populated):
+        # Sweep only the prefixes the corpus owns, and sweep them even when
+        # empty. The earlier rule -- sweep what the corpus populates -- was
+        # aimed at the right hazard, `Agent/wiki/`, where the Stage-A librarian
+        # still holds 15 compiled pages the service has never seen. But
+        # occupancy answers "is this folder in use", not "whose folder is
+        # this", and the two diverge exactly when an owned folder empties: the
+        # last promotion candidate settles, no row names that prefix any more,
+        # the sweep skips it, and the stale file survives claiming a candidacy
+        # that ended. ADR 0023 replaces the occupancy test with this constant.
+        for orphan in _orphaned_files(root, expected, CORPUS_OWNED_PATH_PREFIXES):
             report.prunable.append(orphan.relative_to(resolved_root).as_posix())
             if prune and apply:
                 orphan.unlink()
@@ -588,11 +618,12 @@ def _orphaned_files(
 ) -> tuple[Path, ...]:
     """Markdown files under the given prefixes that no row accounts for.
 
-    Scoped to the prefixes this module owns, so a file the engine never wrote --
-    ``Agent/INDEX.md``, anything under ``Agent/Promotion Candidates/`` -- is
-    never a deletion candidate, whatever the corpus contains. Narrowed again by
-    the caller to prefixes the corpus populates, so an empty one is left alone
-    rather than emptied.
+    Scoped to the prefixes the caller passes, which is
+    ``CORPUS_OWNED_PATH_PREFIXES`` rather than everything the export writes. A
+    file no row accounts for is only an orphan inside a folder the service is
+    authoritative for; elsewhere -- ``Agent/INDEX.md``, the Stage-A pages under
+    ``Agent/wiki/`` -- it belongs to somebody else and is left alone whatever
+    the corpus contains.
     """
 
     resolved_root = root.resolve()

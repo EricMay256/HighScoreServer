@@ -16,6 +16,7 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    PromotionStatus,
     ReviewState,
     VaultDocument,
     VaultReviewCase,
@@ -70,6 +71,34 @@ logger = logging.getLogger(__name__)
 # derived from caller input -- that separation is the whole of ADR 0022's
 # privilege argument, and types.yml constrains this folder to "Agent Note".
 AGENT_NOTES_DIRECTORY = "Agent/notes/"
+
+# Where compilation will put a wiki page. Named here rather than in export.py
+# so the promotion verb can send a retracted page back to the folder it came
+# from: folders.yml types that one "Wiki Page" and `Agent/notes/` "Agent Note",
+# so returning a page to the notes folder would leave it violating the rule its
+# own path selects. Nothing writes it yet -- compilation is NEXT-STEPS item 5.
+AGENT_WIKI_DIRECTORY = "Agent/wiki/"
+
+# Where a promotion candidate is projected. Both kinds land here: ADR 0023
+# widened `allowed_types` to ["Agent Note", "Wiki Page"] on the reasoning that a
+# compiled page distilling several notes is, if anything, more human-worthy than
+# a raw note.
+PROMOTION_CANDIDATES_DIRECTORY = "Agent/Promotion Candidates/"
+
+
+def _promotion_home_directory(kind: DocumentKind) -> str:
+    """Where a document lives when it is not a promotion candidate.
+
+    Keyed on `kind` rather than on the current path, so the answer is a
+    property of the document rather than of where it happens to be sitting --
+    which is what a candidate's path deliberately is not.
+    """
+
+    return (
+        AGENT_WIKI_DIRECTORY
+        if kind is DocumentKind.WIKI
+        else AGENT_NOTES_DIRECTORY
+    )
 
 
 class VaultTransactionService:
@@ -1223,4 +1252,153 @@ class VaultReviewService:
             return ReviewDecisionOutcome(
                 review_case=settled if settled is not None else decided,
                 candidate=candidate,
+            )
+
+
+class PromotionNotApplicable(Exception):
+    """The document cannot carry a promotion judgement.
+
+    Raised for a document living outside the folders this verb routes between,
+    which is the one way it could relocate a row into a tree the service does
+    not own.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionRequest:
+    """A reviewer's judgement about whether a note belongs in the Human layer."""
+
+    document_id: str
+    # None clears the judgement back to "never proposed". Distinct from
+    # RETRACTED, which records that someone looked and declined.
+    promotion_status: PromotionStatus | None
+    principal_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionOutcome:
+    document: VaultDocument
+    # Whether `vault_path` actually moved. False for a no-op re-application and
+    # for any transition between two non-candidate states, which share a
+    # folder.
+    moved: bool
+
+
+class VaultPromotionService:
+    """Set a document's promotion candidacy, and move its file to match.
+
+    ADR 0023: candidacy is a field, and the export projects it into a folder.
+    The projection is ``vault_path`` -- ADR 0010 requires that column to stay
+    byte-identical to the governance scanner's ``rel_path``, so the row has to
+    name the folder the file is actually in or the wrong ``folders.yml`` rule
+    resolves against it. Setting the field and moving the path is therefore one
+    operation, not two.
+
+    **The corpus lock is required, for the reason contribution takes it.**
+    ``vault_path`` is UNIQUE and collisions suffix, so the free name is only
+    still free while the lock is held. A promotion racing a contribution of a
+    note with the same title is exactly the collision ``resolve_vault_path``
+    exists to settle.
+
+    **Active documents only.** ADR 0023 makes a candidate "a first-class agent
+    note: served to agents, returned by search, and inside the dedup gate",
+    which is a description of ``active`` and of nothing else. A flagged note is
+    one the write path declined to endorse and an archived one is retired;
+    projecting either into a folder that means *elevated* would put a file in
+    front of a librarian for content agents cannot see. A flagged note is
+    promotable once its review case is accepted, which is the right order.
+
+    **No dedup gate, and no re-embedding.** Nothing about the content changes
+    -- not the title, not the body, not ``updated_at`` -- so the embedding is
+    still current and the rendered file is byte-identical either side of the
+    move. That is what makes git show a rename and follow the history.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def set_promotion_status(
+        self, request: PromotionRequest
+    ) -> PromotionOutcome:
+        documents = VaultDocumentRepository()
+
+        async with self._transactions.transaction() as connection:
+            # Serializes with contribution, retirement and review decisions --
+            # all four resolve or invalidate a `vault_path`, and the answer to
+            # "is this name taken" is only true under the lock.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+
+            existing = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=(DocumentStatus.ACTIVE,),
+            )
+            if existing is None:
+                raise DocumentNotFound(request.document_id)
+
+            home = _promotion_home_directory(existing.kind)
+            if not existing.vault_path.startswith(
+                (home, PROMOTION_CANDIDATES_DIRECTORY)
+            ):
+                # The verb routes between exactly two folders. A row anywhere
+                # else -- an imported human note, a folder added later -- is
+                # not something it may relocate, and refusing is the only
+                # answer that cannot move a file into a tree this service does
+                # not own.
+                raise PromotionNotApplicable(
+                    f"{existing.vault_path!r} is outside {home!r} and "
+                    f"{PROMOTION_CANDIDATES_DIRECTORY!r}"
+                )
+
+            if existing.promotion_status is request.promotion_status:
+                # Re-applying a judgement is a no-op rather than an error: it
+                # must not re-resolve the path, which would suffix the note
+                # against its own name and rewrite the file for nothing.
+                return PromotionOutcome(document=existing, moved=False)
+
+            directory = (
+                PROMOTION_CANDIDATES_DIRECTORY
+                if request.promotion_status is PromotionStatus.CANDIDATE
+                else home
+            )
+            taken = await documents.vault_paths_under(connection, directory)
+            # Its own path is not a collision with itself. Only reachable when
+            # the folder is unchanged -- promoted/retracted/cleared all share
+            # `home` -- and there the answer must be "stay put".
+            taken.discard(existing.vault_path)
+            resolved = resolve_vault_path(directory, existing.title, taken)
+
+            updated = await documents.set_promotion_status(
+                connection,
+                request.document_id,
+                promotion_status=request.promotion_status,
+                vault_path=resolved,
+            )
+            if updated is None:
+                # Present under the lock a moment ago. Nothing can delete it
+                # while this transaction holds that lock, so this is a bug
+                # rather than a race -- surfaced as the 404 it looks like from
+                # outside.
+                raise DocumentNotFound(request.document_id)
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.promote",
+                outcome=(
+                    request.promotion_status.value
+                    if request.promotion_status is not None
+                    else "cleared"
+                ),
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=request.document_id,
+            )
+            return PromotionOutcome(
+                document=updated,
+                moved=updated.vault_path != existing.vault_path,
             )

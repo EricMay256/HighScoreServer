@@ -7,43 +7,52 @@ this list assumes — inherited state, the conventions that bite, what is unsett
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** on `dev`, pushed, **21 commits ahead of `main`**. Suite green (416
-vault, 642 full).
+**State:** on `dev`. Suite green (433 vault, 675 full). PR #14 merges the
+22-commit gap into `main` and is open for review.
 
-**Production is current with `dev`'s schema:** vault lineage
-`0011_review_candidate_optional`, 70 documents, all active, none flagged, none
-unembedded, every path a title slug. The review flow shipped in release v64.
+**Production is one revision behind `dev`'s schema:** it sits at vault lineage
+`0011_review_candidate_optional` with 70 documents, all active, none flagged,
+none unembedded, every path a title slug. The review flow shipped in release
+v64. `0012_document_promotion_status` deploys with the next release — it adds a
+nullable column and creates one enum, so it is additive and needs no backfill.
 
 **ADRs 0023, 0024 and 0025 are all Accepted as of 2026-08-22.** What remains is
 implementation, listed below; no decision blocks it.
 
 ---
 
-## 1. Merge `dev` into `main`
+## 1. Merge `dev` into `main` — **PR open**
 
-Twenty-one commits, including every piece of vault documentation written this month.
+Twenty-two commits, including every piece of vault documentation written this month.
 This is not bookkeeping: someone looking for the MCP setup instructions could not
 find them, because they were on `dev` and GitHub shows `main`. Documentation on a
 non-default branch is documentation nobody reads.
 
 Nothing on Heroku tracks `main`, so this changes no running behaviour.
 
-## 2. Implement ADR 0023 — promotion candidacy
+[PR #14](https://github.com/EricMay256/HighScoreServer/pull/14) is open and
+fast-forwardable. Awaiting a human on the merge button.
+
+## 2. Implement ADR 0023 — promotion candidacy — **done except the verb**
 
 "Candidacy is a field, and the export projects it into a folder."
 
-The governance side is done (knowledge-platform `d40bdfc`): the folder is now
-canonical, engine-managed, and typed for `Agent Note` and `Wiki Page`. Four pieces
-of code are outstanding:
+The governance side was already done (knowledge-platform `d40bdfc`): the folder is
+canonical, engine-managed, and typed for `Agent Note` and `Wiki Page`. Three of the
+four code pieces landed 2026-08-21:
 
-- `promotion_status` enum column and its migration
-- export routing on it — candidate to `Agent/Promotion Candidates/`, otherwise
-  `Agent/notes/`
-- the prune-guard fix: an explicit owned-prefix set, because occupancy is the
-  wrong ownership signal and the last candidate would otherwise strand its file
-- the `vault:review`-gated verb to set it, which lands with the admin MCP
+- ✅ `promotion_status` enum column, migration `0012_document_promotion_status`
+- ✅ routing — and it is **`vault_path`**, not a directory the exporter derives.
+  ADR 0010 requires the column to equal the scanner's `rel_path`, so
+  `VaultPromotionService` sets the field and moves the path in one statement under
+  the corpus lock, and the exporter writes wherever the row points
+- ✅ the prune-guard fix: `CORPUS_OWNED_PATH_PREFIXES` replaces the occupancy test.
+  `Agent/wiki/` is written but not owned — it joins the owned set when item 5 lands
+- ⬜ the `vault:review`-gated verb to set it, which lands with the admin MCP
+  (item 6). The service method exists and is tested; it has no transport surface
 
-Blocks Phase 4, which needs to know where candidates live.
+No longer blocks Phase 4: candidates live where `vault_path` says, and item 5 can
+read that.
 
 ## 3. Implement ADR 0024 — the authorization server
 
@@ -139,14 +148,18 @@ loop in the knowledge-platform engine, because the service has no compile path.
 `vault_compile_runs` already exists with its provenance CHECK and
 `ON DELETE RESTRICT`; the service and routes do not.
 
-Two things to carry in:
+Three things to carry in:
 
-- The exporter refuses to prune a prefix the corpus does not populate. That guard
-  is what stops an export deleting the 15 Stage-A wiki pages, and it stops being
-  load-bearing the moment the service holds wiki documents.
+- `Agent/wiki/` is an exported prefix the corpus does **not** own. It is absent
+  from `CORPUS_OWNED_PATH_PREFIXES` precisely so an export cannot delete the 15
+  Stage-A pages no row accounts for. Adding it to that tuple is part of this
+  work, and must not happen before the service actually holds those pages.
 - Wiki `SourceIDs` now come from service note ids, not filenames.
+- A compiled page can be a promotion candidate (ADR 0023 admits both types), and
+  `VaultPromotionService` already routes one home to `Agent/wiki/`. Nothing to
+  build; it is there so a page does not land in a folder typed `Agent Note`.
 
-Blocked on ADR 0023.
+No longer blocked.
 
 ## 6. The admin MCP surface
 

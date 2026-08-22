@@ -123,6 +123,32 @@ be edited when it does.
   answer is only true while the lock is held — do not move that back to `_build_candidate`. A
   retitled note keeps its path: `replace_content` leaves it alone, and a path that followed the
   title would turn a frontmatter edit into a delete-plus-create in the export's git history.
+- **`promotion_status` routes through `vault_path`, and the two move together.** ADR 0023
+  says candidacy is a field and the folder is a projection of it — but the projection is the
+  path column, not a directory the exporter re-derives. ADR 0010 requires `vault_path` to stay
+  byte-identical to the governance scanner's `rel_path`, so a file under
+  `Agent/Promotion Candidates/` whose row still says `Agent/notes/` would resolve its
+  `allowed_types` and `validation_mode` against the wrong `folders.yml` rule. `folders.yml`
+  says the same thing from the other side: dropping a file into the folder by hand does
+  nothing, because "the row still names its own path". `VaultPromotionService` therefore sets
+  the field and resolves the new path in one statement, **under the corpus advisory lock** —
+  `vault_path` is UNIQUE and collisions suffix, so the free name is only still free while the
+  lock is held. `updated_at` deliberately does not move, and here that is load-bearing rather
+  than tidy: the rendered file is byte-identical either side of the move, which is what makes
+  git show a rename and follow the history. Home is keyed on `kind`, so a retracted **`Wiki
+  Page` returns to `Agent/wiki/`**, never to `Agent/notes/`, which is typed to `Agent Note`
+  alone. `NewVaultDocument` carries no `promotion_status` on purpose: a note is never a
+  candidate at birth, and keeping the field off that record is what makes the review-gated
+  verb the only way in. Active documents only — a candidate is "served to agents, returned by
+  search, and inside the dedup gate", which describes `active` and nothing else.
+- **The export writes more prefixes than it prunes.** `EXPORTED_PATH_PREFIXES` is what may be
+  written; `CORPUS_OWNED_PATH_PREFIXES` is the subset the service is authoritative for and may
+  therefore delete from. `Agent/wiki/` is in the first and not the second, because the Stage-A
+  librarian still holds 15 compiled pages there; it joins the second when compilation moves to
+  the service. The owned set is explicit rather than derived from occupancy, per ADR 0023:
+  "sweep the prefixes that have rows" looks equivalent and fails exactly when an owned folder
+  empties — the last promotion candidate settles, no row names the prefix, the sweep skips it,
+  and the stale file survives advertising a candidacy that ended.
 - **A review candidate is always a brand-new note, and a settled case releases it.**
   `insert_pending` has one production caller: the contribute path's `Flag` branch, with the
   note it just wrote. Pre-existing notes appear only as JSON evidence, and the update path

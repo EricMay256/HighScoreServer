@@ -18,6 +18,34 @@ class DocumentStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class PromotionStatus(str, Enum):
+    """Whether a note has been proposed for the Human layer, and what came of it.
+
+    Distinct from ``DocumentStatus`` (the vault's visibility gate) and from
+    ``doc_status`` (the Status Map value): three different questions, none
+    derived from the others (ADR 0011's rule, applied a third time). ``None``
+    is a real value here and the ordinary one -- never proposed.
+
+    The export routes on ``CANDIDATE`` alone. The other two exist so the
+    *outcome* is recorded rather than collapsing back into "never proposed",
+    which is what stops a note being re-proposed forever and lets a reviewer
+    see that something was already considered and declined. Same shape as a
+    review case, where ``accepted`` and ``rejected`` both mean settled and are
+    worth telling apart. See ADR 0023.
+    """
+
+    # Proposed for promotion, awaiting human judgement. Exports to
+    # `Agent/Promotion Candidates/`.
+    CANDIDATE = "candidate"
+    # A Human note has been written from it. The agent note is *not* consumed:
+    # promotion rewrites rather than moves, so the original stays a
+    # first-class note in `Agent/notes/`.
+    PROMOTED = "promoted"
+    # Considered and declined. Back to `Agent/notes/`, and not a candidate
+    # again without a fresh judgement.
+    RETRACTED = "retracted"
+
+
 class ReviewState(str, Enum):
     """What a human decided about a flagged contribution.
 
@@ -103,6 +131,9 @@ class VaultDocument:
     doc_type: str | None = None
     # Status Map value from types.yml, distinct from `status`. See ADR 0011.
     doc_status: str | None = None
+    # Promotion candidacy, distinct from both of the above. None means never
+    # proposed, which is the ordinary state. See ADR 0023.
+    promotion_status: PromotionStatus | None = None
     summary: str | None = None
     tags: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
@@ -129,6 +160,15 @@ class VaultDocument:
 
 @dataclass(frozen=True, slots=True)
 class NewVaultDocument:
+    """Content on its way into a row, from a contribution or a replacement.
+
+    Deliberately carries no ``promotion_status``: a note is never a candidate
+    at birth, and an update is a new body for an existing row rather than a new
+    judgement about it. Candidacy is set afterwards by a reviewer holding
+    ``vault:review``, together with the ``vault_path`` it routes to, and
+    keeping the field off this record is what makes that the only way in.
+    """
+
     id: str
     kind: DocumentKind
     status: DocumentStatus

@@ -12,8 +12,21 @@ The governance changes this required are applied (knowledge-platform `d40bdfc`):
 and the Promotion Policy describes a projection rather than a drop box. The live vault
 validates clean and the engine's schema tests pass against it.
 
-Implementation is outstanding: the `promotion_status` column, the export routing, and the
-prune-guard fix in "Consequences" below.
+Implemented 2026-08-21, except the verb's transport surface. Migration
+`0012_document_promotion_status` adds the column; `VaultPromotionService` sets it and moves
+`vault_path` with it under the corpus lock; `EXPORTED_PATH_PREFIXES` gains the folder and
+`CORPUS_OWNED_PATH_PREFIXES` replaces the occupancy test the prune guard used.
+
+**Routing is the path column, not a directory the exporter derives.** That is worth stating
+plainly, because "the export routes on it" below reads either way. ADR 0010 requires
+`vault_path` to equal the governance scanner's `rel_path`, so a row and its file cannot
+disagree about which folder rule applies; the service moves the two together and the exporter
+writes wherever the row points, as it does for every other note. `folders.yml` records the
+same thing from the other side — dropping a file in by hand does nothing, because "the row
+still names its own path".
+
+Still outstanding: the `vault:review`-gated verb that calls the service, which lands with the
+admin MCP surface (its own decision, "What this does not decide" below).
 
 Refines ADR 0022 (two trees, one writer each), which said the exporter "projects `Agent/`
 only" without saying which parts of `Agent/`. Depends on ADR 0010 (`vault_path` is the only
@@ -160,6 +173,28 @@ Three files, as one reviewed patch:
 Flagging a note rewrites it at a new path and prunes the old file. Content is identical, so
 git renders it as a rename and history follows. Acceptable, and the alternative — a stable
 path with the folder as an index or a symlink farm — buys nothing a reader would notice.
+
+### Three things the implementation had to settle (2026-08-21)
+
+Each follows from the reasoning above rather than deciding anything new, and each is recorded
+because reading the decision alone does not produce it.
+
+**Active documents only.** A candidate is "served to agents, returned by search, and inside
+the dedup gate" — which describes `active` and nothing else. A `flagged` note is one the write
+path declined to endorse and an `archived` one is retired; projecting either into a folder
+that means *elevated* would put a file in front of a librarian for content the read surface
+withholds. A flagged note becomes promotable once its review case is accepted, which is the
+right order.
+
+**Home is keyed on `kind`.** `allowed_types` admits both an `Agent Note` and a `Wiki Page` to
+the candidates folder, so a page that goes in has to come back out somewhere legal — and
+`Agent/notes/` is typed to `Agent Note` alone. A retracted page therefore returns to
+`Agent/wiki/`, not to the notes folder, and the answer is a property of the document rather
+than of where it happens to be sitting.
+
+**The verb refuses a row outside those two folders.** It is the one way a state change could
+relocate a document into a tree the service does not own — an imported human note, a folder
+classified later. Refusing is the only answer that cannot.
 
 ### The privilege argument is unchanged
 

@@ -62,6 +62,13 @@ review_state_enum = ENUM(
     name="vault_review_state",
     schema=VAULT_SCHEMA,
 )
+promotion_status_enum = ENUM(
+    "candidate",
+    "promoted",
+    "retracted",
+    name="vault_promotion_status",
+    schema=VAULT_SCHEMA,
+)
 write_request_state_enum = ENUM(
     "processing",
     "inserted",
@@ -150,6 +157,12 @@ vault_documents = Table(
     # read surface's visibility gate and cannot represent a Wiki Page's
     # Current/Stub. See ADR 0011.
     Column("doc_status", Text),
+    # Whether a human has proposed this note for the Human layer. A third
+    # independent question alongside `status` and `doc_status`, and NULL --
+    # never proposed -- is the ordinary state. `candidate` is the only value
+    # the export routes on; `promoted` and `retracted` record that the
+    # judgement was made and settled. See ADR 0023.
+    Column("promotion_status", promotion_status_enum),
     Column("title", Text, nullable=False),
     Column("summary", Text),
     Column("body", Text, nullable=False),

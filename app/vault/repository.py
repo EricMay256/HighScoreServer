@@ -17,6 +17,7 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    PromotionStatus,
     ReviewState,
     VaultDocument,
     VaultReviewCase,
@@ -47,6 +48,7 @@ DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.vault_path,
     vault_documents.c.status,
     vault_documents.c.doc_status,
+    vault_documents.c.promotion_status,
     vault_documents.c.title,
     vault_documents.c.summary,
     vault_documents.c.body,
@@ -78,6 +80,11 @@ def document_from_row(row: RowMapping) -> VaultDocument:
         vault_path=row["vault_path"],
         status=DocumentStatus(row["status"]),
         doc_status=row["doc_status"],
+        promotion_status=(
+            None
+            if row["promotion_status"] is None
+            else PromotionStatus(row["promotion_status"])
+        ),
         title=row["title"],
         summary=row["summary"],
         body=row["body"],
@@ -233,6 +240,48 @@ class VaultDocumentRepository:
             update(vault_documents)
             .where(vault_documents.c.id == document_id)
             .values(status=status.value, doc_status=doc_status)
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def set_promotion_status(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        promotion_status: PromotionStatus | None,
+        vault_path: str,
+    ) -> VaultDocument | None:
+        """Move candidacy and the path it routes to, in one statement.
+
+        The folder is a projection of the field (ADR 0023), and the projection
+        is ``vault_path``: the exporter writes a candidate under
+        ``Agent/Promotion Candidates/`` because the row says that is where it
+        lives, not because the exporter re-derives a directory. ADR 0010
+        requires ``vault_path`` to stay byte-identical to the governance
+        scanner's ``rel_path``, so a file in one folder and a row naming
+        another would resolve its ``allowed_types`` and ``validation_mode``
+        against the wrong rule. The two therefore move together or not at all,
+        the same way ``set_status`` moves ``status`` and ``doc_status``.
+
+        ``updated_at`` deliberately does not move, and here that is
+        load-bearing rather than tidy: the rendered content is byte-identical
+        either side of the move, which is what makes git show a rename and
+        follow the file's history. Bumping the timestamp would rewrite
+        ``LastUpdated`` and turn every promotion into a rename plus an edit.
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .values(
+                promotion_status=(
+                    None if promotion_status is None else promotion_status.value
+                ),
+                vault_path=vault_path,
+            )
             .returning(*self._domain_columns)
         )
         result = await connection.execute(statement)
