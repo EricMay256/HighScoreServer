@@ -167,21 +167,34 @@ exists for this, and the credential rows OAuth mints should carry `expires_at` r
 living forever like an operator-issued one. A pruning story is required, not optional — this is
 the same shape as `prune_idempotency_keys.py`.
 
-### The mobile premise rests on one unverified fact
+### The mobile premise held (measured 2026-08-22)
 
-Reaching the vault from a phone is the reason web access matters at all, and it depends on
-whether the target client authorizes connectors in a system browser or an embedded webview.
-Google works in the first and is refused in the second.
+Reaching the vault from a phone is the reason web access matters at all, and it depended on
+whether the client authorizes connectors in a system browser or an embedded webview. Google
+works in the first and is refused in the second.
 
-That is cheap to determine and expensive to assume, so determine it first: register the Google
-client, wire `authorize` to redirect and the callback to log what comes back, and try it from
-the device that matters. Everything else in this ADR is unaffected by the answer -- the
-provider, the credential mapping, the scope bounds -- which is precisely why the check should
-come before them rather than after.
+`oauth_spike.py` answered it against the real client. The flow splits across two callers:
 
-If the answer is "embedded webview", the password form still works and mobile contribution
-still happens; it is just less pleasant than hoped. The premise survives either way. What does
-not survive is building the Google path, shipping it, and discovering the block from a phone.
+```
+POST /register   ua='python-httpx/0.28.1'                       <- Anthropic's backend
+GET  /authorize  ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+                     ... Chrome/151.0.0.0 Safari/537.36'        <- the operator's browser
+                 sec-fetch-dest='document'  referer='https://claude.ai/'
+```
+
+**`/authorize` is a genuine top-level navigation in the system browser**, so Google is
+reachable and the webview block does not apply. Registration is server-side, which is a
+separate and useful fact: the two halves arrive from different addresses and therefore
+different workers, so a provider must not keep client state in process memory. The spike's
+first version did, and failed exactly there.
+
+The mobile case follows from this rather than needing its own test: the claude.ai mobile app
+exposes no connector settings and consumes the configuration established on desktop or web, so
+authorization happens in the browser above and a phone never renders Google's login page. The
+residual risk is re-authorization initiated from mobile, which the password method covers.
+
+Both identity methods stay in the decision regardless. What this measurement settles is which
+one to reach for first, and it is Google.
 
 ### Existing credentials are unaffected
 
