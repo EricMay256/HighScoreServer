@@ -28,7 +28,7 @@ Nothing on Heroku tracks `main`, so this changes no running behaviour.
 
 ## 2. Implement ADR 0023 — promotion candidacy
 
-"The export projects only the engine-managed folders, not all of `Agent/`."
+"Candidacy is a field, and the export projects it into a folder."
 
 The governance side is done (knowledge-platform `d40bdfc`): the folder is now
 canonical, engine-managed, and typed for `Agent Note` and `Wiki Page`. Four pieces
