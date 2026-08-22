@@ -1,0 +1,98 @@
+{# The operator login and consent screen for the vault's OAuth authorization
+   server (vault ADR 0024).
+
+   Login and consent are one page on purpose: it names the client and the exact
+   scopes it asked for, above the password field, because a scope grant the
+   operator never sees is a scope grant the operator did not make.
+
+   Self-contained -- no `extends`, no external CSS, no scripts. Not minimalism
+   for its own sake: `app/vault/` moves as a directory, so a page depending on a
+   host asset would arrive at the new repository broken, and the boundary test
+   cannot catch that because it scans imports rather than templates. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{# Authorization pages must not be framed: a clickjacked consent screen is a
+   scope grant the operator did not intend. The header is set on the response
+   too; this is the belt to that braces. #}
+<meta http-equiv="Content-Security-Policy" content="frame-ancestors 'none'">
+<title>Authorize access &middot; vault</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; padding: 2rem 1rem;
+    display: flex; justify-content: center;
+    background: Canvas; color: CanvasText;
+  }
+  main { width: 100%; max-width: 26rem; }
+  h1 { font-size: 1.25rem; margin: 0 0 1.5rem; }
+  .client { font-weight: 600; }
+  ul.scopes { margin: .5rem 0 1.5rem; padding-left: 1.25rem; }
+  ul.scopes li { margin: .25rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .scope-name { font-weight: 600; }
+  .scope-note { opacity: .75; }
+  label { display: block; margin-bottom: .35rem; font-weight: 600; }
+  input[type=password] {
+    width: 100%; box-sizing: border-box; padding: .6rem .7rem;
+    font: inherit; border: 1px solid GrayText; border-radius: .4rem;
+    background: Field; color: FieldText;
+  }
+  button {
+    margin-top: 1rem; width: 100%; padding: .65rem 1rem;
+    font: inherit; font-weight: 600; border: 0; border-radius: .4rem;
+    background: AccentColor; color: AccentColorText; cursor: pointer;
+  }
+  .error {
+    margin: 0 0 1.25rem; padding: .6rem .8rem; border-radius: .4rem;
+    border: 1px solid currentColor; opacity: .9;
+  }
+  footer { margin-top: 2rem; font-size: .85rem; opacity: .7; }
+</style>
+</head>
+<body>
+<main>
+{% if error %}
+  {# One message for every failure -- a wrong password, an expired nonce, and a
+     nonce that never existed all render identically (ADR 0024). Telling them
+     apart would hand an attacker a probe for valid authorization attempts. The
+     operator loses nothing: they know which of the two they just did. #}
+  <p class="error">{{ error }}</p>
+{% endif %}
+
+{% if request_valid %}
+  <h1><span class="client">{{ client_name }}</span> is asking to access your vault.</h1>
+
+  <p>It will be granted:</p>
+  <ul class="scopes">
+    {% for scope in scopes %}
+    <li>
+      <code class="scope-name">{{ scope.name }}</code>
+      <span class="scope-note">&mdash; {{ scope.description }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <form method="post" action="{{ login_path }}" autocomplete="off">
+    <input type="hidden" name="{{ nonce_param }}" value="{{ nonce }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <label for="password">Operator password</label>
+    <input type="password" id="password" name="password"
+           required autofocus autocomplete="current-password">
+    <button type="submit">Authorize</button>
+  </form>
+
+  <footer>
+    Approving this issues a credential for {{ client_name }} alone. Revoke it at
+    any time with <code>issue_vault_credential revoke</code>.
+  </footer>
+{% else %}
+  <h1>This authorization request is no longer valid.</h1>
+  <footer>Start again from the client that sent you here.</footer>
+{% endif %}
+</main>
+</body>
+</html>

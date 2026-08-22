@@ -16,6 +16,7 @@ from .auth import VaultCredential
 from .constants import (
     AUTHORIZATION_CODE_TTL_SECONDS,
     PENDING_AUTHORIZATION_TTL_SECONDS,
+    REFRESH_TOKEN_TTL_SECONDS,
 )
 from .domain import (
     DocumentEmbedding,
@@ -27,6 +28,7 @@ from .domain import (
     RegisteredOAuthClient,
     ReviewState,
     StoredAuthorizationCode,
+    StoredRefreshToken,
     VaultDocument,
     VaultReviewCase,
 )
@@ -39,6 +41,7 @@ from .tables import (
     vault_oauth_authorization_codes,
     vault_oauth_clients,
     vault_oauth_pending_authorizations,
+    vault_oauth_refresh_tokens,
     vault_review_cases,
     vault_write_requests,
 )
@@ -684,6 +687,81 @@ class VaultAgentCredentialRepository:
             last_used_at=row["last_used_at"],
         )
 
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        credential_id: str,
+        principal_id: str,
+        display_name: str,
+        secret_sha256: bytes,
+        scopes: Sequence[str],
+        expires_at: datetime | None = None,
+    ) -> VaultCredential:
+        """Insert a credential row.
+
+        Used by the OAuth provider, which mints one per authorization and one
+        per refresh rotation -- ADR 0024's "an issued access token *is* a
+        credential row". ``scripts/issue_vault_credential.py`` writes its own
+        insert rather than calling this: it runs against a database the
+        application may not be pointed at, and an operator tool sharing the
+        request path's code would make a schema change silently break the tool
+        that repairs schema problems.
+
+        The caller supplies ``secret_sha256`` rather than the secret, so the
+        plaintext never crosses this boundary and cannot be logged by a query
+        echo.
+        """
+
+        statement = (
+            insert(vault_agent_credentials)
+            .values(
+                id=credential_id,
+                principal_id=principal_id,
+                display_name=display_name,
+                secret_sha256=secret_sha256,
+                scopes=sorted(set(scopes)),
+                expires_at=expires_at,
+            )
+            .returning(*self._columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one()
+        return VaultCredential(
+            id=row["id"],
+            principal_id=row["principal_id"],
+            display_name=row["display_name"],
+            secret_sha256=bytes(row["secret_sha256"]),
+            scopes=tuple(row["scopes"]),
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            revoked_at=row["revoked_at"],
+            last_used_at=row["last_used_at"],
+        )
+
+    async def revoke(
+        self,
+        connection: AsyncConnection,
+        credential_ids: Sequence[str],
+    ) -> int:
+        """Mark credentials revoked. Idempotent, and never deletes.
+
+        ``revoked_at IS NULL`` in the predicate keeps the first revocation's
+        timestamp, which is the one an incident reconstruction wants. The row
+        survives so that ``last_used_at`` and the audit trail still name
+        something.
+        """
+
+        if not credential_ids:
+            return 0
+        result = await connection.execute(
+            update(vault_agent_credentials)
+            .where(vault_agent_credentials.c.id.in_(list(credential_ids)))
+            .where(vault_agent_credentials.c.revoked_at.is_(None))
+            .values(revoked_at=func.now())
+        )
+        return result.rowcount or 0
+
     async def touch(
         self,
         connection: AsyncConnection,
@@ -898,6 +976,7 @@ def _pending_authorization_from_row(row: RowMapping) -> PendingAuthorization:
         params=dict(row["params"]),
         created_at=row["created_at"],
         expires_at=row["expires_at"],
+        csrf_sha256=row["csrf_sha256"],
     )
 
 
@@ -1029,6 +1108,7 @@ class VaultOAuthPendingAuthorizationRepository:
         nonce: str,
         client_id: str,
         params: Mapping[str, Any],
+        csrf_token: str | None = None,
         ttl_seconds: int = PENDING_AUTHORIZATION_TTL_SECONDS,
     ) -> PendingAuthorization:
         statement = (
@@ -1037,12 +1117,40 @@ class VaultOAuthPendingAuthorizationRepository:
                 nonce_sha256=hash_oauth_secret(nonce),
                 client_id=client_id,
                 params=dict(params),
+                csrf_sha256=(
+                    None if csrf_token is None else hash_oauth_secret(csrf_token)
+                ),
                 expires_at=func.now() + timedelta(seconds=ttl_seconds),
             )
             .returning(*vault_oauth_pending_authorizations.c)
         )
         result = await connection.execute(statement)
         return _pending_authorization_from_row(result.mappings().one())
+
+    async def peek(
+        self,
+        connection: AsyncConnection,
+        nonce: str,
+    ) -> PendingAuthorization | None:
+        """Read one without consuming it, for rendering the login form.
+
+        The GET that shows the form must not spend the nonce -- an operator who
+        reloads the page, or whose browser prefetches it, would otherwise find
+        their authorization already gone. Consumption belongs to the POST, which
+        is the step that mints a code. Expiry is still applied, so an expired
+        nonce renders the same refusal it would on submit.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_pending_authorizations)
+            .where(
+                vault_oauth_pending_authorizations.c.nonce_sha256
+                == hash_oauth_secret(nonce)
+            )
+            .where(vault_oauth_pending_authorizations.c.expires_at > func.now())
+        )
+        row = result.mappings().one_or_none()
+        return _pending_authorization_from_row(row) if row is not None else None
 
     async def redeem(
         self,
@@ -1180,6 +1288,159 @@ class VaultOAuthAuthorizationCodeRepository:
         result = await connection.execute(
             delete(vault_oauth_authorization_codes).where(
                 vault_oauth_authorization_codes.c.expires_at <= func.now()
+            )
+        )
+        return result.rowcount or 0
+
+
+def _refresh_token_from_row(row: RowMapping) -> StoredRefreshToken:
+    return StoredRefreshToken(
+        family_id=row["family_id"],
+        client_id=row["client_id"],
+        credential_id=row["credential_id"],
+        scopes=tuple(row["scopes"]),
+        subject=row["subject"],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        consumed_at=row["consumed_at"],
+    )
+
+
+class VaultOAuthRefreshTokenRepository:
+    """Refresh tokens, rotated on every use with replay detection.
+
+    The one OAuth table that marks consumption rather than deleting, and the
+    difference carries a security property rather than a preference. A deleted
+    row cannot be told from a token that never existed; a consumed one can, and
+    presenting a consumed refresh token is positive evidence that a token was
+    captured. OAuth 2.1 requires a public client's refresh token to be
+    sender-constrained or rotated with replay detection, and this is the
+    detection half.
+    """
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        token: str,
+        family_id: UUID,
+        client_id: str,
+        credential_id: str,
+        scopes: Sequence[str],
+        subject: str | None = None,
+        ttl_seconds: int = REFRESH_TOKEN_TTL_SECONDS,
+    ) -> StoredRefreshToken:
+        statement = (
+            insert(vault_oauth_refresh_tokens)
+            .values(
+                token_sha256=hash_oauth_secret(token),
+                family_id=family_id,
+                client_id=client_id,
+                credential_id=credential_id,
+                scopes=list(scopes),
+                subject=subject,
+                expires_at=func.now() + timedelta(seconds=ttl_seconds),
+            )
+            .returning(*vault_oauth_refresh_tokens.c)
+        )
+        result = await connection.execute(statement)
+        return _refresh_token_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        token: str,
+    ) -> StoredRefreshToken | None:
+        """Look one up without consuming it, expired or consumed included.
+
+        Unfiltered on purpose, unlike the authorization-code repository's
+        ``get``. The SDK's ``load_refresh_token`` decides validity itself -- it
+        compares ``expires_at`` and pretends an expired token does not exist --
+        and the replay check needs to see a consumed row precisely because it is
+        consumed. Filtering here would hide the evidence.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_refresh_tokens).where(
+                vault_oauth_refresh_tokens.c.token_sha256 == hash_oauth_secret(token)
+            )
+        )
+        row = result.mappings().one_or_none()
+        return _refresh_token_from_row(row) if row is not None else None
+
+    async def consume(
+        self,
+        connection: AsyncConnection,
+        token: str,
+    ) -> StoredRefreshToken | None:
+        """Mark one used, atomically, or return None if it was already used.
+
+        ``consumed_at IS NULL`` in the predicate is what makes rotation
+        single-use under concurrency: two simultaneous refreshes both match the
+        digest, one wins the UPDATE, the other returns None and is treated as a
+        replay. Expiry is in the predicate too, so the database clock decides
+        it rather than the caller's.
+        """
+
+        statement = (
+            update(vault_oauth_refresh_tokens)
+            .where(
+                vault_oauth_refresh_tokens.c.token_sha256 == hash_oauth_secret(token)
+            )
+            .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+            .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
+            .values(consumed_at=func.now())
+            .returning(*vault_oauth_refresh_tokens.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _refresh_token_from_row(row) if row is not None else None
+
+    async def credential_ids_in_family(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+    ) -> tuple[str, ...]:
+        """Every access credential ever minted in one rotation chain.
+
+        The replay response: revoke all of them. Which one the attacker holds
+        is unknown, so the answer is the whole family rather than a guess.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_refresh_tokens.c.credential_id)
+            .where(vault_oauth_refresh_tokens.c.family_id == family_id)
+            .distinct()
+        )
+        return tuple(result.scalars())
+
+    async def consume_family(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+    ) -> int:
+        """Burn every unconsumed token in a chain, so none can be rotated again."""
+
+        result = await connection.execute(
+            update(vault_oauth_refresh_tokens)
+            .where(vault_oauth_refresh_tokens.c.family_id == family_id)
+            .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+            .values(consumed_at=func.now())
+        )
+        return result.rowcount or 0
+
+    async def delete_expired(self, connection: AsyncConnection) -> int:
+        """Prune by expiry, never by consumption.
+
+        A consumed token has to outlive its own rotation or replay detection
+        stops working -- the whole point is recognising it when it comes back.
+        Expiry is the safe boundary: past it, ``load_refresh_token`` would
+        refuse the token anyway, so forgetting it costs nothing.
+        """
+
+        result = await connection.execute(
+            delete(vault_oauth_refresh_tokens).where(
+                vault_oauth_refresh_tokens.c.expires_at <= func.now()
             )
         )
         return result.rowcount or 0

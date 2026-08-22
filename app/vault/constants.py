@@ -148,3 +148,17 @@ PENDING_AUTHORIZATION_TTL_SECONDS = 300
 # new work; the redemption is a machine-to-machine round trip that happens
 # immediately, so 60s is generous rather than tight.
 AUTHORIZATION_CODE_TTL_SECONDS = 60
+
+# How long an OAuth-minted access credential lives. Short, because the client
+# renews itself: ADR 0024's 2026-08-21 amendment adds refresh tokens precisely
+# so that expiry costs a machine round trip rather than an operator redoing a
+# browser flow. A compromised access token is therefore useful for an hour, not
+# a month.
+ACCESS_TOKEN_TTL_SECONDS = 3600
+
+# How long the refresh token that renews it lives. This is the real session
+# length, and the interval at which the operator must authorize again from a
+# browser. Thirty days balances that chore against the window a stolen refresh
+# token would be useful for -- bounded further by rotation, which makes a
+# captured token detectable the moment either party uses it.
+REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 3600

@@ -266,6 +266,75 @@ application rather than by a shell.
   so the log is where the real cause is findable. If a correct password is being
   rejected, look there before assuming the password is wrong.
 
+### Turning the OAuth authorization server on
+
+The vault hosts its own OAuth 2.1 authorization server (vault ADR 0024) so that
+clients with no way to send a static header — the claude.ai web connector — can
+still reach it. It is off until `VAULT_PUBLIC_URL` is set, and that variable is
+the switch on purpose: every URL in the discovery metadata is absolute, so a
+deployment that cannot state its own origin cannot publish correct metadata.
+Forgetting it therefore serves nothing rather than something wrong.
+
+```bash
+heroku config:set VAULT_PUBLIC_URL=https://high-score-server-xxxx.herokuapp.com --app high-score-server
+```
+
+No trailing slash; one is stripped if present. It must be the origin clients
+actually reach, because the SDK builds `/authorize` and `/token` from it and a
+mismatch surfaces as a client giving up during discovery rather than as an
+error.
+
+Two variables together make the flow work, and both are needed:
+
+| Variable | Required | Effect |
+| -------- | -------- | ------ |
+| `VAULT_PUBLIC_URL` | yes | Publishes discovery metadata and registers `/authorize`, `/token`, `/register`, `/revoke`, `/vault/login`. Absent, none of them exist. |
+| `VAULT_OPERATOR_PASSWORD_HASH` | yes, for the password method | What the login page verifies against. Absent, every login refuses. |
+| `VAULT_LOGIN_RATE_LIMIT` | no (`10/minute`) | The login POST's own bucket, tighter than the pre-auth guard. |
+
+Once both are set, a client registers itself and the flow is:
+
+```
+POST /register              the vendor's backend, server to server
+GET  /authorize             the operator's browser, a real top-level navigation
+  -> 302 /vault/login       consent and password on one screen
+POST /vault/login           bcrypt verify, mint an authorization code
+  -> 303 back to the client with code and state
+POST /token                 code + PKCE verifier -> access token + refresh token
+```
+
+The access token it issues is an ordinary `hssv1_` credential, so it appears in
+`issue_vault_credential list` beside every other one and is revoked the same way.
+Its principal is `oauth-<client name>`, which is also what lands in
+`ContributedBy` on notes the client writes.
+
+**Scopes are capped at `vault:read` and `vault:write`.** A client cannot request
+more — `vault:update`, `vault:delete` and `vault:review` are unreachable through
+this path by construction, not by an operator declining on a screen. That is a
+security decision: ADR 0021's defence against instructions injected into note
+text is that a destructive tool is absent from the surface that text can name.
+
+**Access tokens live one hour; refresh tokens thirty days.** The client renews
+itself, so the operator authorizes roughly monthly rather than hourly. Each
+refresh mints a new credential row and revokes the previous one, so revoked rows
+accumulate — expected, and they grant nothing.
+
+**A replayed refresh token revokes the whole chain.** If a rotated token is
+presented again, every credential ever minted from that authorization is
+revoked. The legitimate client simply re-authorizes; the symptom an operator
+sees is a connector asking to be reconnected, and the cause is in the log as
+`vault oauth refresh token replayed; family revoked`.
+
+#### Troubleshooting the flow
+
+| Symptom | Cause |
+| ------- | ----- |
+| Client reports the server does not support OAuth | `VAULT_PUBLIC_URL` unset, so no metadata is published |
+| `/authorize` 302s to a login page that says the request is no longer valid | The nonce expired (5 minutes) or was already used |
+| Correct password rejected every time | `VAULT_OPERATOR_PASSWORD_HASH` unset or mangled — check the log for `not a valid bcrypt hash` |
+| Login returns 429 | The login bucket; wait a minute, or raise `VAULT_LOGIN_RATE_LIMIT` |
+| A typo'd password needs restarting from the client | Deliberate: the nonce is redeemed before the password is checked, so one authorization affords one attempt |
+
 #### Why bcrypt here and SHA-256 everywhere else
 
 Agent secrets (`hssv1_…`) are machine-generated with full entropy, so a plain

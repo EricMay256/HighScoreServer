@@ -320,10 +320,42 @@ be edited when it does.
   there is one of them, it has no lifecycle a table would model, and a database's backups
   circulate more widely than a config var. Unset means the password method is not configured
   and the login **refuses** — never "any password works".
-- **One failure message, whatever failed.** A wrong password, an expired nonce and a nonce that
-  never existed render identically, which is why `redeem` returns None for all three rather
-  than distinguishing them. A page that told them apart would hand an attacker a probe for
-  valid authorization attempts.
+- **One failure message, whatever failed.** A wrong password, an expired nonce, a nonce that
+  never existed, a bad CSRF token and an unconfigured operator password all render identically,
+  which is why `redeem` returns None for every case rather than distinguishing them. A page that
+  told them apart would hand an attacker a probe for valid authorization attempts.
+- **The access token an OAuth client receives is an ordinary `hssv1_` string.** That is what
+  lets the whole resource server — the MCP mount, the REST routes, scope checks, quotas,
+  `contributed_by` — stay untouched by OAuth. Do not invent a second token format; if one ever
+  seems necessary, the thing to change is this property, deliberately, in an ADR.
+- **Refresh tokens rotate, and `vault_oauth_refresh_tokens` marks `consumed_at` rather than
+  deleting.** The other two transient OAuth tables delete on redemption; this one must not, and
+  the difference is a security property rather than a preference. A deleted row cannot be
+  distinguished from a token that never existed, while a consumed one is positive evidence that
+  a token was captured — so presenting one revokes every credential in its `family_id` chain
+  and burns every unconsumed token in it. OAuth 2.1 requires rotation *with replay detection*
+  for a public client, and this is the detection half. `load_refresh_token` is where it fires,
+  which is untidy and unavoidable: the SDK offers no hook between recognising a refresh token
+  and refusing it.
+- **Rotation mints a new credential and revokes the old one.** It cannot re-key: only
+  `sha256(secret)` is stored, so there is no way to hand back a token for an existing row.
+  Revoked credential rows therefore accumulate, one per refresh, and want pruning alongside
+  `vault_oauth_clients`. They grant nothing in the meantime.
+- **`load_authorization_code` must not consume.** The SDK splits load from exchange and does
+  real work between them — PKCE, the `redirect_uri` round trip, expiry — so a consuming load
+  would destroy a code whenever any of those failed, when the client may still retry.
+- **The login POST redeems the nonce before verifying the password**, so one authorization
+  affords exactly one attempt. Do not "fix" that ordering to be friendlier: it is what stops a
+  live authorization being reused as a guessing oracle.
+- **Absence of `VAULT_PUBLIC_URL` is the feature's off switch.** Every URL in the discovery
+  metadata is absolute, so a deployment that cannot state its own origin cannot serve correct
+  metadata — the variable that makes it work is the variable that enables it, and forgetting it
+  fails closed. Do not add a separate boolean; that would be a way to set one and not the other.
+- **The login page uses the vault's own Jinja2 environment (`templating.py`), never HSS's
+  `templates/`.** The boundary test scans *imports*, so a `{% extends "base.html" %}` would pass
+  every guard in this repository and fail only at extraction, as a missing file. Autoescaping is
+  on and must stay on: registration is open, so `client_name` is attacker-controlled text
+  rendered next to a password field.
 
 ## The MCP adapter
 

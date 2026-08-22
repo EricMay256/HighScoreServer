@@ -281,6 +281,10 @@ class PendingAuthorization:
     params: dict[str, Any]
     created_at: datetime
     expires_at: datetime
+    # SHA-256 of the token the login form carries in a hidden field. None only
+    # for a row written before migration 0014; the login route refuses that as
+    # it would refuse a mismatch, rather than treating absence as permission.
+    csrf_sha256: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,3 +306,32 @@ class StoredAuthorizationCode:
     expires_at: datetime
     resource: str | None = None
     subject: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredRefreshToken:
+    """A refresh token, rotated on every use.
+
+    ``family_id`` is constant across every rotation descending from one
+    authorization. It exists so that presenting an already-consumed token --
+    positive evidence that a token was captured -- can revoke the whole chain
+    rather than merely failing one request, which is what OAuth 2.1 means by
+    rotation *with replay detection*.
+
+    ``consumed_at`` is set rather than the row deleted, for the same reason:
+    a deleted row is indistinguishable from a token that never existed, and
+    the distinction is the entire security property here. The other two
+    transient OAuth tables delete on redemption precisely because nothing
+    useful follows from telling those two cases apart.
+    """
+
+    family_id: UUID
+    client_id: str
+    # The access credential this token renews. A rotation revokes it as it
+    # mints the next.
+    credential_id: str
+    scopes: tuple[str, ...]
+    created_at: datetime
+    expires_at: datetime
+    subject: str | None = None
+    consumed_at: datetime | None = None

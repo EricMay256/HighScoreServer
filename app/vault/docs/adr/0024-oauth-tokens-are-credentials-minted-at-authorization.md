@@ -10,16 +10,60 @@ Design settled. The 2026-08-22 spike confirmed `/authorize` runs in the operator
 browser, so both identity methods are reachable, and left three constraints recorded under
 "Consequences".
 
-**Persistence landed 2026-08-21** in migration `0013_oauth_authorization_server`: three tables
-(`vault_oauth_clients`, `vault_oauth_pending_authorizations`,
-`vault_oauth_authorization_codes`), their repositories, and `app/vault/passwords.py` for the
-operator password. There is deliberately no fourth table for tokens, which is this ADR's whole
-point. Two implementation choices are recorded under "Consequences" below: where the operator
-hash lives, and why the code table's scope CHECK is wider than the baseline.
+**Implemented 2026-08-21**, except the `grant`/`revoke-scope` subcommand this ADR requires,
+which must land before OAuth is enabled in production.
 
-Still outstanding: the provider itself, the login page and its template, CSRF, the
-login-specific rate limit, the `grant`/`revoke-scope` subcommand this ADR requires, and
-deleting `oauth_spike.py`.
+- Migration `0013_oauth_authorization_server` — `vault_oauth_clients`,
+  `vault_oauth_pending_authorizations`, `vault_oauth_authorization_codes`, and
+  `app/vault/passwords.py`. There is deliberately no table for access tokens, which is this
+  ADR's whole point.
+- Migration `0014_oauth_refresh_and_csrf` — `vault_oauth_refresh_tokens` and a CSRF token on
+  the pending authorization. See the amendment below; refresh tokens are a decision this ADR
+  did not make and now does.
+- `app/vault/oauth.py` — the ten-method provider. `app/vault/oauth_routes.py` — the login page
+  and route assembly. `app/vault/templating.py` and `app/vault/templates/login.html` — the
+  vault's own Jinja2 environment, the first non-documentation asset in the package.
+- `oauth_spike.py` is deleted, its two reusable parts — the route wiring and the slowapi
+  labelling workaround — carried into `oauth_routes.py`.
+
+Four implementation choices are recorded under "Consequences": where the operator hash lives,
+why the code table's scope CHECK is wider than the baseline, why absence of `VAULT_PUBLIC_URL`
+is the on/off switch, and why the login POST redeems the nonce before checking the password.
+
+## Amendment, 2026-08-21: refresh tokens, rotated with replay detection
+
+This ADR said OAuth credentials "should carry `expires_at` rather than living forever" and did
+not say how a client renews one. The two answers are materially different, so it is recorded
+here rather than settled in code.
+
+**Decision: the vault issues refresh tokens. They rotate on every use, and a replayed one
+revokes its whole family.**
+
+Without them, expiry means the operator redoes the browser flow — password and all — every
+time an access token lapses, and the connector is broken until they notice. That pushes the
+access token's lifetime out to weeks to stay tolerable, which is the wrong direction: the
+window a stolen token is useful for is exactly what expiry exists to shrink. With refresh, the
+access credential lives an hour and renewal is a machine round trip, so the operator authorizes
+once a month rather than once a lapse.
+
+The cost is a fourth table and one property that has to be got right. **Rotation without replay
+detection is not enough** — OAuth 2.1 requires a public client's refresh token to be
+sender-constrained or rotated with detection, and sender-constraining is not available here. So
+`vault_oauth_refresh_tokens` carries a `family_id` constant across a chain and marks
+`consumed_at` rather than deleting the row. That is the one place this schema departs from the
+`DELETE ... RETURNING` idiom the other two transient tables use, and the departure *is* the
+security property: a deleted row cannot be told from a token that never existed, while a
+consumed one is positive evidence that a token was captured. Presenting one revokes every
+credential ever minted in the chain. The honest client re-authorizes; whoever stole the token
+gets nothing.
+
+Rotation also explains a consequence worth naming: **credential rows accumulate**, one per
+refresh, all but the newest revoked. That is a pruning story, not a leak — they are revoked
+rows, so they grant nothing — and it belongs with the pruning `vault_oauth_clients` already
+needs.
+
+This does not weaken the token-is-a-credential property. A refresh token is not an access
+token: it names one, mints its replacement, and never authenticates a request.
 
 Supersedes the OAuth deferral in ADR 0021, which recorded that the SDK's `token_verifier` was
 left unused because it requires `AuthSettings.issuer_url`, and setting that would publish
@@ -284,6 +328,26 @@ operator may widen a specific credential afterwards — "expected rather than ex
 CHECK constraining the column to `vault:read` and `vault:write` would forbid the widened case
 at a layer no application code could permit, turning a supported operation into an integrity
 error. The narrower rule belongs where it is enforceable and overridable: application code.
+
+**Absence of `VAULT_PUBLIC_URL` is the on/off switch, and there is no second flag.** The spike
+had one (`VAULT_OAUTH_SPIKE_ENABLED`) because it needed to be inert while it existed. The real
+server needs the opposite: a deployment that cannot state its own origin *cannot* publish
+correct discovery metadata, because every URL in it is absolute. So the variable that makes the
+feature work is the variable that turns it on, and forgetting it fails closed — serving no
+metadata, which this ADR already argues is better than advertising an authorization server
+before one answers. A separate boolean would be a way to set one and not the other.
+
+**The login POST redeems the nonce before it checks the password.** Deliberately, and the order
+is the security property: one authorization affords exactly one password attempt, so a live
+request cannot be reused as an unlimited guessing oracle even inside the rate limit. It costs
+the honest operator a restart from the client after a typo, which is the right trade for a
+public unauthenticated form.
+
+**CSRF is a server-side token, not a signed one.** `docs/NEXT-STEPS.md` suggested "a signed
+hidden token tied to the nonce". Signing needs a signing key — a third secret to configure,
+rotate, and get wrong — while a row already exists per authorization to hang a random token on,
+which makes it single-use for free and needs no key at all. Only its digest is stored, for the
+reason every other secret in this schema is hashed.
 
 ### Existing credentials are unaffected
 

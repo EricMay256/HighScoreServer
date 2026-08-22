@@ -612,9 +612,18 @@ vault_oauth_pending_authorizations = Table(
         server_default=text("now()"),
     ),
     Column("expires_at", DateTime(timezone=True), nullable=False),
+    # SHA-256 of the CSRF token the login form carries in a hidden field.
+    # Server-side rather than a signed token, because signing would need a third
+    # secret to configure and rotate, while a row already exists per
+    # authorization and gives single use for free. See migration 0014.
+    Column("csrf_sha256", LargeBinary),
     CheckConstraint(
         "octet_length(nonce_sha256) = 32",
         name="vault_oauth_pending_nonce_length",
+    ),
+    CheckConstraint(
+        "csrf_sha256 IS NULL OR octet_length(csrf_sha256) = 32",
+        name="vault_oauth_pending_csrf_length",
     ),
     CheckConstraint(
         "jsonb_typeof(params) = 'object'",
@@ -690,6 +699,77 @@ vault_oauth_authorization_codes = Table(
         "'vault:delete', 'vault:review', 'vault:compile', "
         "'vault:export']::text[]",
         name="vault_oauth_codes_scopes_known",
+    ),
+)
+
+# Refresh tokens, rotated on every use with replay detection. OAuth 2.1 requires
+# a public client's refresh token to be sender-constrained or rotated with
+# detection, and rotation is the one available here.
+#
+# `consumed_at` rather than the DELETE ... RETURNING the other transient tables
+# use, and the difference is the point: presenting an already-rotated refresh
+# token is positive evidence a token was captured, and the response is revoking
+# the whole `family_id` chain rather than failing one request. That needs the
+# consumed digest remembered. See migration 0014.
+vault_oauth_refresh_tokens = Table(
+    "vault_oauth_refresh_tokens",
+    metadata,
+    Column("token_sha256", LargeBinary, primary_key=True),
+    # Constant across every rotation descending from one authorization, which
+    # is what makes "revoke the chain" expressible. Not a foreign key: the
+    # family outlives any particular row in it.
+    Column("family_id", UUID(as_uuid=True), nullable=False),
+    Column(
+        "client_id",
+        Text,
+        ForeignKey(
+            "vault.vault_oauth_clients.client_id",
+            name="vault_oauth_refresh_tokens_client_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    # The access credential this token renews. A rotation revokes this one as it
+    # mints the next. CASCADE fires only on a real delete -- ordinary revocation
+    # sets `revoked_at` and leaves the row in place.
+    Column(
+        "credential_id",
+        Text,
+        ForeignKey(
+            "vault.vault_agent_credentials.id",
+            name="vault_oauth_refresh_tokens_credential_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    Column(
+        "scopes",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column("subject", Text),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("consumed_at", DateTime(timezone=True)),
+    CheckConstraint(
+        "octet_length(token_sha256) = 32",
+        name="vault_oauth_refresh_token_length",
+    ),
+    CheckConstraint(
+        "expires_at > created_at",
+        name="vault_oauth_refresh_expires_after_creation",
+    ),
+    CheckConstraint(
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
+        "'vault:delete', 'vault:review', 'vault:compile', "
+        "'vault:export']::text[]",
+        name="vault_oauth_refresh_scopes_known",
     ),
 )
 
@@ -847,4 +927,12 @@ Index(
 Index(
     "vault_oauth_codes_expires_at_idx",
     vault_oauth_authorization_codes.c.expires_at,
+)
+Index(
+    "vault_oauth_refresh_family_idx",
+    vault_oauth_refresh_tokens.c.family_id,
+)
+Index(
+    "vault_oauth_refresh_expires_at_idx",
+    vault_oauth_refresh_tokens.c.expires_at,
 )

@@ -31,6 +31,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from slowapi import Limiter
 from starlette.requests import Request
@@ -374,6 +375,63 @@ def reset_ip_limiter() -> None:
     credential gets a clean bucket for free. An IP key has no such escape
     hatch — every test shares a loopback address — so this is the seam that
     keeps the suite order-independent.
+    """
+
+    _ip_limiter.reset()
+
+
+# The login POST's own bucket, far tighter than the pre-auth guard.
+#
+# A public, unauthenticated password endpoint is a brute-force target, and the
+# 600/minute IP guard is sized for "bound the cost of authentication", not for
+# "bound guesses at a password". Three defences stack here and none replaces
+# another: bcrypt's cost factor makes each guess expensive, this bucket makes
+# them rare, and the login route redeems the nonce before checking the password
+# so a single authorization affords exactly one attempt.
+#
+# 10/minute is generous for a person typing one password and hostile to anything
+# else. Keyed by IP like the guard it sits beside, because there is no
+# authenticated principal at a login form -- that is what the form is for.
+_DEFAULT_LOGIN_LIMIT = "10/minute"
+
+
+def login_rate_limit() -> str:
+    """The configured login limit, read when the routes are built.
+
+    At call time rather than at import, unlike ``_PREAUTH_LIMIT`` above. That
+    one has to be module-level because its decorator is applied at import; this
+    one is applied while the application is being constructed, which is late
+    enough to read the environment and early enough to be fixed for the life of
+    the app. It is also what lets a test build an app at a limit it can actually
+    exhaust without reloading this module -- and reloading it would replace the
+    limiter instance other modules already hold.
+    """
+
+    return os.environ.get("VAULT_LOGIN_RATE_LIMIT", _DEFAULT_LOGIN_LIMIT)
+
+
+def get_login_limiter() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """The decorator that charges the login bucket.
+
+    Returns slowapi's decorator rather than a dependency, unlike
+    ``build_preauth_dependency``: the login routes are Starlette ``Route``
+    objects sitting beside the SDK's, so there is no FastAPI dependency system
+    to attach to. Decorating the endpoint is correct *here* for the reason it
+    was wrong there -- this handler does no database work before the limiter
+    charges, so there is nothing to protect that runs first.
+
+    Its own bucket rather than the guard's because slowapi scopes by endpoint,
+    so the two never draw down each other's allowance.
+    """
+
+    return _ip_limiter.limit(login_rate_limit())
+
+
+def reset_login_limiter() -> None:
+    """Drop the login buckets. Shares storage with the pre-auth guard.
+
+    ``reset_ip_limiter`` already clears everything the limiter holds, including
+    these; this exists so a test can say what it means.
     """
 
     _ip_limiter.reset()
