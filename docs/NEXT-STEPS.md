@@ -7,7 +7,7 @@ this list assumes — inherited state, the conventions that bite, what is unsett
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** on `dev`. Suite green (527 vault, 769 full). PR #14 merges the
+**State:** on `dev`. Suite green (538 vault, 780 full). PR #14 merges the
 22-commit gap into `main` and is open for review.
 
 **Production is three revisions behind `dev`'s schema:** it sits at vault lineage
@@ -140,27 +140,31 @@ Once that lands, the knowledge-platform engine's `compile plan`/`write`/`finish`
 and the `knowledge-vault` skill's compile loop can be retired: ADR 0022 gives
 each tree one writer, and that becomes true of `Agent/wiki/` at that point.
 
-## 6. The admin MCP surface — **ADR proposed, awaiting review**
+## 6. The privileged MCP tools — **done**
 
-Two finished verbs wait here: the review decision (REST-only since v64) and
-`promotion_status` (service method built and tested, no transport at all).
+[ADR 0026](../app/vault/docs/adr/0026-privileged-tools-are-gated-by-scope-on-one-mount.md)
+settled it, and **reversed** what ADRs 0019 and 0023 both assumed: there is no
+separate admin MCP. The four privileged tools live on the existing mount, gated
+by `vault:review` through `list_tools`.
 
-[ADR 0026](../app/vault/docs/adr/0026-the-admin-surface-is-a-second-mount-nobody-is-told-about.md)
-is **Proposed** and is the thing to react to. Its argument is not the obvious
-one: scope-filtered listing already makes a tool absent unless the credential
-carries the scope, and that does nothing for the reviewer, who must read flagged
-text and then decide, in one session. No arrangement of mounts fixes that, so the
-ADR rests on what the verbs can *do* — `reject` deletes a never-endorsed note
-whose substance the case itself asserts is already in the corpus.
+- ✅ `vault_list_review_cases` — ids and reasons, deliberately **no note bodies**
+- ✅ `vault_read_review_case` — the only tool serving `flagged` content
+- ✅ `vault_decide_review_case`
+- ✅ `vault_set_promotion_status` — ADR 0023's last outstanding piece
 
-The proposal: a second MCP app at `/api/v1/vault/admin/mcp/`, off by default
-behind `VAULT_ADMIN_MCP_ENABLED`, absent from OAuth discovery, four tools, REST
-routes retained. The cheapest alternative — no admin MCP, promotion as a REST
-route — is recorded and is the one to fall back to if the queue stays empty in
-practice.
+**The operating rule, which is now the boundary:** a reviewing credential holds
+`vault:read` and `vault:review` and nothing else. Then the adjudicating session
+cannot also retire or overwrite. That is configuration rather than code, and it
+is the accepted cost — a separate mount would have made the consumer surface
+structurally incapable of destruction. Re-open the ADR if a second person gains a
+credential, or if an agent starts adjudicating unattended.
 
-Costs real work either way: `_TOOL_SCOPES` has to become per-application, or a
-`vault:review` credential would see the admin tools on the ordinary mount too.
+`claude-1` holds `vault:read vault:write`, so a reviewer is a second credential
+rather than a widening of the first:
+
+```bash
+python -m scripts.issue_vault_credential issue --name reviewer --scopes vault:read vault:review
+```
 
 ---
 

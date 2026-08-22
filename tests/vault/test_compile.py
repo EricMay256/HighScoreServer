@@ -605,6 +605,47 @@ def test_a_wiki_page_is_not_a_dedup_candidate(
     assert payload["status"] == "inserted"
 
 
+def test_a_related_page_is_reported_as_context_not_as_a_duplicate(
+    client: TestClient, compile_token: str
+) -> None:
+    """The two purposes one query used to serve, now separated.
+
+    A page near a contribution is worth telling the contributor about -- "there
+    is already a synthesis covering this" is actionable. What it must never be
+    is the reason a contribution flags, because a page restates its sources by
+    construction.
+
+    Byte-identical text again, so the page scores 1.0. Under `flag_at = 1.0`
+    that is precisely the score that *would* flag if pages were in the gate's
+    corpus, which is what makes this assertion mean something: the same
+    document appears in `related_pages` and the outcome is still `inserted`.
+    """
+
+    marker = uuid4().hex
+    title = f"{TWIN_TITLE_PREFIX}{marker}"
+    body = f"A synthesis carrying the marker {marker}."
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+    page = _write(
+        client, compile_token, run_id, source_ids=[note_id], title=title, body=body
+    ).json()
+
+    payload = client.post(
+        "/api/v1/vault/contributions",
+        json={"title": title, "body": body, "idempotency_key": uuid4().hex},
+        headers=_auth(compile_token),
+    ).json()
+
+    assert payload["status"] == "inserted"
+    reported = {entry["note_id"] for entry in payload["related_pages"]}
+    assert page["note_id"] in reported
+    # And it is nowhere near the gate's evidence.
+    assert page["note_id"] not in {
+        entry["note_id"] for entry in payload["similars"]
+    }
+
+
 def _page_count() -> int:
     transactions, engine = vault_service()
 

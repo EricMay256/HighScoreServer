@@ -453,6 +453,17 @@ class VaultContributionService:
                 profile_id=self._provider.profile_id,
                 limit=self._similar_limit,
             )
+            # A second query over the corpus the first deliberately excludes.
+            # It reaches the response and nothing else: not `decide()`, not
+            # `top_similarity`, not the calibration register. A compiled page
+            # restates its sources, so resembling one is expected rather than
+            # evidence (ADR 0027).
+            related_pages = await search.find_related_pages(
+                connection,
+                embedding=vector,
+                profile_id=self._provider.profile_id,
+                limit=self._similar_limit,
+            )
             action = decide(candidate, similars, self._policy)
             return await self._execute(
                 connection,
@@ -461,6 +472,7 @@ class VaultContributionService:
                 vector=vector,
                 text_digest=text_digest,
                 similars=similars,
+                related_pages=related_pages,
             )
 
     def _build_candidate(self, request: ContributionRequest) -> NewVaultDocument:
@@ -687,7 +699,9 @@ class VaultContributionService:
         vector: tuple[float, ...],
         text_digest: bytes,
         similars: list[ScoredCandidate],
+        related_pages: list[ScoredCandidate] | None = None,
     ) -> ContributionOutcome:
+        pages = list(related_pages or [])
         match action:
             case Insert(note=note):
                 note_id = await self._store(connection, note, vector, text_digest)
@@ -698,6 +712,7 @@ class VaultContributionService:
                         note_id=note_id,
                         message="note added to vault",
                         similars=similars,
+                        related_pages=pages,
                     ),
                     state="inserted",
                     request=request,
@@ -729,6 +744,7 @@ class VaultContributionService:
                         note_id=note_id,
                         message=f"flagged for review: {reason}",
                         similars=sims,
+                        related_pages=pages,
                     ),
                     state="flagged",
                     request=request,
@@ -742,6 +758,7 @@ class VaultContributionService:
                         note_id=None,
                         message=f"rejected: {reason} (conflicts with {conflicting})",
                         similars=similars,
+                        related_pages=pages,
                     ),
                     # No dedicated enum value. reject_at is disabled under the
                     # current policy, so this is unreachable today; "invalid"

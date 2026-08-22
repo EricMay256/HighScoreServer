@@ -233,7 +233,22 @@ class VaultContributionResponse(BaseModel):
         default=False,
         description="True when this response replays an earlier identical request.",
     )
-    similars: list[VaultSimilarNote] = Field(default_factory=list)
+    similars: list[VaultSimilarNote] = Field(
+        default_factory=list,
+        description=(
+            "Existing NOTES the candidate scored against. This is what the "
+            "dedup gate judged, so a high score here is what 'flagged' means."
+        ),
+    )
+    related_pages: list[VaultSimilarNote] = Field(
+        default_factory=list,
+        description=(
+            "Compiled wiki pages near this note. CONTEXT, NOT A VERDICT: a "
+            "page restates the notes it was built from, so resembling one is "
+            "expected and is never why a contribution is flagged. Useful for "
+            "deciding whether to extend an existing synthesis."
+        ),
+    )
     errors: list[str] = Field(default_factory=list)
 
 

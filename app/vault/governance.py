@@ -199,6 +199,14 @@ class ContributionOutcome:
     status: str  # inserted | flagged | linked | rejected | invalid
     note_id: str | None
     message: str
+    # Notes the candidate scored against. This is the gate's evidence and the
+    # calibration register's input, so it is notes-only (ADR 0027).
     similars: list[ScoredCandidate] = field(default_factory=list)
+    # Compiled pages near the candidate. **Context, never a verdict.** A page
+    # restates its sources by construction, so it must not reach `decide()` or
+    # `top_similarity` -- but telling a contributor "there is already a page
+    # covering this" is useful, and the two purposes were conflated while one
+    # query served both.
+    related_pages: list[ScoredCandidate] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     idempotent_replay: bool = False

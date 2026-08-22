@@ -383,6 +383,26 @@ be edited when it does.
   lives in `api_models.py`. A second copy in the second adapter is a silent drift bug: the
   digest decides idempotency, so two of them eventually disagree about what "the same
   request" is.
+- **Privileged tools live on the one mount, gated by scope (ADR 0026).** There is no separate
+  admin MCP; the proposal for one was considered and rejected. `vault_list_review_cases`,
+  `vault_read_review_case`, `vault_decide_review_case` and `vault_set_promotion_status` all
+  require `vault:review`, so a session without it neither sees nor can name them — the same
+  boundary that hides `vault_retire_note`.
+  **The operating rule that carries the rest: a reviewing credential holds `vault:read` and
+  `vault:review`, and nothing else.** Then adjudication cannot also retire or overwrite. That
+  rule is configuration rather than code, which is the deliberate cost — a separate mount
+  would have made the consumer surface structurally incapable of destruction, and this does
+  not. Re-open ADR 0026 if a second person gains a credential, or if an agent starts
+  adjudicating unattended.
+  `vault_list_review_cases` returns **no note bodies**: triage must not pull the least-vetted
+  text in the corpus into context. Only reading a specific case does that.
+- **`similars` is the verdict; `related_pages` is context, and they come from different
+  corpora.** `find_similar` is notes-only and feeds `decide()` and `top_similarity`;
+  `find_related_pages` is wiki-only and reaches the response and nothing else. Two queries
+  rather than one split afterwards, because a shared limit would let page hits starve the
+  gate's evidence. Never let a page reach the gate or the calibration register — that is
+  ADR 0027's whole point — and never withhold one from the response merely because the same
+  query used to serve both purposes.
 - **`list_tools` is filtered by the credential's scopes, and that is a security boundary.**
   The corpus is untrusted input written by agents and read by agents; a note carrying
   injected instructions is read *inside* an already-authenticated session, where no scope

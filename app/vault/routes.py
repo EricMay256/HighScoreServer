@@ -422,6 +422,10 @@ async def contribute(
             VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
             for s in outcome.similars
         ],
+        related_pages=[
+            VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
+            for s in outcome.related_pages
+        ],
         errors=list(outcome.errors),
     )
 

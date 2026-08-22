@@ -333,6 +333,74 @@ class VaultSearchRepository:
         # Trim the over-fetch rather than the caller's page size.
         return candidates[:limit]
 
+    async def find_related_pages(
+        self,
+        connection: AsyncConnection,
+        *,
+        embedding: EmbeddingVector,
+        profile_id: str,
+        limit: int,
+    ) -> list[GovernanceScoredCandidate]:
+        """Compiled pages close to a candidate -- as *context*, never a verdict.
+
+        The counterpart of ``find_similar``, over the corpus that one excludes.
+        Splitting them is the point: a wiki page restates its sources by
+        construction, so it must never reach ``decide()`` or the calibration
+        register (ADR 0027). But "there is already a page covering this" is
+        genuinely useful to a contributor, and withholding it because the same
+        query happened to feed the dedup gate was conflating two purposes.
+
+        **Two queries rather than one split afterwards.** With a shared limit,
+        four page hits would starve the gate down to a single note, so the
+        limits have to be per corpus to stay honest. The cost is one extra
+        vector query per contribution, inside a lock the write path already
+        holds.
+
+        The same ``readable_path_predicate`` applies, for the reason it applies
+        to ``find_similar``: this output names documents and scores them, so an
+        unscoped version would be a disclosure channel around ADR 0014.
+        """
+
+        if len(embedding) != EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"Candidate embedding has {len(embedding)} dimensions; "
+                f"the vault schema stores {EMBEDDING_DIMENSIONS}"
+            )
+
+        distance = vault_document_embeddings.c.embedding.cosine_distance(
+            list(embedding)
+        )
+        statement = (
+            select(
+                vault_documents.c.id,
+                vault_documents.c.title,
+                distance.label("distance"),
+            )
+            .select_from(
+                vault_document_embeddings.join(
+                    vault_documents,
+                    vault_documents.c.id == vault_document_embeddings.c.document_id,
+                )
+            )
+            .where(
+                vault_document_embeddings.c.profile_id == profile_id,
+                vault_documents.c.status == DocumentStatus.ACTIVE.value,
+                vault_documents.c.kind == DocumentKind.WIKI.value,
+                readable_path_predicate(),
+            )
+            .order_by(distance, vault_documents.c.id)
+            .limit(limit)
+        )
+        result = await connection.execute(statement)
+        return [
+            GovernanceScoredCandidate(
+                note_id=row["id"],
+                title=row["title"],
+                score=1.0 - float(row["distance"]),
+            )
+            for row in result.mappings()
+        ]
+
     async def fetch_documents(
         self,
         connection: AsyncConnection,

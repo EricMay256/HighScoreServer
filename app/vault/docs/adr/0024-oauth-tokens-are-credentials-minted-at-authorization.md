@@ -63,8 +63,16 @@ gets nothing.
 
 Rotation also explains a consequence worth naming: **credential rows accumulate**, one per
 refresh, all but the newest revoked. That is a pruning story, not a leak — they are revoked
-rows, so they grant nothing — and it belongs with the pruning `vault_oauth_clients` already
-needs.
+rows, so they grant nothing.
+
+`scripts/prune_vault_oauth.py` handles it, **by age and not by keeping the last N per
+identity**. The count-based rule is the one that suggests itself and it has a failure mode
+that looks like success: an OAuth principal is `oauth-<slug(client_name)>`, so two separate
+registrations both naming themselves "Claude" share a principal, and keep-newest-N would
+delete the older registration's *live* credential. Age plus `revoked_at IS NOT NULL` cannot
+express that mistake. Thirty days matches the refresh token's own lifetime, and operator-issued
+credentials are excluded by the principal prefix — those rows are a census someone reads, not
+machine turnover.
 
 This does not weaken the token-is-a-credential property. A refresh token is not an access
 token: it names one, mints its replacement, and never authenticates a request.
