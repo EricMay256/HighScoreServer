@@ -1,9 +1,9 @@
 """Pydantic models for the vault transport boundary.
 
 Search and document retrieval over HTTP, plus the governed write path:
-contribution (ADR 0016), full replacement (ADR 0018), and the review queue
-(ADR 0019's amendment). Compile and export have models in neither this module
-nor the router yet.
+contribution (ADR 0016), full replacement (ADR 0018), the review queue
+(ADR 0019's amendment), and wiki compilation. Export has models in neither this
+module nor the router yet.
 
 Persistence records and SQLAlchemy table definitions intentionally live in
 separate modules.
@@ -18,8 +18,10 @@ from uuid import UUID
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
 from .domain import (
+    CompileWorkItem,
     DocumentKind,
     DocumentStatus,
+    VaultCompileRun,
     VaultDocument,
     VaultReviewCase,
     VectorSearchStatus,
@@ -512,4 +514,123 @@ def review_case_summary(case: VaultReviewCase) -> VaultReviewCaseSummary:
         decided_at=case.decided_at,
         decided_by=case.decided_by,
         decision_note=case.decision_note,
+    )
+
+
+class VaultCompileWorkItem(BaseModel):
+    """One page a run should write, and why.
+
+    Note **ids**, never bodies. The compiling agent fetches what it needs
+    through the ordinary read surface, which is already policy-checked (ADR
+    0014); inlining bodies here would be a second read path with its own
+    disclosure rules and a response the size of the corpus.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    page_id: str | None = Field(
+        default=None,
+        description=(
+            "The existing page to rewrite, or null for a page that does not "
+            "exist yet. Pass it back as `page_id` when writing."
+        ),
+    )
+    title: str | None = None
+    reason: Literal["stale", "missing", "new-source"] = Field(
+        description=(
+            "'stale': a source moved after the page was compiled, or has since "
+            "been flagged. 'missing': the page cites a note that no longer "
+            "exists. 'new-source': a note no page covers at all."
+        ),
+    )
+    source_ids: list[str]
+
+
+class VaultCompileRunSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID
+    state: Literal["running", "succeeded", "failed"]
+    compiled_by: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    input_frontier: dict[str, Any] = Field(default_factory=dict)
+    output_frontier: dict[str, Any] = Field(default_factory=dict)
+    error_summary: str | None = None
+
+
+class VaultCompilePlanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run: VaultCompileRunSummary
+    items: list[VaultCompileWorkItem]
+    count: int
+
+
+class VaultCompilePageRequest(BaseModel):
+    """One compiled page, written by the agent that synthesized it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=100_000)
+    source_ids: list[str] = Field(
+        min_length=1,
+        description=(
+            "The notes this page was synthesized from. Validated: unlike a "
+            "note's related_ids, provenance naming something that does not "
+            "exist is refused rather than stored."
+        ),
+    )
+    summary: str | None = Field(default=None, max_length=2_000)
+    tags: list[str] = Field(default_factory=list)
+    related_ids: list[str] = Field(default_factory=list)
+    page_id: str | None = Field(
+        default=None,
+        description=(
+            "Rewrite this existing page rather than creating one. From the "
+            "plan item's `page_id`."
+        ),
+    )
+
+
+class VaultCompileSettleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    error_summary: str | None = Field(
+        default=None,
+        max_length=2_000,
+        description=(
+            "Required when failing a run; ignored when finishing one. A failed "
+            "run keeps the pages it wrote and publishes no frontier, so the "
+            "next plan re-covers what it did not finish."
+        ),
+    )
+
+
+def compile_run_summary(run: VaultCompileRun) -> VaultCompileRunSummary:
+    """Project a domain compile run onto its transport shape.
+
+    Here rather than in either adapter, for the reason ``document_detail`` is:
+    two copies eventually disagree about what a run looks like.
+    """
+
+    return VaultCompileRunSummary(
+        run_id=run.id,
+        state=run.state.value,
+        compiled_by=run.compiler_principal_id,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        input_frontier=run.input_frontier,
+        output_frontier=run.output_frontier,
+        error_summary=run.error_summary,
+    )
+
+
+def compile_work_item(item: CompileWorkItem) -> VaultCompileWorkItem:
+    return VaultCompileWorkItem(
+        page_id=item.page_id,
+        title=item.title,
+        reason=item.reason,  # type: ignore[arg-type]
+        source_ids=list(item.source_ids),
     )

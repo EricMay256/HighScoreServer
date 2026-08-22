@@ -335,3 +335,48 @@ class StoredRefreshToken:
     expires_at: datetime
     subject: str | None = None
     consumed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VaultCompileRun:
+    """One pass of the wiki compiler, from plan to finish.
+
+    The unit compile provenance points at: every wiki document names the run
+    that produced it, with ``ON DELETE RESTRICT``, so a run cannot be deleted
+    out from under its pages (ADR 0019, migration 0008).
+
+    ``input_frontier`` and ``output_frontier`` record how far the note corpus
+    had advanced when the run started and finished. The next run compares
+    against the output frontier to find notes written since, which is what
+    makes an incremental plan possible without diffing the whole corpus.
+    """
+
+    id: UUID
+    compiler_principal_id: str
+    state: CompileRunState
+    started_at: datetime
+    completed_at: datetime | None = None
+    input_frontier: dict[str, Any] = field(default_factory=dict)
+    output_frontier: dict[str, Any] = field(default_factory=dict)
+    error_summary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CompileWorkItem:
+    """One page a run should write, and why.
+
+    Deliberately carries note **ids** rather than note bodies. The compiling
+    agent fetches what it needs through the ordinary read surface, which is
+    already policy-checked (ADR 0014) and already paginated -- a plan that
+    inlined bodies would be a second read path with its own disclosure rules,
+    and a very large response.
+    """
+
+    # None for a page that does not exist yet.
+    page_id: str | None
+    title: str | None
+    # "stale" -- a source moved under an existing page.
+    # "missing" -- a source it cites is gone.
+    # "new-source" -- a note no page covers.
+    reason: str
+    source_ids: tuple[str, ...]

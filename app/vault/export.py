@@ -99,10 +99,15 @@ EXPORTED_PATH_PREFIXES: tuple[str, ...] = (
 
 # Which of those the corpus *owns*, and may therefore delete files from. A
 # narrower set than what may be written, and the difference is deliberate:
-# `Agent/wiki/` is still produced by the Stage-A librarian loop, which holds 15
-# compiled pages the service has never seen, so an export that swept it would
-# delete another writer's work. It joins this set when compilation moves to the
-# service (NEXT-STEPS item 5) and stops being a shared folder.
+# `Agent/wiki/` is still populated by 15 pages the Stage-A librarian loop wrote
+# and the service has never seen, so an export that swept it would delete
+# another writer's work.
+#
+# **Compilation now exists (ADR 0027), and that is not sufficient.** The gate is
+# whether those fifteen files exist as rows, not whether the code that could
+# produce them exists. Adding `Agent/wiki/` here before they are imported or
+# recompiled is a one-line diff that deletes every one of them on the next
+# `--apply --prune`. Do it after, and verify with a dry run first.
 #
 # Explicit rather than derived from occupancy, per ADR 0023. "Sweep the
 # prefixes that have rows" looks equivalent and is not: an owned folder is

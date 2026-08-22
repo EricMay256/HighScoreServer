@@ -95,6 +95,16 @@ LIMITS: dict[str, Limit] = {
     "review_list": Limit(per_minute=60, burst=20),
     "review_read": Limit(per_minute=60, burst=20),
     "review_decide": Limit(per_minute=10, burst=5),
+    # Compilation is a librarian loop: one plan, a burst of pages, one finish.
+    # Planning is deliberately tight -- it opens a run row every time, and a
+    # loop that plans without finishing accumulates `running` runs nobody
+    # settles. Writing pages gets contribute's shape, because that is what it
+    # is: a batch of synthesis arriving together, each costing an embedding
+    # call. Settling is as cheap as planning is expensive and needs no headroom
+    # beyond what a retry wants.
+    "compile_plan": Limit(per_minute=6, burst=3),
+    "compile_write": Limit(per_minute=30, burst=20),
+    "compile_settle": Limit(per_minute=10, burst=5),
     "snapshot": Limit(per_minute=2 / 60, burst=1),  # 2/hour
 }
 

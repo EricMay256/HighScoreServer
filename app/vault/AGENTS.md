@@ -149,6 +149,25 @@ be edited when it does.
   "sweep the prefixes that have rows" looks equivalent and fails exactly when an owned folder
   empties — the last promotion candidate settles, no row names the prefix, the sweep skips it,
   and the stale file survives advertising a candidacy that ended.
+- **Compilation plans; a model writes. And `find_similar` is notes-only.** ADR 0027. The
+  service decides which pages are stale — three reasons, `missing` / `stale` / `new-source`,
+  ported from the Stage-A engine and kept diffable against it — and a model writes the prose.
+  A plan carries note **ids**, never bodies: the agent fetches through the policy-checked read
+  surface rather than through a second one with its own disclosure rules. A **flagged note is
+  never offered as a new source**, because compiling unendorsed content launders it into a tree
+  the read surface serves freely.
+  **Wiki pages are excluded from the dedup corpus**, and that is correctness rather than
+  tuning: a page restates its sources by construction, so a note whose successor covers the
+  same ground would look like a duplicate of a document that exists only because that note
+  does. Pages are still *embedded* — search returning synthesis is the point — they are simply
+  not adjudicated. Do not "restore" the filter for symmetry with the read path.
+  The **frontier** is read at `finish`, never at `plan` (reading it early skips notes that
+  landed mid-run), and a **failed run publishes none** (a failed frontier would claim coverage
+  for pages nobody wrote). `compiled_at` comes from the run's start so one run is one
+  timestamp, which is why `set_compile_provenance` exists apart from `replace_content` — that
+  one leaves provenance alone so an ordinary update cannot claim to have compiled anything.
+  `source_ids` are **validated** and refused when unresolved, unlike `related_ids`: provenance
+  naming something that never existed is a false claim, not a dangling edge.
 - **A review candidate is always a brand-new note, and a settled case releases it.**
   `insert_pending` has one production caller: the contribute path's `Flag` branch, with the
   note it just wrote. Pre-existing notes appear only as JSON evidence, and the update path

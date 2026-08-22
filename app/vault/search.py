@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .constants import EMBEDDING_DIMENSIONS
-from .domain import DocumentStatus, VaultDocument
+from .domain import DocumentKind, DocumentStatus, VaultDocument
 from .embeddings import EmbeddingVector
 from .governance import ScoredCandidate as GovernanceScoredCandidate
 from .read_policy import readable_path_predicate
@@ -262,6 +262,22 @@ class VaultSearchRepository:
         an existing row: without it a document scores 1.0 against itself and
         every edit looks like a duplicate. Excluding it is what lets an update
         run the same gate a contribution does rather than skipping it.
+
+        **Notes only. Wiki pages are excluded, and that is a correctness rule
+        rather than a filter.** Dedup asks "does the corpus already say this",
+        and a compiled page is the corpus *saying it again* -- a synthesis whose
+        body is drawn from the very notes it cites. Scoring a note against one
+        conflates two layers: a page derived from note A would make note A's
+        successor look like a duplicate of a document that only exists because
+        note A does. The two are also asymmetric in a way a single corpus
+        cannot express -- a page legitimately restates its sources, while a note
+        restating another note is exactly what this gate exists to catch.
+
+        Today `flag_at` is 1.0, so only an identical embedding flags and the
+        practical effect is small. It will not stay small: the calibration
+        register in `docs/embedding-calibration.md` exists to lower that value
+        as observations accumulate, and this filter is what stops compilation
+        from poisoning the distribution it is derived from.
         """
 
         if len(embedding) != EMBEDDING_DIMENSIONS:
@@ -288,6 +304,7 @@ class VaultSearchRepository:
             .where(
                 vault_document_embeddings.c.profile_id == profile_id,
                 vault_documents.c.status == DocumentStatus.ACTIVE.value,
+                vault_documents.c.kind == DocumentKind.NOTE.value,
                 readable_path_predicate(),
             )
             .order_by(distance, vault_documents.c.id)

@@ -7,7 +7,7 @@ this list assumes — inherited state, the conventions that bite, what is unsett
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** on `dev`. Suite green (504 vault, 746 full). PR #14 merges the
+**State:** on `dev`. Suite green (527 vault, 769 full). PR #14 merges the
 22-commit gap into `main` and is open for review.
 
 **Production is three revisions behind `dev`'s schema:** it sits at vault lineage
@@ -116,34 +116,51 @@ no credential carries that name any more — and it is the right thing to keep f
 the next bulk import. Note that a *new* credential named `importer` would inherit
 that headroom.
 
-## 5. Compilation (Phase 4)
+## 5. Compilation (Phase 4) — **built; one operator step left**
 
-The last markdown writer. `Agent/wiki/` is still produced by the Stage-A librarian
-loop in the knowledge-platform engine, because the service has no compile path.
-`vault_compile_runs` already exists with its provenance CHECK and
-`ON DELETE RESTRICT`; the service and routes do not.
+The last markdown writer. `Agent/wiki/` was produced by the Stage-A librarian loop
+because the service had no compile path; it has one now (ADR 0027).
 
-Three things to carry in:
+- ✅ `VaultCompileService` — plan, write page, finish, fail
+- ✅ four REST routes under `/api/v1/vault/compile/`, scope `vault:compile`
+- ✅ `find_similar` excludes wiki pages from the dedup corpus — a latent bug that
+  would have bitten the moment the first page was written, not a new rule
+- ✅ `source_ids` validated and refused when unresolved, unlike `related_ids`
+- ⬜ **import or recompile the 15 Stage-A pages, then add `Agent/wiki/` to
+  `CORPUS_OWNED_PATH_PREFIXES`.** In that order.
 
-- `Agent/wiki/` is an exported prefix the corpus does **not** own. It is absent
-  from `CORPUS_OWNED_PATH_PREFIXES` precisely so an export cannot delete the 15
-  Stage-A pages no row accounts for. Adding it to that tuple is part of this
-  work, and must not happen before the service actually holds those pages.
-- Wiki `SourceIDs` now come from service note ids, not filenames.
-- A compiled page can be a promotion candidate (ADR 0023 admits both types), and
-  `VaultPromotionService` already routes one home to `Agent/wiki/`. Nothing to
-  build; it is there so a page does not land in a folder typed `Agent Note`.
+**The order is load-bearing and the failure is silent.** `Agent/wiki/` is
+exported but not owned, which is what stops `--apply --prune` deleting fifteen
+files no row accounts for. Compilation existing does not change that — the gate
+is whether the pages exist *as rows*. Adding the prefix first is a one-line diff
+that deletes all of them on the next prune. `export.py` carries the warning at
+the constant.
 
-No longer blocked.
+Once that lands, the knowledge-platform engine's `compile plan`/`write`/`finish`
+and the `knowledge-vault` skill's compile loop can be retired: ADR 0022 gives
+each tree one writer, and that becomes true of `Agent/wiki/` at that point.
 
-## 6. The admin MCP surface
+## 6. The admin MCP surface — **ADR proposed, awaiting review**
 
-The review routes are REST-only on purpose (ADR 0019's amendment, ADR 0021's
-reasoning): reading a case serves `flagged` content and deciding one publishes or
-destroys a note, so those tools stay off the surface injected text can name. The
-agreed destination is a **separate admin MCP server**, not the existing mount.
+Two finished verbs wait here: the review decision (REST-only since v64) and
+`promotion_status` (service method built and tested, no transport at all).
 
-Unstarted, and its own design decision with its own ADR.
+[ADR 0026](../app/vault/docs/adr/0026-the-admin-surface-is-a-second-mount-nobody-is-told-about.md)
+is **Proposed** and is the thing to react to. Its argument is not the obvious
+one: scope-filtered listing already makes a tool absent unless the credential
+carries the scope, and that does nothing for the reviewer, who must read flagged
+text and then decide, in one session. No arrangement of mounts fixes that, so the
+ADR rests on what the verbs can *do* — `reject` deletes a never-endorsed note
+whose substance the case itself asserts is already in the corpus.
+
+The proposal: a second MCP app at `/api/v1/vault/admin/mcp/`, off by default
+behind `VAULT_ADMIN_MCP_ENABLED`, absent from OAuth discovery, four tools, REST
+routes retained. The cheapest alternative — no admin MCP, promotion as a REST
+route — is recorded and is the one to fall back to if the queue stays empty in
+practice.
+
+Costs real work either way: `_TOOL_SCOPES` has to become per-application, or a
+`vault:review` credential would see the admin tools on the ordinary mount too.
 
 ---
 

@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
@@ -19,6 +19,7 @@ from .constants import (
     REFRESH_TOKEN_TTL_SECONDS,
 )
 from .domain import (
+    CompileRunState,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
@@ -29,6 +30,7 @@ from .domain import (
     ReviewState,
     StoredAuthorizationCode,
     StoredRefreshToken,
+    VaultCompileRun,
     VaultDocument,
     VaultReviewCase,
 )
@@ -36,6 +38,7 @@ from .read_policy import readable_path_predicate
 from .tables import (
     vault_agent_credentials,
     vault_audit_events,
+    vault_compile_runs,
     vault_document_embeddings,
     vault_documents,
     vault_oauth_authorization_codes,
@@ -295,6 +298,48 @@ class VaultDocumentRepository:
                     None if promotion_status is None else promotion_status.value
                 ),
                 vault_path=vault_path,
+            )
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def set_compile_provenance(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        compile_run_id: UUID,
+        compiled_by: str,
+        compiled_at: datetime,
+    ) -> VaultDocument | None:
+        """Re-attribute a page to the run that has just rewritten it.
+
+        Separate from ``replace_content`` on purpose. That method leaves compile
+        provenance alone because an ordinary update must not be able to claim it
+        produced a page -- ``contributed_by`` stays put there for the same
+        reason. A recompile genuinely *is* a compilation, so it moves the
+        provenance in its own statement, and the two callers cannot be confused
+        for one another.
+
+        All three provenance columns move together, and ``compiled_at`` has to
+        be among them: ``replace_content`` deliberately ignores it, so a
+        recompiled page would otherwise keep the timestamp of the run before
+        last and stay permanently "stale" in every subsequent plan. It comes
+        from the *run's start*, not from ``now()``, so every page in one run
+        carries one timestamp -- otherwise "was this note newer than the page"
+        would depend on where in the run the page happened to be written.
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.kind == DocumentKind.WIKI.value)
+            .values(
+                compile_run_id=compile_run_id,
+                compiled_by=compiled_by,
+                compiled_at=compiled_at,
             )
             .returning(*self._domain_columns)
         )
@@ -1444,3 +1489,167 @@ class VaultOAuthRefreshTokenRepository:
             )
         )
         return result.rowcount or 0
+
+
+def _compile_run_from_row(row: RowMapping) -> VaultCompileRun:
+    return VaultCompileRun(
+        id=row["id"],
+        compiler_principal_id=row["compiler_principal_id"],
+        state=CompileRunState(row["state"]),
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+        input_frontier=dict(row["input_frontier"]),
+        output_frontier=dict(row["output_frontier"]),
+        error_summary=row["error_summary"],
+    )
+
+
+class VaultCompileRunRepository:
+    """The lifecycle of one compile pass.
+
+    A run is `running` with no `completed_at`, or settled with one -- the
+    schema's completion CHECK admits nothing else, which is why every
+    transition here sets both columns together.
+    """
+
+    async def start(
+        self,
+        connection: AsyncConnection,
+        *,
+        run_id: UUID,
+        compiler_principal_id: str,
+        input_frontier: Mapping[str, Any],
+    ) -> VaultCompileRun:
+        statement = (
+            insert(vault_compile_runs)
+            .values(
+                id=run_id,
+                compiler_principal_id=compiler_principal_id,
+                input_frontier=dict(input_frontier),
+            )
+            .returning(*vault_compile_runs.c)
+        )
+        result = await connection.execute(statement)
+        return _compile_run_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        run_id: UUID,
+    ) -> VaultCompileRun | None:
+        result = await connection.execute(
+            select(vault_compile_runs).where(vault_compile_runs.c.id == run_id)
+        )
+        row = result.mappings().one_or_none()
+        return _compile_run_from_row(row) if row is not None else None
+
+    async def settle(
+        self,
+        connection: AsyncConnection,
+        run_id: UUID,
+        *,
+        state: CompileRunState,
+        output_frontier: Mapping[str, Any] | None = None,
+        error_summary: str | None = None,
+    ) -> VaultCompileRun | None:
+        """Move a run out of ``running``, or return None if it already left.
+
+        ``state = 'running'`` in the predicate is the concurrency guard, the
+        same shape the review decision uses: two finishes race, one wins, and
+        the loser is told the run was already settled rather than overwriting
+        the first outcome.
+        """
+
+        statement = (
+            update(vault_compile_runs)
+            .where(vault_compile_runs.c.id == run_id)
+            .where(vault_compile_runs.c.state == CompileRunState.RUNNING.value)
+            .values(
+                state=state.value,
+                completed_at=func.now(),
+                output_frontier=dict(output_frontier or {}),
+                error_summary=error_summary,
+            )
+            .returning(*vault_compile_runs.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _compile_run_from_row(row) if row is not None else None
+
+    async def note_frontier(self, connection: AsyncConnection) -> str | None:
+        """The latest ``updated_at`` across notes, as ISO-8601 text.
+
+        Text rather than a timestamp because it is stored in JSONB and compared
+        against what a previous run recorded; keeping one representation
+        removes a class of "the string sorted differently from the instant"
+        bug the Stage-A compiler had to fix explicitly.
+
+        Notes only. A wiki page's own ``updated_at`` must never advance the
+        frontier: the frontier answers "how far has the *source* corpus
+        moved", and a compile run that counted its own output would mark
+        everything it just wrote as already covered.
+        """
+
+        result = await connection.execute(
+            select(func.max(vault_documents.c.updated_at)).where(
+                vault_documents.c.kind == DocumentKind.NOTE.value
+            )
+        )
+        latest = result.scalar_one_or_none()
+        return latest.astimezone(UTC).isoformat() if latest is not None else None
+
+
+class VaultWikiPageRepository:
+    """Reads over the compiled layer, for planning a run.
+
+    Separate from ``VaultDocumentRepository`` because the questions are
+    different: that one fetches a document, this one asks which pages exist,
+    what they cite, and which notes nothing covers.
+    """
+
+    async def list_pages(
+        self,
+        connection: AsyncConnection,
+    ) -> tuple[VaultDocument, ...]:
+        """Every active wiki page.
+
+        Unpaged, deliberately: a corpus with enough wiki pages to need paging
+        here has other problems, and the planner needs all of them at once to
+        compute coverage. Fifteen pages today.
+        """
+
+        result = await connection.execute(
+            select(*DOCUMENT_DOMAIN_COLUMNS)
+            .where(vault_documents.c.kind == DocumentKind.WIKI.value)
+            .where(vault_documents.c.status == DocumentStatus.ACTIVE.value)
+            .order_by(vault_documents.c.vault_path)
+        )
+        return tuple(document_from_row(row) for row in result.mappings())
+
+    async def note_states(
+        self,
+        connection: AsyncConnection,
+    ) -> dict[str, tuple[datetime, str]]:
+        """Every note's ``(updated_at, status)``, keyed by id.
+
+        Two columns rather than whole documents: staleness is decided by when
+        a note last moved and whether it is still endorsed, and loading bodies
+        to answer that would read the corpus into memory for nothing.
+
+        Includes flagged and archived notes on purpose. A page citing a note
+        that has since been flagged is *stale* -- that is one of the three
+        reasons the Stage-A planner recognises -- and it cannot be detected by
+        a query that only sees active ones.
+        """
+
+        result = await connection.execute(
+            select(
+                vault_documents.c.id,
+                vault_documents.c.updated_at,
+                vault_documents.c.status,
+            ).where(vault_documents.c.kind == DocumentKind.NOTE.value)
+        )
+        return {
+            row["id"]: (row["updated_at"], row["status"])
+            for row in result.mappings()
+        }
