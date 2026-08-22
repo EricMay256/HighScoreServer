@@ -3,6 +3,10 @@
 Written 2026-08-19 at the end of the session that landed the MCP adapter and ADR 0022.
 Read ADR 0022 first; this file is the execution plan for it and assumes its decisions.
 
+> **Superseded 2026-08-22 by [`HANDOFF-VAULT-IMPLEMENTATION.md`](HANDOFF-VAULT-IMPLEMENTATION.md).**
+> The exporter and the metadata work below shipped. This file is kept for the reasoning,
+> not the plan — do not start a session from the prompt at the bottom of it.
+
 ## Read these before touching anything
 
 1. `app/vault/docs/adr/0022-two-trees-one-writer-each.md` — the governing decision.

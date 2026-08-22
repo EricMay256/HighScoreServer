@@ -1,11 +1,13 @@
 # Next steps
 
 Current as of 2026-08-22. A short, ordered list — the *why now* and the blocking
-relationships, not the detail. `HANDOFF.md` holds the full task list and session
-history; `HANDOFF-METADATA.md` holds the metadata-model decision brief. This file
-exists so neither has to be read to know what to pick up.
+relationships, not the detail. `HANDOFF-VAULT-IMPLEMENTATION.md` holds the context
+this list assumes — inherited state, the conventions that bite, what is unsettled.
+`HANDOFF.md` holds the full task list and session history; `HANDOFF-METADATA.md`
+holds the metadata-model decision brief. This file exists so none of them has to be
+read to know what to pick up.
 
-**State:** on `dev`, pushed, **13 commits ahead of `main`**. Suite green (416
+**State:** on `dev`, pushed, **21 commits ahead of `main`**. Suite green (416
 vault, 642 full).
 
 **Production is current with `dev`'s schema:** vault lineage
@@ -19,7 +21,7 @@ implementation, listed below; no decision blocks it.
 
 ## 1. Merge `dev` into `main`
 
-Thirteen commits, including every piece of vault documentation written this month.
+Twenty-one commits, including every piece of vault documentation written this month.
 This is not bookkeeping: someone looking for the MCP setup instructions could not
 find them, because they were on `dev` and GitHub shows `main`. Documentation on a
 non-default branch is documentation nobody reads.
