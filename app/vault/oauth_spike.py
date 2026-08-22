@@ -33,8 +33,11 @@ than the current honest dead end. A deployment that has not opted in serves no
 metadata and behaves exactly as it does today.
 """
 
+import json
 import logging
 import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from mcp.server.auth.provider import (
@@ -97,15 +100,17 @@ def _probe(inner: Any, path: str) -> Any:
                 key.decode("latin-1").lower(): value.decode("latin-1")
                 for key, value in scope.get("headers") or []
             }
+            # In the message, not in `extra`. The application's log formatter
+            # renders only the message, so a structured field is captured and
+            # then invisible -- which is how the first production run of this
+            # spike produced no usable output at all.
             logger.info(
-                "vault oauth spike request",
-                extra={
-                    "vault_oauth_path": path,
-                    "vault_oauth_method": scope.get("method", ""),
-                    "vault_oauth_user_agent": headers.get("user-agent", ""),
-                    "vault_oauth_sec_fetch_dest": headers.get("sec-fetch-dest", ""),
-                    "vault_oauth_referer": headers.get("referer", ""),
-                },
+                "vault oauth spike | %s %s | ua=%r | sec-fetch-dest=%r | referer=%r",
+                scope.get("method", ""),
+                path,
+                headers.get("user-agent", ""),
+                headers.get("sec-fetch-dest", ""),
+                headers.get("referer", ""),
             )
         await inner(scope, receive, send)
 
@@ -124,32 +129,58 @@ class SpikeAuthorizationProvider(
 ):
     """Enough of the protocol to be walked to ``authorize``, and no further."""
 
-    def __init__(self) -> None:
-        # In memory, and therefore per worker. See the module docstring: this is
-        # why the spike is not a foundation to build on.
-        self._clients: dict[str, OAuthClientInformationFull] = {}
+    def __init__(self, store_path: str | None = None) -> None:
+        # A JSON file on the dyno filesystem, because registration and
+        # authorization land on *different Gunicorn workers* -- the first
+        # production run of this spike registered on one and then 400'd on the
+        # other, which is the failure this replaces. The filesystem is the
+        # cheapest thing both workers can see.
+        #
+        # Ephemeral and unsynchronised, and that is fine for a spike: a lost
+        # file costs one retry, and two concurrent registrations are not a
+        # scenario a hand-run test produces. A real provider persists to
+        # Postgres, and that difference is most of why this module is throwaway.
+        self._store = Path(
+            store_path
+            or os.environ.get("VAULT_OAUTH_SPIKE_STORE")
+            or Path(tempfile.gettempdir()) / "vault-oauth-spike-clients.json"
+        )
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            return json.loads(self._store.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        client = self._clients.get(client_id)
-        if client is None:
-            # Worth logging rather than returning quietly: against two workers
-            # this is the expected failure, and it looks like a client bug.
+        raw = self._load().get(client_id)
+        if raw is None:
             logger.info(
-                "vault oauth spike: unknown client (registered on another worker?)",
-                extra={"vault_oauth_client_id": client_id},
+                "vault oauth spike | unknown client_id=%s (store=%s, known=%d)",
+                client_id,
+                self._store,
+                len(self._load()),
             )
-        return client
+            return None
+        return OAuthClientInformationFull.model_validate(raw)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        self._clients[client_info.client_id] = client_info
+        clients = self._load()
+        clients[client_info.client_id] = client_info.model_dump(mode="json")
+        try:
+            self._store.write_text(json.dumps(clients), encoding="utf-8")
+        except OSError as exc:
+            # Loud, because a silent failure here reappears as an inexplicable
+            # 400 at /authorize one step later.
+            logger.warning(
+                "vault oauth spike | could not persist client store at %s: %s",
+                self._store,
+                type(exc).__name__,
+            )
         logger.info(
-            "vault oauth spike: client registered",
-            extra={
-                "vault_oauth_client_id": client_info.client_id,
-                "vault_oauth_redirect_uris": [
-                    str(uri) for uri in client_info.redirect_uris or []
-                ],
-            },
+            "vault oauth spike | registered client_id=%s redirect_uris=%s",
+            client_info.client_id,
+            [str(uri) for uri in client_info.redirect_uris or []],
         )
 
     async def authorize(
@@ -167,12 +198,10 @@ class SpikeAuthorizationProvider(
         """
 
         logger.info(
-            "vault oauth spike: authorize reached",
-            extra={
-                "vault_oauth_client_id": client.client_id,
-                "vault_oauth_redirect_uri": str(params.redirect_uri),
-                "vault_oauth_scopes": list(params.scopes or []),
-            },
+            "vault oauth spike | AUTHORIZE REACHED client_id=%s redirect_uri=%s scopes=%s",
+            client.client_id,
+            params.redirect_uri,
+            list(params.scopes or []),
         )
         raise AuthorizeError(
             error="temporarily_unavailable",
