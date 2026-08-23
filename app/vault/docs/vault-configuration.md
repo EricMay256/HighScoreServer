@@ -306,8 +306,12 @@ POST /token                 code + PKCE verifier -> access token + refresh token
 
 The access token it issues is an ordinary `hssv1_` credential, so it appears in
 `issue_vault_credential list` beside every other one and is revoked the same way.
-Its principal is `oauth-<client name>`, which is also what lands in
-`ContributedBy` on notes the client writes.
+Its principal is `oauth-<client_id>` — the server-issued registration id, never the
+client's self-declared name — and that is also what lands in `ContributedBy` on notes
+the client writes. The readable name is on the credential's `display_name`, which is
+what `issue_vault_credential list` shows. A name-derived principal collided across
+separately registered clients that chose the same name, which meant sharing an
+idempotency namespace and a quota; see vault ADR 0024's 2026-08-23 amendment.
 
 **Scopes are capped at `vault:read` and `vault:write`.** A client cannot request
 more — `vault:update`, `vault:delete` and `vault:review` are unreachable through
@@ -335,7 +339,7 @@ sees is a connector asking to be reconnected, and the cause is in the log as
 | Correct password rejected every time | `VAULT_OPERATOR_PASSWORD_HASH` unset or mangled — check the log for `not a valid bcrypt hash` |
 | Login returns 429 | The login bucket; wait a minute, or raise `VAULT_LOGIN_RATE_LIMIT` |
 | `/register` returns 429 | The registration bucket; wait a minute, or raise `VAULT_REGISTRATION_RATE_LIMIT`. Re-registering repeatedly is itself unusual — a client registers once. |
-| A typo'd password needs restarting from the client | Deliberate: the nonce is redeemed before the password is checked, so one authorization affords one attempt |
+| A typo'd password needs restarting from the client | Deliberate: a submit redeems the nonce whether or not the password was right, so a wrong guess burns that authorization |
 
 #### Why bcrypt here and SHA-256 everywhere else
 

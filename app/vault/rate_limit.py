@@ -398,8 +398,13 @@ def reset_ip_limiter() -> None:
 # 600/minute IP guard is sized for "bound the cost of authentication", not for
 # "bound guesses at a password". Three defences stack here and none replaces
 # another: bcrypt's cost factor makes each guess expensive, this bucket makes
-# them rare, and the login route redeems the nonce before checking the password
-# so a single authorization affords exactly one attempt.
+# them rare, and the login route redeems the nonce whatever the password turns
+# out to be, so a wrong guess burns the authorization.
+#
+# The nonce is redeemed in the same transaction that mints the code, which is
+# *after* bcrypt rather than before it -- so concurrent submits on one nonce can
+# each get a password evaluation, and only one of them redeems. This bucket is
+# what bounds that, which is the reason it is not merely defence in depth.
 #
 # 10/minute is generous for a person typing one password and hostile to anything
 # else. Keyed by IP like the guard it sits beside, because there is no

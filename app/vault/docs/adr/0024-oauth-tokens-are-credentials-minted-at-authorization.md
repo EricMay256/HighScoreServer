@@ -32,7 +32,11 @@ a configuration step (`VAULT_PUBLIC_URL` and `VAULT_OPERATOR_PASSWORD_HASH`), do
 
 Four implementation choices are recorded under "Consequences": where the operator hash lives,
 why the code table's scope CHECK is wider than the baseline, why absence of `VAULT_PUBLIC_URL`
-is the on/off switch, and why the login POST redeems the nonce before checking the password.
+is the on/off switch, and why the login POST redeems the nonce whether or not the password was
+correct. (That last one originally read "before checking the password", describing an ordering
+the 2026-08-23 amendment below had to reverse — bcrypt now runs before the transaction that
+redeems and mints together. What survives is the property, not the sequence: one submit spends
+one authorization.)
 
 ## Amendment, 2026-08-21: refresh tokens, rotated with replay detection
 

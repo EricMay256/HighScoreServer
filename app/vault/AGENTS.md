@@ -466,9 +466,15 @@ be edited when it does.
 - **`load_authorization_code` must not consume.** The SDK splits load from exchange and does
   real work between them — PKCE, the `redirect_uri` round trip, expiry — so a consuming load
   would destroy a code whenever any of those failed, when the client may still retry.
-- **The login POST redeems the nonce before verifying the password**, so one authorization
-  affords exactly one attempt. Do not "fix" that ordering to be friendlier: it is what stops a
-  live authorization being reused as a guessing oracle.
+- **The login POST redeems the nonce whatever the password turns out to be**, so a wrong guess
+  burns the authorization and the operator restarts from the client. Do not "fix" that to be
+  friendlier: it is what stops a live authorization being reused as a guessing oracle.
+  **Bcrypt runs before the transaction, not after the redeem** — that ordering is required, not
+  incidental, because redeeming and minting the code have to be one transaction (see above) and
+  a bcrypt call must not be held across it. The consequence is accepted and deliberate:
+  concurrent submits on one nonce each get a password evaluation, and only one of them redeems.
+  The login bucket and bcrypt's own cost are what bound guessing — `/authorize` mints nonces
+  freely, so one-guess-per-nonce was never the thing doing that work.
 - **Absence of `VAULT_PUBLIC_URL` is the feature's off switch.** Every URL in the discovery
   metadata is absolute, so a deployment that cannot state its own origin cannot serve correct
   metadata — the variable that makes it work is the variable that enables it, and forgetting it
