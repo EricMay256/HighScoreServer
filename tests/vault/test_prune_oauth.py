@@ -15,9 +15,12 @@ from sqlalchemy import delete, insert, select, text
 
 from app.vault.auth import VaultScope, hash_secret
 from app.vault.oauth import PRINCIPAL_PREFIX
+from app.vault.repository import VaultOAuthClientRepository
 from app.vault.tables import (
     vault_agent_credentials,
+    vault_oauth_authorization_codes,
     vault_oauth_clients,
+    vault_oauth_pending_authorizations,
     vault_oauth_refresh_tokens,
 )
 from scripts.prune_vault_oauth import prune
@@ -319,3 +322,149 @@ def test_a_recent_registration_is_kept_even_with_no_tokens(capsys) -> None:
         )
 
     assert _run(read).one_or_none() is not None
+
+
+def _old_client(client_id: str) -> None:
+    async def seed(connection):
+        await connection.execute(
+            insert(vault_oauth_clients).values(
+                client_id=client_id,
+                client_info={"client_id": client_id},
+                registered_at=text("now() - interval '90 days'"),
+            )
+        )
+
+    _run(seed)
+
+
+def _client_survives(client_id: str) -> bool:
+    def read(connection):
+        return connection.execute(
+            select(vault_oauth_clients.c.client_id).where(
+                vault_oauth_clients.c.client_id == client_id
+            )
+        )
+
+    return _run(read).one_or_none() is not None
+
+
+def _park_pending(client_id: str, *, expires_in: str) -> None:
+    """An authorization parked at the consent screen.
+
+    ``created_at`` is dated back an hour so an already-expired row can be
+    written at all: the table checks ``expires_at > created_at``, which the
+    default ``now()`` would violate.
+    """
+
+    async def seed(connection):
+        await connection.execute(
+            insert(vault_oauth_pending_authorizations).values(
+                nonce_sha256=uuid4().bytes + uuid4().bytes,
+                client_id=client_id,
+                params={"redirect_uri": "https://example.test/cb"},
+                created_at=text("now() - interval '1 hour'"),
+                expires_at=text(f"now() + interval '{expires_in}'"),
+            )
+        )
+
+    _run(seed)
+
+
+def _park_code(client_id: str, *, expires_in: str) -> None:
+    """A code minted and not yet exchanged. Same dating trick as above."""
+
+    async def seed(connection):
+        await connection.execute(
+            insert(vault_oauth_authorization_codes).values(
+                code_sha256=uuid4().bytes + uuid4().bytes,
+                client_id=client_id,
+                scopes=[VaultScope.READ],
+                code_challenge="a-pkce-challenge",
+                redirect_uri="https://example.test/cb",
+                redirect_uri_provided_explicitly=True,
+                created_at=text("now() - interval '1 hour'"),
+                expires_at=text(f"now() + interval '{expires_in}'"),
+            )
+        )
+
+    _run(seed)
+
+
+def test_a_registration_on_the_consent_screen_is_never_pruned(capsys) -> None:
+    """Age plus a live refresh token was not enough liveness.
+
+    A pending authorization cascades on delete, so pruning while the operator
+    is looking at the consent page destroys the flow: the login POST finds no
+    row and renders the same failure as a bad password, with nothing anywhere
+    saying a sweep took it.
+
+    Not an exotic window either. An old registration whose refresh token has
+    expired is exactly the client that reconnects, and reconnecting means
+    starting here.
+    """
+
+    client_id = f"test-prune-{uuid4().hex}"
+    _old_client(client_id)
+    _park_pending(client_id, expires_in="5 minutes")
+
+    _prune()
+
+    assert _client_survives(client_id)
+
+
+def test_a_registration_mid_code_exchange_is_never_pruned(capsys) -> None:
+    """The other half of the window: code minted, not yet exchanged."""
+
+    client_id = f"test-prune-{uuid4().hex}"
+    _old_client(client_id)
+    _park_code(client_id, expires_in="60 seconds")
+
+    _prune()
+
+    assert _client_survives(client_id)
+
+
+def test_expired_in_flight_rows_do_not_make_a_registration_immortal(
+    capsys,
+) -> None:
+    """Sparing anything referenced at all would be the opposite mistake.
+
+    An abandoned authorization is a row that stays forever, so it would pin its
+    client forever too, and the sweep would go back to deleting nothing. The
+    predicate is unexpired, and this is what pins that.
+    """
+
+    client_id = f"test-prune-{uuid4().hex}"
+    _old_client(client_id)
+    _park_pending(client_id, expires_in="-5 minutes")
+    _park_code(client_id, expires_in="-60 seconds")
+
+    _prune()
+
+    assert not _client_survives(client_id)
+
+
+def test_the_dry_run_count_matches_what_the_delete_removes(capsys) -> None:
+    """A preview that disagrees with the delete is worse than no preview.
+
+    Both used to build the predicate separately, in two files, which is the
+    drift this asserts against: the count is taken, then the same state is
+    actually pruned, and the two have to agree.
+    """
+
+    doomed = f"test-prune-{uuid4().hex}"
+    spared = f"test-prune-{uuid4().hex}"
+    _old_client(doomed)
+    _old_client(spared)
+    _park_pending(spared, expires_in="5 minutes")
+
+    async def counted(connection):
+        return await VaultOAuthClientRepository().count_stale(connection, 30)
+
+    before = _run(counted)
+
+    _prune()
+
+    assert before == 1
+    assert not _client_survives(doomed)
+    assert _client_survives(spared)

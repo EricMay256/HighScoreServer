@@ -872,3 +872,127 @@ def test_the_public_oauth_routes_carry_the_preauth_guard() -> None:
     assert len(login_post) == 1
     assert getattr(login_post[0].app, "__name__", "") != "guarded"
     assert hasattr(login_post[0].endpoint, "__wrapped__")
+
+
+# --------------------------------------------- who the operator approves ----
+
+
+def _authorize_to(client: TestClient, client_id: str, redirect_uri: str):
+    """``authorize`` for a client whose redirect is not the shared one."""
+
+    response = client.get(
+        "/authorize",
+        params={
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "code_challenge": _challenge(VERIFIER),
+            "code_challenge_method": "S256",
+            "state": "opaque-state",
+            "scope": " ".join(OAUTH_BASELINE_SCOPES),
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 302, response.text
+    return parse_qs(urlparse(response.headers["location"]).query)
+
+
+def _consent_page(client: TestClient, params: dict) -> str:
+    page = client.get(
+        LOGIN_PATH, params={"req": params["req"][0], "csrf": params["csrf"][0]}
+    )
+    assert page.status_code == 200, page.text
+    return page.text
+
+
+def _register_to(client: TestClient, *, name: str, redirect_uri: str) -> str:
+    response = client.post(
+        "/register",
+        json={
+            "client_name": name,
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        },
+    )
+    assert response.status_code in (200, 201), response.text
+    return response.json()["client_id"]
+
+
+def test_two_clients_sharing_a_name_are_distinguishable_at_consent(
+    oauth_client: TestClient,
+) -> None:
+    """The impersonation the consent screen exists to stop.
+
+    Registration is open, so `client_name` is attacker-controlled: anyone may
+    register as "Claude", point the redirect at a host they control, and mail
+    the operator a real `/authorize` link on the real vault domain. The page
+    used to lead with that name and show nothing else about the client, so the
+    two requests rendered identically -- and approving the wrong one hands
+    `vault:read` and `vault:write` to the attacker.
+
+    What separates them is where the code is delivered, and which registration
+    it is. Both are on the page now, and this asserts they actually differ
+    between two clients that named themselves the same thing.
+    """
+
+    honest = _register_to(oauth_client, name="Claude", redirect_uri=REDIRECT_URI)
+    impostor_redirect = "https://claude-ai.example.net/callback"
+    impostor = _register_to(
+        oauth_client, name="Claude", redirect_uri=impostor_redirect
+    )
+
+    honest_page = _consent_page(oauth_client, authorize(oauth_client, honest))
+    impostor_page = _consent_page(
+        oauth_client, _authorize_to(oauth_client, impostor, impostor_redirect)
+    )
+
+    # The name alone tells the operator nothing -- both pages carry it.
+    assert "Claude" in honest_page and "Claude" in impostor_page
+
+    assert "https://claude.ai" in honest_page
+    assert "https://claude-ai.example.net" not in honest_page
+    assert "https://claude-ai.example.net" in impostor_page
+    assert "https://claude.ai" not in impostor_page
+
+    assert honest in honest_page and honest not in impostor_page
+    assert impostor in impostor_page and impostor not in honest_page
+
+
+def test_the_consent_screen_calls_the_name_unverified(
+    oauth_client: TestClient,
+) -> None:
+    """Shown as a claim, not as identity.
+
+    An operator who reads the name as the vault vouching for it has been
+    misled by the page rather than informed by it.
+    """
+
+    client_id = register(oauth_client, name="Claude")
+    page = _consent_page(oauth_client, authorize(oauth_client, client_id))
+
+    assert "calling itself" in page
+    assert "not verified" in page
+
+
+def test_an_overlong_client_name_cannot_bury_the_destination(
+    oauth_client: TestClient,
+) -> None:
+    """The name is unbounded attacker input, and it renders above the rest.
+
+    A few thousand characters of it -- or a few thousand newlines -- would push
+    the destination, the scopes and the caution off the screen, leaving a
+    password field under something that looks like a complete page.
+    """
+
+    client_id = _register_to(
+        oauth_client,
+        name="Claude " + "padding " * 500,
+        redirect_uri=REDIRECT_URI,
+    )
+    page = _consent_page(oauth_client, authorize(oauth_client, client_id))
+
+    assert page.count("padding") < 20
+    assert "https://claude.ai" in page
+    assert "not verified" in page

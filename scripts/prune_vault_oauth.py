@@ -10,7 +10,11 @@ durable record:
   so every row was NULL there and an expiry-only sweep deleted nothing at all
   while ``/register`` grew the table. A client with an unconsumed, unexpired
   refresh token is never a candidate whatever its age -- deleting one cascades
-  to its tokens and would revoke a working connector.
+  to its tokens and would revoke a working connector. Neither is one with an
+  authorization *in flight*: a pending authorization the operator is looking at,
+  or a code minted seconds ago and not yet exchanged. Both cascade too, and an
+  old registration reaches exactly that state when its refresh token expires and
+  the connector reconnects -- the ordinary way back, not an edge case.
 - **Expired pending authorizations.** A nonce nobody returned from, five minutes
   old.
 - **Expired authorization codes.** Sixty seconds old, redeemed or not.
@@ -127,8 +131,10 @@ async def prune(dry_run: bool, retention_days: int) -> int:
                 counts["refresh tokens"] = await _count_expired(
                     connection, "vault_oauth_refresh_tokens"
                 )
-                counts["stale client registrations"] = await _count_stale_clients(
-                    connection, retention_days
+                counts["stale client registrations"] = (
+                    await VaultOAuthClientRepository().count_stale(
+                        connection, retention_days
+                    )
                 )
                 result = await connection.execute(
                     select(func.count())
@@ -176,33 +182,10 @@ async def prune(dry_run: bool, retention_days: int) -> int:
     print(
         f"\nRevoked OAuth credentials and idle registrations are kept for "
         f"{retention_days} days. Operator-issued credentials are never pruned, "
-        "and a registration with a live refresh token is never stale."
+        "and a registration is never stale while it has a live refresh token "
+        "or an authorization in flight."
     )
     return 0
-
-
-async def _count_stale_clients(connection, retention_days: int) -> int:
-    """What ``delete_stale`` would remove, without removing it."""
-
-    from app.vault.tables import vault_oauth_clients, vault_oauth_refresh_tokens
-
-    live = (
-        select(vault_oauth_refresh_tokens.c.client_id)
-        .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
-        .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
-        .distinct()
-        .scalar_subquery()
-    )
-    result = await connection.execute(
-        select(func.count())
-        .select_from(vault_oauth_clients)
-        .where(
-            vault_oauth_clients.c.registered_at
-            < func.now() - func.make_interval(0, 0, 0, retention_days)
-        )
-        .where(vault_oauth_clients.c.client_id.not_in(live))
-    )
-    return int(result.scalar_one())
 
 
 async def _count_expired(connection, table_name: str) -> int:

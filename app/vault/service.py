@@ -1438,6 +1438,26 @@ class CompileRunAlreadySettled(Exception):
     """The run finished before this call reached it."""
 
 
+class CompileTargetNotAPage(Exception):
+    """``page_id`` names a document that is not a wiki page.
+
+    A compile run rewrites pages it produced. Pointed at a note -- a stale id,
+    or one copied out of the wrong column of a plan -- it would otherwise
+    overwrite that note's body with synthesized content and only *then* fail,
+    because compile provenance is wiki-only and would match no row. Refused
+    before anything is written, and reported as a request error rather than a
+    server fault: the id comes from the caller, and any credential holding
+    ``vault:compile`` can send a wrong one.
+    """
+
+    def __init__(self, document_id: str, kind: DocumentKind) -> None:
+        super().__init__(
+            f"page_id {document_id} names a {kind.value}, not a wiki page"
+        )
+        self.document_id = document_id
+        self.kind = kind
+
+
 class UnresolvedSources(Exception):
     """A page cites note ids that do not resolve.
 
@@ -1658,6 +1678,19 @@ class VaultCompileService:
                 raise UnresolvedSources(vanished)
 
             if request.page_id is not None:
+                # The target's kind is settled before anything is written.
+                # `replace_content` matches on id alone, which is right for it
+                # -- the ordinary update path edits notes through it -- so a
+                # note id here would overwrite that note with page content and
+                # discover the mistake afterwards, when the wiki-only
+                # provenance update matched nothing. The transaction would roll
+                # it back, but the caller would get a 500 for what is plainly a
+                # bad field value.
+                target = await documents.get_by_id(connection, request.page_id)
+                if target is None:
+                    raise DocumentNotFound(request.page_id)
+                if target.kind is not DocumentKind.WIKI:
+                    raise CompileTargetNotAPage(request.page_id, target.kind)
                 stored = await documents.replace_content(
                     connection, request.page_id, candidate
                 )
@@ -1673,7 +1706,12 @@ class VaultCompileService:
                     compiled_by=f"agent:{request.principal_id}",
                     compiled_at=run.started_at,
                 )
-                assert stored is not None
+                if stored is None:
+                    # Unreachable now the kind is checked above under this same
+                    # lock. A raise rather than an `assert`, which -O strips --
+                    # and the next line would then fail with an AttributeError
+                    # on None, which tells a reader nothing.
+                    raise DocumentNotFound(request.page_id)
             else:
                 taken = await documents.vault_paths_under(
                     connection, AGENT_WIKI_DIRECTORY

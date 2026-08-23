@@ -1116,31 +1116,13 @@ class VaultOAuthClientRepository:
         result = await connection.execute(statement)
         return _registered_client_from_row(result.mappings().one())
 
-    async def delete_expired(
-        self,
-        connection: AsyncConnection,
-    ) -> int:
-        """Remove registrations whose secret has expired.
+    def _stale_conditions(self, retention_days: int) -> tuple[Any, ...]:
+        """Old enough, with nothing live attached.
 
-        Open registration means unbounded rows, so a pruning story is required
-        rather than optional (ADR 0024). Cascades to any pending authorization
-        or unredeemed code for the client, which is correct: neither can
-        complete once the client is gone.
-        """
-
-        result = await connection.execute(
-            delete(vault_oauth_clients)
-            .where(vault_oauth_clients.c.expires_at.is_not(None))
-            .where(vault_oauth_clients.c.expires_at <= func.now())
-        )
-        return result.rowcount or 0
-
-    async def delete_stale(
-        self,
-        connection: AsyncConnection,
-        retention_days: int,
-    ) -> int:
-        """Remove registrations that are old and have nothing live attached.
+        One definition, read by both the delete and the dry-run count. Two
+        copies of a predicate that must agree will drift, and a dry run whose
+        answer differs from the delete it previews is worse than no dry run --
+        it is a wrong answer an operator acted on.
 
         **Not keyed on ``expires_at``.** Registration is open, the SDK leaves
         ``client_secret_expiry_seconds`` unset, and nothing else supplies one --
@@ -1148,32 +1130,79 @@ class VaultOAuthClientRepository:
         while `/register` grew the table without bound. Age plus liveness is the
         rule that actually prunes.
 
-        **A client with a live refresh family is never a candidate**, whatever
-        its age. Deleting one cascades to its refresh tokens and pending
-        authorizations, which would revoke a working connector -- the client
-        would come back as `invalid_client` with no explanation. Live means an
-        unconsumed, unexpired refresh token: a connector still able to renew.
+        **Liveness is three things, not one**, because all three cascade. A
+        refresh token that can still renew is the obvious case: deleting its
+        client revokes a working connector, which comes back as
+        `invalid_client` with no explanation. The other two are an authorization
+        *in flight* -- a pending authorization on the operator's screen right
+        now, and a code minted seconds ago and not yet exchanged. Pruning
+        through either window destroys the flow silently, and the client reports
+        an expired or invalid request that names nothing an operator could act
+        on.
 
-        A consumed-and-rotated family does not protect its client, because the
-        successor row is the live one and it is checked too.
+        That window is not exotic. An old registration reaches exactly this
+        state when its refresh token has expired and the connector reconnects,
+        which is the ordinary way back: old-with-no-live-token *is* the
+        reconnecting client.
+
+        A consumed-and-rotated refresh family does not protect its client, since
+        the successor row is the live one and it is checked too.
         """
 
-        live = (
+        live_refresh = (
             select(vault_oauth_refresh_tokens.c.client_id)
             .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
             .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
             .distinct()
             .scalar_subquery()
         )
+        pending = (
+            select(vault_oauth_pending_authorizations.c.client_id)
+            .where(vault_oauth_pending_authorizations.c.expires_at > func.now())
+            .distinct()
+            .scalar_subquery()
+        )
+        codes = (
+            select(vault_oauth_authorization_codes.c.client_id)
+            .where(vault_oauth_authorization_codes.c.expires_at > func.now())
+            .distinct()
+            .scalar_subquery()
+        )
+        return (
+            vault_oauth_clients.c.registered_at
+            < func.now() - func.make_interval(0, 0, 0, retention_days),
+            vault_oauth_clients.c.client_id.not_in(live_refresh),
+            vault_oauth_clients.c.client_id.not_in(pending),
+            vault_oauth_clients.c.client_id.not_in(codes),
+        )
+
+    async def delete_stale(
+        self,
+        connection: AsyncConnection,
+        retention_days: int,
+    ) -> int:
+        """Remove registrations that are old and have nothing live attached."""
+
         result = await connection.execute(
-            delete(vault_oauth_clients)
-            .where(
-                vault_oauth_clients.c.registered_at
-                < func.now() - func.make_interval(0, 0, 0, retention_days)
+            delete(vault_oauth_clients).where(
+                *self._stale_conditions(retention_days)
             )
-            .where(vault_oauth_clients.c.client_id.not_in(live))
         )
         return result.rowcount or 0
+
+    async def count_stale(
+        self,
+        connection: AsyncConnection,
+        retention_days: int,
+    ) -> int:
+        """What ``delete_stale`` would remove, without removing it."""
+
+        result = await connection.execute(
+            select(func.count())
+            .select_from(vault_oauth_clients)
+            .where(*self._stale_conditions(retention_days))
+        )
+        return int(result.scalar_one())
 
 
 class VaultOAuthPendingAuthorizationRepository:

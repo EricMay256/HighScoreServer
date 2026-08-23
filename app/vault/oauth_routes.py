@@ -76,6 +76,12 @@ FAILURE_MESSAGE = (
     "from the client."
 )
 
+# How much of a client's self-declared name the consent screen will show.
+# Registration is open, so this string is attacker-supplied and unbounded; a
+# name long enough to push the destination and the scopes out of view would
+# undo the rest of the page.
+MAX_DISPLAYED_CLIENT_NAME = 80
+
 # What the consent screen says each scope means, in the operator's terms rather
 # than the code's. Only the baseline scopes can appear here -- a client may not
 # request more -- but the map covers every scope so that an operator-widened
@@ -117,6 +123,8 @@ def _page(
     request_valid: bool,
     status_code: int = 200,
     client_name: str = "",
+    client_id: str = "",
+    redirect_origin: str = "",
     scopes: tuple[str, ...] = (),
     nonce: str = "",
     csrf_token: str = "",
@@ -126,6 +134,8 @@ def _page(
         "login.html",
         request_valid=request_valid,
         client_name=client_name,
+        client_id=client_id,
+        redirect_origin=redirect_origin,
         scopes=_describe(scopes),
         nonce=nonce,
         csrf_token=csrf_token,
@@ -176,7 +186,36 @@ def _client_display_name(client: Any) -> str:
 
     info = client.client_info or {}
     name = str(info.get("client_name") or "").strip()
+    # Truncated, because it is attacker-supplied and unbounded: a name long
+    # enough to push the destination and the scope list off the operator's
+    # screen would defeat the rest of this page. Escaping is the template's job.
+    if len(name) > MAX_DISPLAYED_CLIENT_NAME:
+        name = name[:MAX_DISPLAYED_CLIENT_NAME].rstrip() + "\u2026"
     return name or client.client_id
+
+
+def _redirect_origin(pending: Any) -> str:
+    """Where approving this would actually deliver the authorization code.
+
+    The one part of a registration an attacker cannot borrow. ``client_name`` is
+    free text on an open registration endpoint, so "Claude" on this page proves
+    nothing -- anyone may register under that name, point the redirect at a host
+    they control, and send the operator a genuine `/authorize` link on the real
+    vault domain. The operator would see a trusted name, on the right site, with
+    the right scopes, and the only thing distinguishing that request from the
+    real one is the destination. So the destination is shown.
+
+    Origin and not the full URI: the path cannot move the code to another host,
+    and a long URI is a thing operators stop reading.
+    """
+
+    parsed = urlparse(str(pending.params.get("redirect_uri") or ""))
+    if not parsed.scheme or not parsed.netloc:
+        # Unreachable through `/authorize`, which validates the URI against the
+        # registration before parking it. Shown rather than hidden if it ever
+        # happens: a destination that cannot be described is not one to approve.
+        return str(pending.params.get("redirect_uri") or "(none)")
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _requested_scopes(pending: Any) -> tuple[str, ...]:
@@ -210,6 +249,8 @@ async def login_form(request: Request) -> Response:
     return _page(
         request_valid=True,
         client_name=_client_display_name(client),
+        client_id=client.client_id,
+        redirect_origin=_redirect_origin(pending),
         scopes=_requested_scopes(pending),
         nonce=nonce,
         csrf_token=csrf_token,

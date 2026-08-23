@@ -1,9 +1,14 @@
 {# The operator login and consent screen for the vault's OAuth authorization
    server (vault ADR 0024).
 
-   Login and consent are one page on purpose: it names the client and the exact
-   scopes it asked for, above the password field, because a scope grant the
-   operator never sees is a scope grant the operator did not make.
+   Login and consent are one page on purpose: it names the client, where the
+   credential would be delivered, and the exact scopes asked for, all above the
+   password field, because a grant the operator never sees is a grant the
+   operator did not make.
+
+   The client's *name* is not identity here. Registration is open, so the name
+   is whatever the registrant typed; the destination and the registration id
+   are what an impersonator cannot borrow, and they are shown for that reason.
 
    Self-contained -- no `extends`, no external CSS, no scripts. Not minimalism
    for its own sake: `app/vault/` moves as a directory, so a page depending on a
@@ -30,6 +35,25 @@
   main { width: 100%; max-width: 26rem; }
   h1 { font-size: 1.25rem; margin: 0 0 1.5rem; }
   .client { font-weight: 600; }
+  /* The destination block. Bordered and set apart because it is the part of
+     this page an operator has to actually read to tell a real client from one
+     that copied its name. */
+  dl.identity {
+    margin: 0 0 1rem; padding: .75rem .9rem;
+    border: 1px solid GrayText; border-radius: .4rem;
+  }
+  dl.identity dt {
+    font-size: .8rem; text-transform: uppercase; letter-spacing: .04em;
+    opacity: .7;
+  }
+  dl.identity dt + dd { margin: .1rem 0 0; }
+  dl.identity dd + dt { margin-top: .6rem; }
+  dl.identity dd { margin-left: 0; }
+  /* `overflow-wrap` and not `nowrap`: a long origin must wrap and stay
+     readable rather than scroll out of the box unnoticed. */
+  dl.identity code { font-weight: 600; overflow-wrap: anywhere; }
+  .caution { margin: 0 0 1.5rem; font-size: .9rem; opacity: .8; }
+  h1 .client { overflow-wrap: anywhere; }
   ul.scopes { margin: .5rem 0 1.5rem; padding-left: 1.25rem; }
   ul.scopes li { margin: .25rem 0; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -64,7 +88,32 @@
 {% endif %}
 
 {% if request_valid %}
-  <h1><span class="client">{{ client_name }}</span> is asking to access your vault.</h1>
+  {# "calling itself", not a bare name. Registration is open by decision (ADR
+     0024), so `client_name` is free text chosen by whoever registered -- an
+     attacker may register as "Claude", point the redirect at a host they
+     control, and send the operator a real `/authorize` link on the real vault
+     domain. Presented as the identity, that name would be the whole attack:
+     trusted name, right site, plausible scopes. Presented as a claim, with the
+     destination beside it, the operator has something to check. #}
+  <h1>A client calling itself
+      <span class="client">{{ client_name }}</span>
+      is asking to access your vault.</h1>
+
+  {# The two things the name cannot borrow. The origin is where approving this
+     delivers the authorization code, which is what an impersonator has to
+     change and cannot hide; the registration id distinguishes two clients that
+     chose the same name. #}
+  <dl class="identity">
+    <dt>Sends the credential to</dt>
+    <dd><code>{{ redirect_origin }}</code></dd>
+    <dt>Registration</dt>
+    <dd><code>{{ client_id }}</code></dd>
+  </dl>
+
+  <p class="caution">
+    The name above is chosen by the client and is not verified. Approve only if
+    you just started this from that client and you recognise the address.
+  </p>
 
   <p>It will be granted:</p>
   <ul class="scopes">
@@ -86,7 +135,7 @@
   </form>
 
   <footer>
-    Approving this issues a credential for {{ client_name }} alone. Revoke it at
+    Approving this issues a credential for that one registration. Revoke it at
     any time with <code>issue_vault_credential revoke</code>.
   </footer>
 {% else %}

@@ -170,25 +170,30 @@ def test_re_registering_replaces_rather_than_conflicting() -> None:
     assert "x_unmodelled_extension" not in updated.client_info
 
 
-def test_pruning_removes_only_expired_registrations() -> None:
-    expired = _register()
-    permanent = _register()
+def test_pruning_removes_only_registrations_past_the_retention_window() -> None:
+    """Age is the predicate, not ``expires_at``.
+
+    There used to be a ``delete_expired`` here keyed on that column, and it
+    could never delete anything: `register_client` supplies no expiry and the
+    SDK leaves ``client_secret_expiry_seconds`` unset, so every row is NULL
+    there while `/register` -- a public endpoint -- keeps writing more.
+    """
+
+    stale = _register()
+    recent = _register()
     run(
         lambda c: c.execute(
             vault_oauth_clients.update()
-            .where(vault_oauth_clients.c.client_id == expired)
-            .values(
-                registered_at=text("now() - interval '1 hour'"),
-                expires_at=text("now() - interval '1 second'"),
-            )
+            .where(vault_oauth_clients.c.client_id == stale)
+            .values(registered_at=text("now() - interval '90 days'"))
         )
     )
 
-    removed = run(lambda c: VaultOAuthClientRepository().delete_expired(c))
+    removed = run(lambda c: VaultOAuthClientRepository().delete_stale(c, 30))
 
     assert removed == 1
-    assert run(lambda c: VaultOAuthClientRepository().get(c, expired)) is None
-    assert run(lambda c: VaultOAuthClientRepository().get(c, permanent)) is not None
+    assert run(lambda c: VaultOAuthClientRepository().get(c, stale)) is None
+    assert run(lambda c: VaultOAuthClientRepository().get(c, recent)) is not None
 
 
 # --------------------------------------------- pending authorizations ----

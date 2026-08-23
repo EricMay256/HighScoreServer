@@ -334,10 +334,26 @@ be edited when it does.
   mount's; `/register` writes a row on every unauthenticated call. A route whose endpoint
   already has its own slowapi bucket is left unwrapped — wrapping the login POST suppressed
   its own tighter limit.
+- **The consent screen shows the redirect origin and the registration id, and calls the
+  client's name unverified.** `client_name` is free text on an open registration endpoint, so a
+  page that leads with it lets anyone appear as "Claude" with a redirect they control — on the
+  real vault domain, reached by a real `/authorize` link. The destination is the part an
+  impersonator cannot forge, so it is the part the operator is shown. Truncate the name: it
+  renders above everything else and is unbounded.
+- **A compile `page_id` is checked for kind before anything is written.** `replace_content`
+  matches on id alone — right for it, since the ordinary update path edits notes through it —
+  while compile provenance is wiki-only. A note id therefore overwrote that note and *then*
+  found nothing to stamp. Refused up front as a 422, not an `assert`: the id is
+  request-controlled, and `-O` strips asserts.
 - **Registrations are pruned by age *and liveness*, never by `expires_at`.** The SDK leaves
   `client_secret_expiry_seconds` unset and nothing else supplies one, so an expiry-only sweep
   deleted nothing at all. A client with an unconsumed, unexpired refresh token is never a
-  candidate — deleting one cascades to its tokens and revokes a working connector.
+  candidate — deleting one cascades to its tokens and revokes a working connector. Nor is one
+  with an authorization **in flight**: a pending authorization or an unexchanged code, both of
+  which cascade too. An old registration with no live token is exactly the client that
+  reconnects, so that window is the ordinary path back, not an edge case. The delete and the
+  dry-run count read one predicate — a preview that disagrees with the delete it previews is
+  worse than no preview.
 - **An issued access token *is* a `vault_agent_credentials` row.** That is the load-bearing
   choice and everything else follows: `contributed_by` derives from the principal, revocation
   and the credential census work unchanged, scopes stay on the credential, and quota buckets

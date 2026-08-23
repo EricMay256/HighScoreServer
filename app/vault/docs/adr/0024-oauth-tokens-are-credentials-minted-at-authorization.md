@@ -240,10 +240,36 @@ Rendering one form without a template engine at all is a legitimate alternative 
 page — and the reason not to is that a login page is exactly where HTML-escaping mistakes turn
 into injected markup on a form that takes a password.
 
-**Login and consent are the same page.** It names the client and the scopes it asked for above
-the password field, because a scope grant the operator never sees is a scope grant the operator
-did not make — and ADR 0021's whole argument is that what a credential holds decides what tool
-surface exists.
+**Login and consent are the same page.** It names the client, where the credential would be
+delivered, and the scopes it asked for, all above the password field, because a grant the
+operator never sees is a grant the operator did not make — and ADR 0021's whole argument is that
+what a credential holds decides what tool surface exists.
+
+**The client's name is not its identity, and the page must not present it as one.** This was
+wrong until 2026-08-23 and it undercut the sentence above it. Registration is open, so
+`client_name` is free text chosen by whoever registered; the page led with it and showed nothing
+else about the client. An attacker registers as "Claude", points the redirect at a host they
+control, and sends the operator a genuine `/authorize` link on the real vault domain — trusted
+name, right site, plausible scopes, and nothing on the screen distinguishing it from the real
+request. Approving it hands over `vault:read` and `vault:write`.
+
+The claim "registration grants nothing until the operator personally approves *a particular
+client*" is only true if the operator can tell which client that is. So the page shows the two
+things a name cannot borrow:
+
+- **the redirect origin** — where approving actually delivers the code, which an impersonator
+  must change and cannot hide. Origin rather than the full URI: the path cannot move the code to
+  another host, and a long URI is a thing operators stop reading.
+- **the registration id** — which distinguishes two clients that chose the same name.
+
+and it labels the name as unverified rather than asserting it. The name is also length-capped,
+because it is unbounded attacker input rendered above everything else: a few thousand characters
+of it would push the destination, the scopes, and the caution off the screen and leave a
+password field under what still looks like a complete page.
+
+This is mitigation, not proof of identity — an operator who approves without reading is still
+approving. Restricting redirect URIs for known clients, or a trusted-registration list, would be
+stronger and neither is in place; both are open.
 
 Three things it needs that do not exist yet:
 

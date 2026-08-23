@@ -799,3 +799,67 @@ def test_settling_takes_the_corpus_lock() -> None:
     ):
         source = inspect.getsource(method)
         assert "pg_advisory_xact_lock" in source, method.__name__
+
+
+def _note_title(note_id: str) -> str:
+    transactions, engine = vault_service()
+
+    async def read() -> str:
+        try:
+            async with transactions.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_documents.c.title).where(
+                        vault_documents.c.id == note_id
+                    )
+                )
+                return result.scalar_one()
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(read())
+
+
+def test_a_page_id_naming_a_note_is_refused_before_anything_is_written(
+    client: TestClient, compile_token: str
+) -> None:
+    """A stale or mistyped id used to reach an assertion, not a response.
+
+    `replace_content` matches on id alone, which is right for it -- the ordinary
+    update path edits notes through it. `set_compile_provenance` is wiki-only.
+    So a note id here overwrote the note with page content, then found no row to
+    stamp, then failed an `assert` and returned 500. The transaction rolled the
+    write back, but a bad field value in a request any `vault:compile` credential
+    can send is not a server fault, and an `assert` is not an error path -- `-O`
+    strips it, and the next line would fail on None instead.
+    """
+
+    note_id = _seed_note(title="A note, not a page")
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    response = _write(
+        client, compile_token, run_id, page_id=note_id, source_ids=[note_id]
+    )
+
+    assert response.status_code == 422
+    assert "not a wiki page" in response.json()["detail"]
+    assert _note_title(note_id) == "A note, not a page"
+    assert _page_count() == 0
+
+
+def test_an_unknown_page_id_is_still_a_404(
+    client: TestClient, compile_token: str
+) -> None:
+    """The kind check must not swallow the missing-row case."""
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    response = _write(
+        client,
+        compile_token,
+        run_id,
+        page_id=f"{PREFIX}{uuid4().hex}",
+        source_ids=[note_id],
+    )
+
+    assert response.status_code == 404

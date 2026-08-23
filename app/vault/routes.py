@@ -73,6 +73,7 @@ from .service import (
     CompilePageRequest,
     CompileRunAlreadySettled,
     CompileRunNotFound,
+    CompileTargetNotAPage,
     ContributionRequest,
     DedupUnavailable,
     DocumentNotFound,
@@ -855,6 +856,15 @@ async def write_compile_page(
             detail="Compile run is already settled; open a new run",
         ) from exc
     except UnresolvedSources as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except CompileTargetNotAPage as exc:
+        # 422 and not 404: the document exists, so "not found" would send the
+        # caller looking for a missing row instead of at the id it sent. Same
+        # status as UnresolvedSources, and for the same reason -- a field in the
+        # body names the wrong kind of thing.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
