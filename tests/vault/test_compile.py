@@ -35,6 +35,7 @@ from app.vault.tables import (
     vault_documents,
     vault_write_requests,
 )
+from tests.vault.test_contributions import StubEmbeddingProvider
 from tests.vault.test_routes import _drop, _issue
 from tests.vault.test_search import vault_service
 
@@ -203,6 +204,31 @@ def test_a_flagged_note_is_never_offered_as_a_new_source() -> None:
 
 
 # --------------------------------------------------------- over the wire ----
+
+
+@pytest.fixture(autouse=True)
+def provider(monkeypatch: pytest.MonkeyPatch) -> StubEmbeddingProvider:
+    """A deterministic embedding provider, for two independent reasons.
+
+    **CI has no credential**, deliberately: the provider is optional at runtime
+    and the vault degrades to lexical search without one. Every test here that
+    writes a page would otherwise get a 503, which is correct behaviour and a
+    useless assertion -- and it passes locally, where a key is configured, so
+    the failure only ever appears on a pull request.
+
+    **The stub is also the stronger tool.** Its vectors are one-hot on an axis
+    derived from the text, so identical text scores exactly 1.0 rather than
+    approximately -- which is what the dedup assertions below actually need at
+    `flag_at = 1.0`. Leaning on a real model for that was measuring the model.
+
+    Autouse because every test in the "over the wire" section writes a page,
+    and a test that wants the *unconfigured* path should patch it back to None
+    explicitly rather than rely on the environment.
+    """
+
+    stub = StubEmbeddingProvider()
+    monkeypatch.setattr("app.vault.routes.get_embedding_provider", lambda: stub)
+    return stub
 
 
 @pytest.fixture
