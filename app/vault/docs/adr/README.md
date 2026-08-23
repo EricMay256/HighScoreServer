@@ -34,3 +34,5 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0023 | [Candidacy is a field, and the export projects it into a folder](0023-the-export-projects-only-the-engine-managed-folders.md) | Accepted |
 | 0024 | [The vault runs its own authorization server, and an OAuth token is a credential row](0024-oauth-tokens-are-credentials-minted-at-authorization.md) | Accepted |
 | 0025 | [The vault stores edges and does not traverse them](0025-the-vault-stores-edges-and-does-not-traverse-them.md) | Accepted |
+| 0026 | [Privileged tools live on the one mount, gated by the credential's scopes](0026-privileged-tools-are-gated-by-scope-on-one-mount.md) | Accepted (reverses the separate admin MCP that 0019 and 0023 assumed) |
+| 0027 | [The service plans a compile run; the agent writes it](0027-the-service-plans-a-compile-run-and-the-agent-writes-it.md) | Accepted (amends 0016's "no dedup, no write" for wiki pages) |

@@ -106,7 +106,7 @@ flowchart LR
 ### Knowledge-platform bounded context
 
 The cloud knowledge platform is staged in this service as an isolated `app/vault/` package,
-with its own decision log of 23 ADRs under
+with its own decision log under
 [`app/vault/docs/adr/`](app/vault/docs/adr/). It exposes an authenticated HTTP adapter —
 hybrid lexical and vector search fused by reciprocal rank, fetch by id, and a governed write
 path covering contribution, replacement, and retirement — over one application-service layer.

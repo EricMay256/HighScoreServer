@@ -237,16 +237,20 @@ class VaultContributionResponse(BaseModel):
         default_factory=list,
         description=(
             "Existing NOTES the candidate scored against. This is what the "
-            "dedup gate judged, so a high score here is what 'flagged' means."
+            "dedup gate judged, so a high score here is what 'flagged' means. "
+            "`note_id` is a document id, resolvable with GET /notes/{id}."
         ),
     )
     related_pages: list[VaultSimilarNote] = Field(
         default_factory=list,
         description=(
-            "Compiled wiki pages near this note. CONTEXT, NOT A VERDICT: a "
+            "Compiled WIKI PAGES near this note. CONTEXT, NOT A VERDICT: a "
             "page restates the notes it was built from, so resembling one is "
             "expected and is never why a contribution is flagged. Useful for "
-            "deciding whether to extend an existing synthesis."
+            "deciding whether to extend an existing synthesis. Every entry is "
+            "a wiki page by construction -- the query filters on kind -- and "
+            "`note_id` carries its document id, the same id space every other "
+            "surface uses and resolvable with GET /notes/{id}."
         ),
     )
     errors: list[str] = Field(default_factory=list)

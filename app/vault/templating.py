@@ -1,7 +1,7 @@
 """The vault's own Jinja2 environment.
 
 **Not HSS's.** The host renders Jinja2 views from a root-level ``templates/``
-directory, and reaching for its ``base.html`` would be exactly the comingling
+directory, and reaching for its ``base.html`` would be exactly the commingling
 the extraction manifest exists to prevent: ``app/vault/`` moves as a directory,
 and a page depending on a host asset does not move with it. Worse, the boundary
 test scans *imports* -- a ``{% extends "base.html" %}`` would pass every guard
