@@ -7,7 +7,7 @@ this list assumes — inherited state, the conventions that bite, what is unsett
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** on `dev`. Suite green (538 vault, 780 full). PR #14 merges the
+**State:** on `dev`. Suite green (554 vault, 796 full). PR #14 merges the
 22-commit gap into `main` and is open for review.
 
 **Production is three revisions behind `dev`'s schema:** it sits at vault lineage
@@ -128,12 +128,15 @@ because the service had no compile path; it has one now (ADR 0027).
 - ✅ `source_ids` validated and refused when unresolved, unlike `related_ids`
 - ✅ `scripts/import_vault_wiki.py` — the one-off bridge, verified end to end
   against the test database
-- ⬜ **run the import against production, add the `_index.md` renderer, then add
-  `Agent/wiki/` to `CORPUS_OWNED_PATH_PREFIXES`.** In that order.
+- ✅ the `_index.md` renderer, in the exporter rather than as a row
+- ⬜ **run the import against production, then add `Agent/wiki/` to
+  `CORPUS_OWNED_PATH_PREFIXES`.** In that order, and not before.
 
 **It is 14 pages, not 15** — every earlier doc said 15, including this one,
-and nobody counted. There is also an `_index.md` (a generated `MoC`) and a
-`_frontier.yml`; only the first is at risk, since the sweep takes `*.md` alone.
+and nobody counted. There is also an `_index.md` and a `_frontier.yml`. The
+exporter now regenerates the index, so it is no longer at risk; `_frontier.yml`
+never was, since the sweep takes `*.md` alone and its service equivalent is
+`vault_compile_runs.output_frontier`.
 
 **The order is load-bearing and the failure is silent.** `Agent/wiki/` is
 exported but not owned, which is what stops `--apply --prune` deleting files no
@@ -152,9 +155,17 @@ are additive and change no running behaviour), then import.
 **Verified against the test database:** all 14 pages import, the four historical
 compile runs are preserved as four rows, and a re-export reproduces every file
 byte-for-byte **except one line each** — `CompileRunID`, which is a uuid here
-and was `run_20260813_184935` in Stage A. A one-time 14-line diff, and the
-grouping survives it: the nine pages from one Stage-A run share one uuid. A
-second export writes nothing.
+and was `run_20260813_184935` in Stage A. The grouping survives it: the nine
+pages from one Stage-A run share one uuid.
+
+The regenerated `_index.md` differs by three lines, all deliberate: `CreatedAt`
+comes from the earliest page rather than the index's own first creation (which
+cannot be recovered without parsing the old file), the empty `aliases:` key is
+gone (the canonical renderer cannot emit one bare), and the blurb names the
+generator that now writes it.
+
+**Total one-time diff: 17 lines across 15 files.** A second export writes
+nothing, which is the property that matters.
 
 Once that lands, the knowledge-platform engine's `compile plan`/`write`/`finish`
 and the `knowledge-vault` skill's compile loop can be retired: ADR 0022 gives

@@ -33,6 +33,7 @@ from app.vault.export import (
     ExportReport,
     VaultExportService,
     render_document,
+    render_wiki_index,
     resolve_export_path,
     utc_timestamp,
 )
@@ -679,3 +680,137 @@ def test_every_owned_prefix_is_one_the_export_also_writes() -> None:
     """
 
     assert set(CORPUS_OWNED_PATH_PREFIXES) <= set(EXPORTED_PATH_PREFIXES)
+
+
+# ------------------------------------------------------- the wiki index ----
+
+
+def make_page(**overrides: object) -> VaultDocument:
+    """A compiled wiki page, with the provenance its CHECK constraint wants."""
+
+    page = VaultDocument(
+        id="cafe0001",
+        kind=DocumentKind.WIKI,
+        status=DocumentStatus.ACTIVE,
+        vault_path="Agent/wiki/idempotency-and-identity.md",
+        title="Idempotency and Identity",
+        body="Synthesis.",
+        summary="What makes a request the same request.",
+        contributed_by="agent:librarian",
+        provenance={},
+        schema_version=1,
+        created_at=CREATED_AT,
+        updated_at=UPDATED_AT,
+        doc_type="Wiki Page",
+        doc_status="Current",
+        compile_run_id=UUID("11111111-1111-1111-1111-111111111111"),
+        compiled_by="agent:librarian",
+        compiled_at=UPDATED_AT,
+    )
+    return replace(page, **overrides)  # type: ignore[arg-type]
+
+
+def test_no_pages_means_no_index() -> None:
+    """Writing "_0 notes._" would create a file to describe nothing.
+
+    Absent also lets the prune guard remove a stale index once `Agent/wiki/`
+    becomes a corpus-owned prefix.
+    """
+
+    assert render_wiki_index([make_document()]) is None
+
+
+def test_the_index_lists_every_page_with_its_summary() -> None:
+    index = render_wiki_index([make_document(), make_page()])
+
+    assert index is not None
+    assert index.vault_path == "Agent/wiki/_index.md"
+    assert "_1 notes._" in index.content
+    assert (
+        "- [[idempotency-and-identity]] - What makes a request the same request."
+        in index.content
+    )
+    # A note is not a page, whatever prefix it sits under.
+    assert make_document().title not in index.content
+
+
+def test_index_entries_sort_by_slug_case_insensitively() -> None:
+    """What the Stage-A renderer does, and what keeps the file from churning
+    when a title changes but its path does not."""
+
+    pages = [
+        make_page(id="a", vault_path="Agent/wiki/Zebra.md", title="Z"),
+        make_page(id="b", vault_path="Agent/wiki/apple.md", title="A"),
+    ]
+
+    index = render_wiki_index(pages)
+
+    assert index is not None
+    assert index.content.index("[[apple]]") < index.content.index("[[Zebra]]")
+
+
+def test_index_timestamps_come_from_the_pages_not_the_clock() -> None:
+    """The module's whole contract is a zero-line diff on an unchanged corpus.
+
+    Stage A stamped `LastUpdated` with `now()` and read the previous file to
+    preserve `CreatedAt`. Neither is available here -- this module parses no
+    markdown -- so both are derived: earliest page and latest page.
+    """
+
+    early = make_page(id="a", vault_path="Agent/wiki/a.md")
+    late = make_page(
+        id="b",
+        vault_path="Agent/wiki/b.md",
+        created_at=CREATED_AT + timedelta(days=2),
+        updated_at=UPDATED_AT + timedelta(days=2),
+    )
+
+    index = render_wiki_index([early, late])
+
+    assert index is not None
+    assert f"CreatedAt: {utc_timestamp(CREATED_AT)}" in index.content
+    assert f"LastUpdated: {utc_timestamp(UPDATED_AT + timedelta(days=2))}" in index.content
+
+
+def test_index_timestamps_follow_origin_for_an_imported_page() -> None:
+    """So the index agrees with the files it indexes.
+
+    An imported page projects its upstream dates rather than the moment its row
+    landed; an index reporting the import instead would disagree with every
+    entry in it.
+    """
+
+    imported = make_page(
+        origin={
+            "created_at": "2026-08-13T18:56:41Z",
+            "updated_at": "2026-08-13T18:56:41Z",
+        }
+    )
+
+    index = render_wiki_index([imported])
+
+    assert index is not None
+    assert "CreatedAt: 2026-08-13T18:56:41Z" in index.content
+    assert "LastUpdated: 2026-08-13T18:56:41Z" in index.content
+
+
+def test_the_index_is_written_and_never_pruned(tmp_path: Path) -> None:
+    """It is generated rather than stored, so no row accounts for it.
+
+    That is exactly what the prune sweep looks for, which is why the export has
+    to add it to the expected set rather than only writing it.
+    """
+
+    documents = (make_document(), make_page())
+
+    first = export_to(tmp_path, documents, apply=True, prune=True)
+    index = tmp_path / "Agent" / "wiki" / "_index.md"
+
+    assert index.exists()
+    assert first.prunable == []
+
+    second = export_to(tmp_path, documents, apply=True, prune=True)
+
+    assert second.written == 0
+    assert second.unchanged == 3
+    assert index.exists()
