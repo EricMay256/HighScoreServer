@@ -27,6 +27,7 @@ from sqlalchemy import delete, func, select
 from app.vault.auth import VaultScope
 from app.vault.constants import OAUTH_BASELINE_SCOPES
 from app.vault.oauth import LOGIN_PATH, PRINCIPAL_PREFIX
+from app.vault.oauth_routes import FAILURE_MESSAGE
 from app.vault.passwords import hash_password
 from app.vault.rate_limit import reset_ip_limiter
 from app.vault.settings import vault_enabled
@@ -1347,3 +1348,84 @@ def test_register_carries_its_own_tighter_bucket() -> None:
 
     allowed = int(registration_rate_limit().split("/")[0])
     assert allowed < 600
+
+
+def test_a_concurrent_code_redemption_loser_gets_invalid_grant(
+    oauth_client: TestClient,
+) -> None:
+    """The third site of the raise-inside-a-transaction bug.
+
+    `exchange_authorization_code` raised `TokenError` inside its transaction, so
+    a lost redemption race produced `FrozenInstanceError` from contextlib rather
+    than the `invalid_grant` the code intended.
+
+    Unreachable over HTTP sequentially, which is how it survived two passes:
+    `load_authorization_code` answers None for a spent code and the SDK refuses
+    before this method runs. Two exchanges that both loaded first is the only
+    way in, and a second direct exchange is exactly the state the loser sees.
+    """
+
+    from mcp.server.auth.provider import AuthorizationCode, TokenError
+
+    registration = register_full(oauth_client, name="Claude")
+    client_id = registration["client_id"]
+    params = authorize(oauth_client, client_id)
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"][0]
+
+    provider = _provider()
+    client = _client_record(client_id)
+
+    async def exercise():
+        loaded: AuthorizationCode | None = await provider.load_authorization_code(
+            client, code
+        )
+        assert loaded is not None
+        await provider.exchange_authorization_code(client, loaded)
+        # The loser presents the same code, having loaded it before the winner
+        # redeemed the row.
+        try:
+            await provider.exchange_authorization_code(client, loaded)
+        except TokenError as exc:
+            return exc.error
+        raise AssertionError("the second redemption was not refused")
+
+    assert asyncio.run(exercise()) == "invalid_grant"
+
+
+def test_a_registration_pruned_during_bcrypt_fails_cleanly(
+    oauth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redeeming the nonce and minting the code used to be two transactions.
+
+    Between them sat bcrypt, a few hundred milliseconds long -- and in that
+    window an old registration has no pending authorization, no code, and no
+    live refresh token, which is precisely what stale-client pruning deletes.
+    The operator typed the correct password and got a 500 from a foreign key on
+    the code insert.
+
+    They are one transaction now, so no committed moment exists in which
+    neither row is present. A sweep landing during bcrypt takes the pending row
+    with the client by cascade, and the redeem that follows simply finds
+    nothing -- the ordinary failure page, not a stack trace.
+
+    The deletion is hung off `verify_password` to put it exactly in the window
+    the old ordering left open.
+    """
+
+    from app.vault import oauth_routes
+
+    client_id = register(oauth_client, name="Claude")
+    params = authorize(oauth_client, client_id)
+    original = oauth_routes.verify_password
+
+    async def prune_then_verify(password: str, stored_hash: str) -> bool:
+        await _delete_client(client_id)
+        return await original(password, stored_hash)
+
+    monkeypatch.setattr(oauth_routes, "verify_password", prune_then_verify)
+
+    response = submit_login(oauth_client, params)
+
+    assert response.status_code == 400, response.text
+    assert FAILURE_MESSAGE in response.text

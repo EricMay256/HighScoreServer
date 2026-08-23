@@ -186,3 +186,40 @@ scope — so if compile tools ever land, that is where and `vault:compile` is th
 
 Whether an `MoC` (map of content) is a distinct type. `types.yml` admits `Wiki Page` and `MoC`
 under `Agent/wiki/`; the service writes the former and nothing writes the latter.
+
+## Amendment, 2026-08-23 — a run belongs to the principal that opened it, and the plan is advice
+
+Two things this decision left implicit, one of them wrong.
+
+**Wrong:** `compiler_principal_id` was recorded on the run and never checked. Any holder of
+`vault:compile` could write pages into another principal's run and settle it, producing a run
+that names one compiler while its pages and its settlement audit events name another —
+provenance contradicting itself, which is the one thing a compile run exists to provide.
+Settling is worse than writing, because settling publishes a frontier on the opener's behalf and
+the frontier is what stops notes being re-offered. All three of `write_page`, `finish` and `fail`
+now require the caller to be the opener, refusing with `409`: the scope already permits writing
+wiki pages and a holder may open its own run whenever it likes, so this is a consistency rule
+rather than a permission the caller lacks.
+
+**Implicit, and deliberate:** the plan is *advice about what is stale*, not an authorization
+list. `write_page` does not check that a page, its sources, or its `page_id` appeared in the
+run's work items, and `finish` does not check that any planned item was completed. Nothing is
+persisted per work item — the run row holds the frontier and the opener, and the items live only
+in the `plan()` response.
+
+That follows from what the scope means. `vault:compile` is the permission to write wiki pages;
+it is operator-granted, cannot be requested through OAuth (the baseline is read and write only),
+and is currently granted to nothing. A holder writing a page the plan did not mention is doing
+the thing the scope is for. And an empty successful run is not a failure to complete work — it is
+the documented way to decline, which is exactly what the frontier exists to record. Re-offering a
+note the librarian consciously passed over, every run forever, is the state this ADR was written
+to avoid. `all_pages=true` re-offers everything, which is the recovery path when a decline was
+wrong.
+
+What that costs is real and worth naming: a *buggy* compiler that opens a run, writes nothing,
+and finishes successfully advances the frontier past notes it never covered, and only
+`all_pages=true` will surface them again. Making the plan binding — persisting work items and
+their state, requiring each write to consume one, refusing `finish` while items are unresolved —
+would close that, and would need an Alembic revision and an explicit representation of "declined"
+so that declining stays possible. **Deferred rather than dismissed**, and recorded here so the
+next person meets a decision instead of a silence.

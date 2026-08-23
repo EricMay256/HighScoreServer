@@ -341,7 +341,24 @@ be edited when it does.
   block did security work first: `exchange_refresh_token` revoked a replayed token's whole
   family and then raised, so the rollback undid the revocations, the family consume, and the
   audit event. Detection that reports itself and then erases itself. Compute the outcome inside
-  the block, leave it, then raise. This has now been hit twice.
+  the block, leave it, then raise. **Hit three times** — `authorize`, `exchange_refresh_token`,
+  and `exchange_authorization_code` — because none of these branches is reachable by a
+  sequential test: each needs two requests that both pass a load check before either consumes
+  the row. `tests/vault/test_boundaries.py` now enforces the rule lexically, since the runtime
+  path is exactly the part that does not get exercised.
+- **Redeeming a login nonce and minting its authorization code are one transaction.** They were
+  two, with bcrypt between them, and in that window an old registration has no pending
+  authorization, no code, and no live refresh token — the exact state stale-client pruning
+  deletes, so a correct password could end in a foreign-key 500. Atomic, no committed moment
+  exists in which neither row is present. The cost, accepted: bcrypt now runs before redemption,
+  so concurrent submits on one nonce each get a password evaluation before one wins. The login
+  bucket and bcrypt's cost are what bound guessing, and `/authorize` mints nonces freely, so
+  one-guess-per-nonce was never what stopped an attacker.
+- **A compile run belongs to the principal that opened it.** `compiler_principal_id` was
+  recorded and never checked, so any `vault:compile` holder could write pages into another
+  principal's run and settle it — a run naming one compiler while its pages and settlement
+  events name another. Refused with 409, not 403: the scope already permits writing wiki pages
+  and the caller may open its own run, so this is a consistency rule, not a permission.
 - **`/register` writes no audit event.** It is public and unauthenticated, and nothing prunes
   `vault_audit_events` — by ADR 0002's design, since it is the durable record of what was done
   to the corpus. One row per anonymous registration made an unauthenticated caller the author of

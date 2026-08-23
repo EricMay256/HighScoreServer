@@ -41,11 +41,12 @@ from mcp.server.auth.routes import (
 )
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from pydantic import AnyHttpUrl
+from sqlalchemy import text as sql_text
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
-from .constants import OAUTH_BASELINE_SCOPES
+from .constants import OAUTH_BASELINE_SCOPES, OAUTH_CLIENT_LOCK_KEY
 from .db import get_vault_engine
 from .oauth import (
     LOGIN_PATH,
@@ -264,11 +265,27 @@ async def login_form(request: Request) -> Response:
 async def login_submit(request: Request) -> Response:
     """Verify the password, mint the code, and redirect back to the client.
 
-    The order matters. The nonce is redeemed **before** the password is
-    checked, so a brute-force attempt against one authorization burns it on the
-    first wrong guess rather than getting unlimited tries at a live request.
-    That costs the honest operator a restart from the client on a typo, which
-    is the right trade for a public password endpoint.
+    **The nonce is redeemed whatever the password turns out to be**, so one
+    authorization is worth one attempt: a wrong guess burns it and the operator
+    restarts from the client. That is the trade a public password endpoint
+    wants, and it costs an honest operator a restart on a typo.
+
+    The redemption and the code now share **one transaction**, which they did
+    not until 2026-08-23, and the gap between them was a race. Redeeming
+    committed on its own, bcrypt ran for a few hundred milliseconds, and only
+    then was the code written -- and in that window an old registration has no
+    pending authorization, no code, and no live refresh token, which is exactly
+    the state stale-client pruning deletes. The operator typed the right
+    password and got a 500 from a foreign key. Atomic, there is no committed
+    moment when neither row exists, so the sweep always sees one of them; the
+    advisory lock makes that explicit rather than incidental.
+
+    The cost is that bcrypt now runs *before* redemption, so several requests
+    arriving together on one nonce each get a password evaluation before one of
+    them wins the redeem. The login bucket and bcrypt's own cost are what bound
+    guessing, and they are unchanged -- `/authorize` mints nonces freely, so
+    one-guess-per-nonce was never the thing stopping an attacker who wanted
+    more.
     """
 
     form = await request.form()
@@ -304,35 +321,47 @@ async def login_submit(request: Request) -> Response:
         )
         return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
 
+    # Outside the transaction below, deliberately: bcrypt is a deliberately slow
+    # CPU-bound call and holding a pooled connection across one is the mistake
+    # this package keeps naming.
+    password_ok = await verify_password(password, stored_hash)
+
     transactions = _transactions()
+    code = new_secret()
     async with transactions.transaction() as connection:
+        await connection.execute(
+            sql_text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": OAUTH_CLIENT_LOCK_KEY},
+        )
         redeemed = await VaultOAuthPendingAuthorizationRepository().redeem(
             connection, nonce
         )
+        if redeemed is not None and password_ok:
+            params = redeemed.params
+            await VaultOAuthAuthorizationCodeRepository().create(
+                connection,
+                code=code,
+                client_id=redeemed.client_id,
+                scopes=_requested_scopes(redeemed),
+                code_challenge=params["code_challenge"],
+                redirect_uri=str(params["redirect_uri"]),
+                redirect_uri_provided_explicitly=bool(
+                    params.get("redirect_uri_provided_explicitly", True)
+                ),
+                resource=params.get("resource"),
+                subject=PASSWORD_SUBJECT,
+            )
+
     if redeemed is None:
-        # Raced by another submit, or expired between the read above and here.
+        # Raced by another submit, expired, or its registration was pruned --
+        # which cascades the pending row away, so this covers that too.
         return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
 
-    if not await verify_password(password, stored_hash):
+    if not password_ok:
         logger.warning("vault oauth login rejected: password mismatch")
         return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
 
     params = redeemed.params
-    code = new_secret()
-    async with transactions.transaction() as connection:
-        await VaultOAuthAuthorizationCodeRepository().create(
-            connection,
-            code=code,
-            client_id=redeemed.client_id,
-            scopes=_requested_scopes(redeemed),
-            code_challenge=params["code_challenge"],
-            redirect_uri=str(params["redirect_uri"]),
-            redirect_uri_provided_explicitly=bool(
-                params.get("redirect_uri_provided_explicitly", True)
-            ),
-            resource=params.get("resource"),
-            subject=PASSWORD_SUBJECT,
-        )
 
     logger.info(
         "vault oauth authorization approved",

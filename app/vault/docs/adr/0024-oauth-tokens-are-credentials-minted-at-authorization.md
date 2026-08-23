@@ -101,6 +101,20 @@ name-derived principal was derived from something mutable. A re-registering clie
 new principal, and therefore a fresh quota bucket and idempotency namespace, which is correct:
 a reinstalled client remembers neither.
 
+**Amendment, 2026-08-23: the login nonce and its authorization code are redeemed and minted
+in one transaction.** They were two, and bcrypt ran between them. During that window an old
+registration has no pending authorization, no code, and no live refresh token — precisely the
+state stale-client pruning deletes — so the operator could type the correct password and get a
+500 from a foreign key on the code insert. This is the same transition race the advisory lock
+closed between client lookup and pending-authorization creation, in the half nobody looked at.
+
+Atomic, there is no committed moment in which neither row exists, so a sweep always sees one of
+them; the lock is taken as well, to make that explicit rather than incidental. The trade is that
+bcrypt now runs *before* redemption, so several submits arriving together on one nonce each get
+a password evaluation before one wins the redeem. Accepted: the login bucket and bcrypt's own
+cost are what bound guessing, and `/authorize` mints nonces freely, so one-guess-per-nonce was
+never the property stopping an attacker who wanted more.
+
 **Amendment, 2026-08-23: a replay burn commits before its error is raised.** The
 exchange-time replay branch revoked the whole refresh family and then raised `TokenError`
 *inside* the same transaction, so unwinding rolled back every revocation, the family consume,

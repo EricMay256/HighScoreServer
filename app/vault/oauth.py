@@ -388,26 +388,39 @@ class VaultAuthorizationProvider(
         and the first refresh token of a new family is written together. A
         partial commit here would either strand a code nobody can spend or
         issue a credential no ledger records.
+
+        The refusal is raised **after** the block, for the reason recorded at
+        every other protocol error in this module: ``TokenError`` is a frozen
+        dataclass and unwinding through an ``@asynccontextmanager`` runs
+        ``exc.__traceback__ = tb`` in contextlib, which a frozen instance
+        refuses. Raised inside, a lost redemption race returned
+        ``FrozenInstanceError`` instead of ``invalid_grant``.
+
+        Unreachable sequentially, which is why it survived two passes over this
+        file: ``load_authorization_code`` answers None for a spent code, so the
+        SDK refuses before reaching here. Only two exchanges that both load
+        before either redeems arrive at the branch below.
         """
 
         async with self._transactions_for().transaction() as connection:
             redeemed = await self._codes.redeem(connection, authorization_code.code)
-            if redeemed is None:
-                # Expired, already spent, or racing another exchange. RFC 6749
-                # calls a reused code invalid_grant, and the caller is not told
-                # which of the three it was.
-                raise TokenError(
-                    error="invalid_grant",
-                    error_description="authorization code is not redeemable",
+            if redeemed is not None:
+                return await self._issue(
+                    connection,
+                    client=client,
+                    scopes=redeemed.scopes,
+                    subject=redeemed.subject,
+                    family_id=uuid4(),
+                    operation="vault.oauth.authorize",
                 )
-            return await self._issue(
-                connection,
-                client=client,
-                scopes=redeemed.scopes,
-                subject=redeemed.subject,
-                family_id=uuid4(),
-                operation="vault.oauth.authorize",
-            )
+
+        # Expired, already spent, or racing another exchange. RFC 6749 calls a
+        # reused code invalid_grant, and the caller is not told which of the
+        # three it was.
+        raise TokenError(
+            error="invalid_grant",
+            error_description="authorization code is not redeemable",
+        )
 
     # -------------------------------------------------------- refresh flow ---
 

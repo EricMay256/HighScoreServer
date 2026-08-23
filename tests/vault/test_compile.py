@@ -863,3 +863,69 @@ def test_an_unknown_page_id_is_still_a_404(
     )
 
     assert response.status_code == 404
+
+
+def test_a_run_cannot_be_written_by_another_principal(
+    client: TestClient, compile_token: str
+) -> None:
+    """`compiler_principal_id` was recorded and never checked.
+
+    A run that names one compiler while its pages and settlement events name
+    another is provenance contradicting itself, which is the one thing a compile
+    run exists to provide. Not an authorization boundary -- the scope already
+    permits writing wiki pages, and the caller can open its own run -- so the
+    refusal is 409.
+    """
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    other_id, other_token = _issue(
+        scopes=(VaultScope.READ, VaultScope.WRITE, VaultScope.COMPILE)
+    )
+    try:
+        response = _write(
+            client, other_token, run_id, source_ids=[note_id]
+        )
+        assert response.status_code == 409
+        assert "different principal" in response.json()["detail"]
+        assert _page_count() == 0
+    finally:
+        _drop(other_id)
+
+
+def test_a_run_cannot_be_settled_by_another_principal(
+    client: TestClient, compile_token: str
+) -> None:
+    """Settling publishes a frontier on the opener's behalf.
+
+    The frontier is what stops notes being re-offered, so finishing someone
+    else's run silently narrows their next plan.
+    """
+
+    _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    other_id, other_token = _issue(
+        scopes=(VaultScope.READ, VaultScope.WRITE, VaultScope.COMPILE)
+    )
+    try:
+        finished = client.post(
+            f"/api/v1/vault/compile/runs/{run_id}/finish",
+            headers=_auth(other_token),
+        )
+        failed = client.post(
+            f"/api/v1/vault/compile/runs/{run_id}/fail",
+            json={"error_summary": "not mine to fail"},
+            headers=_auth(other_token),
+        )
+        assert finished.status_code == 409
+        assert failed.status_code == 409
+    finally:
+        _drop(other_id)
+
+    # Still open, and still the opener's to settle.
+    mine = client.post(
+        f"/api/v1/vault/compile/runs/{run_id}/finish", headers=_auth(compile_token)
+    )
+    assert mine.status_code == 200

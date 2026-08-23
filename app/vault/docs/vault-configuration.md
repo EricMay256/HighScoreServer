@@ -291,6 +291,7 @@ Two variables together make the flow work, and both are needed:
 | `VAULT_PUBLIC_URL` | yes | Publishes discovery metadata and registers `/authorize`, `/token`, `/register`, `/revoke`, `/vault/login`. Absent, none of them exist. |
 | `VAULT_OPERATOR_PASSWORD_HASH` | yes, for the password method | What the login page verifies against. Absent, every login refuses. |
 | `VAULT_LOGIN_RATE_LIMIT` | no (`10/minute`) | The login POST's own bucket, tighter than the pre-auth guard. |
+| `VAULT_REGISTRATION_RATE_LIMIT` | no (`10/minute`) | `/register`'s own bucket. Registration is public, unauthenticated, and writes a row; one client registers once. Defence in depth, not the storage bound — pruning is that. |
 
 Once both are set, a client registers itself and the flow is:
 
@@ -333,6 +334,7 @@ sees is a connector asking to be reconnected, and the cause is in the log as
 | `/authorize` 302s to a login page that says the request is no longer valid | The nonce expired (5 minutes) or was already used |
 | Correct password rejected every time | `VAULT_OPERATOR_PASSWORD_HASH` unset or mangled — check the log for `not a valid bcrypt hash` |
 | Login returns 429 | The login bucket; wait a minute, or raise `VAULT_LOGIN_RATE_LIMIT` |
+| `/register` returns 429 | The registration bucket; wait a minute, or raise `VAULT_REGISTRATION_RATE_LIMIT`. Re-registering repeatedly is itself unusual — a client registers once. |
 | A typo'd password needs restarting from the client | Deliberate: the nonce is redeemed before the password is checked, so one authorization affords one attempt |
 
 #### Why bcrypt here and SHA-256 everywhere else

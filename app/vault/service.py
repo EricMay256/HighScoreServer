@@ -1452,6 +1452,22 @@ class CompileRunNotFound(Exception):
     """No compile run carries that id."""
 
 
+class CompileRunNotYours(Exception):
+    """The run was opened by a different principal.
+
+    ``compiler_principal_id`` was recorded and never checked, so any holder of
+    ``vault:compile`` could write pages into another principal's run and settle
+    it. The run then names one compiler while its pages and its settlement audit
+    events name another -- provenance that contradicts itself, which is the one
+    thing a compile run exists to provide.
+
+    A run is not a lock and this is not an authorization boundary: the scope
+    already permits writing wiki pages, and a holder can open its own run
+    whenever it likes. It is a consistency rule, which is why the refusal is
+    409 rather than 403.
+    """
+
+
 class CompileRunAlreadySettled(Exception):
     """The run finished before this call reached it."""
 
@@ -1636,6 +1652,8 @@ class VaultCompileService:
             run = await runs.get(connection, request.run_id)
             if run is None:
                 raise CompileRunNotFound(str(request.run_id))
+            if run.compiler_principal_id != request.principal_id:
+                raise CompileRunNotYours(str(request.run_id))
             if run.state is not CompileRunState.RUNNING:
                 raise CompileRunAlreadySettled(str(request.run_id))
             notes = await wiki.note_states(connection)
@@ -1671,6 +1689,8 @@ class VaultCompileService:
                 {"key": _CONTRIBUTION_LOCK_KEY},
             )
             run = await runs.get(connection, request.run_id)
+            if run is not None and run.compiler_principal_id != request.principal_id:
+                raise CompileRunNotYours(str(request.run_id))
             if run is None or run.state is not CompileRunState.RUNNING:
                 # Re-checked under the lock: a finish may have landed while the
                 # embedding call was in flight, and a page attributed to a
@@ -1839,6 +1859,12 @@ class VaultCompileService:
             existing = await runs.get(connection, run_id)
             if existing is None:
                 raise CompileRunNotFound(str(run_id))
+            if existing.compiler_principal_id != principal_id:
+                # A run settled by someone other than the principal who opened
+                # it publishes a frontier on their behalf -- and the frontier is
+                # what stops notes being re-offered, so settling another
+                # principal's run silently narrows their next plan.
+                raise CompileRunNotYours(str(run_id))
             settled = await runs.settle(
                 connection,
                 run_id,
@@ -1884,6 +1910,11 @@ class VaultCompileService:
                 text_sql("SELECT pg_advisory_xact_lock(:key)"),
                 {"key": _CONTRIBUTION_LOCK_KEY},
             )
+            existing = await runs.get(connection, run_id)
+            if existing is None:
+                raise CompileRunNotFound(str(run_id))
+            if existing.compiler_principal_id != principal_id:
+                raise CompileRunNotYours(str(run_id))
             settled = await runs.settle(
                 connection,
                 run_id,

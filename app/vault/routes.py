@@ -73,6 +73,7 @@ from .service import (
     CompilePageRequest,
     CompileRunAlreadySettled,
     CompileRunNotFound,
+    CompileRunNotYours,
     CompileTargetNotAPage,
     ContributionRequest,
     DedupUnavailable,
@@ -847,6 +848,15 @@ async def write_compile_page(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Compile run not found",
         ) from exc
+    except CompileRunNotYours as exc:
+        # 409 and not 403: the scope already permits writing wiki pages, and the
+        # caller may open its own run whenever it likes. What it may not do is
+        # attribute work to someone else's run -- a consistency rule about this
+        # run, not a permission the caller lacks.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run belongs to a different principal",
+        ) from exc
     except CompileRunAlreadySettled as exc:
         # 409 rather than 404: the run exists, and the caller can open a new
         # one. A page attributed to a settled run would make its provenance a
@@ -964,6 +974,15 @@ async def _settle(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Compile run not found",
+        ) from exc
+    except CompileRunNotYours as exc:
+        # 409 and not 403: the scope already permits writing wiki pages, and the
+        # caller may open its own run whenever it likes. What it may not do is
+        # attribute work to someone else's run -- a consistency rule about this
+        # run, not a permission the caller lacks.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run belongs to a different principal",
         ) from exc
     except CompileRunAlreadySettled as exc:
         raise HTTPException(

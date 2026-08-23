@@ -20,6 +20,18 @@ from app.vault.db import (
 )
 
 
+# The logger every test here names in `at_level`. `caplog.records` is every
+# record the run produced rather than only that logger's, so an unrelated
+# `psycopg_pool` worker error from another test lands in these assertions --
+# which is how the search suite's no-error test failed once carrying three
+# pool-worker errors it had nothing to do with.
+_LOGGER = "app.vault.db"
+
+
+def _levels(caplog: pytest.LogCaptureFixture) -> list[int]:
+    return [record.levelno for record in caplog.records if record.name == _LOGGER]
+
+
 def test_high_water_mark_records_the_peak_not_the_current_depth() -> None:
     """The number the budget review needs is the maximum, not the instant.
 
@@ -110,7 +122,7 @@ def test_pool_line_is_a_warning_once_the_pool_has_refused_work(
     with caplog.at_level(logging.INFO, logger="app.vault.db"):
         log_vault_pool_snapshot("test")
 
-    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert _levels(caplog) == [logging.WARNING]
 
 
 def test_pool_line_is_informational_while_nothing_has_been_refused(
@@ -124,7 +136,7 @@ def test_pool_line_is_informational_while_nothing_has_been_refused(
     with caplog.at_level(logging.INFO, logger="app.vault.db"):
         log_vault_pool_snapshot("test")
 
-    assert [record.levelno for record in caplog.records] == [logging.INFO]
+    assert _levels(caplog) == [logging.INFO]
 
 
 def test_pool_line_is_skipped_when_no_engine_was_initialized(
@@ -138,7 +150,7 @@ def test_pool_line_is_skipped_when_no_engine_was_initialized(
     with caplog.at_level(logging.INFO, logger="app.vault.db"):
         log_vault_pool_snapshot("test")
 
-    assert caplog.records == []
+    assert _levels(caplog) == []
 
 
 def test_reporter_emits_a_final_line_on_exit(
@@ -165,7 +177,10 @@ def test_reporter_emits_a_final_line_on_exit(
         asyncio.run(exercise())
 
     finals = [
-        r for r in caplog.records if getattr(r, "vault_pool_reason", None) == "final"
+        r
+        for r in caplog.records
+        if r.name == _LOGGER
+        and getattr(r, "vault_pool_reason", None) == "final"
     ]
     assert len(finals) == 1
     assert finals[0].vault_pool_maximum_checked_out == 2
