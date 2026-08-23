@@ -126,15 +126,35 @@ because the service had no compile path; it has one now (ADR 0027).
 - ✅ `find_similar` excludes wiki pages from the dedup corpus — a latent bug that
   would have bitten the moment the first page was written, not a new rule
 - ✅ `source_ids` validated and refused when unresolved, unlike `related_ids`
-- ⬜ **import or recompile the 15 Stage-A pages, then add `Agent/wiki/` to
-  `CORPUS_OWNED_PATH_PREFIXES`.** In that order.
+- ✅ `scripts/import_vault_wiki.py` — the one-off bridge, verified end to end
+  against the test database
+- ⬜ **run the import against production, add the `_index.md` renderer, then add
+  `Agent/wiki/` to `CORPUS_OWNED_PATH_PREFIXES`.** In that order.
+
+**It is 14 pages, not 15** — every earlier doc said 15, including this one,
+and nobody counted. There is also an `_index.md` (a generated `MoC`) and a
+`_frontier.yml`; only the first is at risk, since the sweep takes `*.md` alone.
 
 **The order is load-bearing and the failure is silent.** `Agent/wiki/` is
-exported but not owned, which is what stops `--apply --prune` deleting fifteen
-files no row accounts for. Compilation existing does not change that — the gate
-is whether the pages exist *as rows*. Adding the prefix first is a one-line diff
-that deletes all of them on the next prune. `export.py` carries the warning at
-the constant.
+exported but not owned, which is what stops `--apply --prune` deleting files no
+row accounts for. Compilation existing does not change that — the gate is
+whether the pages exist *as rows*, and `_index.md` will never be one. Adding the
+prefix before the import, or before the exporter learns to write the index, is a
+one-line diff that deletes real files. `export.py` carries the warning at the
+constant.
+
+**The import needs the migrations deployed first.** Not for the data — 0012/0013
+/0014 add nothing it uses — but because `DOCUMENT_DOMAIN_COLUMNS` now names
+`promotion_status` in every `RETURNING`, so the shared repository cannot run
+against a database at 0011. Deploy (the release phase applies all three; they
+are additive and change no running behaviour), then import.
+
+**Verified against the test database:** all 14 pages import, the four historical
+compile runs are preserved as four rows, and a re-export reproduces every file
+byte-for-byte **except one line each** — `CompileRunID`, which is a uuid here
+and was `run_20260813_184935` in Stage A. A one-time 14-line diff, and the
+grouping survives it: the nine pages from one Stage-A run share one uuid. A
+second export writes nothing.
 
 Once that lands, the knowledge-platform engine's `compile plan`/`write`/`finish`
 and the `knowledge-vault` skill's compile loop can be retired: ADR 0022 gives

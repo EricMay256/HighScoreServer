@@ -331,6 +331,18 @@ _ORIGIN_KEY_MAP: tuple[tuple[str, str], ...] = (
 )
 
 
+# The subset an imported *wiki page* takes from `origin`. Narrower than the note
+# map above, and narrower for a reason: `CompiledBy` and `CompileRunID` have
+# real columns (`compiled_by`, `compile_run_id`) that already hold the upstream
+# values, so overriding them from JSONB would be the same fact twice. Only the
+# authoring timestamps have no column of their own -- `created_at` is when the
+# row landed, which for an imported page is the import.
+_WIKI_ORIGIN_KEY_MAP: tuple[tuple[str, str], ...] = (
+    ("created_at", "CreatedAt"),
+    ("updated_at", "LastUpdated"),
+)
+
+
 def _origin_overrides(document: VaultDocument) -> dict[str, Any]:
     """Upstream provenance, which wins over the column-derived value.
 
@@ -350,10 +362,24 @@ def _origin_overrides(document: VaultDocument) -> dict[str, Any]:
     byte-stable. See origin.py.
     """
 
+    return _project_origin(document, _ORIGIN_KEY_MAP)
+
+
+def _project_origin(
+    document: VaultDocument,
+    key_map: tuple[tuple[str, str], ...],
+) -> dict[str, Any]:
+    """Upstream values for the governance keys the given map names.
+
+    Blank values are skipped rather than projected: an import that had no
+    upstream timestamp to carry must not overwrite the column-derived one with
+    an empty string, which would render as a keyless line and fail validation.
+    """
+
     return {
         key: document.origin[field_name]
-        for field_name, key in _ORIGIN_KEY_MAP
-        if field_name in document.origin
+        for field_name, key in key_map
+        if str(document.origin.get(field_name) or "").strip()
     }
 
 
@@ -406,6 +432,11 @@ def _wiki_frontmatter(document: VaultDocument) -> dict[str, Any]:
             "Related": list(document.related_ids),
         }
     )
+    # An imported page carries the dates it was really written on. Without
+    # this, projecting a page imported from Stage A would stamp it with the
+    # moment of the import, which is the same lossiness the 2026-08-12 note
+    # import produced and `origin` exists to prevent.
+    metadata.update(_project_origin(document, _WIKI_ORIGIN_KEY_MAP))
     return metadata
 
 
