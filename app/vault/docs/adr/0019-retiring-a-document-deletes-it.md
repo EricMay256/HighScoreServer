@@ -148,6 +148,12 @@ mistake rather than fix it.
 
 ### The surface is REST-only, on purpose
 
+> **Superseded in part by ADR 0026 (2026-08-22).** The reasoning below stands; the conclusion
+> about *where* the tools live does not. There is no separate admin MCP — the review and
+> promotion tools sit on the existing mount, filtered by `list_tools` on the credential's
+> scopes, which is the same "absent from the surface injected text can name" defence reached
+> by a different route. The REST routes described here are unchanged and remain.
+
 Reading a case means serving `flagged` content -- by construction the least-vetted text in
 the corpus -- and a decide verb can publish or destroy a note. ADR 0021's defence against
 injected instructions is the privileged tool being **absent** from the surface the injected

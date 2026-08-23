@@ -378,5 +378,6 @@ convenience one.
 ### What this does not decide
 
 Whether the operator password becomes delegated login, and whether OAuth clients ever obtain
-`vault:review` once an admin MCP surface exists. Both are later decisions; neither changes the
+`vault:review` — ADR 0026 has since decided there is no separate admin surface, so the question is now purely whether an operator ever grants that scope to an OAuth-minted
+credential. Both are later decisions; neither changes the
 token-is-a-credential property, which is the whole of this ADR.

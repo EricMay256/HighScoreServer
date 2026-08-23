@@ -12,7 +12,7 @@ The governance changes this required are applied (knowledge-platform `d40bdfc`):
 and the Promotion Policy describes a projection rather than a drop box. The live vault
 validates clean and the engine's schema tests pass against it.
 
-Implemented 2026-08-21, except the verb's transport surface. Migration
+Implemented 2026-08-21. Migration
 `0012_document_promotion_status` adds the column; `VaultPromotionService` sets it and moves
 `vault_path` with it under the corpus lock; `EXPORTED_PATH_PREFIXES` gains the folder and
 `CORPUS_OWNED_PATH_PREFIXES` replaces the occupancy test the prune guard used.
@@ -25,8 +25,11 @@ writes wherever the row points, as it does for every other note. `folders.yml` r
 same thing from the other side — dropping a file in by hand does nothing, because "the row
 still names its own path".
 
-Still outstanding: the `vault:review`-gated verb that calls the service, which lands with the
-admin MCP surface (its own decision, "What this does not decide" below).
+The `vault:review`-gated verb landed 2026-08-22 as the MCP tool `vault_set_promotion_status`.
+This ADR expected it on a separate admin surface; **ADR 0026 decided against one**, so it sits
+on the existing mount, visible only to a credential carrying the scope. Nothing else here
+changes: the gate is still `vault:review`, and an ordinary contributor still holds neither it
+nor the review verbs.
 
 Refines ADR 0022 (two trees, one writer each), which said the exporter "projects `Agent/`
 only" without saying which parts of `Agent/`. Depends on ADR 0010 (`vault_path` is the only
@@ -206,7 +209,8 @@ choose where its note lands.
 ### Who sets it
 
 `promotion_status` is gated on **`vault:review`**, and its tool belongs on the **admin MCP
-surface**, not the general mount — the same answer the review flow got, for the same reason.
+surface**, not the general mount [superseded by ADR 0026: there is no separate admin surface,
+and the tool is scope-gated on the existing mount] — the same answer the review flow got, for the same reason.
 Proposing a note for promotion and adjudicating a flagged one are both judgements about what
 the corpus should contain, made by a person, and neither belongs on a surface that untrusted
 note text can name (ADR 0021).
@@ -218,3 +222,5 @@ triage the promotion queue, and an ordinary contributor holds neither.
 ### What this does not decide
 
 The shape of the admin MCP server itself, which remains unstarted and its own decision.
+**Decided by ADR 0026 (2026-08-22): there is no such server.** `vault_set_promotion_status`
+lives on the existing mount, visible only to a credential holding `vault:review`.

@@ -36,7 +36,7 @@ Nothing on Heroku tracks `main`, so this changes no running behaviour.
 [PR #14](https://github.com/EricMay256/HighScoreServer/pull/14) is open and
 fast-forwardable. Awaiting a human on the merge button.
 
-## 2. Implement ADR 0023 — promotion candidacy — **done except the verb**
+## 2. Implement ADR 0023 — promotion candidacy — **done**
 
 "Candidacy is a field, and the export projects it into a folder."
 
@@ -51,8 +51,8 @@ four code pieces landed 2026-08-21:
   the corpus lock, and the exporter writes wherever the row points
 - ✅ the prune-guard fix: `CORPUS_OWNED_PATH_PREFIXES` replaces the occupancy test.
   `Agent/wiki/` is written but not owned — it joins the owned set when item 5 lands
-- ⬜ the `vault:review`-gated verb to set it, which lands with the admin MCP
-  (item 6). The service method exists and is tested; it has no transport surface
+- ✅ the `vault:review`-gated verb to set it — `vault_set_promotion_status`, on the
+  existing MCP mount rather than a separate admin one (ADR 0026, item 6)
 
 No longer blocks Phase 4: candidates live where `vault_path` says, and item 5 can
 read that.

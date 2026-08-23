@@ -186,10 +186,12 @@ be edited when it does.
   opened rather than overwriting the first. Only a **pending** case blocks retirement now;
   ADR 0019's "every state" rule made a flagged note permanently undeletable. `superseded` is
   reserved and unreachable — do not give it a meaning without a case that needs one.
-- **The review surface is REST-only and stays off the MCP tool list.** Reading a case serves
-  `flagged` content, the least-vetted text in the corpus, and deciding publishes or destroys
-  a note. ADR 0021's defence is the privileged tool being absent from the surface injected
-  text can name. A separate admin MCP is where these belong if they ever move.
+- **The review surface is REST *and* MCP, and the MCP half is scope-gated.** Reading a case
+  serves `flagged` content, the least-vetted text in the corpus, and deciding publishes or
+  destroys a note — so the tools exist only for a credential holding `vault:review`, which is
+  ADR 0021's defence applied through `list_tools`. **ADR 0026 reversed the destination this
+  invariant used to name:** there is no separate admin MCP, and the REST routes stay. See "The
+  MCP adapter" below for the operating rule that carries the rest of it.
 - **`related_ids` / `source_ids` are opaque and unvalidated on purpose.** A contribution may
   reference a note that is archived, flagged, or not yet written; a foreign key would fail the
   write for the reason ADR 0002 already rejected for audit events.
