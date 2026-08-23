@@ -692,9 +692,21 @@ class VaultExportService:
     async def documents(self) -> tuple[VaultDocument, ...]:
         """Every exportable row, ordered by ``vault_path``.
 
-        Paged inside one transaction so the walk sees one consistent corpus. A
-        note created midway through must not appear on a later page while being
-        absent from the prune set computed from the same run.
+        Paged inside one **REPEATABLE READ** transaction so the walk sees one
+        consistent corpus. A note created midway through must not appear on a
+        later page while being absent from the prune set computed from the same
+        run.
+
+        The isolation level is the whole of that guarantee, and sharing a
+        transaction is not: under the server default, READ COMMITTED, every
+        statement takes its own snapshot, so this loop saw the corpus move
+        between pages while claiming it could not. The cursor makes it worse
+        rather than better -- ``vault_path`` is *mutable*, and promotion (ADR
+        0023) is a feature whose entire job is to move one. A document crossing
+        the cursor between pages is exported twice under two paths, or not at
+        all, and since the same walk feeds both the writes and the prune set, a
+        `--apply --prune` run can then delete a document's old export without
+        having written its new one.
 
         Returns the rows rather than only their renderings, because the wiki
         index is derived from the corpus rather than from one document -- it
@@ -702,7 +714,9 @@ class VaultExportService:
         """
 
         documents: list[VaultDocument] = []
-        async with self._transactions.transaction() as connection:
+        async with self._transactions.transaction(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
             cursor: str | None = None
             while True:
                 page = await self._documents.list_under_path_prefixes(

@@ -155,6 +155,19 @@ def new_secret() -> str:
     return secrets.token_hex(_SECRET_BYTES)
 
 
+def principal_for_client_id(client_id: str) -> str:
+    """The principal id for a registration, given only its id.
+
+    The revocation path has a token and a family but no client object, and it
+    was recording the bare ``client_id`` -- so an audit query for a principal
+    found its registration, its issuance, and its refreshes, but not its
+    revocations. Off by exactly the prefix, which is the kind of near-miss that
+    reads as correct until someone needs the trail.
+    """
+
+    return f"{PRINCIPAL_PREFIX}{client_id}"
+
+
 def principal_for_client(client: OAuthClientInformationFull) -> str:
     """The principal id an OAuth client's credentials carry.
 
@@ -169,7 +182,7 @@ def principal_for_client(client: OAuthClientInformationFull) -> str:
     reason to prefer it over caller-supplied text.
     """
 
-    return f"{PRINCIPAL_PREFIX}{client.client_id}"
+    return principal_for_client_id(client.client_id)
 
 
 def access_token_string(credential_id: str, secret: str) -> str:
@@ -228,15 +241,21 @@ class VaultAuthorizationProvider(
                 client_id=client_info.client_id,
                 client_info=client_info.model_dump(mode="json"),
             )
-            await self._audit.record(
-                connection,
-                operation="vault.oauth.register",
-                outcome="registered",
-                request_id=uuid4().hex,
-                principal_id=principal_for_client(client_info),
-                target_type="oauth_client",
-                target_id=client_info.client_id,
-            )
+        # **No audit event here, deliberately.** `/register` is public and
+        # unauthenticated, and an audit row is permanent -- nothing prunes
+        # `vault_audit_events`, by ADR 0002's design, because it is the durable
+        # record of what was done to the corpus. Writing one per anonymous
+        # registration made an unauthenticated caller the author of unbounded
+        # permanent rows, with only a rate limit between them and the disk. A
+        # limit slows that; it does not bound it.
+        #
+        # Nothing durable is lost. A registration is not an action on the vault:
+        # it grants nothing until an operator approves an authorization, and
+        # *that* is audited. The fact itself lives on the row this just wrote --
+        # `vault_oauth_clients.registered_at` -- for as long as the registration
+        # does, and the two are pruned together rather than one outliving the
+        # other forever. What remains is the structured log below, which is
+        # bounded operationally rather than by a table.
         logger.info(
             "vault oauth client registered",
             extra={"client_id": client_info.client_id},
@@ -472,40 +491,54 @@ class VaultAuthorizationProvider(
 
         async with self._transactions_for().transaction() as connection:
             consumed = await self._refresh.consume(connection, refresh_token.token)
-            if consumed is None:
-                # **A miss here can still be a replay, and was not treated as
-                # one.** ``load_refresh_token`` checks ``consumed_at``, but the
-                # SDK loads and exchanges in separate calls, so two concurrent
-                # requests both pass that check while the row is unconsumed. One
-                # wins this conditional UPDATE and rotates; the other lands
-                # here -- which is exactly the shape of a captured token being
-                # spent by two parties at once, and precisely what
-                # rotation-with-detection exists to catch.
-                #
-                # So the reason matters. Re-read the row: consumed means
-                # somebody else spent it and the family burns. Absent or expired
-                # is an ordinary bad request.
-                stored = await self._refresh.get(connection, refresh_token.token)
-                if stored is not None and stored.consumed_at is not None:
-                    await self._burn_family(
-                        connection,
-                        client=client,
-                        family_id=stored.family_id,
-                        outcome="replay_detected_on_exchange",
-                    )
-                raise TokenError(
-                    error="invalid_grant",
-                    error_description="refresh token is not redeemable",
+            if consumed is not None:
+                await self._credentials.revoke(
+                    connection, [consumed.credential_id]
                 )
-            await self._credentials.revoke(connection, [consumed.credential_id])
-            return await self._issue(
-                connection,
-                client=client,
-                scopes=scopes or list(consumed.scopes),
-                subject=consumed.subject,
-                family_id=consumed.family_id,
-                operation="vault.oauth.refresh",
-            )
+                return await self._issue(
+                    connection,
+                    client=client,
+                    scopes=scopes or list(consumed.scopes),
+                    subject=consumed.subject,
+                    family_id=consumed.family_id,
+                    operation="vault.oauth.refresh",
+                )
+
+            # **A miss here can still be a replay, and was not treated as one.**
+            # ``load_refresh_token`` checks ``consumed_at``, but the SDK loads
+            # and exchanges in separate calls, so two concurrent requests both
+            # pass that check while the row is unconsumed. One wins this
+            # conditional UPDATE and rotates; the other lands here -- which is
+            # exactly the shape of a captured token being spent by two parties
+            # at once, and precisely what rotation-with-detection exists to
+            # catch.
+            #
+            # So the reason matters. Re-read the row: consumed means somebody
+            # else spent it and the family burns. Absent or expired is an
+            # ordinary bad request.
+            stored = await self._refresh.get(connection, refresh_token.token)
+            replayed = stored is not None and stored.consumed_at is not None
+            if replayed:
+                await self._burn_family(
+                    connection,
+                    client=client,
+                    family_id=stored.family_id,
+                    outcome="replay_detected_on_exchange",
+                )
+
+        # **Raised after the transaction commits, never inside it.** This block
+        # is the security response -- every credential in the family revoked,
+        # every unconsumed token in it spent, and the audit event that says why.
+        # Raising inside the `async with` would roll all three back on the way
+        # out, leaving the caller a correct `invalid_grant` and the attacker a
+        # working replacement token: the detection would run, report itself, and
+        # then undo itself. `load_refresh_token`'s burn returns normally and so
+        # never had this problem, which is why a sequential replay test could
+        # not see it.
+        raise TokenError(
+            error="invalid_grant",
+            error_description="refresh token is not redeemable",
+        )
 
     # -------------------------------------------------------- access tokens --
 
@@ -601,7 +634,7 @@ class VaultAuthorizationProvider(
                 client=None,
                 family_id=family_id,
                 outcome="revoked",
-                principal_id=token.client_id,
+                principal_id=principal_for_client_id(token.client_id),
             )
 
     async def _burn_family(

@@ -71,3 +71,20 @@ handle unmatched rows.
 
 Nothing enforces at write time that a correlation identifier is well-formed beyond its regex.
 Application code is responsible for populating it consistently.
+
+## Amendment, 2026-08-23 — an unauthenticated endpoint does not get to write here
+
+This record has no retention, which is the point of it. That makes "who may cause a row" a
+question this ADR has to answer, and it did not.
+
+Vault ADR 0024's `/register` is public and unauthenticated by specification, and it was
+recording an audit event per call. A caller with no credential could therefore write unbounded
+permanent rows into the durable record, limited only by a rate limit — which slows accumulation
+rather than bounding it. That is a storage-exhaustion path dressed as an audit trail, and it
+also dilutes the trail with events no operator asked for.
+
+**The rule: an audit event records an action on the corpus or on a credential, taken by an
+identified principal.** An unauthenticated call that grants nothing and changes nothing gets a
+structured log and, where the fact needs to persist, a row in its own table with its own
+retention. Registration now does exactly that — `vault_oauth_clients.registered_at` holds the
+fact, and pruning covers it.

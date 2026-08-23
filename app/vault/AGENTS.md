@@ -334,6 +334,30 @@ be edited when it does.
   mount's; `/register` writes a row on every unauthenticated call. A route whose endpoint
   already has its own slowapi bucket is left unwrapped — wrapping the login POST suppressed
   its own tighter limit.
+- **Never raise the MCP SDK's protocol errors inside a transaction block.** `AuthorizeError`
+  and `TokenError` are *frozen dataclasses*, and unwinding through an `@asynccontextmanager`
+  runs `exc.__traceback__ = tb` in contextlib, which a frozen instance refuses — so the caller
+  gets a `FrozenInstanceError` from the exit path instead of the protocol error. Worse when the
+  block did security work first: `exchange_refresh_token` revoked a replayed token's whole
+  family and then raised, so the rollback undid the revocations, the family consume, and the
+  audit event. Detection that reports itself and then erases itself. Compute the outcome inside
+  the block, leave it, then raise. This has now been hit twice.
+- **`/register` writes no audit event.** It is public and unauthenticated, and nothing prunes
+  `vault_audit_events` — by ADR 0002's design, since it is the durable record of what was done
+  to the corpus. One row per anonymous registration made an unauthenticated caller the author of
+  unbounded permanent storage; a rate limit slows that but does not bound it. The fact lives on
+  `vault_oauth_clients.registered_at`, which pruning covers, plus a structured log. `/register`
+  also carries its own tighter bucket, and slowapi scopes buckets by the wrapped callable's
+  **qualified name** — two guards built from `build_preauth_dependency` are both
+  `…<locals>.guard` and would silently share one.
+- **A paged read that must see one corpus needs `REPEATABLE READ`, not just one transaction.**
+  Under the default READ COMMITTED every statement takes a fresh snapshot, so sharing a
+  transaction buys atomicity for writes and nothing at all for a multi-statement walk. Keyset
+  paging does not close it either: it beats OFFSET on *insertions*, but `vault_path` is mutable
+  and promotion exists to move one, so a row can cross the cursor and be read twice or never.
+  `VaultExportService.documents` passes the isolation level for exactly this reason — and it
+  feeds the prune set, so getting it wrong deletes a document's old export without writing its
+  new one.
 - **An OAuth principal is `oauth-<client_id>` — the registration id, never the client's
   name.** Same error as the consent screen's, in the place it does real damage: `principal_id`
   is the actor for idempotency (`vault_write_requests` PK), for quota (the token buckets), and

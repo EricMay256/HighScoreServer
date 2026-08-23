@@ -101,6 +101,25 @@ name-derived principal was derived from something mutable. A re-registering clie
 new principal, and therefore a fresh quota bucket and idempotency namespace, which is correct:
 a reinstalled client remembers neither.
 
+**Amendment, 2026-08-23: a replay burn commits before its error is raised.** The
+exchange-time replay branch revoked the whole refresh family and then raised `TokenError`
+*inside* the same transaction, so unwinding rolled back every revocation, the family consume,
+and the audit event. The caller's `invalid_grant` was the only part that survived: the detection
+ran, reported itself, and undid itself, leaving the attacker's replacement token working. The
+error is now raised after the transaction commits. (`load_refresh_token`'s burn returns normally
+and never had this, which is why a sequential replay test could not see it — reaching the
+exchange branch requires driving the provider directly.)
+
+**Amendment, 2026-08-23: `/register` writes no audit event, and carries its own rate limit.**
+Registration is public and unauthenticated, and `vault_audit_events` has no retention by ADR
+0002's design. A row per registration therefore let an unauthenticated caller write unbounded
+permanent storage, bounded only by a 600/minute guard — which slows accumulation without
+capping it. Nothing durable is lost: a registration is not an action on the corpus (it grants
+nothing until an operator approves an authorization, and that *is* audited), and the fact lives
+on `vault_oauth_clients.registered_at` for as long as the registration does, pruned with it
+rather than outliving it forever. What remains is a structured log, bounded operationally. The
+endpoint also gets its own far tighter bucket, as defence in depth rather than as the bound.
+
 **Amendment, 2026-08-23: starting an authorization is serialized against stale-client
 pruning.** The pruning predicate spares a client with an authorization in flight, but that
 describes rows that already exist. The SDK loads the client in one transaction and calls

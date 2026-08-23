@@ -340,10 +340,21 @@ def test_exported_prefixes_are_all_under_the_agent_tree() -> None:
 
 class _StubTransactions:
     """Stands in for VaultTransactionService: the export loop never uses the
-    connection for anything but handing it to the repository."""
+    connection for anything but handing it to the repository.
+
+    Records the isolation level it was asked for, which is the one thing about
+    the transaction the exporter genuinely depends on -- paging under READ
+    COMMITTED sees a different corpus on every page.
+    """
+
+    def __init__(self) -> None:
+        self.isolation_levels: list[str | None] = []
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[None]:
+    async def transaction(
+        self, isolation_level: str | None = None
+    ) -> AsyncIterator[None]:
+        self.isolation_levels.append(isolation_level)
         yield None
 
 
@@ -814,3 +825,32 @@ def test_the_index_is_written_and_never_pruned(tmp_path: Path) -> None:
     assert second.written == 0
     assert second.unchanged == 3
     assert index.exists()
+
+
+def test_the_walk_is_read_at_repeatable_read(tmp_path: Path) -> None:
+    """Sharing a transaction is not what makes the paged walk consistent.
+
+    Under the server default, READ COMMITTED, every statement takes a fresh
+    snapshot -- so the loop saw the corpus move between pages while its
+    docstring claimed it could not. The cursor makes that worse rather than
+    better: `vault_path` is mutable, and promotion exists to move one, so a
+    document can cross the cursor and be exported twice under two paths or not
+    at all. Since the same walk feeds both the writes and the prune set, an
+    `--apply --prune` run could then delete a document's old export without
+    having written its new one.
+
+    Asserted on what the exporter *asks the transaction for*, because that is
+    the entire fix and it is invisible in the output otherwise -- a passing
+    export proves nothing about isolation when nothing is writing concurrently.
+    """
+
+    transactions = _StubTransactions()
+    service = VaultExportService(
+        transactions,  # type: ignore[arg-type]
+        _StubDocuments((make_document(),)),  # type: ignore[arg-type]
+        page_size=2,
+    )
+
+    asyncio.run(service.export(tmp_path))
+
+    assert transactions.isolation_levels == ["REPEATABLE READ"]

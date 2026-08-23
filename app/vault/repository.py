@@ -389,10 +389,17 @@ class VaultDocumentRepository:
     ) -> tuple[VaultDocument, ...]:
         """One ordered page of the documents living under any of ``prefixes``.
 
-        Ordered by ``vault_path`` and paged by keyset rather than OFFSET, so a
-        full walk is stable under concurrent writes and never revisits a row.
+        Ordered by ``vault_path`` and paged by keyset rather than OFFSET.
         ``vault_path`` is UNIQUE, which is what makes it a total order and a
         legal cursor.
+
+        **Keyset paging alone does not make the walk stable, and this docstring
+        used to claim it did.** OFFSET is the thing it beats: it cannot skip or
+        repeat rows because of *insertions* behind the cursor. But the cursor
+        column is mutable -- promotion moves a `vault_path` on purpose -- so a
+        row can still cross the cursor and be seen twice or never. What closes
+        that is the caller reading every page in one REPEATABLE READ
+        transaction, which is what `VaultExportService.documents` does.
 
         Unfiltered by status and by ``ai_read``, for the reason ``get_by_id``
         gives: which rows a surface may see is that surface's policy. The

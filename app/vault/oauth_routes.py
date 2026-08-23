@@ -55,7 +55,11 @@ from .oauth import (
     new_secret,
 )
 from .passwords import verify_password
-from .rate_limit import get_login_limiter, guard_asgi_app
+from .rate_limit import (
+    build_registration_guard,
+    get_login_limiter,
+    guard_asgi_app,
+)
 from .repository import (
     VaultOAuthAuthorizationCodeRepository,
     VaultOAuthClientRepository,
@@ -365,7 +369,7 @@ def _endpoint_name(path: str) -> str:
     return f"vault_oauth_{cleaned or 'root'}"
 
 
-def _guarded(route: Any) -> Any:
+def _guarded(route: Any, charge: Any = None) -> Any:
     """Charge the pre-auth IP guard before the route runs.
 
     Every route here is public and unauthenticated -- that is what an
@@ -392,7 +396,7 @@ def _guarded(route: Any) -> Any:
         return route
     inner = getattr(route, "app", None)
     if inner is not None:
-        route.app = guard_asgi_app(inner)
+        route.app = guard_asgi_app(inner, charge)
     return route
 
 
@@ -487,4 +491,14 @@ def build_vault_oauth_routes(issuer_url: str, mcp_url: str) -> list[Route]:
             methods=["POST"],
         ),
     ]
-    return [_guarded(_named(route)) for route in routes]
+    # `/register` is the one route here that writes a row on an
+    # unauthenticated call, so it draws on its own far tighter bucket instead
+    # of the general pre-auth allowance.
+    registration_charge = build_registration_guard()
+    return [
+        _guarded(
+            _named(route),
+            registration_charge if getattr(route, "path", "") == "/register" else None,
+        )
+        for route in routes
+    ]

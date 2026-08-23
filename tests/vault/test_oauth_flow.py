@@ -22,7 +22,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.vault.auth import VaultScope
 from app.vault.constants import OAUTH_BASELINE_SCOPES
@@ -32,6 +32,7 @@ from app.vault.rate_limit import reset_ip_limiter
 from app.vault.settings import vault_enabled
 from app.vault.tables import (
     vault_agent_credentials,
+    vault_audit_events,
     vault_oauth_authorization_codes,
     vault_oauth_clients,
     vault_oauth_pending_authorizations,
@@ -1162,3 +1163,187 @@ def test_pruning_and_authorizing_take_the_same_lock() -> None:
         assert "OAUTH_CLIENT_LOCK_KEY" in source, method.__qualname__
 
     assert OAUTH_CLIENT_LOCK_KEY != 0x5641554C5401  # not the corpus lock
+
+
+# ------------------------------------------ the exchange-time replay burn ----
+
+
+def _provider():
+    """The provider, over the same engine the app uses."""
+
+    from app.vault.db import get_vault_engine
+    from app.vault.oauth import VaultAuthorizationProvider
+    from app.vault.service import VaultTransactionService
+
+    return VaultAuthorizationProvider(
+        lambda: VaultTransactionService(get_vault_engine())
+    )
+
+
+def _client_record(client_id: str):
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    return OAuthClientInformationFull(
+        client_id=client_id,
+        redirect_uris=[REDIRECT_URI],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method="none",
+    )
+
+
+def test_an_exchange_time_replay_actually_commits_the_burn(
+    oauth_client: TestClient,
+) -> None:
+    """The burn used to be rolled back by the error that reported it.
+
+    `exchange_refresh_token` raised `TokenError` *inside* the transaction that
+    had just revoked the family, and `transaction()` is `async with
+    connection.begin()` -- so unwinding discarded the revocations, the family
+    consume, and the audit event. The caller still got `invalid_grant`, so it
+    looked right from outside while the attacker kept a working replacement.
+
+    Not reachable over HTTP sequentially: `load_refresh_token` runs first and
+    catches a consumed token in a branch that returns normally and therefore
+    commits. Only the exchange-time loser of a genuine race lands in the branch
+    below -- so the provider is driven directly, and a second exchange of the
+    same token is exactly the state that loser observes.
+    """
+
+    from mcp.server.auth.provider import TokenError
+
+    client_id, tokens = full_flow(oauth_client, name="Claude")
+    provider = _provider()
+    client = _client_record(client_id)
+
+    async def exercise():
+        loaded = await provider.load_refresh_token(client, tokens["refresh_token"])
+        assert loaded is not None
+        winner = await provider.exchange_refresh_token(client, loaded, [])
+        # The loser of the race presents the same token, having passed its own
+        # load check before the winner consumed the row.
+        try:
+            await provider.exchange_refresh_token(client, loaded, [])
+        except TokenError as exc:
+            return winner, exc.error
+        raise AssertionError("the replay was not refused")
+
+    winner, error = asyncio.run(exercise())
+
+    assert error == "invalid_grant"
+    # The burn has to have survived the error that reported it.
+    replacement = oauth_client.get(
+        "/api/v1/vault/search",
+        params={"q": "x"},
+        headers={"Authorization": f"Bearer {winner.access_token}"},
+    )
+    assert replacement.status_code == 401
+    assert (
+        _refresh(oauth_client, client_id, winner.refresh_token).status_code == 400
+    )
+
+
+def test_revocation_records_the_prefixed_principal(
+    oauth_client: TestClient,
+) -> None:
+    """An audit query for a principal has to find its revocations too.
+
+    Revocation recorded the bare `client_id` while registration, issuance and
+    refresh all record `oauth-<client_id>` -- off by exactly the prefix, which
+    reads as correct right up until someone needs the trail.
+    """
+
+    registration = register_full(oauth_client, name="Claude")
+    client_id = registration["client_id"]
+    params = authorize(oauth_client, client_id)
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"][0]
+    tokens = exchange(oauth_client, client_id, code)
+
+    revoked = oauth_client.post(
+        "/revoke",
+        data={
+            "token": tokens["refresh_token"],
+            "token_type_hint": "refresh_token",
+            "client_id": client_id,
+            "client_secret": registration.get("client_secret") or "",
+        },
+    )
+    assert revoked.status_code == 200
+
+    transactions, engine = vault_service()
+
+    async def read() -> list[str]:
+        try:
+            async with transactions.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_audit_events.c.principal_id).where(
+                        vault_audit_events.c.outcome == "revoked"
+                    )
+                )
+                return [row[0] for row in result]
+        finally:
+            await engine.dispose()
+
+    principals = asyncio.run(read())
+
+    assert f"{PRINCIPAL_PREFIX}{client_id}" in principals
+    assert client_id not in principals
+
+
+def test_registering_writes_no_permanent_audit_row(
+    oauth_client: TestClient,
+) -> None:
+    """`/register` is public, unauthenticated, and nothing prunes audit events.
+
+    A row per anonymous registration made an unauthenticated caller the author
+    of unbounded permanent storage, with only a rate limit in the way -- and a
+    limit slows accumulation rather than bounding it. The registration itself is
+    still recorded, on the `vault_oauth_clients` row that pruning covers.
+    """
+
+    transactions, engine = vault_service()
+
+    async def count() -> int:
+        async with transactions.transaction() as connection:
+            result = await connection.execute(
+                select(func.count()).select_from(vault_audit_events)
+            )
+            return int(result.scalar_one())
+
+    async def before() -> int:
+        return await count()
+
+    start = asyncio.run(before())
+
+    for _ in range(3):
+        register(oauth_client, name="Claude")
+
+    async def after() -> int:
+        try:
+            return await count()
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(after()) == start
+
+
+def test_register_carries_its_own_tighter_bucket() -> None:
+    """Its own bucket, not the 600/minute pre-auth allowance.
+
+    slowapi scopes a bucket by the wrapped callable's qualified name, so a guard
+    built from `build_preauth_dependency` twice would silently share one -- the
+    exact opposite of a dedicated limit. Pinned by name here, and by the limit
+    being tighter than the general one.
+    """
+
+    from app.vault.rate_limit import (
+        build_registration_guard,
+        registration_rate_limit,
+    )
+
+    guard = build_registration_guard()
+    assert guard.__name__ == "registration_guard"
+
+    allowed = int(registration_rate_limit().split("/")[0])
+    assert allowed < 600

@@ -122,11 +122,29 @@ class VaultTransactionService:
         self._observer = observer
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[AsyncConnection]:
+    async def transaction(
+        self,
+        isolation_level: str | None = None,
+    ) -> AsyncIterator[AsyncConnection]:
+        """A connection with a transaction open on it.
+
+        ``isolation_level`` is None for almost everything, meaning the server
+        default -- READ COMMITTED. Pass ``"REPEATABLE READ"`` when a *multi
+        statement read* has to see one corpus: under READ COMMITTED every
+        statement takes a fresh snapshot, so sharing a transaction buys
+        atomicity for writes but no consistency at all for a paged walk. Set
+        before ``begin()`` because Postgres will not accept it once the
+        transaction has started.
+        """
+
         async with acquire_vault_connection(
             self._engine,
             self._observer,
         ) as connection:
+            if isolation_level is not None:
+                await connection.execution_options(
+                    isolation_level=isolation_level
+                )
             async with connection.begin():
                 yield connection
 

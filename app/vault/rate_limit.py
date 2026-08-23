@@ -422,6 +422,44 @@ def login_rate_limit() -> str:
     return os.environ.get("VAULT_LOGIN_RATE_LIMIT", _DEFAULT_LOGIN_LIMIT)
 
 
+_DEFAULT_REGISTRATION_LIMIT = "10/minute"
+
+
+def registration_rate_limit() -> str:
+    """The configured `/register` limit, read when the routes are built."""
+
+    return os.environ.get(
+        "VAULT_REGISTRATION_RATE_LIMIT",
+        _DEFAULT_REGISTRATION_LIMIT,
+    )
+
+
+def build_registration_guard() -> Callable[[Request], Awaitable[None]]:
+    """Charge `/register`'s own bucket, far tighter than the 600/min guard.
+
+    Registration is public, unauthenticated, and *writes a row*. One client
+    registers once, so a tight limit costs an honest caller nothing, while the
+    general guard is sized for reads and would let a single IP add hundreds of
+    thousands of rows a day.
+
+    Defence in depth and not the storage bound -- a limit slows accumulation
+    rather than capping it. The bound is that registrations are pruned and that
+    nothing permanent is written per call (see `oauth.register_client`).
+
+    The inner function is named rather than reusing ``build_preauth_dependency``
+    because slowapi scopes a bucket by the wrapped callable's qualified name:
+    two guards built from that factory are both
+    ``build_preauth_dependency.<locals>.guard`` and would silently share one
+    bucket, which is the opposite of what a dedicated limit is for.
+    """
+
+    @_ip_limiter.limit(registration_rate_limit())
+    async def registration_guard(request: Request) -> None:
+        return None
+
+    return registration_guard
+
+
 def get_login_limiter() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """The decorator that charges the login bucket.
 
@@ -449,7 +487,7 @@ def reset_login_limiter() -> None:
     _ip_limiter.reset()
 
 
-def guard_asgi_app(app: Any) -> Any:
+def guard_asgi_app(app: Any, charge: Any = None) -> Any:
     """Charge the pre-auth IP guard in front of an ASGI application.
 
     The third shape this guard has to take, and the reason is structural. As a
@@ -466,11 +504,18 @@ def guard_asgi_app(app: Any) -> Any:
     MCP mount: without it they are the only unbounded door", which had not
     actually been implemented.
 
+    ``charge`` selects which bucket is spent, defaulting to the pre-auth guard.
+    `/register` passes its own, tighter one -- the same arrangement the login
+    POST has, where a dedicated bucket replaces the general allowance rather
+    than stacking on it.
+
     Renders 429 the same way the MCP mount does, and for the same reason: the
     host's slowapi handler does not see exceptions raised inside a wrapped
     route, and an operator reading a 429 should not be able to tell which
     surface produced it.
     """
+
+    charged = enforce_preauth_ip_limit if charge is None else charge
 
     async def guarded(scope: Any, receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -478,7 +523,7 @@ def guard_asgi_app(app: Any) -> Any:
             return
         request = Request(scope, receive=receive)
         try:
-            await enforce_preauth_ip_limit(request=request)
+            await charged(request=request)
         except RateLimitExceeded as exc:
             await JSONResponse(
                 {"detail": f"Rate limit exceeded: {exc.detail}"},
