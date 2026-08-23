@@ -427,11 +427,17 @@ def test_a_missing_csrf_token_is_refused(oauth_client: TestClient) -> None:
 def test_a_wrong_password_burns_the_authorization(
     oauth_client: TestClient,
 ) -> None:
-    """The nonce is redeemed before the password is checked, deliberately.
+    """A submit redeems the nonce whether or not the password was right.
 
-    One authorization affords exactly one attempt, so a live request cannot be
-    used as an unlimited guessing oracle. The honest operator restarts from the
-    client after a typo, which is the right trade for a public password form.
+    That is the property, and it is not the same as the ordering: bcrypt runs
+    before the transaction, which then redeems and -- on a correct password --
+    mints the code, both together. Atomicity is what keeps stale-client pruning
+    out of the gap between them.
+
+    So a wrong guess burns that authorization and the operator restarts from the
+    client, which is the right trade for a public password form. Concurrent
+    submits on one nonce each get a password evaluation and only one redeems;
+    the login bucket is what bounds that.
     """
 
     client_id = register(oauth_client)

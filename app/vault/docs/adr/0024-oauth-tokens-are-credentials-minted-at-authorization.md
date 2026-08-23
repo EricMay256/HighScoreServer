@@ -444,11 +444,23 @@ feature work is the variable that turns it on, and forgetting it fails closed �
 metadata, which this ADR already argues is better than advertising an authorization server
 before one answers. A separate boolean would be a way to set one and not the other.
 
-**The login POST redeems the nonce before it checks the password.** Deliberately, and the order
-is the security property: one authorization affords exactly one password attempt, so a live
-request cannot be reused as an unlimited guessing oracle even inside the rate limit. It costs
-the honest operator a restart from the client after a typo, which is the right trade for a
-public unauthenticated form.
+**A login submit redeems the nonce whether or not the password was correct.** Deliberately: a
+wrong guess burns that authorization, so a live request cannot be reused as an unlimited
+guessing oracle. It costs the honest operator a restart from the client after a typo, which is
+the right trade for a public unauthenticated form.
+
+The *ordering* is not the property, and this paragraph said it was until 2026-08-23. Bcrypt now
+runs **before** the transaction, which then redeems the nonce and — if the password verified —
+mints the code, both together. That ordering is required rather than incidental: redeeming and
+minting have to be atomic, or stale-client pruning can delete the registration in the gap
+between them (see the amendment above), and a bcrypt call must not be held across a database
+transaction.
+
+What that gives up is exactness under concurrency: several submits arriving together on one
+nonce each get a password evaluation, and only one of them redeems. The **login bucket** is what
+bounds those evaluations, which is why it is not merely defence in depth. One-guess-per-nonce
+was never the binding constraint anyway — `/authorize` mints nonces freely, so an attacker
+wanting more attempts simply asks for more nonces.
 
 **CSRF is a server-side token, not a signed one.** `docs/NEXT-STEPS.md` suggested "a signed
 hidden token tied to the nonce". Signing needs a signing key — a third secret to configure,
