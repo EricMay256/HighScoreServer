@@ -169,9 +169,16 @@ be edited when it does.
   same ground would look like a duplicate of a document that exists only because that note
   does. Pages are still *embedded* — search returning synthesis is the point — they are simply
   not adjudicated. Do not "restore" the filter for symmetry with the read path.
-  The **frontier** is read at `finish`, never at `plan` (reading it early skips notes that
-  landed mid-run), and a **failed run publishes none** (a failed frontier would claim coverage
-  for pages nobody wrote). `compiled_at` comes from the run's start so one run is one
+  A successful run publishes the frontier it was **planned** against — its own
+  `input_frontier` — never one read at `finish`. Reading it at settlement loses notes
+  permanently: a note landing after the plan is never offered to that run, and a finish-time
+  maximum then covers its timestamp so no later plan offers it either. A **failed run
+  publishes none** (a failed frontier would claim coverage for pages nobody wrote).
+  **`write_page`, `finish` and `fail` all take the corpus advisory lock.** `write_page`'s
+  check that the run is still running is only a guard because the settle path contends for the
+  same lock; without it a page commits into a settled run. `source_ids` are re-validated under
+  that lock too — the pre-embedding check goes stale across a third-party call that retirement
+  can land inside. `compiled_at` comes from the run's start so one run is one
   timestamp, which is why `set_compile_provenance` exists apart from `replace_content` — that
   one leaves provenance alone so an ordinary update cannot claim to have compiled anything.
   `source_ids` are **validated** and refused when unresolved, unlike `related_ids`: provenance
@@ -311,6 +318,26 @@ be edited when it does.
 
 ### The OAuth authorization server (ADR 0024)
 
+- **`load_access_token` returns the OAuth *client id*, and None for an operator credential.**
+  The SDK's revocation handler calls `revoke_token` only when the loaded token's `client_id`
+  equals the authenticated client's, so returning `principal_id` (`oauth-<slug>`) made
+  `/revoke` a silent 200 that revoked nothing. Returning None for a credential with no refresh
+  family is deliberate: an `hssv1_` credential must not be revocable through an endpoint any
+  self-registered client may call.
+- **Revocation and replay both burn the whole family.** Revoking one credential leaves its
+  refresh token able to mint a replacement, which is not revocation. And a `consume()` miss is
+  not automatically innocent — the SDK loads and exchanges separately, so two concurrent
+  requests both pass the `consumed_at` check and the loser is exactly the captured-token case
+  rotation exists to catch. Re-read the row: consumed means burn the family.
+- **The public OAuth routes carry the pre-auth guard as ASGI middleware.** They are
+  root-mounted Starlette routes and inherit neither the vault router's dependency nor the MCP
+  mount's; `/register` writes a row on every unauthenticated call. A route whose endpoint
+  already has its own slowapi bucket is left unwrapped — wrapping the login POST suppressed
+  its own tighter limit.
+- **Registrations are pruned by age *and liveness*, never by `expires_at`.** The SDK leaves
+  `client_secret_expiry_seconds` unset and nothing else supplies one, so an expiry-only sweep
+  deleted nothing at all. A client with an unconsumed, unexpired refresh token is never a
+  candidate — deleting one cascades to its tokens and revokes a working connector.
 - **An issued access token *is* a `vault_agent_credentials` row.** That is the load-bearing
   choice and everything else follows: `contributed_by` derives from the principal, revocation
   and the credential census work unchanged, scopes stay on the credential, and quota buckets

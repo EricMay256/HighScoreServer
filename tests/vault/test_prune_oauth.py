@@ -215,3 +215,107 @@ def test_a_consumed_refresh_token_survives_until_it_expires(capsys) -> None:
         )
 
     assert _run(read).one_or_none() is not None
+
+
+def test_an_idle_registration_becomes_prunable(capsys) -> None:
+    """Registrations used to be immortal.
+
+    `register_client` supplies no expiry, the SDK leaves
+    `client_secret_expiry_seconds` unset, and the old sweep filtered on
+    `expires_at IS NOT NULL` -- so it deleted nothing while `/register`, a
+    public endpoint, grew the table on every call.
+    """
+
+    client_id = f"test-prune-{uuid4().hex}"
+
+    async def seed(connection):
+        await connection.execute(
+            insert(vault_oauth_clients).values(
+                client_id=client_id,
+                client_info={"client_id": client_id},
+                registered_at=text("now() - interval '90 days'"),
+            )
+        )
+
+    _run(seed)
+
+    _prune()
+
+    def read(connection):
+        return connection.execute(
+            select(vault_oauth_clients.c.client_id).where(
+                vault_oauth_clients.c.client_id == client_id
+            )
+        )
+
+    assert _run(read).one_or_none() is None
+
+
+def test_a_registration_with_a_live_refresh_token_is_never_pruned(capsys) -> None:
+    """Deleting one cascades to its tokens and revokes a working connector.
+
+    Age alone is not enough: a client registered long ago and still renewing is
+    exactly the client that must keep working. Liveness is an unconsumed,
+    unexpired refresh token.
+    """
+
+    client_id = f"test-prune-{uuid4().hex}"
+    credential_id = _credential(OAUTH_PRINCIPAL, revoked_days_ago=None)
+
+    async def seed(connection):
+        await connection.execute(
+            insert(vault_oauth_clients).values(
+                client_id=client_id,
+                client_info={"client_id": client_id},
+                registered_at=text("now() - interval '90 days'"),
+            )
+        )
+        await connection.execute(
+            insert(vault_oauth_refresh_tokens).values(
+                token_sha256=uuid4().bytes + uuid4().bytes,
+                family_id=uuid4(),
+                client_id=client_id,
+                credential_id=credential_id,
+                scopes=[VaultScope.READ],
+                expires_at=text("now() + interval '10 days'"),
+            )
+        )
+
+    _run(seed)
+
+    _prune()
+
+    def read(connection):
+        return connection.execute(
+            select(vault_oauth_clients.c.client_id).where(
+                vault_oauth_clients.c.client_id == client_id
+            )
+        )
+
+    assert _run(read).one_or_none() is not None
+
+
+def test_a_recent_registration_is_kept_even_with_no_tokens(capsys) -> None:
+    """An authorization in progress has a registration and not yet a token."""
+
+    client_id = f"test-prune-{uuid4().hex}"
+
+    async def seed(connection):
+        await connection.execute(
+            insert(vault_oauth_clients).values(
+                client_id=client_id, client_info={"client_id": client_id}
+            )
+        )
+
+    _run(seed)
+
+    _prune()
+
+    def read(connection):
+        return connection.execute(
+            select(vault_oauth_clients.c.client_id).where(
+                vault_oauth_clients.c.client_id == client_id
+            )
+        )
+
+    assert _run(read).one_or_none() is not None

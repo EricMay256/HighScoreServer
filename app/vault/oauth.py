@@ -404,9 +404,26 @@ class VaultAuthorizationProvider(
         async with self._transactions_for().transaction() as connection:
             consumed = await self._refresh.consume(connection, refresh_token.token)
             if consumed is None:
-                # Raced by another refresh, or expired between the load and
-                # here. Not a replay -- `load_refresh_token` already answered
-                # that question -- so no family is burned.
+                # **A miss here can still be a replay, and was not treated as
+                # one.** ``load_refresh_token`` checks ``consumed_at``, but the
+                # SDK loads and exchanges in separate calls, so two concurrent
+                # requests both pass that check while the row is unconsumed. One
+                # wins this conditional UPDATE and rotates; the other lands
+                # here -- which is exactly the shape of a captured token being
+                # spent by two parties at once, and precisely what
+                # rotation-with-detection exists to catch.
+                #
+                # So the reason matters. Re-read the row: consumed means
+                # somebody else spent it and the family burns. Absent or expired
+                # is an ordinary bad request.
+                stored = await self._refresh.get(connection, refresh_token.token)
+                if stored is not None and stored.consumed_at is not None:
+                    await self._burn_family(
+                        connection,
+                        client=client,
+                        family_id=stored.family_id,
+                        outcome="replay_detected_on_exchange",
+                    )
                 raise TokenError(
                     error="invalid_grant",
                     error_description="refresh token is not redeemable",
@@ -431,6 +448,21 @@ class VaultAuthorizationProvider(
         ``principal.resolve_credential``, which does the same verification with
         the timing-equalised comparison and the ``last_used_at`` bookkeeping
         this does not need.
+
+        **``client_id`` is the registered OAuth client id, not the principal**,
+        and that distinction is load-bearing rather than cosmetic. The SDK's
+        revocation handler calls ``revoke_token`` only when the loaded token's
+        ``client_id`` equals the authenticated client's. Returning
+        ``principal_id`` -- which is ``oauth-<slug>`` -- never matched a
+        registration uuid, so ``/revoke`` answered 200 and revoked nothing. The
+        refresh path happened to work because a refresh token already carried
+        the real client id, which is why the shipped test passed over a broken
+        access-token path.
+
+        **None for an operator-issued credential**, which belongs to no client.
+        That is the right answer rather than a gap: an ``hssv1_`` credential
+        minted by ``issue_vault_credential`` must not be revocable through an
+        endpoint any self-registered client may call.
         """
 
         parsed = parse_token(token)
@@ -438,15 +470,21 @@ class VaultAuthorizationProvider(
             return None
         async with self._transactions_for().transaction() as connection:
             credential = await self._credentials.get(connection, parsed.credential_id)
-        if credential is None:
+            if credential is None:
+                return None
+            owner = await self._refresh.client_and_family_for_credential(
+                connection, parsed.credential_id
+            )
+        if owner is None:
             return None
         if credential.secret_sha256 != hash_secret(parsed.secret):
             return None
         if not credential.is_active():
             return None
+        client_id, _family_id = owner
         return AccessToken(
             token=token,
-            client_id=credential.principal_id,
+            client_id=client_id,
             scopes=list(credential.scopes),
             expires_at=(
                 int(credential.expires_at.timestamp())
@@ -469,33 +507,80 @@ class VaultAuthorizationProvider(
                 stored = await self._refresh.get(connection, token.token)
                 if stored is None:
                     return
-                await self._credentials.revoke(
-                    connection,
-                    await self._refresh.credential_ids_in_family(
-                        connection, stored.family_id
-                    ),
-                )
-                await self._refresh.consume_family(connection, stored.family_id)
-                target_type, target_id = (
-                    "oauth_refresh_family",
-                    str(stored.family_id),
-                )
+                family_id = stored.family_id
             else:
+                # **An access token revokes its whole family too.** Revoking
+                # only the presented credential leaves its refresh token able to
+                # mint a replacement moments later, which is not revocation --
+                # the caller asked for the grant to stop working and would have
+                # no way to learn that it had not.
                 parsed = parse_token(token.token)
                 if parsed is None:
                     return
-                await self._credentials.revoke(connection, [parsed.credential_id])
-                target_type, target_id = "credential", parsed.credential_id
+                owner = await self._refresh.client_and_family_for_credential(
+                    connection, parsed.credential_id
+                )
+                if owner is None:
+                    # No family: an operator-issued credential, which this
+                    # endpoint does not govern. ``load_access_token`` already
+                    # refuses to return one; this is the second layer.
+                    return
+                _client_id, family_id = owner
 
-            await self._audit.record(
+            await self._burn_family(
                 connection,
-                operation="vault.oauth.revoke",
+                client=None,
+                family_id=family_id,
                 outcome="revoked",
-                request_id=uuid4().hex,
                 principal_id=token.client_id,
-                target_type=target_type,
-                target_id=target_id,
             )
+
+    async def _burn_family(
+        self,
+        connection,
+        *,
+        client: OAuthClientInformationFull | None,
+        family_id: UUID,
+        outcome: str,
+        principal_id: str | None = None,
+    ) -> int:
+        """Revoke every credential in a rotation chain and consume its tokens.
+
+        One implementation for the two paths that must do it -- an explicit
+        revocation and a detected replay -- because they have to agree about
+        what "the whole family" means. Revoking the credentials without
+        consuming the tokens would leave one able to mint a fresh credential;
+        consuming without revoking would leave the current access token live for
+        the rest of its hour.
+        """
+
+        revoked = await self._credentials.revoke(
+            connection,
+            await self._refresh.credential_ids_in_family(connection, family_id),
+        )
+        await self._refresh.consume_family(connection, family_id)
+        await self._audit.record(
+            connection,
+            operation="vault.oauth.revoke",
+            outcome=outcome,
+            request_id=uuid4().hex,
+            principal_id=(
+                principal_id
+                if principal_id is not None
+                else (principal_for_client(client) if client is not None else None)
+            ),
+            target_type="oauth_refresh_family",
+            target_id=str(family_id),
+        )
+        logger.info(
+            "vault oauth family burned",
+            extra={
+                "family_id": str(family_id),
+                "outcome": outcome,
+                "credentials_revoked": revoked,
+            },
+        )
+        return revoked
 
     async def exchange_identity_assertion(
         self,

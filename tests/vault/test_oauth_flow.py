@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
+from app.vault.auth import VaultScope
 from app.vault.constants import OAUTH_BASELINE_SCOPES
 from app.vault.oauth import LOGIN_PATH, PRINCIPAL_PREFIX
 from app.vault.passwords import hash_password
@@ -36,6 +37,7 @@ from app.vault.tables import (
     vault_oauth_pending_authorizations,
     vault_oauth_refresh_tokens,
 )
+from tests.vault.test_routes import _drop, _issue
 from tests.vault.test_search import vault_service
 
 
@@ -717,3 +719,156 @@ def test_the_principal_reads_as_a_name_not_a_uuid() -> None:
 
     assert PRINCIPAL_PREFIX == "oauth-"
     assert os.sep not in PRINCIPAL_PREFIX
+
+
+# ------------------------------------------- revocation and replay races ----
+
+
+def test_revoking_an_access_token_kills_the_grant(oauth_client: TestClient) -> None:
+    """The SDK only calls `revoke_token` when the loaded token's `client_id`
+    matches the authenticated client's.
+
+    `load_access_token` used to return `principal_id` -- `oauth-<slug>` -- which
+    never equals a registration uuid, so `/revoke` answered 200 and revoked
+    nothing at all. The refresh-token path masked it, because a refresh token
+    already carried the real client id.
+
+    And revoking the credential alone is not revocation either: its refresh
+    token would mint a replacement seconds later. Both halves are asserted here.
+    """
+
+    registration = register_full(oauth_client)
+    client_id = registration["client_id"]
+    params = authorize(oauth_client, client_id)
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"][0]
+    tokens = exchange(oauth_client, client_id, code)
+
+    revoked = oauth_client.post(
+        "/revoke",
+        data={
+            "token": tokens["access_token"],
+            "token_type_hint": "access_token",
+            "client_id": client_id,
+            "client_secret": registration.get("client_secret") or "",
+        },
+    )
+
+    assert revoked.status_code == 200
+    used = oauth_client.get(
+        "/api/v1/vault/search",
+        params={"q": "x"},
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert used.status_code == 401
+    # The refresh token cannot resurrect the grant.
+    renewed = _refresh(oauth_client, client_id, tokens["refresh_token"])
+    assert renewed.status_code == 400
+
+
+def test_an_operator_credential_is_not_revocable_through_oauth(
+    oauth_client: TestClient,
+) -> None:
+    """`/revoke` is callable by any self-registered client.
+
+    An `hssv1_` credential minted by `issue_vault_credential` belongs to no
+    OAuth client, so `load_access_token` returns None and the endpoint cannot
+    reach it. Without that, a registered client could name an operator
+    credential and have it revoked.
+    """
+
+    registration = register_full(oauth_client)
+    credential_id, operator_token = _issue((VaultScope.READ,))
+    try:
+        revoked = oauth_client.post(
+            "/revoke",
+            data={
+                "token": operator_token,
+                "token_type_hint": "access_token",
+                "client_id": registration["client_id"],
+                "client_secret": registration.get("client_secret") or "",
+            },
+        )
+        assert revoked.status_code == 200  # RFC 7009: 200 whatever happened
+        still_works = oauth_client.get(
+            "/api/v1/vault/search",
+            params={"q": "x"},
+            headers={"Authorization": f"Bearer {operator_token}"},
+        )
+        assert still_works.status_code == 200
+    finally:
+        _drop(credential_id)
+
+
+def test_a_concurrent_refresh_loser_burns_the_family(
+    oauth_client: TestClient,
+) -> None:
+    """The race rotation-with-detection exists to catch.
+
+    `load_refresh_token` checks `consumed_at`, but the SDK loads and exchanges
+    in separate calls, so two requests can both pass that check while the row is
+    unconsumed. One wins the conditional consume; the other used to get a plain
+    `invalid_grant` and leave the family alive -- which is the stolen-token case
+    going undetected.
+
+    Driven sequentially rather than with real threads: the loser's distinguishing
+    condition is "the row is now consumed", which is exactly the state a second
+    exchange of the same token observes. That is what the fix keys on.
+    """
+
+    client_id, tokens = full_flow(oauth_client)
+    first = _refresh(oauth_client, client_id, tokens["refresh_token"])
+    assert first.status_code == 200
+    renewed = first.json()
+
+    # The loser of the race presents the same token again.
+    loser = _refresh(oauth_client, client_id, tokens["refresh_token"])
+
+    assert loser.status_code == 400
+    # The winner's replacement is dead too -- that is what "family" means.
+    assert _refresh(oauth_client, client_id, renewed["refresh_token"]).status_code == 400
+    live = oauth_client.get(
+        "/api/v1/vault/search",
+        params={"q": "x"},
+        headers={"Authorization": f"Bearer {renewed['access_token']}"},
+    )
+    assert live.status_code == 401
+
+
+def test_the_public_oauth_routes_carry_the_preauth_guard() -> None:
+    """ADR 0024 requires it and it was not implemented.
+
+    These are root-mounted Starlette routes, so they inherit neither the vault
+    router's dependency nor the MCP mount's middleware -- `/register` was an
+    unauthenticated endpoint that writes a row, with no limit at all.
+
+    Asserted structurally rather than by exhausting a bucket: the limit is
+    600/minute and spending it in a test would be slower than the rest of the
+    suite combined, and would leave the shared IP bucket empty for whatever ran
+    next.
+    """
+
+    from app.main import create_app
+
+    routes = create_app().router.routes
+    guarded = {
+        route.path
+        for route in routes
+        if getattr(route, "path", "") in ("/register", "/authorize", "/token", "/revoke")
+        and getattr(getattr(route, "app", None), "__name__", "") == "guarded"
+    }
+
+    assert guarded == {"/register", "/authorize", "/token", "/revoke"}
+
+    # The login POST is deliberately *not* wrapped: it carries its own 10/minute
+    # bucket, and wrapping it suppressed that entirely -- trading the tighter
+    # limit for the looser one. One bucket per endpoint, the tightest that
+    # applies.
+    login_post = [
+        route
+        for route in routes
+        if getattr(route, "path", "") == LOGIN_PATH and "POST" in (route.methods or ())
+    ]
+    assert len(login_post) == 1
+    assert getattr(login_post[0].app, "__name__", "") != "guarded"
+    assert hasattr(login_post[0].endpoint, "__wrapped__")

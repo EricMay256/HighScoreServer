@@ -55,7 +55,7 @@ from .oauth import (
     new_secret,
 )
 from .passwords import verify_password
-from .rate_limit import get_login_limiter
+from .rate_limit import get_login_limiter, guard_asgi_app
 from .repository import (
     VaultOAuthAuthorizationCodeRepository,
     VaultOAuthClientRepository,
@@ -324,6 +324,37 @@ def _endpoint_name(path: str) -> str:
     return f"vault_oauth_{cleaned or 'root'}"
 
 
+def _guarded(route: Any) -> Any:
+    """Charge the pre-auth IP guard before the route runs.
+
+    Every route here is public and unauthenticated -- that is what an
+    authorization server is -- and `/register` writes a row on each call. ADR
+    0024 requires the guard to cover them and it did not: the guard is an
+    ``APIRouter`` dependency on the vault router, and these are root-mounted
+    Starlette routes that inherit nothing from it.
+
+    Applied to ``route.app`` rather than as a decorator on the endpoint because
+    the SDK's endpoints are ``CORSMiddleware`` instances, not
+    ``async def(request)`` callables, so slowapi's decorator cannot wrap them.
+
+    **A route whose endpoint already carries a slowapi bucket is left alone**,
+    which today means the login POST. Wrapping it suppressed its own limiter
+    entirely -- 15 attempts against a bucket of 10 all returned 400 and none
+    returned 429 -- so the tighter, more important limit was traded for the
+    looser one. The rule is therefore "one bucket per endpoint, the tightest
+    that applies", and the login POST's 10/minute is strictly stronger than the
+    600/minute guard it would otherwise inherit.
+    """
+
+    endpoint = getattr(route, "endpoint", None)
+    if hasattr(endpoint, "__wrapped__"):
+        return route
+    inner = getattr(route, "app", None)
+    if inner is not None:
+        route.app = guard_asgi_app(inner)
+    return route
+
+
 def _named(route: Any) -> Any:
     """Give slowapi a name to read on every route.
 
@@ -415,4 +446,4 @@ def build_vault_oauth_routes(issuer_url: str, mcp_url: str) -> list[Route]:
             methods=["POST"],
         ),
     ]
-    return [_named(route) for route in routes]
+    return [_guarded(_named(route)) for route in routes]

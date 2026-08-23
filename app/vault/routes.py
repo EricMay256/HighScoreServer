@@ -884,12 +884,13 @@ async def finish_compile_run(
     run_id: UUID,
     credential: VaultCredential = Depends(compile_settle_quota),
 ) -> VaultCompileRunSummary:
-    """Settle a run and record how far the note corpus had moved.
+    """Settle a run, publishing the frontier it was planned against.
 
-    The frontier is read now rather than at plan time, so a note written during
-    the run is counted as covered only if it actually was. Read at plan time it
-    would skip anything landing mid-run; read here it may re-plan a note this
-    run already handled, which is the harmless direction.
+    Not a frontier read here: that would count a note written *after* planning
+    as covered, when the plan never mentioned it and the compiler never saw it,
+    and no later plan would offer it either. Publishing the plan-time frontier
+    may re-offer something this run already handled, which is harmless — a page
+    covering a note removes it from `new-source` anyway.
     """
 
     return compile_run_summary(

@@ -69,11 +69,17 @@ notes. The next incremental plan offers only uncovered notes newer than that. Wi
 every note a librarian consciously chose not to compile would be re-offered forever and the
 plan would never be empty, which is the state in which nobody reads it.
 
-Two details that are easy to get backwards:
+Two details that are easy to get backwards, and the first of them **was** — this ADR and the
+code both asserted the opposite until 2026-08-23:
 
-- **The frontier is read at `finish`, not at `plan`.** Read at plan time it would skip notes
-  that landed mid-run; read at finish it may re-offer a note the run already handled. The
-  second is the harmless direction.
+- **A successful run publishes the frontier it was *planned* against, not one read at
+  `finish`.** Reading it at settlement loses notes permanently: plan at frontier F, a note
+  lands at T > F so the plan never mentions it and the compiler never sees it, the run
+  finishes and publishes T, and every later incremental plan then skips uncovered notes at or
+  below T. That note can never be compiled. Publishing F means the next plan reconsiders
+  everything written since planning began — including work this run may already have covered,
+  which is the harmless direction, because a page that covers a note removes it from
+  `new-source` anyway.
 - **A failed run publishes no frontier**, and `_last_frontier` considers only succeeded runs.
   A failed run's frontier would claim coverage for pages it never wrote, so the next plan
   would skip exactly the notes the failure left uncompiled.
@@ -117,6 +123,20 @@ archived, flagged, or not yet written. A wiki page's `source_ids` are different 
 are its **provenance**, the record of what it was synthesized from. Provenance naming
 something that never existed is a false claim rather than a dangling edge, so an unresolved
 source is a 422. The Stage-A compiler refuses the same way.
+
+### Settling takes the corpus lock
+
+`write_page` re-checks under the corpus advisory lock that its run is still `running`, and
+that check is only a guard if the settle path contends for the same lock. `finish` and `fail`
+therefore take it too. Without that, `finish` can commit in the window between the check and
+the insert, and a page lands attributed to a run that has already reported its result — with
+the settlement response and the published frontier both describing a corpus that gained
+another page immediately afterwards.
+
+The same lock is why `write_page` re-validates `source_ids` under it rather than trusting the
+check it made before embedding. Retirement takes this lock, and an embedding call is seconds
+long, so a source can vanish inside that window; validating only up front would store
+provenance naming a note that no longer exists.
 
 ### One timestamp per run
 

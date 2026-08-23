@@ -1135,6 +1135,46 @@ class VaultOAuthClientRepository:
         )
         return result.rowcount or 0
 
+    async def delete_stale(
+        self,
+        connection: AsyncConnection,
+        retention_days: int,
+    ) -> int:
+        """Remove registrations that are old and have nothing live attached.
+
+        **Not keyed on ``expires_at``.** Registration is open, the SDK leaves
+        ``client_secret_expiry_seconds`` unset, and nothing else supplies one --
+        so every row was NULL there and an expiry-only sweep deleted nothing
+        while `/register` grew the table without bound. Age plus liveness is the
+        rule that actually prunes.
+
+        **A client with a live refresh family is never a candidate**, whatever
+        its age. Deleting one cascades to its refresh tokens and pending
+        authorizations, which would revoke a working connector -- the client
+        would come back as `invalid_client` with no explanation. Live means an
+        unconsumed, unexpired refresh token: a connector still able to renew.
+
+        A consumed-and-rotated family does not protect its client, because the
+        successor row is the live one and it is checked too.
+        """
+
+        live = (
+            select(vault_oauth_refresh_tokens.c.client_id)
+            .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+            .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
+            .distinct()
+            .scalar_subquery()
+        )
+        result = await connection.execute(
+            delete(vault_oauth_clients)
+            .where(
+                vault_oauth_clients.c.registered_at
+                < func.now() - func.make_interval(0, 0, 0, retention_days)
+            )
+            .where(vault_oauth_clients.c.client_id.not_in(live))
+        )
+        return result.rowcount or 0
+
 
 class VaultOAuthPendingAuthorizationRepository:
     """Authorizations in flight between ``/authorize`` and the login form.
@@ -1440,6 +1480,35 @@ class VaultOAuthRefreshTokenRepository:
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return _refresh_token_from_row(row) if row is not None else None
+
+    async def client_and_family_for_credential(
+        self,
+        connection: AsyncConnection,
+        credential_id: str,
+    ) -> tuple[str, UUID] | None:
+        """Which OAuth client and rotation family a credential belongs to.
+
+        None for an operator-issued credential, which belongs to neither -- and
+        that is the answer the revocation endpoint needs. The SDK compares the
+        loaded token's ``client_id`` against the authenticated client's before
+        calling ``revoke_token``, so returning something that is not a client id
+        makes revocation a silent 200 that revokes nothing.
+
+        Ordered so the newest row wins. A family rotates, so one credential has
+        exactly one row -- but the query is written not to depend on that.
+        """
+
+        result = await connection.execute(
+            select(
+                vault_oauth_refresh_tokens.c.client_id,
+                vault_oauth_refresh_tokens.c.family_id,
+            )
+            .where(vault_oauth_refresh_tokens.c.credential_id == credential_id)
+            .order_by(vault_oauth_refresh_tokens.c.created_at.desc())
+            .limit(1)
+        )
+        row = result.one_or_none()
+        return (row[0], row[1]) if row is not None else None
 
     async def credential_ids_in_family(
         self,

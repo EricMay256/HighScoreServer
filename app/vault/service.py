@@ -1636,8 +1636,26 @@ class VaultCompileService:
             if run is None or run.state is not CompileRunState.RUNNING:
                 # Re-checked under the lock: a finish may have landed while the
                 # embedding call was in flight, and a page attributed to a
-                # settled run would make its provenance a lie.
+                # settled run would make its provenance a lie. `finish` and
+                # `fail` take this same lock, which is what makes the check a
+                # guard rather than a snapshot that can go stale a line later.
                 raise CompileRunAlreadySettled(str(request.run_id))
+
+            # Sources are re-validated here, not only before the embedding call.
+            # That call is a third-party round trip taking seconds, and a
+            # retirement can land inside it -- storing the page anyway would
+            # write provenance naming a note that no longer exists, which is the
+            # one thing `source_ids` validation exists to prevent. Checked under
+            # the lock, which retirement also takes, so the answer cannot go
+            # stale between here and the insert.
+            notes = await wiki.note_states(connection)
+            vanished = [
+                source_id
+                for source_id in request.source_ids
+                if source_id not in notes
+            ]
+            if vanished:
+                raise UnresolvedSources(vanished)
 
             if request.page_id is not None:
                 stored = await documents.replace_content(
@@ -1732,23 +1750,44 @@ class VaultCompileService:
         principal_id: str,
         request_id: str,
     ) -> VaultCompileRun:
-        """Mark a run succeeded and record how far the corpus had moved.
+        """Mark a run succeeded, publishing the frontier it was planned against.
 
-        The output frontier is read **now**, not at plan time, so notes written
-        during the run are counted as covered only if they actually were. Read
-        at plan time it would skip anything that landed mid-run; read here it
-        may re-plan a note the run already handled, which is the harmless
-        direction.
+        **The output frontier is the run's own ``input_frontier``, captured at
+        plan time -- not a fresh maximum read here.** Reading it here loses
+        notes permanently, which is the opposite of what an earlier version of
+        this docstring claimed:
+
+        1. a run is planned, capturing frontier F;
+        2. a note lands afterwards, at T > F, so the plan never mentioned it and
+           the compiler never saw it;
+        3. the run finishes and a fresh maximum publishes T;
+        4. the next incremental plan skips uncovered notes at or below T.
+
+        That note is never offered again. Publishing F instead means the next
+        plan re-considers everything written since planning began -- including
+        work this run may already have covered, which is the harmless direction
+        because a page that covers a note removes it from `new-source` anyway.
+
+        The lock is the same one ``write_page`` takes. Without it that method's
+        check that the run is still running is not a guard at all: it can pass,
+        and this can settle and commit before the page insert lands, producing a
+        page attributed to a run that has already reported its result.
         """
 
         runs = VaultCompileRunRepository()
         async with self._transactions.transaction() as connection:
-            frontier = await runs.note_frontier(connection)
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            existing = await runs.get(connection, run_id)
+            if existing is None:
+                raise CompileRunNotFound(str(run_id))
             settled = await runs.settle(
                 connection,
                 run_id,
                 state=CompileRunState.SUCCEEDED,
-                output_frontier={"frontier_at": frontier} if frontier else {},
+                output_frontier=dict(existing.input_frontier),
             )
             if settled is None:
                 raise await self._settle_failure(connection, runs, run_id)
@@ -1777,10 +1816,18 @@ class VaultCompileService:
         away work to reach a tidier state. What the failure changes is the
         frontier -- a failed run publishes none, so the next plan re-covers the
         notes this one did not finish.
+
+        Takes the corpus lock for the reason ``finish`` does: a page write that
+        has already checked the run state must not be able to commit after this
+        settles.
         """
 
         runs = VaultCompileRunRepository()
         async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
             settled = await runs.settle(
                 connection,
                 run_id,

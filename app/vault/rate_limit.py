@@ -34,7 +34,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,3 +447,45 @@ def reset_login_limiter() -> None:
     """
 
     _ip_limiter.reset()
+
+
+def guard_asgi_app(app: Any) -> Any:
+    """Charge the pre-auth IP guard in front of an ASGI application.
+
+    The third shape this guard has to take, and the reason is structural. As a
+    FastAPI dependency it covers the vault router; as a call inside
+    ``VaultMCPAuthMiddleware`` it covers the mount. The OAuth routes are
+    root-mounted Starlette ``Route`` objects, so they inherit **neither** -- and
+    the SDK hands back endpoints that are ``CORSMiddleware`` instances rather
+    than ``async def(request)``, so slowapi's decorator cannot wrap them either.
+    Wrapping the ASGI callable is what works on all of them.
+
+    Without this, ``/register``, ``/authorize``, ``/token`` and ``/revoke`` are
+    unauthenticated endpoints with no limit at all -- and `/register` writes a
+    row. ADR 0024 says the guard "must cover them, for the reason it covers the
+    MCP mount: without it they are the only unbounded door", which had not
+    actually been implemented.
+
+    Renders 429 the same way the MCP mount does, and for the same reason: the
+    host's slowapi handler does not see exceptions raised inside a wrapped
+    route, and an operator reading a 429 should not be able to tell which
+    surface produced it.
+    """
+
+    async def guarded(scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await app(scope, receive, send)
+            return
+        request = Request(scope, receive=receive)
+        try:
+            await enforce_preauth_ip_limit(request=request)
+        except RateLimitExceeded as exc:
+            await JSONResponse(
+                {"detail": f"Rate limit exceeded: {exc.detail}"},
+                status_code=429,
+                headers=dict(exc.headers) if exc.headers else None,
+            )(scope, receive, send)
+            return
+        await app(scope, receive, send)
+
+    return guarded

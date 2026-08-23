@@ -688,3 +688,114 @@ def _page_count() -> int:
             await engine.dispose()
 
     return asyncio.run(run())
+
+
+# ------------------------------------------ frontier and settle ordering ----
+
+
+def test_a_note_created_during_a_run_is_still_offered_afterwards(
+    client: TestClient, compile_token: str
+) -> None:
+    """The frontier bug, and it lost notes permanently.
+
+    `finish` used to publish a *fresh* maximum `updated_at` rather than the one
+    the run was planned against. A note created after planning was never in the
+    plan, so the compiler never saw it -- and the finish-time maximum then
+    covered its timestamp, so every later incremental plan skipped it. It could
+    never be compiled.
+
+    Publishing the plan-time frontier instead means the next plan reconsiders
+    everything written since planning began, which is the harmless direction: a
+    page that does cover the note removes it from `new-source` anyway.
+    """
+
+    _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    # Lands after the plan, so this run neither saw it nor compiled it.
+    missed = _seed_note(title="Written while the run was open")
+
+    client.post(
+        f"/api/v1/vault/compile/runs/{run_id}/finish", headers=_auth(compile_token)
+    )
+    following = _plan(client, compile_token).json()
+
+    offered = [i for i in following["items"] if i["source_ids"] == [missed]]
+    assert [i["reason"] for i in offered] == ["new-source"]
+
+
+def test_a_successful_run_publishes_the_frontier_it_planned_against(
+    client: TestClient, compile_token: str
+) -> None:
+    _seed_note()
+    planned = _plan(client, compile_token).json()["run"]
+    run_id = planned["run_id"]
+
+    settled = client.post(
+        f"/api/v1/vault/compile/runs/{run_id}/finish", headers=_auth(compile_token)
+    ).json()
+
+    assert settled["output_frontier"] == planned["input_frontier"]
+
+
+def test_a_page_is_refused_when_a_source_vanishes_before_the_write(
+    client: TestClient, compile_token: str
+) -> None:
+    """Sources are validated before the embedding call, which takes seconds.
+
+    A retirement landing inside that window used to go unnoticed, storing a page
+    whose provenance named a note that no longer existed -- the one thing
+    `source_ids` validation exists to prevent. Re-checked under the corpus lock
+    now, which retirement also takes.
+
+    Simulated by deleting the note between the plan and the write, which is the
+    same state the race produces.
+    """
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    transactions, engine = vault_service()
+
+    async def remove() -> None:
+        try:
+            async with transactions.transaction() as connection:
+                await connection.execute(
+                    delete(vault_documents).where(vault_documents.c.id == note_id)
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(remove())
+
+    response = _write(client, compile_token, run_id, source_ids=[note_id])
+
+    assert response.status_code == 422
+    assert "unresolved source id" in response.json()["detail"]
+    assert _page_count() == 0
+
+
+def test_settling_takes_the_corpus_lock() -> None:
+    """What stops a page committing into a run that has already settled.
+
+    `write_page` re-checks the run state under the corpus advisory lock, but
+    that check only guards anything if the settle path contends for the same
+    lock -- otherwise `finish` can commit in the window between the check and
+    the insert, and the page lands attributed to a finished run.
+
+    Asserted on the source rather than by racing two transactions: the property
+    is "these three take the same lock", and a timing test for it would be
+    slow and flaky while proving less.
+    """
+
+    import inspect
+
+    from app.vault.service import VaultCompileService
+
+    for method in (
+        VaultCompileService.write_page,
+        VaultCompileService.finish,
+        VaultCompileService.fail,
+    ):
+        source = inspect.getsource(method)
+        assert "pg_advisory_xact_lock" in source, method.__name__
