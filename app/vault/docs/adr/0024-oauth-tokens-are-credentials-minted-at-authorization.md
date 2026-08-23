@@ -66,16 +66,48 @@ refresh, all but the newest revoked. That is a pruning story, not a leak — the
 rows, so they grant nothing.
 
 `scripts/prune_vault_oauth.py` handles it, **by age and not by keeping the last N per
-identity**. The count-based rule is the one that suggests itself and it has a failure mode
-that looks like success: an OAuth principal is `oauth-<slug(client_name)>`, so two separate
-registrations both naming themselves "Claude" share a principal, and keep-newest-N would
-delete the older registration's *live* credential. Age plus `revoked_at IS NOT NULL` cannot
-express that mistake. Thirty days matches the refresh token's own lifetime, and operator-issued
-credentials are excluded by the principal prefix — those rows are a census someone reads, not
-machine turnover.
+identity**. Age plus `revoked_at IS NOT NULL` cannot delete a live credential, whatever its
+age or how many newer rows share its principal, and a count-based rule has no such guarantee.
+Thirty days matches the refresh token's own lifetime, and operator-issued credentials are
+excluded by the principal prefix — those rows are a census someone reads, not machine turnover.
+
+*(The original argument here was that two registrations both naming themselves "Claude" share
+a principal, so keep-newest-N would delete the older one's live credential. That collision was
+itself the defect corrected on 2026-08-23 — see the amendment below — and no longer exists. The
+conclusion stands on the simpler ground above.)*
 
 This does not weaken the token-is-a-credential property. A refresh token is not an access
 token: it names one, mints its replacement, and never authenticates a request.
+
+**Amendment, 2026-08-23: the principal is the registration id, not the client's name.** This
+decision originally derived an OAuth principal from `slugify(client_name)`, so that
+`contributed_by` would read `agent:oauth-claude` rather than a uuid, and called the resulting
+collision between same-named registrations deliberate — "they are the same logical client".
+They are not. Registration is open and the name is unverified, so that reasoning fails for
+exactly the reason the consent screen's did: an unverified name was being read as identity.
+
+The collision was not cosmetic, because `principal_id` is the actor across three isolation
+boundaries — `vault_write_requests` keys idempotency on `(principal_id, idempotency_key)`, the
+token buckets key quota on `(principal_id, operation)`, and `contributed_by` and the audit
+trail record it. Two separately approved clients named "Claude" therefore shared an idempotency
+namespace and a quota, and afterwards nothing distinguished their writes. Names differing only
+in case, in punctuation, or past the slug length limit collided the same way.
+
+The principal is now `oauth-<client_id>`, a server-issued uuid4. The readable name is not lost:
+`vault_agent_credentials.display_name` carries it. The trade is a less readable
+`contributed_by`, accepted because an identity boundary that can be forged by choosing a name
+is not one. It is also more honest — a client may re-register under a different name, so a
+name-derived principal was derived from something mutable. A re-registering client now gets a
+new principal, and therefore a fresh quota bucket and idempotency namespace, which is correct:
+a reinstalled client remembers neither.
+
+**Amendment, 2026-08-23: starting an authorization is serialized against stale-client
+pruning.** The pruning predicate spares a client with an authorization in flight, but that
+describes rows that already exist. The SDK loads the client in one transaction and calls
+`authorize` in another, so a sweep could observe "nothing live", delete the registration, and
+commit before the pending row was written — leaving a foreign-key violation and a 500 on a flow
+that was valid when it began. Both sides now take `OAUTH_CLIENT_LOCK_KEY`, and `authorize`
+re-reads the registration under it, answering `unauthorized_client` if it is genuinely gone.
 
 Supersedes the OAuth deferral in ADR 0021, which recorded that the SDK's `token_verifier` was
 left unused because it requires `AuthSettings.issuer_url`, and setting that would publish

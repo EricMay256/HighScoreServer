@@ -334,6 +334,15 @@ be edited when it does.
   mount's; `/register` writes a row on every unauthenticated call. A route whose endpoint
   already has its own slowapi bucket is left unwrapped — wrapping the login POST suppressed
   its own tighter limit.
+- **An OAuth principal is `oauth-<client_id>` — the registration id, never the client's
+  name.** Same error as the consent screen's, in the place it does real damage: `principal_id`
+  is the actor for idempotency (`vault_write_requests` PK), for quota (the token buckets), and
+  for `contributed_by` and the audit trail, so a name-derived principal let two separately
+  approved clients share all three. `display_name` is where the readable name belongs.
+- **`authorize` and `delete_stale` both take `OAUTH_CLIENT_LOCK_KEY`.** Sparing a client with
+  an authorization in flight only works if the sweep cannot run *between* the SDK's client
+  lookup and the pending row's insert. Unlocked, that window is a foreign-key violation and a
+  500 on a valid flow.
 - **The consent screen shows the redirect origin and the registration id, and calls the
   client's name unverified.** `client_name` is free text on an open registration endpoint, so a
   page that leads with it lets anyone appear as "Claude" with a redirect they control — on the

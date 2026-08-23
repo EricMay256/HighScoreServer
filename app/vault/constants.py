@@ -33,6 +33,13 @@ MAX_FACET_VALUE_LENGTH = 128
 NOTE_SCHEMA_VERSION = 2
 WIKI_SCHEMA_VERSION = 1
 
+# The advisory lock serializing OAuth client deletion against the start of an
+# authorization. Here rather than beside the operations because two modules need
+# it -- `oauth.authorize` and `VaultOAuthClientRepository.delete_stale` -- and a
+# lock two callers disagree about is not a lock. Arbitrary but permanent: the
+# value *is* the lock's identity, exactly as _CONTRIBUTION_LOCK_KEY is.
+OAUTH_CLIENT_LOCK_KEY = 0x5641554C5402
+
 # The default per-request embedding timeout, in seconds.
 #
 # Not a persistence contract like the two above, but it lives here for the same

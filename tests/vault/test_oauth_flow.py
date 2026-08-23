@@ -996,3 +996,169 @@ def test_an_overlong_client_name_cannot_bury_the_destination(
     assert page.count("padding") < 20
     assert "https://claude.ai" in page
     assert "not verified" in page
+
+
+# ------------------------------------------------- principals and pruning ----
+
+
+def _principal_of(token: str) -> str:
+    """The principal recorded on the credential a token names."""
+
+    credential_id = token.split("_")[1]
+    transactions, engine = vault_service()
+
+    async def read() -> str:
+        try:
+            async with transactions.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_agent_credentials.c.principal_id).where(
+                        vault_agent_credentials.c.id == credential_id
+                    )
+                )
+                return result.scalar_one()
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(read())
+
+
+def test_two_clients_with_one_name_get_different_principals(
+    oauth_client: TestClient,
+) -> None:
+    """`principal_id` is the actor across three isolation boundaries.
+
+    It was `oauth-<slug(client_name)>`, and registration is open, so two
+    separately approved clients calling themselves "Claude" became one actor:
+    one idempotency namespace (`vault_write_requests` is keyed on
+    `(principal_id, idempotency_key)`), one quota bucket, and one indistinct
+    audit trail. The old comment called that deliberate -- "the same logical
+    client" -- which only holds if the name means something, and nothing checks
+    that it does.
+    """
+
+    _, first = full_flow(oauth_client, name="Claude")
+    _, second = full_flow(oauth_client, name="Claude")
+
+    assert _principal_of(first["access_token"]) != _principal_of(
+        second["access_token"]
+    )
+
+
+def test_names_that_slugify_alike_get_different_principals(
+    oauth_client: TestClient,
+) -> None:
+    """The collision did not need two identical names, only two that normalize
+    alike -- case, punctuation, or anything past the slug's length limit."""
+
+    _, plain = full_flow(oauth_client, name="Claude")
+    _, shouted = full_flow(oauth_client, name="CLAUDE!")
+
+    assert _principal_of(plain["access_token"]) != _principal_of(
+        shouted["access_token"]
+    )
+
+
+def test_a_principal_is_the_registration_id(oauth_client: TestClient) -> None:
+    """Not the name, and not a slug of it.
+
+    Pinned explicitly because the readable-`contributed_by` argument that
+    produced the old scheme is a real cost and someone will be tempted back.
+    `display_name` is where the client's name belongs.
+    """
+
+    client_id, tokens = full_flow(oauth_client, name="Claude")
+
+    assert _principal_of(tokens["access_token"]) == f"{PRINCIPAL_PREFIX}{client_id}"
+    assert "claude" not in _principal_of(tokens["access_token"])
+
+
+async def _delete_client(client_id: str) -> None:
+    transactions, engine = vault_service()
+    try:
+        async with transactions.transaction() as connection:
+            await connection.execute(
+                delete(vault_oauth_clients).where(
+                    vault_oauth_clients.c.client_id == client_id
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
+def test_a_registration_pruned_mid_authorization_is_a_protocol_error(
+    oauth_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prune/authorize race, reproduced at the point it actually opens.
+
+    Deleting the client *before* the request proves nothing: the SDK looks the
+    client up first and refuses cleanly on its own. The window is narrower than
+    that -- the lookup succeeds, and the sweep commits before `authorize` writes
+    the pending row in its own separate transaction. So the deletion is hung off
+    `get_client`, which puts it exactly there.
+
+    Unfixed this is a foreign-key violation on the insert: a 500 on a flow that
+    was valid when it started. Fixed, `authorize` re-reads the registration under
+    the shared lock and answers `unauthorized_client`, which tells the client to
+    register again -- the one useful thing to say.
+    """
+
+    from app.vault.oauth import VaultAuthorizationProvider
+
+    client_id = register(oauth_client, name="Claude")
+    original = VaultAuthorizationProvider.get_client
+
+    async def get_then_prune(self, looked_up_id: str):
+        client = await original(self, looked_up_id)
+        if client is not None and looked_up_id == client_id:
+            # The sweep lands here: after the lookup, before `authorize`.
+            await _delete_client(client_id)
+        return client
+
+    monkeypatch.setattr(VaultAuthorizationProvider, "get_client", get_then_prune)
+
+    response = oauth_client.get(
+        "/authorize",
+        params={
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "code_challenge": _challenge(VERIFIER),
+            "code_challenge_method": "S256",
+            "state": "opaque-state",
+            "scope": " ".join(OAUTH_BASELINE_SCOPES),
+        },
+        follow_redirects=False,
+    )
+
+    # The protocol's own vocabulary -- an error redirect back to the client,
+    # never a stack trace. Asserted unconditionally rather than behind an
+    # `if redirect` branch, which would stop testing anything the day the
+    # status changed.
+    assert response.status_code == 302, response.text
+    assert "unauthorized_client" in response.headers["location"]
+
+
+def test_pruning_and_authorizing_take_the_same_lock() -> None:
+    """Both halves, asserted on the source.
+
+    The property is that two code paths name one lock, and a timing test for it
+    would be slow, flaky, and would still not prove the pairing -- while one of
+    them silently dropping the lock is precisely the regression that reopens the
+    race.
+    """
+
+    import inspect
+
+    from app.vault.constants import OAUTH_CLIENT_LOCK_KEY
+    from app.vault.oauth import VaultAuthorizationProvider
+    from app.vault.repository import VaultOAuthClientRepository
+
+    for method in (
+        VaultAuthorizationProvider.authorize,
+        VaultOAuthClientRepository.delete_stale,
+    ):
+        source = inspect.getsource(method)
+        assert "pg_advisory_xact_lock" in source, method.__qualname__
+        assert "OAUTH_CLIENT_LOCK_KEY" in source, method.__qualname__
+
+    assert OAUTH_CLIENT_LOCK_KEY != 0x5641554C5401  # not the corpus lock

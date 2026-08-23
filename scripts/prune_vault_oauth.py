@@ -34,12 +34,10 @@ Environment variables:
 
 **Credentials are pruned by age, not by keeping the last N per identity**, and
 the difference matters. Rotation mints a credential per refresh, so a
-count-based rule looks natural -- keep the newest few, drop the rest. It has a
-failure mode that looks like the script working correctly: an OAuth principal is
-``oauth-<slug(client_name)>``, so **two separate registrations that both call
-themselves "Claude" share a principal**. Keep-newest-N ordered by creation would
-then delete the older registration's *live* credential, and the symptom is one
-client mysteriously losing access.
+count-based rule looks natural -- keep the newest few, drop the rest. What it
+cannot promise is that the rows it drops are dead ones: ordering by creation and
+keeping N says nothing about whether the N+1st is still in use, and the symptom
+of getting it wrong is a client mysteriously losing access.
 
 Age has no such hazard. Thirty days matches the refresh token's own lifetime,
 after which nothing in that chain can renew anyway, and only rows already

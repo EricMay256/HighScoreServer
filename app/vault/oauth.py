@@ -53,16 +53,19 @@ from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     OAuthAuthorizationServerProvider,
     RefreshToken,
     TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from sqlalchemy import text as sql_text
 
 from .auth import TOKEN_PREFIX, hash_secret, parse_token
 from .constants import (
     ACCESS_TOKEN_TTL_SECONDS,
     OAUTH_BASELINE_SCOPES,
+    OAUTH_CLIENT_LOCK_KEY,
     PENDING_AUTHORIZATION_TTL_SECONDS,
     REFRESH_TOKEN_TTL_SECONDS,
 )
@@ -75,7 +78,6 @@ from .repository import (
     VaultOAuthRefreshTokenRepository,
 )
 from .service import VaultTransactionService
-from .slug import slugify
 
 
 logger = logging.getLogger(__name__)
@@ -98,14 +100,34 @@ _SECRET_BYTES = 32
 # hex expansion has to satisfy vault_agent_credentials_id_format.
 _ID_BYTES = 8
 
-# How a principal is named for an OAuth client. It reaches `contributed_by` on
-# every note the client writes, so it has to read as a person would say it --
-# `agent:oauth-claude`, not a uuid.
+# How a principal is named for an OAuth client: the prefix plus the *registration
+# id*, which the SDK generates as a uuid4 per `/register` call.
 #
-# Two registrations of the same client name therefore share a principal, and
-# that is deliberate: they are the same logical client, so sharing a quota
-# bucket and a write-ledger key is right. Distinguishing them is the credential
-# id's job, which is unique per authorization.
+# This was `slugify(client_name)` until 2026-08-23, and that was wrong for the
+# reason the consent screen was wrong -- it read an unverified name as identity.
+# Registration is open, so `client_name` is free text: two clients calling
+# themselves "Claude", or "CLAUDE" and "Claude!", or anything at all past the
+# slug length limit, collapsed to one principal. The old comment called that
+# deliberate on the grounds that they are "the same logical client", which is
+# only true if the name means something, and nothing checks that it does.
+#
+# The collision was not cosmetic. `principal_id` is the actor across three
+# isolation boundaries: `vault_write_requests` keys idempotency on
+# (principal_id, idempotency_key), the token buckets key quota on
+# (principal_id, operation), and `contributed_by` and the audit trail record it.
+# Two separately approved clients therefore shared an idempotency namespace and
+# a quota, and their writes were indistinguishable afterwards.
+#
+# The cost is that `contributed_by` reads `agent:oauth-<uuid>` rather than
+# `agent:oauth-claude`. That is the right trade and the readable name is not
+# lost: `vault_agent_credentials.display_name` carries it, one join away. It is
+# also the more honest arrangement, because a client may re-register under a new
+# name -- so a principal derived from the name would be derived from something
+# mutable, while the credentials already issued kept the old spelling.
+#
+# A client that re-registers gets a new registration id and therefore a new
+# principal: a fresh quota bucket and a fresh idempotency namespace. Correct --
+# a reinstalled client remembers neither.
 PRINCIPAL_PREFIX = "oauth-"
 
 
@@ -136,15 +158,18 @@ def new_secret() -> str:
 def principal_for_client(client: OAuthClientInformationFull) -> str:
     """The principal id an OAuth client's credentials carry.
 
-    Built from the client's declared name, falling back to its id. ``slugify``
-    is the same function that names a note's file, and it is doing the same job
-    here: collapsing arbitrary caller-supplied text to something safe to put in
-    an identifier. A registration's ``client_name`` is attacker-controlled --
-    registration is open -- so it must never reach a principal id unfiltered.
+    The registration id, never the client's declared name. See
+    ``PRINCIPAL_PREFIX`` for why: the name is unverified free text on an open
+    registration endpoint, and a principal built from it collides across
+    separately approved clients that share an idempotency namespace and a quota
+    as a result.
+
+    Nothing is slugified because nothing needs to be -- a uuid4 from the SDK's
+    registration handler is already safe in an identifier, which is the second
+    reason to prefer it over caller-supplied text.
     """
 
-    name = (client.client_name or "").strip() or client.client_id
-    return f"{PRINCIPAL_PREFIX}{slugify(name)}"
+    return f"{PRINCIPAL_PREFIX}{client.client_id}"
 
 
 def access_token_string(credential_id: str, secret: str) -> str:
@@ -238,18 +263,62 @@ class VaultAuthorizationProvider(
         moment both halves of the pair can be written atomically. Its digest
         goes in the row; the plaintext is handed to the form by the login GET,
         which reads it back out of nothing -- see ``oauth_routes``.
+
+        **Serialized against stale-client pruning**, which is why the lock is
+        here. Pruning spares a client with an authorization in flight, but that
+        is a fact about rows that exist: the SDK loads the client in one
+        transaction and calls this method in another, so a sweep can read "no
+        pending authorization, no code, no live token", delete the registration,
+        and commit in the window before the row below is written. The insert
+        then violates its foreign key and the operator gets a 500 for a flow
+        that was valid when it started. Under the reverse interleaving the
+        delete blocks on the foreign key's row lock and then removes the pending
+        row it was waiting for, by cascade, which is quieter and no better.
+
+        With the lock held, the sweep either has not started -- and will then
+        see the pending row -- or has finished, and the re-read below finds the
+        registration gone and says so in the protocol's own vocabulary.
         """
 
         nonce = new_secret()
         csrf_token = new_secret()
         async with self._transactions_for().transaction() as connection:
-            await self._pending.create(
-                connection,
-                nonce=nonce,
-                client_id=client.client_id,
-                params=params.model_dump(mode="json"),
-                csrf_token=csrf_token,
-                ttl_seconds=PENDING_AUTHORIZATION_TTL_SECONDS,
+            await connection.execute(
+                sql_text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": OAUTH_CLIENT_LOCK_KEY},
+            )
+            # Pruned between the SDK's lookup and this transaction? The check
+            # and the insert are both under the lock, so the answer cannot go
+            # stale between them.
+            registered = (
+                await self._clients.get(connection, client.client_id) is not None
+            )
+            if registered:
+                await self._pending.create(
+                    connection,
+                    nonce=nonce,
+                    client_id=client.client_id,
+                    params=params.model_dump(mode="json"),
+                    csrf_token=csrf_token,
+                    ttl_seconds=PENDING_AUTHORIZATION_TTL_SECONDS,
+                )
+
+        if not registered:
+            # Raised *outside* the transaction deliberately. `AuthorizeError` is
+            # a frozen dataclass, and unwinding through an `@asynccontextmanager`
+            # runs `exc.__traceback__ = tb` in contextlib, which a frozen
+            # instance refuses -- turning a clean protocol error into a
+            # FrozenInstanceError from the exit path. Any AuthorizeError raised
+            # in this module has to leave the transaction block first.
+            #
+            # `unauthorized_client` and not `invalid_request`: the request was
+            # well formed and the registration behind it is simply gone, and
+            # registering again is the useful response.
+            raise AuthorizeError(
+                error="unauthorized_client",
+                error_description=(
+                    "This client registration is no longer valid. Register again."
+                ),
             )
         # The CSRF plaintext travels with the nonce so the form can carry it
         # without a second lookup. Both are in a URL the operator's browser

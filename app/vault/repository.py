@@ -7,7 +7,7 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, insert, or_, select, update
+from sqlalchemy import delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .auth import VaultCredential
 from .constants import (
     AUTHORIZATION_CODE_TTL_SECONDS,
+    OAUTH_CLIENT_LOCK_KEY,
     PENDING_AUTHORIZATION_TTL_SECONDS,
     REFRESH_TOKEN_TTL_SECONDS,
 )
@@ -1181,8 +1182,26 @@ class VaultOAuthClientRepository:
         connection: AsyncConnection,
         retention_days: int,
     ) -> int:
-        """Remove registrations that are old and have nothing live attached."""
+        """Remove registrations that are old and have nothing live attached.
 
+        Takes ``OAUTH_CLIENT_LOCK_KEY`` first, and `oauth.authorize` takes the
+        same lock before parking a pending authorization. The conditions below
+        describe rows that *exist*; starting an authorization is the transition
+        into that state, and without serializing the two this sweep can read
+        "nothing live", delete the registration, and commit while an
+        `/authorize` already past its client lookup is about to write the very
+        row that would have spared it.
+
+        Taken in the repository rather than by the caller because there is
+        nothing else this method could correctly be -- unlocked, it is the race.
+        The corpus lock sits in the service layer instead, but that lock has one
+        call path and this one is reached from a script.
+        """
+
+        await connection.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": OAUTH_CLIENT_LOCK_KEY},
+        )
         result = await connection.execute(
             delete(vault_oauth_clients).where(
                 *self._stale_conditions(retention_days)
