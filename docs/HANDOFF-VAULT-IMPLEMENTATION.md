@@ -16,7 +16,7 @@ only on someone building it.
 3. The ADRs the work implements: **0023** (promotion candidacy), **0024** (OAuth), **0025**
    (the edge graph). All three were revised during review, so read the file rather than a
    summary of it.
-4. In the **private knowledge-platform repository** (`C:\Users\yarom\Code\knowledge-platform`):
+4. In the **private knowledge-platform repository** (`knowledge-platform`, checked out wherever you keep it):
    `Vault/00 Governance/` — the AI Contribution Policy, Promotion Policy, `types.yml`,
    `folders.yml`. **These outrank every ADR.** ADR 0023 changed three of them; the current
    files are correct and the ADR describes why.

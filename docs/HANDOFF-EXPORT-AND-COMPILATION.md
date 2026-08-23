@@ -11,7 +11,7 @@ Read ADR 0022 first; this file is the execution plan for it and assumes its deci
 
 1. `app/vault/docs/adr/0022-two-trees-one-writer-each.md` — the governing decision.
 2. `app/vault/AGENTS.md` — the whole file. Several invariants below are restatements.
-3. In the **private knowledge-platform repository** (`C:\Users\yarom\Code\knowledge-platform`
+3. In the **private knowledge-platform repository** (`knowledge-platform`, checked out wherever you keep it
    on the machine this was written on):
    - `Vault/00 Governance/AI Contribution Policy.md` — where AI may read and write.
    - `Vault/00 Governance/Promotion Policy.md` — how agent memory becomes human knowledge.
@@ -78,7 +78,7 @@ in the **other** repository. Do it before anything relies on either side.
 
 - Reconciliation stops scanning `Agent/`. ADR 0012's sweep is scoped by path prefix
   specifically so this does not require rewriting it.
-- The `knowledge-vault` skill (`C:\Users\yarom\.claude\skills\knowledge-vault`) currently
+- The `knowledge-vault` skill (the `knowledge-vault` skill directory under your Claude config) currently
   drives `vault_contrib` against the markdown layer. It must reach the service instead.
 - Until both are done, the Stage A engine and the service are **two writers to one tree**,
   which is the round trip ADR 0022 exists to prevent.

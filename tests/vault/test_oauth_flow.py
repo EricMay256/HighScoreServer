@@ -211,6 +211,37 @@ def test_the_discovery_chain_answers(oauth_client: TestClient) -> None:
     assert set(server.json()["scopes_supported"]) == set(OAUTH_BASELINE_SCOPES)
 
 
+def test_both_mcp_url_forms_have_protected_resource_metadata(
+    oauth_client: TestClient,
+) -> None:
+    """RFC 9728 derives the metadata path from the resource path.
+
+    So `.../mcp` and `.../mcp/` are two different well-known URLs, and the vault
+    has reason to expect either: the mount answers only the trailing-slash form
+    and the operator docs say to register that one, while the bare form is what
+    an operator types and what the 307 redirect exists for. Serving one and not
+    the other 404s discovery for whichever half a client was configured with,
+    and the symptom is "this server does not support OAuth".
+
+    Each document names the resource it describes, so a client comparing
+    `resource` against what it requested finds them equal.
+    """
+
+    bare = oauth_client.get(
+        "/.well-known/oauth-protected-resource/api/v1/vault/mcp"
+    )
+    slashed = oauth_client.get(
+        "/.well-known/oauth-protected-resource/api/v1/vault/mcp/"
+    )
+
+    assert bare.status_code == 200
+    assert slashed.status_code == 200
+    assert bare.json()["resource"] == f"{PUBLIC_URL}/api/v1/vault/mcp"
+    assert slashed.json()["resource"] == f"{PUBLIC_URL}/api/v1/vault/mcp/"
+    for payload in (bare.json(), slashed.json()):
+        assert payload["authorization_servers"] == [f"{PUBLIC_URL}/"]
+
+
 def test_nothing_is_published_without_a_public_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

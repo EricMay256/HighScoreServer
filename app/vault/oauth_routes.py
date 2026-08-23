@@ -371,8 +371,25 @@ def build_vault_oauth_routes(issuer_url: str, mcp_url: str) -> list[Route]:
     limiter = get_login_limiter()
 
     routes: list[Route] = [
+        # **Both URL forms, and this is not belt-and-braces.** RFC 9728 derives
+        # the metadata path from the resource path, so `.../mcp` and `.../mcp/`
+        # yield two *different* well-known URLs. The mount answers only the
+        # trailing-slash form and the operator docs tell people to register
+        # that one, while the bare form is what an operator types and what the
+        # 307 redirect exists for. Serving one and not the other 404s discovery
+        # for whichever half a client happened to be configured with, and the
+        # symptom is "this server does not support OAuth".
+        #
+        # Each document names the resource it actually describes rather than
+        # pointing at a canonical one, so a client comparing `resource` against
+        # what it asked for finds them equal.
         *create_protected_resource_routes(
-            resource_url=AnyHttpUrl(mcp_url),
+            resource_url=AnyHttpUrl(mcp_url.rstrip("/")),
+            authorization_servers=[AnyHttpUrl(issuer_url)],
+            scopes_supported=baseline_scopes(),
+        ),
+        *create_protected_resource_routes(
+            resource_url=AnyHttpUrl(mcp_url.rstrip("/") + "/"),
             authorization_servers=[AnyHttpUrl(issuer_url)],
             scopes_supported=baseline_scopes(),
         ),

@@ -63,11 +63,16 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Restore both constraints, and refuse rather than destroy evidence.
 
-    A case whose candidate has been retired cannot be represented in the old
-    schema. The honest failure is to stop with a message naming the rows; the
-    dishonest one would be to delete them so the constraint applies, which
-    would discard the judgements this table exists to keep. An operator who
-    really wants the old shape must decide what happens to those rows first.
+    Two states the old schema cannot represent, and **both** are checked before
+    either constraint goes back on: a case whose candidate has been retired has
+    no candidate id, and a candidate reviewed twice has two cases. Each is an
+    ordinary product of this revision rather than corruption.
+
+    The honest failure is to stop with a message naming the rows; the dishonest
+    one would be to delete them so the constraints apply, which would discard
+    the judgements this table exists to keep. Checking both up front is also
+    what keeps the failure atomic -- validating only the first would restore
+    NOT NULL and then fail on UNIQUE, leaving the schema half rolled back.
     """
 
     op.execute(
@@ -75,6 +80,7 @@ def downgrade() -> None:
         DO $$
         DECLARE
             orphans bigint;
+            duplicated bigint;
         BEGIN
             SELECT count(*) INTO orphans
             FROM vault.vault_review_cases
@@ -85,6 +91,29 @@ def downgrade() -> None:
                     'cannot restore NOT NULL: % review case(s) name a retired '
                     'candidate. Decide what happens to them before downgrading.',
                     orphans;
+            END IF;
+
+            -- Both constraints came off, so both are checked before either
+            -- goes back on. Dropping UNIQUE is what allows a candidate to be
+            -- reviewed twice, so duplicates are the *expected* product of this
+            -- revision -- and the ALTER below would meet them only after
+            -- NOT NULL had already been restored, leaving the schema half
+            -- rolled back. Refusing here keeps the failure atomic.
+            SELECT count(*) INTO duplicated
+            FROM (
+                SELECT candidate_document_id
+                FROM vault.vault_review_cases
+                WHERE candidate_document_id IS NOT NULL
+                GROUP BY candidate_document_id
+                HAVING count(*) > 1
+            ) AS repeats;
+
+            IF duplicated > 0 THEN
+                RAISE EXCEPTION
+                    'cannot restore UNIQUE: % candidate(s) carry more than one '
+                    'review case. Decide which judgement survives before '
+                    'downgrading.',
+                    duplicated;
             END IF;
         END
         $$;
