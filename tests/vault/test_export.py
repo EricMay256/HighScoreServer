@@ -616,17 +616,26 @@ def test_prune_leaves_a_prefix_the_corpus_does_not_own(
     assert (wiki / "compiled-page.md").exists()
 
 
-def test_the_wiki_prefix_is_owned_now_that_its_pages_are_rows() -> None:
-    """Pins the 2026-08-24 change, and the ordering that made it safe.
+def test_the_wiki_prefix_is_owned_and_owned_implies_exported() -> None:
+    """``Agent/wiki/`` is owned, and nothing is owned that is not also exported.
 
-    ``Agent/wiki/`` was deliberately excluded while the Stage-A librarian's
-    fourteen pages existed only as files. ``scripts/import_vault_wiki.py
-    --apply`` made them rows; the prefix joined the owned set afterwards.
-    Reversing that order deletes all fourteen on the next ``--apply --prune``.
+    The second assertion is the one with teeth. Prune walks the owned prefixes
+    and keeps whatever the export accounted for, so a prefix that is owned but
+    never written has an empty expected set -- and every file under it becomes
+    an orphan on the next ``--apply --prune``.
+
+    **The ordering that made this change safe is deliberately not asserted
+    here, because no unit test can observe it.** ``Agent/wiki/`` was held out
+    while the Stage-A librarian's fourteen pages existed only as files;
+    ``scripts/import_vault_wiki.py --apply`` made them rows, and the prefix
+    joined the owned set afterwards. That was a one-time deployment sequence
+    against a live database. What this pins is the end state it produced, not
+    the route taken to it.
     """
 
     assert "Agent/wiki/" in CORPUS_OWNED_PATH_PREFIXES
     assert set(CORPUS_OWNED_PATH_PREFIXES) <= set(EXPORTED_PATH_PREFIXES)
+
 
 def test_prune_still_sweeps_a_prefix_the_corpus_does_populate(tmp_path: Path) -> None:
     """The guard narrows the sweep; it does not disable it."""
