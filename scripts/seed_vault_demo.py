@@ -33,10 +33,9 @@ import sys
 from dataclasses import replace
 
 from sqlalchemy import delete
-from sqlalchemy.engine import make_url
 
 from app.env import load_environment
-from app.vault.db import create_vault_engine
+from app.vault.db import create_vault_engine, describe_database
 from app.vault.domain import (
     DocumentEmbedding,
     DocumentKind,
@@ -94,11 +93,6 @@ CORPUS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def describe_database(url: str) -> str:
-    """Host, port, and database name only — never the credential."""
-
-    parsed = make_url(url)
-    return f"{parsed.host}:{parsed.port}/{parsed.database}"
 
 
 async def remove_demo_documents(transactions: VaultTransactionService) -> int:

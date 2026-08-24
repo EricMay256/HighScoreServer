@@ -62,7 +62,7 @@ from sqlalchemy import insert, select
 
 from app.env import load_environment
 from app.vault.constants import WIKI_SCHEMA_VERSION
-from app.vault.db import create_vault_engine
+from app.vault.db import create_vault_engine, describe_database
 from app.vault.domain import (
     CompileRunState,
     DocumentEmbedding,
@@ -297,10 +297,19 @@ async def run_import(
         print(f"frontier_at from Stage A: {frontier}")
 
     if not apply:
-        print("\nDry run. Nothing was written. Re-run with --apply.")
+        # Says "no database" rather than only "nothing was written",
+        # because the difference matters: this returns before an engine is
+        # even built, so a dry run passing tells you the *files* parse and
+        # nothing whatsoever about the database it would write to. Reading
+        # it as a green light for the target has already cost an afternoon.
+        print("\nDry run. No database was contacted and nothing was written. Re-run with --apply.")
         return 0
 
     settings = replace(VaultSettings.from_environment(), enabled=True)
+    # Before the work, not after: this writes to whatever the environment
+    # resolved to, and the operator is the only one who knows whether that
+    # is the database they meant.
+    print(f"database   : {describe_database(settings.database_url)}")
     embedding = EmbeddingSettings.from_environment()
     if not embedding.api_key:
         # Refused rather than degraded. The read path may fall back to lexical

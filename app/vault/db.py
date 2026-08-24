@@ -9,6 +9,7 @@ from threading import Lock
 from time import perf_counter
 
 from sqlalchemy import event, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -17,6 +18,32 @@ from sqlalchemy.ext.asyncio import (
 
 from .domain import PoolSnapshot
 from .settings import VaultSettings, vault_enabled
+
+
+def describe_database(url: str) -> str:
+    """Host, port, and database name only -- never the credential.
+
+    For scripts to print **before** they act, so an operator can see which
+    database is about to be written to, exported from, or pruned. Three scripts
+    had a private copy of this and the two that most needed it had none:
+    ``import_vault_wiki`` and ``prune_vault_oauth`` both resolved a URL silently
+    and then wrote.
+
+    That silence has a cost. ``VaultSettings.from_environment`` reads
+    ``VAULT_DATABASE_URL`` first and falls back to ``DATABASE_URL``, and
+    ``load_environment`` fills either from ``.env`` when the process has none --
+    so "which database am I talking to" has three possible answers and none of
+    them was visible. A run against the wrong one fails confusingly at best, and
+    at worst succeeds.
+
+    Never the password: this string is printed to a terminal and pasted into
+    issues.
+    """
+
+    parsed = make_url(url)
+    host = parsed.host or "(local socket)"
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{host}{port}/{parsed.database}"
 
 
 logger = logging.getLogger(__name__)

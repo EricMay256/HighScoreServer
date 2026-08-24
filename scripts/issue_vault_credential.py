@@ -38,7 +38,7 @@ from sqlalchemy import func, insert, select, update
 
 from app.env import load_environment
 from app.vault.auth import TOKEN_PREFIX, VaultScope, hash_secret
-from app.vault.db import create_vault_engine
+from app.vault.db import create_vault_engine, describe_database
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings
 from app.vault.tables import vault_agent_credentials
@@ -67,6 +67,9 @@ _SECRET_BYTES = 32
 
 def _transactions() -> tuple[VaultTransactionService, object]:
     settings = replace(VaultSettings.from_environment(), enabled=True)
+    # A credential is granted against one database and useless against
+    # another, so an operator issuing one has to see which.
+    print(f"database   : {describe_database(settings.database_url)}")
     engine, observer = create_vault_engine(settings)
     return VaultTransactionService(engine, observer), engine
 

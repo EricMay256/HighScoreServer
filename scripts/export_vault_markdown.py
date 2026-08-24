@@ -34,20 +34,11 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from sqlalchemy.engine import make_url
-
 from app.env import load_environment
-from app.vault.db import create_vault_engine
+from app.vault.db import create_vault_engine, describe_database
 from app.vault.export import EXPORTED_PATH_PREFIXES, ExportReport, VaultExportService
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings
-
-
-def describe_database(url: str) -> str:
-    """Host, port, and database name only -- never the credential."""
-
-    parsed = make_url(url)
-    return f"{parsed.host}:{parsed.port}/{parsed.database}"
 
 
 def print_report(report: ExportReport, applied: bool, pruned: bool) -> None:

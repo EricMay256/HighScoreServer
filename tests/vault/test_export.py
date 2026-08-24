@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import delete
 
+from app.vault import export as export_module
 from app.vault.db import create_vault_engine
 from app.vault.domain import (
     DocumentKind,
@@ -462,31 +463,31 @@ def test_a_removed_document_leaves_an_orphan_that_prune_deletes(
     assert not (tmp_path / retired.vault_path).exists()
 
 
-def test_prune_never_reaches_outside_the_folders_the_corpus_owns(
+def test_prune_never_reaches_outside_the_exported_prefixes(
     tmp_path: Path,
 ) -> None:
-    """Two files nothing may delete, kept out for two different reasons.
+    """``Agent/INDEX.md`` sits under no exported prefix at all.
 
-    ``Agent/INDEX.md`` sits under no exported prefix at all. The Stage-A pages
-    under ``Agent/wiki/`` sit under one the export *writes* but the corpus does
-    not *own* -- which is the distinction ADR 0023 drew when it replaced the
-    occupancy test with an explicit owned set.
+    Pruning walks the owned prefixes and nothing else, so a file sitting beside
+    them -- however much it looks like an orphan -- is not this projection's to
+    delete.
+
+    This test used to make a second point with a Stage-A page under
+    ``Agent/wiki/``: a prefix the export writes but does not own. That example
+    retired on 2026-08-24, when the fourteen pages became rows and the prefix
+    joined ``CORPUS_OWNED_PATH_PREFIXES``. The rule it showed is still live and
+    is tested below against a prefix held out deliberately, rather than against
+    whichever one happens to be unowned today.
     """
 
     (tmp_path / "Agent").mkdir()
     index = tmp_path / "Agent" / "INDEX.md"
     index.write_text("wiki index\n", encoding="utf-8")
-    wiki = tmp_path / "Agent" / "wiki"
-    wiki.mkdir()
-    stage_a = wiki / "compiled-page.md"
-    stage_a.write_text("written by another librarian\n", encoding="utf-8")
 
     report = export_to(tmp_path, (make_document(),), apply=True, prune=True)
 
     assert report.prunable == []
     assert index.exists()
-    assert stage_a.exists()
-
 
 def test_list_under_path_prefixes_pages_the_agent_tree(
     configure_test_env: None,
@@ -575,23 +576,31 @@ def test_list_under_path_prefixes_pages_the_agent_tree(
     asyncio.run(exercise())
 
 
-def test_prune_leaves_a_prefix_the_corpus_does_not_own(tmp_path: Path) -> None:
-    """The hazard this guard exists for, caught against the real corpus.
+def test_prune_leaves_a_prefix_the_corpus_does_not_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prefix the export *writes* but does not *own* is never swept.
 
-    ``Agent/wiki/`` is an exported prefix, but the service holds no wiki
-    documents -- compilation is not built yet, and the Stage-A librarian still
-    owns 15 compiled pages there. Without this guard, one ``--apply --prune``
-    against the live vault deletes every one of them, because no row accounts
-    for any of them.
+    ADR 0023's distinction, and what stops one ``--apply --prune`` deleting a
+    second writer's work: the file has no row, so an occupancy test would call
+    it an orphan, and only the owned set says otherwise.
 
-    ADR 0012 answers the same question the same way for reconciliation: sweep
-    only after a complete walk, and refuse an implausible one.
-
-    The guard used to read the hazard off occupancy -- no rows under the prefix,
-    so leave it alone. It now reads it off ``CORPUS_OWNED_PATH_PREFIXES``, which
-    gives the same answer here and a different one for an owned folder that is
-    legitimately empty. See the promotion-candidate test below.
+    Held out with a patched constant rather than by naming whichever prefix is
+    unowned today. As of 2026-08-24 the owned set and the exported set are
+    equal -- ``Agent/wiki/`` was the last hold-out and its pages are rows now --
+    so a test written against the live values would assert nothing at all while
+    still appearing to pass.
     """
+
+    monkeypatch.setattr(
+        export_module,
+        "CORPUS_OWNED_PATH_PREFIXES",
+        tuple(
+            prefix
+            for prefix in CORPUS_OWNED_PATH_PREFIXES
+            if prefix != "Agent/wiki/"
+        ),
+    )
 
     wiki = tmp_path / "Agent" / "wiki"
     wiki.mkdir(parents=True)
@@ -606,6 +615,18 @@ def test_prune_leaves_a_prefix_the_corpus_does_not_own(tmp_path: Path) -> None:
     assert (wiki / "_index.md").exists()
     assert (wiki / "compiled-page.md").exists()
 
+
+def test_the_wiki_prefix_is_owned_now_that_its_pages_are_rows() -> None:
+    """Pins the 2026-08-24 change, and the ordering that made it safe.
+
+    ``Agent/wiki/`` was deliberately excluded while the Stage-A librarian's
+    fourteen pages existed only as files. ``scripts/import_vault_wiki.py
+    --apply`` made them rows; the prefix joined the owned set afterwards.
+    Reversing that order deletes all fourteen on the next ``--apply --prune``.
+    """
+
+    assert "Agent/wiki/" in CORPUS_OWNED_PATH_PREFIXES
+    assert set(CORPUS_OWNED_PATH_PREFIXES) <= set(EXPORTED_PATH_PREFIXES)
 
 def test_prune_still_sweeps_a_prefix_the_corpus_does_populate(tmp_path: Path) -> None:
     """The guard narrows the sweep; it does not disable it."""
