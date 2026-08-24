@@ -185,10 +185,171 @@ two, both listed below.
   `vault.vault_agent_credentials` and are issued with
   `scripts/issue_vault_credential.py`; only the SHA-256 of each secret is
   stored. See vault ADR 0015.
+- `VAULT_OPERATOR_PASSWORD_HASH` is introduced by the OAuth authorization
+  server (vault ADR 0024). It holds a **bcrypt hash**, never the password, and
+  it is the one human credential the vault has. See below.
 - Never use `heroku config` output in CI logs or documentation.
 
 Local secrets belong in `.env`, which is already ignored by Git. `.env.example`
 contains placeholders and non-secret defaults only.
+
+### `VAULT_OPERATOR_PASSWORD_HASH`
+
+The secret the OAuth login page verifies against, when a client authorizes
+itself against the vault.
+
+**It holds a bcrypt hash, never the password.** The value looks like this — a
+bcrypt modular-crypt string, ASCII, 60 characters, `$`-delimited:
+
+```
+$2b$12$H8choNzlGRYACnlz.LgT1O3sn7Kt7PwtaP7sJKAnIqamtAS/LCeFi
+ │  │  └── 22-char salt + 31-char digest, bcrypt's base64 alphabet
+ │  └───── cost factor (work exponent), from bcrypt.gensalt()'s default
+ └──────── algorithm identifier
+```
+
+There is no separate encoding step and nothing to base64 by hand: the string
+above *is* the config value, verbatim. Setting the plaintext password here does
+not work — it would be compared as though it were a hash and fail every login.
+
+Configuration rather than a table, deliberately: there is exactly one, it has no
+lifecycle a schema would model, rotation is `heroku config:set`, and a config
+var's backups circulate less widely than a database's do.
+
+Unset is a supported state and means the password identity method is not
+configured for this deployment. It is never treated as "any password works" —
+the login refuses outright, the same way `VAULT_ENABLED` defaulting to false
+serves no vault rather than an unguarded one.
+
+#### Generating it
+
+```bash
+python -m scripts.hash_vault_operator_password
+```
+
+It prompts twice without echo, prints the hash, and touches nothing — no
+database, no `DATABASE_URL`, no writes. Copy the printed line.
+
+Use the script rather than an inline `python -c`. One that reads with `input()`
+prints the password to the terminal; one that takes it as an argument leaves it
+in shell history and in the process table. `getpass` avoids both, and on Windows
+it reads the console directly — which also means the script cannot be driven by
+piping into it, on purpose.
+
+#### Setting it
+
+```bash
+heroku config:set VAULT_OPERATOR_PASSWORD_HASH='$2b$12$H8choNzlGRYACnlz.LgT1O3sn7Kt7PwtaP7sJKAnIqamtAS/LCeFi' --app high-score-server
+```
+
+**Single-quote the value.** A bcrypt hash contains `$` characters that bash and
+`zsh` expand as variables — unquoted, `$2b$12$...` becomes a mangled fragment,
+and the symptom is a login that rejects the correct password rather than any
+error naming the config var. PowerShell does not expand `$` inside single
+quotes either, so the same form is correct there.
+
+Locally the same value goes in `.env`, unquoted, since `.env` is read by the
+application rather than by a shell.
+
+#### Three things that go wrong
+
+- **The plaintext password was set instead of the hash.** It will not verify.
+  The value must start `$2`.
+- **bcrypt truncates at 72 bytes**, so `passwords.py` refuses a longer password
+  outright rather than hashing a prefix that would let a different passphrase
+  verify. The limit is *bytes*: a passphrase of accented characters reaches it
+  sooner than its length suggests, and the script says so rather than silently
+  shortening.
+- **A malformed hash reads as a wrong password.** The application logs
+  `vault operator password hash is not a valid bcrypt hash` at ERROR and reports
+  an ordinary login failure — one message for every failure is ADR 0024's rule,
+  so the log is where the real cause is findable. If a correct password is being
+  rejected, look there before assuming the password is wrong.
+
+### Turning the OAuth authorization server on
+
+The vault hosts its own OAuth 2.1 authorization server (vault ADR 0024) so that
+clients with no way to send a static header — the claude.ai web connector — can
+still reach it. It is off until `VAULT_PUBLIC_URL` is set, and that variable is
+the switch on purpose: every URL in the discovery metadata is absolute, so a
+deployment that cannot state its own origin cannot publish correct metadata.
+Forgetting it therefore serves nothing rather than something wrong.
+
+```bash
+heroku config:set VAULT_PUBLIC_URL=https://high-score-server-xxxx.herokuapp.com --app high-score-server
+```
+
+No trailing slash; one is stripped if present. It must be the origin clients
+actually reach, because the SDK builds `/authorize` and `/token` from it and a
+mismatch surfaces as a client giving up during discovery rather than as an
+error.
+
+Two variables together make the flow work, and both are needed:
+
+| Variable | Required | Effect |
+| -------- | -------- | ------ |
+| `VAULT_PUBLIC_URL` | yes | Publishes discovery metadata and registers `/authorize`, `/token`, `/register`, `/revoke`, `/vault/login`. Absent, none of them exist. |
+| `VAULT_OPERATOR_PASSWORD_HASH` | yes, for the password method | What the login page verifies against. Absent, every login refuses. |
+| `VAULT_LOGIN_RATE_LIMIT` | no (`10/minute`) | The login POST's own bucket, tighter than the pre-auth guard. |
+| `VAULT_REGISTRATION_RATE_LIMIT` | no (`10/minute`) | `/register`'s own bucket. Registration is public, unauthenticated, and writes a row; one client registers once. Defence in depth, not the storage bound — pruning is that. |
+
+Once both are set, a client registers itself and the flow is:
+
+```
+POST /register              the vendor's backend, server to server
+GET  /authorize             the operator's browser, a real top-level navigation
+  -> 302 /vault/login       consent and password on one screen
+POST /vault/login           bcrypt verify, mint an authorization code
+  -> 303 back to the client with code and state
+POST /token                 code + PKCE verifier -> access token + refresh token
+```
+
+The access token it issues is an ordinary `hssv1_` credential, so it appears in
+`issue_vault_credential list` beside every other one and is revoked the same way.
+Its principal is `oauth-<client_id>` — the server-issued registration id, never the
+client's self-declared name — and that is also what lands in `ContributedBy` on notes
+the client writes. The readable name is on the credential's `display_name`, which is
+what `issue_vault_credential list` shows. A name-derived principal collided across
+separately registered clients that chose the same name, which meant sharing an
+idempotency namespace and a quota; see vault ADR 0024's 2026-08-23 amendment.
+
+**Scopes are capped at `vault:read` and `vault:write`.** A client cannot request
+more — `vault:update`, `vault:delete` and `vault:review` are unreachable through
+this path by construction, not by an operator declining on a screen. That is a
+security decision: ADR 0021's defence against instructions injected into note
+text is that a destructive tool is absent from the surface that text can name.
+
+**Access tokens live one hour; refresh tokens thirty days.** The client renews
+itself, so the operator authorizes roughly monthly rather than hourly. Each
+refresh mints a new credential row and revokes the previous one, so revoked rows
+accumulate — expected, and they grant nothing.
+
+**A replayed refresh token revokes the whole chain.** If a rotated token is
+presented again, every credential ever minted from that authorization is
+revoked. The legitimate client simply re-authorizes; the symptom an operator
+sees is a connector asking to be reconnected, and the cause is in the log as
+`vault oauth refresh token replayed; family revoked`.
+
+#### Troubleshooting the flow
+
+| Symptom | Cause |
+| ------- | ----- |
+| Client reports the server does not support OAuth | `VAULT_PUBLIC_URL` unset, so no metadata is published |
+| `/authorize` 302s to a login page that says the request is no longer valid | The nonce expired (5 minutes) or was already used |
+| Correct password rejected every time | `VAULT_OPERATOR_PASSWORD_HASH` unset or mangled — check the log for `not a valid bcrypt hash` |
+| Login returns 429 | The login bucket; wait a minute, or raise `VAULT_LOGIN_RATE_LIMIT` |
+| `/register` returns 429 | The registration bucket; wait a minute, or raise `VAULT_REGISTRATION_RATE_LIMIT`. Re-registering repeatedly is itself unusual — a client registers once. |
+| A typo'd password needs restarting from the client | Deliberate: a submit redeems the nonce whether or not the password was right, so a wrong guess burns that authorization |
+
+#### Why bcrypt here and SHA-256 everywhere else
+
+Agent secrets (`hssv1_…`) are machine-generated with full entropy, so a plain
+digest is correct for them: there is no dictionary a work factor would slow
+down, and the read surface cannot afford a deliberately slow hash per request.
+An operator password is chosen by a person, so the work factor is exactly the
+point, and it runs once per authorization rather than once per request. Vault
+ADR 0015 says explicitly not to carry the SHA-256 reasoning across to
+human-chosen passwords; this is where that matters.
 
 ## Migration lineages
 
@@ -258,6 +419,105 @@ Expected production facts:
 - connection limit: 20;
 - `vector` is available;
 - the two version tables contain heads from different Alembic lineages.
+
+## Corpus migration: replacing the imported notes
+
+Written from the 2026-08-21 run that carried `origin` and slug paths into production. Follow
+it whenever the corpus has to be re-imported — the shape is the same even when the reason is
+not.
+
+**The one thing that governs everything else: find out what is native first.** Notes
+contributed directly through the live service exist *only* in the database. A re-import
+cannot recreate them, and an unfiltered wipe destroys them. The August run found one, and it
+was a good note. Census before you plan, not after:
+
+```sql
+SELECT contributed_by, count(*) FROM vault.vault_documents GROUP BY 1 ORDER BY 2 DESC;
+```
+
+### Order, and why it is not negotiable
+
+1. **Census** (read-only). Counts by contributor, `vault_path` shapes, review cases,
+   credentials. Nothing is decided until this comes back.
+2. **Back up, *after* the deploy.** A backup taken before the release captures the
+   pre-migration schema, so restoring it leaves the database a revision behind the running
+   code and needs `alembic -c alembic-vault.ini upgrade head` before the app works again.
+   The data is safe either way; the rollback is only one step if the backup is post-deploy.
+   `heroku pg:backups:capture --app <app>`.
+3. **Deploy.** The release phase runs the vault lineage. **This must precede the import**:
+   `VaultContributionRequest` sets `extra="forbid"`, so an import sending a field the
+   deployed model does not know is a 422 on every note.
+4. **Verify the deploy in two places.** The migration (`vault.vault_alembic_version`, plus
+   the columns and constraints it added) *and* the running code — fetch `/openapi.json` and
+   confirm the request model carries the new field. A migration that landed while the dynos
+   still run old code looks fine from the database side.
+5. **Export the corpus as it stands.** A readable snapshot on disk, before anything
+   destructive, including the native notes. Validate it: `python -m vault_governance.cli
+   validate --vault <snapshot-root>` with a copy of `00 Governance/` beside the `Agent/`
+   tree.
+6. **Issue a fresh import principal.** Not the previous one. The ledger is keyed
+   `(principal_id, idempotency_key)` and the import re-sends the same keys, so reusing the
+   old principal makes every note either a silent replay or — once the request body has
+   changed, which is usually the point — a `409` conflict on all of them. A new principal
+   sidesteps both and leaves the old ledger intact for ADR 0019's reasons.
+7. **Dry-run the importer before wiping.** It reports exactly what each note would send and
+   what, if anything, is dropped. Doing this after the wipe means discovering a payload bug
+   with an empty corpus.
+8. **Wipe, filtered to the import principal.** Delete through
+   `VaultDocumentRepository.delete`, never raw SQL: it clears the write-request and
+   review-case pointers so the ledger and any judgements survive with a null reference. Raw
+   `DELETE` either trips the foreign keys or takes the audit trail with it.
+9. **Import.** ~2s per note is the built-in pacing and matches the sustained contribute
+   quota, so a 60-note corpus takes about two minutes. Pass `--map` so the
+   original-id → new-id mapping does not live only in scrollback.
+10. **Verify.** Counts, provenance coverage, path shapes, embeddings, no orphan documents.
+    Export again and re-run the governance validator; a second export immediately after
+    should report every file unchanged, which is what proves the projection is stable.
+11. **Revoke the import credential**, and any other write credential that has outlived its
+    purpose.
+
+### If the import fails partway
+
+**Do not re-wipe.** The importer is idempotent per `(principal, key)`, so re-running it
+resumes and skips what already landed. Wiping again throws away the partial progress and
+starts the clock over.
+
+### Credential tokens are printed once, to stdout
+
+`issue_vault_credential` prints the token and cannot recover it. When an agent or a shared
+session runs the command, that token lands in a transcript — which has already happened once
+to a still-live production credential. Prefer issuing the credential yourself in your own
+shell, or redirect the output to a file you control. Revoke anything that leaks:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
+```
+
+### `heroku run` eats flags meant for your script
+
+`heroku run -a <app> python -m scripts.x --id abc` fails with `Nonexistent flags: -m, --id`:
+Heroku's own parser claims them before the remote command sees them. Quote the whole remote
+command as a single argument:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
+```
+
+### PowerShell has no inline environment prefix
+
+`DATABASE_URL=... python x.py` is a bash-ism. In PowerShell, set the variables as their own
+statements first, use the venv interpreter explicitly, and clear them afterwards so a later
+command in the same session does not quietly address production:
+
+```powershell
+$env:DATABASE_URL = (heroku config:get DATABASE_URL --app <app>)
+$env:VAULT_ENABLED = 'true'; $env:PYTHONPATH = '.'
+.\.venv\Scripts\python.exe <script>.py --apply
+Remove-Item Env:DATABASE_URL, Env:VAULT_ENABLED, Env:PYTHONPATH
+```
+
+Reading the URL from `heroku config:get` beats pasting it: one fewer copy of a live
+credential, and it survives rotation.
 
 ## Later move to a separate database
 
@@ -453,7 +713,8 @@ credential into the wrong database is silent.
 | `vault:write` | Contribute a new note — **and nothing else** |
 | `vault:update` | Replace an existing note's content |
 | `vault:delete` | Retire a note, **destroying it** (vault ADR 0019) |
-| `vault:review`, `vault:compile`, `vault:export` | Recognised, granted by no route yet |
+| `vault:review` | List, read, and decide near-duplicate review cases. **The only scope that serves `flagged` content**, so grant it narrowly |
+| `vault:compile`, `vault:export` | Recognised, granted by no route yet |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
 ADR 0020.
@@ -586,6 +847,219 @@ limit at all, which is the point at which a shared backend becomes necessary
 rather than tidier. The pre-auth guard can already take one via
 `VAULT_RATE_LIMIT_STORAGE_URI`; the quota cannot, and would need the same
 treatment.
+
+## Granting an agent access, end to end
+
+Everything from "someone wants to use the vault" to "their agent is contributing
+notes". Do it once per person or per machine.
+
+### 1. Decide the scopes
+
+Scopes are verbs, one per route (vault ADR 0020), and they are what shapes the
+MCP tool surface a caller can see (ADR 0021). Grant the narrowest set that does
+the job:
+
+| Who | Scopes | Why |
+| --- | ------ | --- |
+| An ordinary agent or person contributing notes | `vault:read vault:write` | Search, fetch, contribute. The common case |
+| A read-only consumer | `vault:read` | Retrieval with no way to write |
+| A corpus import or backfill | `vault:read vault:write vault:update` | Replacement is a separate verb |
+| A reviewer adjudicating flagged notes | `vault:read vault:review` | **Serves `flagged` content**, the least-vetted text in the corpus |
+| Nobody, by default | `vault:delete` | Retirement destroys a note (ADR 0019). Grant per incident, revoke after |
+
+Withholding a scope is a **prompt-injection boundary, not tidiness**. The MCP
+tool list is filtered by the caller's scopes, so a credential without
+`vault:delete` has no `vault_retire_note` on its surface at all — there is no
+tool for injected text in a note to name. Do not fold scopes together because
+issuing two looks like ceremony; that is exactly how `vault:write` came to mean
+"may destroy any note" before ADR 0020 split it.
+
+### 2. Mint the credential
+
+```bash
+python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write
+```
+
+Against production, set `DATABASE_URL` explicitly for the command — issuing into
+the wrong database is silent. On a dyno it is already set:
+
+```bash
+heroku run --app <app> "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write"
+```
+
+Quote the whole remote command. `heroku run` parses the line first and claims
+`-m` and `--scopes` for itself otherwise, reporting `Nonexistent flags` about
+flags that are perfectly valid for your script.
+
+**Name it per person or per machine, never per team.** `contributed_by` is
+derived from the principal and never from the request body, so the name becomes
+the note's `ContributedBy` — one credential per person gives per-person
+provenance in the corpus and per-person revocation, both for free. A shared
+credential gives up both and cannot be taken back from one user.
+
+`--days N` sets an expiry. Omit it for none.
+
+**The token prints once and is not recoverable** — only `sha256(secret)` is
+stored. Two consequences:
+
+- Have the *person* run this in their own shell. An agent that runs it has read
+  the secret into its transcript, and from there into summaries and logs. This
+  has already happened twice to live production credentials.
+- If it leaks, revoke and reissue. Do not reason about how exposed it is.
+
+### 3. Register the MCP server (preferred)
+
+**One line. No continuation character.**
+
+```
+claude mcp add --transport http --scope user vault https://example.herokuapp.com/api/v1/vault/mcp/ --header "Authorization: Bearer hssv1_<credential-id>_<secret>"
+```
+
+A trailing `\` is a bash-ism PowerShell does not honour. The command truncates
+there, the server registers *without* the `--header`, and the only symptom is a
+later `✘ Failed to connect` that names nothing useful. That has already happened
+once, from this very runbook — which at the time also carried a section warning
+that PowerShell needs different syntax.
+
+Substitute the real host. A literal `<host>` registers as a literal `<host>`,
+which is the second half of the same incident.
+
+`--scope user` makes the server available in every project. The default is
+`local`, meaning the current project only — rarely what you want for a vault.
+
+**Note the trailing slash** on the URL. The bare form 307-redirects to it, so
+both work and the slash saves a hop.
+
+This only stores a URL and a header — nothing is launched. The vault MCP server
+is an ASGI app mounted into the host application, so it is already running
+wherever the host runs; there is no process to start and no Procfile entry.
+
+The credential lives in the client's configuration and the transport attaches
+it, so **the agent never handles the token**. That is the reason to prefer this
+over REST: not convenience, but that there is no secret in the session to leak.
+
+### 4. Or configure REST (fallback)
+
+For agents without MCP — Codex, CI, one-off scripts. The token goes in an
+environment variable the process inherits:
+
+```bash
+export VAULT_API_TOKEN='hssv1_<credential-id>_<secret>'
+```
+
+Never on a command line: argv is readable by every process on the host. Never in
+a file the agent writes, and never printed.
+
+Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
+`POST /api/v1/vault/contributions`, `PUT /api/v1/vault/notes/{id}`, and
+`DELETE /api/v1/vault/notes/{id}`, all taking `Authorization: Bearer <token>`.
+
+### 5. Verify
+
+```bash
+curl -sS -H "Authorization: Bearer $VAULT_API_TOKEN" "https://<host>/api/v1/vault/search?q=idempotency&limit=3"
+```
+
+On PowerShell that is `curl.exe` — the bare `curl` is an alias for
+`Invoke-WebRequest`, which takes different arguments and throws on a non-2xx
+rather than printing the body. Use `$env:VAULT_API_TOKEN` for the variable.
+
+A working credential returns results and a `vector_status`.
+
+For MCP, check the registration itself first:
+
+```
+claude mcp list
+```
+
+`✔ Connected` means the URL and header both landed. `✘ Failed to connect` most
+often means the header did not — see the truncation trap above.
+
+There is **no edit subcommand**. Changing a registration is remove-then-add:
+
+```
+claude mcp remove vault
+```
+
+Then check the tools: the ones that appear should match the scopes granted — a
+`vault:read vault:write` credential shows `vault_search`, `vault_get_note`, and
+`vault_contribute`, and nothing else. **A server added mid-session does not
+appear in that session**; the tool set is fixed at startup, so restart the agent
+before concluding the registration failed.
+
+### 6. Rotate, revoke, and change scopes
+
+```bash
+python -m scripts.issue_vault_credential list
+python -m scripts.issue_vault_credential revoke --id <credential-id>
+```
+
+`list` shows each credential's principal, scopes, creation, expiry, revocation,
+and `last_used_at` — which means "last used", not "last attempted", because it
+is written only on success. A credential that has never been used shows `never`,
+which is how a registration that silently failed becomes visible.
+
+Rotation is revoke-then-issue; there is no re-key, because the secret was never
+stored.
+
+#### Widening and narrowing without rotating
+
+```bash
+python -m scripts.issue_vault_credential grant --id <credential-id> --scopes vault:update
+python -m scripts.issue_vault_credential revoke-scope --id <credential-id> --scopes vault:update
+```
+
+Both change what an existing credential may do and leave its secret alone, so
+nothing has to be redistributed — that is the difference from revoke-then-issue,
+and the reason to reach for these instead.
+
+Both print the scope set before and after. Both are additive/subtractive rather
+than a replacement: `grant` never removes a scope the operator did not name, and
+naming a scope already held (or already absent) reports `No change` and writes
+nothing.
+
+**This is the only supported way an OAuth client receives an above-baseline
+scope.** Vault ADR 0024 caps what a client may *request* at `vault:read` and
+`vault:write`, so `vault:update`, `vault:delete` and `vault:review` are
+unreachable through the authorization flow by construction. An operator grants
+them deliberately, to one named credential, with this command. Before it existed
+the documented method was a hand-written `UPDATE` on the `scopes` column, which
+is not something that should become routine against production.
+
+Three refusals worth knowing about:
+
+- **A revoked credential is refused, not widened.** Scopes on a revoked row grant
+  nothing, and an operator reaching for `grant` there is plausibly hoping it will
+  un-revoke the credential. It will not, so the command says so instead of
+  succeeding silently. Issue a new credential.
+- **An expired credential is refused** for the same reason. A credential whose
+  expiry is still in the future is fine — every OAuth-minted credential has one,
+  and those are exactly the rows this command exists for.
+- **An unknown scope name is refused before any write**, with the list of real
+  ones. The database CHECK would catch it too, but as an integrity error naming a
+  constraint.
+
+Removing every scope is allowed and is **not** the same as revoking: the
+credential still authenticates, and each route then refuses it with `403` rather
+than `401`. The command says so when it happens, because an operator who meant to
+revoke needs to know they have not.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| ------- | ----- |
+| `401` | Bad, expired, or revoked credential. The response deliberately does not say which |
+| `403` | Valid credential, missing scope. Check the grant against the table above |
+| MCP tools missing entirely | Server not registered for this client, or the header is wrong. The mount carries its own auth — it inherits none of the host router's guards |
+| Some MCP tools missing | Working as designed: the tool list is filtered by scope |
+| `421` on every MCP request | `VAULT_MCP_ALLOWED_HOSTS` is set and does not name this host. Unset it, or add the host. It is off by default because the SDK's default validates `Host` against `127.0.0.1` and would reject every request to a public deployment |
+| `429` | Quota, per principal per operation. Buckets are per process, so the real ceiling is the limit times the worker count |
+| `503` on a write | No embedding provider, so the dedup gate cannot run. The write path refuses rather than inserting un-deduplicated content |
+| `409` on a contribution | An idempotency key was reused for different content. Change one or the other; do not loop |
+
+A `flagged` result is **not** an error. It is a settled `200` outcome meaning the
+note was written for review, and retrying it creates a second note that flags
+against the first.
 
 ## Saturation
 

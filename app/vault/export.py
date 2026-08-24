@@ -17,14 +17,35 @@ two machines unless the exporter converts. That was observed on the real corpus,
 not assumed.
 
 **What is projected.** ``EXPORTED_PATH_PREFIXES`` mirrors the ``Agent/`` rules
-that ``folders.yml`` marks ``engine_managed: true``. That deliberately excludes
-``Agent/Promotion Candidates/``, which ``folders.yml`` marks
-``engine_managed: false`` and the Promotion Policy calls "a human-curated queue,
-**not** an engine-managed store ... kept outside the engine's dedup gate on
-purpose". Writing files there would make this a second writer to a folder whose
-whole point is human judgment. Nothing here touches ``Human/``: agents may not
-write there at all, and the ``check-policy`` gate on ``ai/`` branches enforces
-it.
+that ``folders.yml`` marks ``engine_managed: true``, which since ADR 0023
+includes ``Agent/Promotion Candidates/``. That folder was originally excluded on
+the grounds that it was a human-curated drop box; it is now a projection of
+``promotion_status``, and dragging a file into it by hand does nothing, because
+the row still names its own path and the next export rewrites the original. The
+exporter is not a second writer there -- it is the only one. Nothing here
+touches ``Human/``: agents may not write there at all, and the ``check-policy``
+gate on ``ai/`` branches enforces it.
+
+**Candidacy routes through ``vault_path``, not through a directory this module
+computes.** ADR 0010 requires ``vault_path`` to be byte-identical to the
+governance scanner's ``rel_path``, so the row and the file must agree about
+which folder rule applies. ``VaultPromotionService`` moves the two together;
+this module writes wherever the row says, exactly as it does for every other
+note.
+
+**One file here is generated rather than projected.** ``Agent/wiki/_index.md``
+is a ``MoC`` whose every line is derived from pages the corpus already holds --
+their slugs and summaries -- so it is rendered here rather than stored as a row,
+which would be a second source of truth for facts the rows already state. It is
+added to the expected set so the prune sweep does not treat the file it just
+wrote as an orphan no row accounts for. See ``render_wiki_index``.
+
+**Pruning is narrower than writing.** ``CORPUS_OWNED_PATH_PREFIXES`` is the
+subset the service is authoritative for, and only those are swept. It is an
+explicit set rather than "prefixes the corpus populates", because occupancy is
+the wrong ownership signal: when the last candidate is promoted or retracted the
+folder goes empty, and an occupancy test would skip it and strand the final file
+showing a candidate that is no longer one. See ``VaultExportService.export``.
 
 **Flagged notes are exported.** ADR 0008 withholds ``flagged`` from *agents*,
 because the consumer is a model that will not check the ``status`` field. A
@@ -77,9 +98,33 @@ from .service import VaultTransactionService
 # governance decision, and a deployment must not be able to opt into projecting
 # into one the governance layer reserved for a human.
 EXPORTED_PATH_PREFIXES: tuple[str, ...] = (
+    "Agent/Promotion Candidates/",
     "Agent/notes/",
     "Agent/review/",
     "Agent/wiki/",
+)
+
+# Which of those the corpus *owns*, and may therefore delete files from. A
+# narrower set than what may be written, and the difference is deliberate:
+# `Agent/wiki/` is still populated by 14 pages the Stage-A librarian loop wrote
+# and the service has never seen, so an export that swept it would delete
+# another writer's work.
+#
+# **Compilation now exists (ADR 0027), and that is not sufficient.** The gate is
+# whether those fourteen files exist as rows, not whether the code that could
+# produce them exists. Adding `Agent/wiki/` here before they are imported or
+# recompiled is a one-line diff that deletes every one of them on the next
+# `--apply --prune`. Do it after, and verify with a dry run first.
+#
+# Explicit rather than derived from occupancy, per ADR 0023. "Sweep the
+# prefixes that have rows" looks equivalent and is not: an owned folder is
+# legitimately empty -- `Agent/Promotion Candidates/` between the last
+# candidate settling and the next one being proposed, `Agent/review/` today --
+# and skipping it there strands exactly the file that most needs removing.
+CORPUS_OWNED_PATH_PREFIXES: tuple[str, ...] = (
+    "Agent/Promotion Candidates/",
+    "Agent/notes/",
+    "Agent/review/",
 )
 
 # Ported from vault_contrib.vault_frontmatter.SCHEMA_ORDER, with four keys the
@@ -293,6 +338,18 @@ _ORIGIN_KEY_MAP: tuple[tuple[str, str], ...] = (
 )
 
 
+# The subset an imported *wiki page* takes from `origin`. Narrower than the note
+# map above, and narrower for a reason: `CompiledBy` and `CompileRunID` have
+# real columns (`compiled_by`, `compile_run_id`) that already hold the upstream
+# values, so overriding them from JSONB would be the same fact twice. Only the
+# authoring timestamps have no column of their own -- `created_at` is when the
+# row landed, which for an imported page is the import.
+_WIKI_ORIGIN_KEY_MAP: tuple[tuple[str, str], ...] = (
+    ("created_at", "CreatedAt"),
+    ("updated_at", "LastUpdated"),
+)
+
+
 def _origin_overrides(document: VaultDocument) -> dict[str, Any]:
     """Upstream provenance, which wins over the column-derived value.
 
@@ -312,10 +369,24 @@ def _origin_overrides(document: VaultDocument) -> dict[str, Any]:
     byte-stable. See origin.py.
     """
 
+    return _project_origin(document, _ORIGIN_KEY_MAP)
+
+
+def _project_origin(
+    document: VaultDocument,
+    key_map: tuple[tuple[str, str], ...],
+) -> dict[str, Any]:
+    """Upstream values for the governance keys the given map names.
+
+    Blank values are skipped rather than projected: an import that had no
+    upstream timestamp to carry must not overwrite the column-derived one with
+    an empty string, which would render as a keyless line and fail validation.
+    """
+
     return {
         key: document.origin[field_name]
-        for field_name, key in _ORIGIN_KEY_MAP
-        if field_name in document.origin
+        for field_name, key in key_map
+        if str(document.origin.get(field_name) or "").strip()
     }
 
 
@@ -368,6 +439,11 @@ def _wiki_frontmatter(document: VaultDocument) -> dict[str, Any]:
             "Related": list(document.related_ids),
         }
     )
+    # An imported page carries the dates it was really written on. Without
+    # this, projecting a page imported from Stage A would stamp it with the
+    # moment of the import, which is the same lossiness the 2026-08-12 note
+    # import produced and `origin` exists to prevent.
+    metadata.update(_project_origin(document, _WIKI_ORIGIN_KEY_MAP))
     return metadata
 
 
@@ -415,6 +491,121 @@ def render_document(document: VaultDocument) -> RenderedDocument:
         content=dump_note(metadata, document.body, order),
         dropped_fields=_dropped_fields(document),
         warnings=_warnings(document),
+    )
+
+
+# The generated table of contents for `Agent/wiki/`. A `MoC` in governance
+# terms, which `folders.yml` admits alongside `Wiki Page`.
+#
+# **Written by the exporter, not stored as a row**, and that is the decision.
+# Every line in it is derived from pages the corpus already holds -- their
+# slugs and their summaries -- so a row would be a second source of truth for
+# facts the rows already state, which is what ADR 0025 rejects for edges. The
+# exporter is also the only thing that knows what it just wrote.
+WIKI_INDEX_PATH = "Agent/wiki/_index.md"
+
+# Exactly the keys the Stage-A renderer emits, minus `aliases`. It emits that
+# one bare (`aliases:`) and the canonical renderer here cannot -- `aliases` is
+# in LIST_KEYS, so an empty one renders `[]` -- and an optional key that would
+# differ on every comparison is worse than an absent one. `Title` is
+# deliberately *not* added: `types.yml` requires nothing of a `MoC`, the
+# heading already carries the name, and adding a key Stage A never wrote makes
+# the two harder to diff, which is the point of keeping this a port.
+WIKI_INDEX_KEY_ORDER: tuple[str, ...] = (
+    "Type",
+    "Status",
+    "CreatedAt",
+    "LastUpdated",
+    "tags",
+)
+
+
+def _projected_timestamps(document: VaultDocument) -> tuple[str, str]:
+    """The ``CreatedAt``/``LastUpdated`` a document's file will carry.
+
+    Column-derived, then overridden by ``origin`` exactly as the page's own
+    frontmatter is -- so the index agrees with the files it indexes rather than
+    reporting when their rows happened to land.
+    """
+
+    created = utc_timestamp(document.created_at)
+    updated = utc_timestamp(document.updated_at)
+    overrides = _project_origin(document, _WIKI_ORIGIN_KEY_MAP)
+    return (
+        str(overrides.get("CreatedAt", created)),
+        str(overrides.get("LastUpdated", updated)),
+    )
+
+
+def render_wiki_index(documents: Sequence[VaultDocument]) -> RenderedDocument | None:
+    """The `Agent/wiki/` index, or None when there are no pages to index.
+
+    Ported from the Stage-A engine's ``render_moc`` as specialised by
+    ``render_wiki_index``, and kept diffable against them the way
+    ``governance.py`` is kept diffable against ``vault_contrib.core`` (ADR
+    0004). ``Agent/wiki/`` has no subfolders, so the grouping that renderer does
+    by first path component collapses to a single flat list.
+
+    **Both timestamps are derived from the pages, never from the clock.** Stage
+    A stamped ``LastUpdated`` with ``now()`` and preserved ``CreatedAt`` by
+    reading the previous file. Neither is available here: this module's whole
+    contract is that re-running over an unchanged corpus produces a zero-line
+    diff, and it deliberately parses no markdown. So ``CreatedAt`` is the
+    earliest page's and ``LastUpdated`` the latest -- stable, and true in the
+    sense that matters, since the index changed exactly when its newest page
+    did.
+
+    Entries sort by slug, case-insensitively, which is what the Stage-A
+    renderer does and what keeps the file from churning when a title changes
+    but its path does not.
+
+    None when the corpus holds no wiki pages: writing "_0 notes._" would create
+    a file to describe nothing, and leaving it absent lets the prune guard
+    remove a stale one once ``Agent/wiki/`` is a corpus-owned prefix.
+    """
+
+    pages = [
+        document
+        for document in documents
+        if document.kind is DocumentKind.WIKI
+        and document.vault_path.startswith("Agent/wiki/")
+    ]
+    if not pages:
+        return None
+
+    stamps = [_projected_timestamps(page) for page in pages]
+    entries = sorted(
+        (
+            (PurePosixPath(page.vault_path).stem, page.summary or "")
+            for page in pages
+        ),
+        key=lambda entry: entry[0].lower(),
+    )
+
+    lines = [
+        "# Agent Wiki Index",
+        "",
+        "_Generated by the vault export; manual edits are overwritten._",
+        "",
+        f"_{len(pages)} notes._",
+        "",
+    ]
+    for stem, summary in entries:
+        lines.append(f"- [[{stem}]] - {summary}" if summary else f"- [[{stem}]]")
+
+    metadata: dict[str, Any] = {
+        "Type": "MoC",
+        "Status": None,
+        "CreatedAt": min(created for created, _ in stamps),
+        "LastUpdated": max(updated for _, updated in stamps),
+        "tags": [],
+    }
+    return RenderedDocument(
+        document_id=WIKI_INDEX_PATH,
+        vault_path=WIKI_INDEX_PATH,
+        content=dump_note(
+            metadata, "\n".join(lines).rstrip() + "\n", WIKI_INDEX_KEY_ORDER
+        ),
     )
 
 
@@ -495,8 +686,37 @@ class VaultExportService:
         absent from the prune set computed from the same run.
         """
 
-        rendered: list[RenderedDocument] = []
-        async with self._transactions.transaction() as connection:
+        documents = await self.documents()
+        return tuple(render_document(document) for document in documents)
+
+    async def documents(self) -> tuple[VaultDocument, ...]:
+        """Every exportable row, ordered by ``vault_path``.
+
+        Paged inside one **REPEATABLE READ** transaction so the walk sees one
+        consistent corpus. A note created midway through must not appear on a
+        later page while being absent from the prune set computed from the same
+        run.
+
+        The isolation level is the whole of that guarantee, and sharing a
+        transaction is not: under the server default, READ COMMITTED, every
+        statement takes its own snapshot, so this loop saw the corpus move
+        between pages while claiming it could not. The cursor makes it worse
+        rather than better -- ``vault_path`` is *mutable*, and promotion (ADR
+        0023) is a feature whose entire job is to move one. A document crossing
+        the cursor between pages is exported twice under two paths, or not at
+        all, and since the same walk feeds both the writes and the prune set, a
+        `--apply --prune` run can then delete a document's old export without
+        having written its new one.
+
+        Returns the rows rather than only their renderings, because the wiki
+        index is derived from the corpus rather than from one document -- it
+        needs every page's slug, summary and timestamps at once.
+        """
+
+        documents: list[VaultDocument] = []
+        async with self._transactions.transaction(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
             cursor: str | None = None
             while True:
                 page = await self._documents.list_under_path_prefixes(
@@ -507,9 +727,9 @@ class VaultExportService:
                 )
                 if not page:
                     break
-                rendered.extend(render_document(document) for document in page)
+                documents.extend(page)
                 cursor = page[-1].vault_path
-        return tuple(rendered)
+        return tuple(documents)
 
     async def export(
         self,
@@ -525,7 +745,15 @@ class VaultExportService:
         """
 
         report = ExportReport()
-        rendered = await self.rendered_documents()
+        documents = await self.documents()
+        rendered = [render_document(document) for document in documents]
+        # The index is generated rather than stored, so it joins the write set
+        # here. It must also join `expected` below, or the prune sweep would
+        # treat the file it just wrote as an orphan no row accounts for --
+        # which is exactly true, and exactly why it needs saying.
+        index = render_wiki_index(documents)
+        if index is not None:
+            rendered.append(index)
         expected: set[Path] = set()
 
         for item in rendered:
@@ -546,7 +774,16 @@ class VaultExportService:
                 _write_text(target, item.content)
 
         resolved_root = root.resolve()
-        for orphan in _orphaned_files(root, expected):
+        # Sweep only the prefixes the corpus owns, and sweep them even when
+        # empty. The earlier rule -- sweep what the corpus populates -- was
+        # aimed at the right hazard, `Agent/wiki/`, where the Stage-A librarian
+        # still holds 15 compiled pages the service has never seen. But
+        # occupancy answers "is this folder in use", not "whose folder is
+        # this", and the two diverge exactly when an owned folder empties: the
+        # last promotion candidate settles, no row names that prefix any more,
+        # the sweep skips it, and the stale file survives claiming a candidacy
+        # that ended. ADR 0023 replaces the occupancy test with this constant.
+        for orphan in _orphaned_files(root, expected, CORPUS_OWNED_PATH_PREFIXES):
             report.prunable.append(orphan.relative_to(resolved_root).as_posix())
             if prune and apply:
                 orphan.unlink()
@@ -569,17 +806,24 @@ def _write_text(path: Path, content: str) -> None:
         handle.write(content)
 
 
-def _orphaned_files(root: Path, expected: set[Path]) -> tuple[Path, ...]:
-    """Markdown files under the exported prefixes that no row accounts for.
+def _orphaned_files(
+    root: Path,
+    expected: set[Path],
+    prefixes: Iterable[str],
+) -> tuple[Path, ...]:
+    """Markdown files under the given prefixes that no row accounts for.
 
-    Scoped to the prefixes this module owns, so a file the engine never wrote --
-    ``Agent/INDEX.md``, anything under ``Agent/Promotion Candidates/`` -- is
-    never a deletion candidate, whatever the corpus contains.
+    Scoped to the prefixes the caller passes, which is
+    ``CORPUS_OWNED_PATH_PREFIXES`` rather than everything the export writes. A
+    file no row accounts for is only an orphan inside a folder the service is
+    authoritative for; elsewhere -- ``Agent/INDEX.md``, the Stage-A pages under
+    ``Agent/wiki/`` -- it belongs to somebody else and is left alone whatever
+    the corpus contains.
     """
 
     resolved_root = root.resolve()
     orphans: list[Path] = []
-    for prefix in EXPORTED_PATH_PREFIXES:
+    for prefix in prefixes:
         directory = resolved_root / Path(*PurePosixPath(prefix).parts)
         if not directory.is_dir():
             continue

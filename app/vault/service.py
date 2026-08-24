@@ -1,22 +1,30 @@
 """Application-service transaction boundary for vault use cases."""
 
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from uuid import uuid4
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
 from sqlalchemy import text as text_sql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from .constants import NOTE_SCHEMA_VERSION
+from .constants import NOTE_SCHEMA_VERSION, WIKI_SCHEMA_VERSION
 from .db import VaultPoolObserver, acquire_vault_connection
 from .domain import (
+    CompileRunState,
+    CompileWorkItem,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    NoteCompileState,
+    PromotionStatus,
+    ReviewState,
+    VaultCompileRun,
     VaultDocument,
+    VaultReviewCase,
     VectorSearchStatus,
 )
 from .embedding_text import assemble_embedding_text, embedding_text_digest
@@ -45,9 +53,11 @@ from .origin import normalize_origin, validate_origin
 from .read_policy import READABLE_STATUSES
 from .repository import (
     VaultAuditEventRepository,
+    VaultCompileRunRepository,
     VaultDocumentEmbeddingRepository,
     VaultDocumentRepository,
     VaultReviewCaseRepository,
+    VaultWikiPageRepository,
     VaultWriteRequestRepository,
     WriteRequestRecord,
 )
@@ -69,6 +79,34 @@ logger = logging.getLogger(__name__)
 # privilege argument, and types.yml constrains this folder to "Agent Note".
 AGENT_NOTES_DIRECTORY = "Agent/notes/"
 
+# Where compilation will put a wiki page. Named here rather than in export.py
+# so the promotion verb can send a retracted page back to the folder it came
+# from: folders.yml types that one "Wiki Page" and `Agent/notes/` "Agent Note",
+# so returning a page to the notes folder would leave it violating the rule its
+# own path selects. Nothing writes it yet -- compilation is NEXT-STEPS item 5.
+AGENT_WIKI_DIRECTORY = "Agent/wiki/"
+
+# Where a promotion candidate is projected. Both kinds land here: ADR 0023
+# widened `allowed_types` to ["Agent Note", "Wiki Page"] on the reasoning that a
+# compiled page distilling several notes is, if anything, more human-worthy than
+# a raw note.
+PROMOTION_CANDIDATES_DIRECTORY = "Agent/Promotion Candidates/"
+
+
+def _promotion_home_directory(kind: DocumentKind) -> str:
+    """Where a document lives when it is not a promotion candidate.
+
+    Keyed on `kind` rather than on the current path, so the answer is a
+    property of the document rather than of where it happens to be sitting --
+    which is what a candidate's path deliberately is not.
+    """
+
+    return (
+        AGENT_WIKI_DIRECTORY
+        if kind is DocumentKind.WIKI
+        else AGENT_NOTES_DIRECTORY
+    )
+
 
 class VaultTransactionService:
     """Own transactions while repositories remain connection-injected."""
@@ -82,11 +120,29 @@ class VaultTransactionService:
         self._observer = observer
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[AsyncConnection]:
+    async def transaction(
+        self,
+        isolation_level: str | None = None,
+    ) -> AsyncIterator[AsyncConnection]:
+        """A connection with a transaction open on it.
+
+        ``isolation_level`` is None for almost everything, meaning the server
+        default -- READ COMMITTED. Pass ``"REPEATABLE READ"`` when a *multi
+        statement read* has to see one corpus: under READ COMMITTED every
+        statement takes a fresh snapshot, so sharing a transaction buys
+        atomicity for writes but no consistency at all for a paged walk. Set
+        before ``begin()`` because Postgres will not accept it once the
+        transaction has started.
+        """
+
         async with acquire_vault_connection(
             self._engine,
             self._observer,
         ) as connection:
+            if isolation_level is not None:
+                await connection.execution_options(
+                    isolation_level=isolation_level
+                )
             async with connection.begin():
                 yield connection
 
@@ -413,6 +469,17 @@ class VaultContributionService:
                 profile_id=self._provider.profile_id,
                 limit=self._similar_limit,
             )
+            # A second query over the corpus the first deliberately excludes.
+            # It reaches the response and nothing else: not `decide()`, not
+            # `top_similarity`, not the calibration register. A compiled page
+            # restates its sources, so resembling one is expected rather than
+            # evidence (ADR 0027).
+            related_pages = await search.find_related_pages(
+                connection,
+                embedding=vector,
+                profile_id=self._provider.profile_id,
+                limit=self._similar_limit,
+            )
             action = decide(candidate, similars, self._policy)
             return await self._execute(
                 connection,
@@ -421,6 +488,7 @@ class VaultContributionService:
                 vector=vector,
                 text_digest=text_digest,
                 similars=similars,
+                related_pages=related_pages,
             )
 
     def _build_candidate(self, request: ContributionRequest) -> NewVaultDocument:
@@ -647,7 +715,9 @@ class VaultContributionService:
         vector: tuple[float, ...],
         text_digest: bytes,
         similars: list[ScoredCandidate],
+        related_pages: list[ScoredCandidate] | None = None,
     ) -> ContributionOutcome:
+        pages = list(related_pages or [])
         match action:
             case Insert(note=note):
                 note_id = await self._store(connection, note, vector, text_digest)
@@ -658,6 +728,7 @@ class VaultContributionService:
                         note_id=note_id,
                         message="note added to vault",
                         similars=similars,
+                        related_pages=pages,
                     ),
                     state="inserted",
                     request=request,
@@ -689,6 +760,7 @@ class VaultContributionService:
                         note_id=note_id,
                         message=f"flagged for review: {reason}",
                         similars=sims,
+                        related_pages=pages,
                     ),
                     state="flagged",
                     request=request,
@@ -702,6 +774,7 @@ class VaultContributionService:
                         note_id=None,
                         message=f"rejected: {reason} (conflicts with {conflicting})",
                         similars=similars,
+                        related_pages=pages,
                     ),
                     # No dedicated enum value. reject_at is disabled under the
                     # current policy, so this is unreachable today; "invalid"
@@ -1053,3 +1126,958 @@ class VaultDocumentRetireService:
             removed = await documents.delete(connection, request.document_id)
             if not removed:
                 raise DocumentNotFound(request.document_id)
+
+
+class ReviewCaseNotFound(Exception):
+    """No review case carries that id."""
+
+
+class ReviewCaseAlreadyDecided(Exception):
+    """The case was settled before this decision reached it."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewDecisionRequest:
+    review_case_id: UUID
+    state: ReviewState
+    principal_id: str
+    request_id: str
+    decision_note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewDecisionOutcome:
+    """What the decision did, in the terms the caller reports."""
+
+    review_case: VaultReviewCase
+    # The candidate's fate: ``published`` for an accepted note now serving from
+    # search, ``deleted`` for a rejected duplicate, ``absent`` when the
+    # candidate was already gone.
+    candidate: str
+
+
+class VaultReviewService:
+    """Adjudicate the near-duplicate cases the write path opened.
+
+    **A candidate is always a brand-new note.** ``insert_pending`` is called
+    from one place -- the contribute path's ``Flag`` branch -- with the note it
+    has just written; the notes it resembles appear only as evidence, and the
+    update path refuses on collision rather than opening a case. Every decision
+    is therefore about content that has never been endorsed, which is what makes
+    the two outcomes what they are:
+
+    - ``ACCEPTED`` -- the flag was a false positive. The note goes ``active``
+      and rejoins search and the dedup corpus.
+    - ``REJECTED`` -- it really is a duplicate. The note is **deleted**, per ADR
+      0019's line between archiving what is overtaken and deleting what is
+      wrong. A duplicate judged redundant at birth has no history worth keeping,
+      and its content is by definition already in the corpus: that is what the
+      case said.
+
+    The case survives either way. On a rejection the candidate pointer goes null
+    (migration 0011) rather than the judgement going with the note.
+
+    Reading a case means serving ``flagged`` content, which is the least-vetted
+    text in the corpus. That is why this is a REST-only surface gated on
+    ``vault:review`` and deliberately absent from the MCP tool list: ADR 0021's
+    defence against injected instructions is the privileged tool not being there
+    to name.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def list_pending(self, limit: int = 50) -> tuple[VaultReviewCase, ...]:
+        async with self._transactions.transaction() as connection:
+            return await VaultReviewCaseRepository().list_pending(connection, limit)
+
+    async def get(
+        self,
+        review_case_id: UUID,
+    ) -> tuple[VaultReviewCase, VaultDocument | None]:
+        """One case and its candidate, which may be gone.
+
+        The document is fetched unfiltered on purpose. ``READABLE_STATUSES``
+        withholds ``flagged`` from the read surface (ADR 0008), and a reviewer
+        needs precisely the content that rule hides -- adjudicating a note you
+        cannot read is not a review. The restriction stays at the public
+        surface; this one is gated on its own scope instead.
+        """
+
+        async with self._transactions.transaction() as connection:
+            case = await VaultReviewCaseRepository().get(connection, review_case_id)
+            if case is None:
+                raise ReviewCaseNotFound(str(review_case_id))
+            candidate = (
+                await VaultDocumentRepository().get_by_id(
+                    connection, case.candidate_document_id
+                )
+                if case.candidate_document_id is not None
+                else None
+            )
+            return case, candidate
+
+    async def decide(self, request: ReviewDecisionRequest) -> ReviewDecisionOutcome:
+        cases = VaultReviewCaseRepository()
+        documents = VaultDocumentRepository()
+
+        async with self._transactions.transaction() as connection:
+            # The same corpus lock contribution and retirement take. A decision
+            # both settles the case and moves the document, and a concurrent
+            # retirement checks for pending cases -- without serializing, a
+            # retire could observe no pending case while this one is mid-flight.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+
+            existing = await cases.get(connection, request.review_case_id)
+            if existing is None:
+                raise ReviewCaseNotFound(str(request.review_case_id))
+
+            decided = await cases.decide(
+                connection,
+                request.review_case_id,
+                state=request.state,
+                # From the credential, never the body: a reviewer must not be
+                # able to sign someone else's name to a judgement.
+                decided_by=f"agent:{request.principal_id}",
+                decision_note=request.decision_note,
+            )
+            if decided is None:
+                # The row exists but was not pending, so another reviewer
+                # settled it first. Reported rather than silently overwritten.
+                raise ReviewCaseAlreadyDecided(str(request.review_case_id))
+
+            candidate_id = existing.candidate_document_id
+            candidate = "absent"
+            if candidate_id is not None:
+                if request.state is ReviewState.ACCEPTED:
+                    published = await documents.set_status(
+                        connection,
+                        candidate_id,
+                        status=DocumentStatus.ACTIVE,
+                        doc_status="Active",
+                    )
+                    candidate = "published" if published is not None else "absent"
+                elif request.state is ReviewState.REJECTED:
+                    # Audit before the delete, in the same transaction: the
+                    # event outlives its subject and must never be observable
+                    # without the deletion, or the reverse. See ADR 0019.
+                    await VaultAuditEventRepository().record(
+                        connection,
+                        operation="vault.review",
+                        outcome="candidate_deleted",
+                        request_id=request.request_id,
+                        principal_id=request.principal_id,
+                        target_type="document",
+                        target_id=candidate_id,
+                    )
+                    removed = await documents.delete(connection, candidate_id)
+                    candidate = "deleted" if removed else "absent"
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.review",
+                outcome=request.state.value,
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="review_case",
+                target_id=str(request.review_case_id),
+            )
+            # Re-read: the UPDATE above has to run first, because its
+            # pending-state filter is the concurrency guard, but deleting a
+            # rejected candidate then clears the case's pointer underneath it.
+            # Returning the row as it was mid-transaction would report a
+            # candidate that no longer exists.
+            settled = await cases.get(connection, request.review_case_id)
+            return ReviewDecisionOutcome(
+                review_case=settled if settled is not None else decided,
+                candidate=candidate,
+            )
+
+
+class PromotionNotApplicable(Exception):
+    """The document cannot carry a promotion judgement.
+
+    Raised for a document living outside the folders this verb routes between,
+    which is the one way it could relocate a row into a tree the service does
+    not own.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionRequest:
+    """A reviewer's judgement about whether a note belongs in the Human layer."""
+
+    document_id: str
+    # None clears the judgement back to "never proposed". Distinct from
+    # RETRACTED, which records that someone looked and declined.
+    promotion_status: PromotionStatus | None
+    principal_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionOutcome:
+    document: VaultDocument
+    # Whether `vault_path` actually moved. False for a no-op re-application and
+    # for any transition between two non-candidate states, which share a
+    # folder.
+    moved: bool
+
+
+class VaultPromotionService:
+    """Set a document's promotion candidacy, and move its file to match.
+
+    ADR 0023: candidacy is a field, and the export projects it into a folder.
+    The projection is ``vault_path`` -- ADR 0010 requires that column to stay
+    byte-identical to the governance scanner's ``rel_path``, so the row has to
+    name the folder the file is actually in or the wrong ``folders.yml`` rule
+    resolves against it. Setting the field and moving the path is therefore one
+    operation, not two.
+
+    **The corpus lock is required, for the reason contribution takes it.**
+    ``vault_path`` is UNIQUE and collisions suffix, so the free name is only
+    still free while the lock is held. A promotion racing a contribution of a
+    note with the same title is exactly the collision ``resolve_vault_path``
+    exists to settle.
+
+    **Active documents only.** ADR 0023 makes a candidate "a first-class agent
+    note: served to agents, returned by search, and inside the dedup gate",
+    which is a description of ``active`` and of nothing else. A flagged note is
+    one the write path declined to endorse and an archived one is retired;
+    projecting either into a folder that means *elevated* would put a file in
+    front of a librarian for content agents cannot see. A flagged note is
+    promotable once its review case is accepted, which is the right order.
+
+    **No dedup gate, and no re-embedding.** Nothing about the content changes
+    -- not the title, not the body, not ``updated_at`` -- so the embedding is
+    still current and the rendered file is byte-identical either side of the
+    move. That is what makes git show a rename and follow the history.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def set_promotion_status(
+        self, request: PromotionRequest
+    ) -> PromotionOutcome:
+        documents = VaultDocumentRepository()
+
+        async with self._transactions.transaction() as connection:
+            # Serializes with contribution, retirement and review decisions --
+            # all four resolve or invalidate a `vault_path`, and the answer to
+            # "is this name taken" is only true under the lock.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+
+            existing = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=(DocumentStatus.ACTIVE,),
+            )
+            if existing is None:
+                raise DocumentNotFound(request.document_id)
+
+            home = _promotion_home_directory(existing.kind)
+            if not existing.vault_path.startswith(
+                (home, PROMOTION_CANDIDATES_DIRECTORY)
+            ):
+                # The verb routes between exactly two folders. A row anywhere
+                # else -- an imported human note, a folder added later -- is
+                # not something it may relocate, and refusing is the only
+                # answer that cannot move a file into a tree this service does
+                # not own.
+                raise PromotionNotApplicable(
+                    f"{existing.vault_path!r} is outside {home!r} and "
+                    f"{PROMOTION_CANDIDATES_DIRECTORY!r}"
+                )
+
+            if existing.promotion_status is request.promotion_status:
+                # Re-applying a judgement is a no-op rather than an error: it
+                # must not re-resolve the path, which would suffix the note
+                # against its own name and rewrite the file for nothing.
+                return PromotionOutcome(document=existing, moved=False)
+
+            directory = (
+                PROMOTION_CANDIDATES_DIRECTORY
+                if request.promotion_status is PromotionStatus.CANDIDATE
+                else home
+            )
+            taken = await documents.vault_paths_under(connection, directory)
+            # Its own path is not a collision with itself. Only reachable when
+            # the folder is unchanged -- promoted/retracted/cleared all share
+            # `home` -- and there the answer must be "stay put".
+            taken.discard(existing.vault_path)
+            resolved = resolve_vault_path(directory, existing.title, taken)
+
+            updated = await documents.set_promotion_status(
+                connection,
+                request.document_id,
+                promotion_status=request.promotion_status,
+                vault_path=resolved,
+            )
+            if updated is None:
+                # Present under the lock a moment ago. Nothing can delete it
+                # while this transaction holds that lock, so this is a bug
+                # rather than a race -- surfaced as the 404 it looks like from
+                # outside.
+                raise DocumentNotFound(request.document_id)
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.promote",
+                outcome=(
+                    request.promotion_status.value
+                    if request.promotion_status is not None
+                    else "cleared"
+                ),
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=request.document_id,
+            )
+            return PromotionOutcome(
+                document=updated,
+                moved=updated.vault_path != existing.vault_path,
+            )
+
+
+class CompileRunNotFound(Exception):
+    """No compile run carries that id."""
+
+
+class CompileRunNotYours(Exception):
+    """The run was opened by a different principal.
+
+    ``compiler_principal_id`` was recorded and never checked, so any holder of
+    ``vault:compile`` could write pages into another principal's run and settle
+    it. The run then names one compiler while its pages and its settlement audit
+    events name another -- provenance that contradicts itself, which is the one
+    thing a compile run exists to provide.
+
+    A run is not a lock and this is not an authorization boundary: the scope
+    already permits writing wiki pages, and a holder can open its own run
+    whenever it likes. It is a consistency rule, which is why the refusal is
+    409 rather than 403.
+    """
+
+
+class CompileRunAlreadySettled(Exception):
+    """The run finished before this call reached it."""
+
+
+class CompileTargetNotAPage(Exception):
+    """``page_id`` names a document that is not a wiki page.
+
+    A compile run rewrites pages it produced. Pointed at a note -- a stale id,
+    or one copied out of the wrong column of a plan -- it would otherwise
+    overwrite that note's body with synthesized content and only *then* fail,
+    because compile provenance is wiki-only and would match no row. Refused
+    before anything is written, and reported as a request error rather than a
+    server fault: the id comes from the caller, and any credential holding
+    ``vault:compile`` can send a wrong one.
+    """
+
+    def __init__(self, document_id: str, kind: DocumentKind) -> None:
+        super().__init__(
+            f"page_id {document_id} names a {kind.value}, not a wiki page"
+        )
+        self.document_id = document_id
+        self.kind = kind
+
+
+class UnresolvedSources(Exception):
+    """A page cites note ids that do not resolve.
+
+    Refused rather than stored, unlike ``related_ids``. ADR 0025 keeps edges
+    opaque because a contribution may legitimately reference a note that is
+    archived, flagged, or not yet written -- but a wiki page's ``source_ids``
+    are its *provenance*, the record of what it was synthesized from, and
+    provenance naming something that never existed is not a dangling edge, it
+    is a false claim. The Stage-A compiler refuses the same way.
+    """
+
+    def __init__(self, missing: Sequence[str]) -> None:
+        super().__init__(f"unresolved source id(s): {', '.join(missing)}")
+        self.missing = tuple(missing)
+
+
+@dataclass(frozen=True, slots=True)
+class CompilePlan:
+    run: VaultCompileRun
+    items: tuple[CompileWorkItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CompilePageRequest:
+    """One page a compiling agent has written."""
+
+    run_id: UUID
+    title: str
+    body: str
+    source_ids: tuple[str, ...]
+    principal_id: str
+    request_id: str
+    summary: str | None = None
+    tags: tuple[str, ...] = ()
+    related_ids: tuple[str, ...] = ()
+    # Replace this page rather than creating one. From the plan's `page_id`.
+    page_id: str | None = None
+
+
+class VaultCompileService:
+    """Wiki compilation: plan a run, write its pages, settle it.
+
+    **The service plans; the agent synthesizes.** This is the same division the
+    Stage-A engine draws, and it is the only one that works: deciding *which*
+    pages are stale is a query, and writing the prose that distils four notes
+    into one page is not. So ``plan`` returns work items and ``write_page``
+    accepts the result, with a model in between.
+
+    **A plan carries note ids, never note bodies.** The agent fetches what it
+    needs through the ordinary read surface, which is already policy-checked
+    (ADR 0014). Inlining bodies would be a second read path with its own
+    disclosure rules, and a response the size of the corpus.
+
+    **No dedup gate.** A compiled page restates its sources by construction, so
+    scoring it against them would flag every page ever written. That is not a
+    hole in ADR 0016's "no dedup, no write" -- that rule is about notes
+    duplicating notes, and ``find_similar`` now excludes wiki pages from the
+    corpus for the same reason. Pages are still embedded, because search must
+    return synthesis; they are simply not adjudicated as duplicates.
+
+    **Provenance is a foreign key with ``ON DELETE RESTRICT``.** Every page
+    names its run, and the run cannot be deleted while pages cite it (migration
+    0008). ``source_ids`` are validated at write time and refused when
+    unresolved, unlike a note's opaque edges -- provenance that names nothing
+    is a false claim rather than a dangling reference.
+    """
+
+    def __init__(
+        self,
+        transactions: VaultTransactionService,
+        provider: EmbeddingProvider | None,
+    ) -> None:
+        self._transactions = transactions
+        self._provider = provider
+
+    # ---------------------------------------------------------------- plan --
+
+    async def plan(self, principal_id: str, all_pages: bool = False) -> CompilePlan:
+        """Open a run and describe the work it should do.
+
+        ``all_pages`` forces a full recompile, which is what the Stage-A engine
+        calls a full flush and what an operator wants after changing the page
+        model. Incremental is the default: only pages whose sources moved, and
+        only notes written since the last run's frontier.
+        """
+
+        run_id = uuid4()
+        documents = VaultWikiPageRepository()
+        runs = VaultCompileRunRepository()
+
+        async with self._transactions.transaction() as connection:
+            # Still recorded on the run, and no longer read when planning.
+            # `output_frontier` is the run's own history -- when the source
+            # corpus stood where it did -- while what a note has been *judged*
+            # to be now lives on the note.
+            frontier = await runs.note_frontier(connection)
+            pages = await documents.list_pages(connection)
+            notes = await documents.note_states(connection)
+            run = await runs.start(
+                connection,
+                run_id=run_id,
+                compiler_principal_id=principal_id,
+                input_frontier={"frontier_at": frontier} if frontier else {},
+            )
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.compile",
+                outcome="planned",
+                request_id=uuid4().hex,
+                principal_id=principal_id,
+                target_type="compile_run",
+                target_id=str(run_id),
+            )
+
+        items = _plan_items(pages=pages, notes=notes, all_pages=all_pages)
+        return CompilePlan(run=run, items=items)
+
+    # ---------------------------------------------------------- write page --
+
+    async def write_page(self, request: CompilePageRequest) -> VaultDocument:
+        """Store one compiled page, embedded and attributed to its run."""
+
+        documents = VaultDocumentRepository()
+        wiki = VaultWikiPageRepository()
+        runs = VaultCompileRunRepository()
+        embeddings = VaultDocumentEmbeddingRepository()
+
+        if self._provider is None:
+            # Same rule the write path applies: a page nobody can find is not
+            # a page. Unlike dedup this is about the read surface, so it fails
+            # rather than degrading.
+            raise DedupUnavailable(
+                "No embedding provider is configured; refusing to write an "
+                "unsearchable wiki page"
+            )
+
+        async with self._transactions.transaction() as connection:
+            run = await runs.get(connection, request.run_id)
+            if run is None:
+                raise CompileRunNotFound(str(request.run_id))
+            if run.compiler_principal_id != request.principal_id:
+                raise CompileRunNotYours(str(request.run_id))
+            if run.state is not CompileRunState.RUNNING:
+                raise CompileRunAlreadySettled(str(request.run_id))
+            notes = await wiki.note_states(connection)
+
+        missing = [
+            source_id
+            for source_id in request.source_ids
+            if source_id not in notes
+        ]
+        if missing:
+            raise UnresolvedSources(missing)
+
+        candidate = self._build_page(request, run)
+        errors = validate(candidate)
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        # Embed outside the transaction, for the reason the contribute path
+        # does: an embedding call is a third-party round trip and holding a
+        # pooled connection across it is the mistake this package keeps naming.
+        text = assemble_embedding_text(candidate)
+        digest = embedding_text_digest(text)
+        vector = await embed_one(
+            self._provider, text, EmbeddingInputKind.DOCUMENT
+        )
+
+        async with self._transactions.transaction() as connection:
+            # The corpus lock, because `_resolve_path` below reads which paths
+            # are taken and `vault_path` is UNIQUE -- the same race a
+            # contribution has, for the same reason.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            run = await runs.get(connection, request.run_id)
+            if run is not None and run.compiler_principal_id != request.principal_id:
+                raise CompileRunNotYours(str(request.run_id))
+            if run is None or run.state is not CompileRunState.RUNNING:
+                # Re-checked under the lock: a finish may have landed while the
+                # embedding call was in flight, and a page attributed to a
+                # settled run would make its provenance a lie. `finish` and
+                # `fail` take this same lock, which is what makes the check a
+                # guard rather than a snapshot that can go stale a line later.
+                raise CompileRunAlreadySettled(str(request.run_id))
+
+            # Sources are re-validated here, not only before the embedding call.
+            # That call is a third-party round trip taking seconds, and a
+            # retirement can land inside it -- storing the page anyway would
+            # write provenance naming a note that no longer exists, which is the
+            # one thing `source_ids` validation exists to prevent. Checked under
+            # the lock, which retirement also takes, so the answer cannot go
+            # stale between here and the insert.
+            notes = await wiki.note_states(connection)
+            vanished = [
+                source_id
+                for source_id in request.source_ids
+                if source_id not in notes
+            ]
+            if vanished:
+                raise UnresolvedSources(vanished)
+
+            if request.page_id is not None:
+                # The target's kind is settled before anything is written.
+                # `replace_content` matches on id alone, which is right for it
+                # -- the ordinary update path edits notes through it -- so a
+                # note id here would overwrite that note with page content and
+                # discover the mistake afterwards, when the wiki-only
+                # provenance update matched nothing. The transaction would roll
+                # it back, but the caller would get a 500 for what is plainly a
+                # bad field value.
+                target = await documents.get_by_id(connection, request.page_id)
+                if target is None:
+                    raise DocumentNotFound(request.page_id)
+                if target.kind is not DocumentKind.WIKI:
+                    raise CompileTargetNotAPage(request.page_id, target.kind)
+                stored = await documents.replace_content(
+                    connection, request.page_id, candidate
+                )
+                if stored is None:
+                    raise DocumentNotFound(request.page_id)
+                # `replace_content` leaves compile provenance alone, because an
+                # ordinary update must not claim to be a compilation. A
+                # recompile genuinely is one, so it moves separately.
+                stored = await documents.set_compile_provenance(
+                    connection,
+                    request.page_id,
+                    compile_run_id=request.run_id,
+                    compiled_by=f"agent:{request.principal_id}",
+                    compiled_at=run.started_at,
+                )
+                if stored is None:
+                    # Unreachable now the kind is checked above under this same
+                    # lock. A raise rather than an `assert`, which -O strips --
+                    # and the next line would then fail with an AttributeError
+                    # on None, which tells a reader nothing.
+                    raise DocumentNotFound(request.page_id)
+            else:
+                taken = await documents.vault_paths_under(
+                    connection, AGENT_WIKI_DIRECTORY
+                )
+                candidate = replace(
+                    candidate,
+                    vault_path=resolve_vault_path(
+                        AGENT_WIKI_DIRECTORY, candidate.title, taken
+                    ),
+                )
+                stored = await documents.insert(connection, candidate)
+
+            await embeddings.upsert(
+                connection,
+                DocumentEmbedding(
+                    document_id=stored.id,
+                    profile_id=self._provider.profile_id,
+                    vector=vector,
+                    text_sha256=digest,
+                ),
+            )
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.compile",
+                outcome="page_written",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=stored.id,
+            )
+        return stored
+
+    def _build_page(
+        self,
+        request: CompilePageRequest,
+        run: VaultCompileRun,
+    ) -> NewVaultDocument:
+        """The row a compiled page becomes.
+
+        ``compiled_at`` comes from the run's start rather than from ``now()``,
+        so every page in one run carries one timestamp. A page-by-page clock
+        would make "was this note newer than the page" depend on where in the
+        run the page happened to be written.
+        """
+
+        return NewVaultDocument(
+            id=request.page_id or uuid4().hex,
+            kind=DocumentKind.WIKI,
+            doc_type="Wiki Page",
+            schema_version=WIKI_SCHEMA_VERSION,
+            vault_path=resolve_vault_path(
+                AGENT_WIKI_DIRECTORY, request.title, ()
+            ),
+            status=DocumentStatus.ACTIVE,
+            doc_status="Current",
+            title=request.title,
+            summary=request.summary,
+            body=request.body,
+            tags=request.tags,
+            related_ids=request.related_ids,
+            source_ids=request.source_ids,
+            contributed_by=f"agent:{request.principal_id}",
+            provenance={"principal_id": request.principal_id},
+            compile_run_id=run.id,
+            compiled_by=f"agent:{request.principal_id}",
+            compiled_at=run.started_at,
+        )
+
+    # -------------------------------------------------------------- decline --
+
+    async def decline(
+        self,
+        run_id: UUID,
+        principal_id: str,
+        request_id: str,
+        note_ids: Sequence[str],
+    ) -> tuple[tuple[str, ...], datetime]:
+        """Record that this run considered these notes and wants no page.
+
+        The counterpart to ``write_page``, and the reason the plan can ever be
+        empty. Without it the planner has to *infer* refusal from the passage of
+        time, which is what the frontier did and what it could not do correctly:
+        "I looked and decided against it" and "nobody ever showed me this" are
+        different facts and only one of them should suppress a future offer.
+
+        A separate call rather than a field on ``finish``, for the reason pages
+        are separate: a run that declines and then fails keeps its declines, the
+        same way it keeps its pages. Both are real judgements, and discarding
+        them to reach a tidier state throws the work away.
+
+        Declining a note the plan did not offer is allowed, deliberately -- the
+        plan is advice (ADR 0027). Refusing it would mean a librarian who
+        noticed something in passing had nowhere to put that.
+
+        Ids that resolve to no live note are refused rather than ignored, the
+        way a page's ``source_ids`` are: a decline naming nothing is a caller
+        error, and silently dropping it would leave the note being offered
+        forever with nothing to explain why.
+        """
+
+        runs = VaultCompileRunRepository()
+        documents = VaultWikiPageRepository()
+        declined_at = datetime.now(UTC)
+
+        async with self._transactions.transaction() as connection:
+            # The corpus lock, for the reason `finish` and `write_page` take it:
+            # a judgement must not attach to a run that has already reported its
+            # result, and the state check below is only a guard while the settle
+            # path contends for the same lock.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            run = await runs.get(connection, run_id)
+            if run is None:
+                raise CompileRunNotFound(str(run_id))
+            if run.compiler_principal_id != principal_id:
+                raise CompileRunNotYours(str(run_id))
+            if run.state is not CompileRunState.RUNNING:
+                raise CompileRunAlreadySettled(str(run_id))
+
+            requested = tuple(dict.fromkeys(note_ids))
+            reached = await documents.decline_notes(
+                connection, requested, declined_at=declined_at
+            )
+            unresolved = [
+                note_id for note_id in requested if note_id not in set(reached)
+            ]
+            if unresolved:
+                raise UnresolvedSources(unresolved)
+
+            audit = VaultAuditEventRepository()
+            for note_id in reached:
+                # One event per note, not one per call: each is a judgement
+                # about a particular note, and `target_id` holds one id. This is
+                # also where "who declined it, and when" lives -- the note keeps
+                # only the timestamp, deliberately (see migration 0015).
+                await audit.record(
+                    connection,
+                    operation="vault.compile",
+                    outcome="declined",
+                    request_id=request_id,
+                    principal_id=principal_id,
+                    target_type="document",
+                    target_id=note_id,
+                )
+
+        return reached, declined_at
+
+    # --------------------------------------------------------------- settle --
+
+    async def finish(
+        self,
+        run_id: UUID,
+        principal_id: str,
+        request_id: str,
+    ) -> VaultCompileRun:
+        """Mark a run succeeded, publishing the frontier it was planned against.
+
+        **The output frontier is the run's own ``input_frontier``, captured at
+        plan time -- not a fresh maximum read here.** Reading it here loses
+        notes permanently, which is the opposite of what an earlier version of
+        this docstring claimed:
+
+        1. a run is planned, capturing frontier F;
+        2. a note lands afterwards, at T > F, so the plan never mentioned it and
+           the compiler never saw it;
+        3. the run finishes and a fresh maximum publishes T;
+        4. the next incremental plan skips uncovered notes at or below T.
+
+        That note is never offered again. Publishing F instead means the next
+        plan re-considers everything written since planning began -- including
+        work this run may already have covered, which is the harmless direction
+        because a page that covers a note removes it from `new-source` anyway.
+
+        The lock is the same one ``write_page`` takes. Without it that method's
+        check that the run is still running is not a guard at all: it can pass,
+        and this can settle and commit before the page insert lands, producing a
+        page attributed to a run that has already reported its result.
+        """
+
+        runs = VaultCompileRunRepository()
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            existing = await runs.get(connection, run_id)
+            if existing is None:
+                raise CompileRunNotFound(str(run_id))
+            if existing.compiler_principal_id != principal_id:
+                # A run settled by someone other than the principal who opened
+                # it publishes a frontier on their behalf -- and the frontier is
+                # what stops notes being re-offered, so settling another
+                # principal's run silently narrows their next plan.
+                raise CompileRunNotYours(str(run_id))
+            settled = await runs.settle(
+                connection,
+                run_id,
+                state=CompileRunState.SUCCEEDED,
+                output_frontier=dict(existing.input_frontier),
+            )
+            if settled is None:
+                raise await self._settle_failure(connection, runs, run_id)
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.compile",
+                outcome="succeeded",
+                request_id=request_id,
+                principal_id=principal_id,
+                target_type="compile_run",
+                target_id=str(run_id),
+            )
+            return settled
+
+    async def fail(
+        self,
+        run_id: UUID,
+        principal_id: str,
+        request_id: str,
+        error_summary: str,
+    ) -> VaultCompileRun:
+        """Abandon a run, leaving whatever pages it wrote in place.
+
+        Deliberately not a rollback. The pages a failed run committed are real
+        synthesis and their provenance is accurate; discarding them would throw
+        away work to reach a tidier state. What the failure changes is the
+        frontier -- a failed run publishes none, so the next plan re-covers the
+        notes this one did not finish.
+
+        Takes the corpus lock for the reason ``finish`` does: a page write that
+        has already checked the run state must not be able to commit after this
+        settles.
+        """
+
+        runs = VaultCompileRunRepository()
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            existing = await runs.get(connection, run_id)
+            if existing is None:
+                raise CompileRunNotFound(str(run_id))
+            if existing.compiler_principal_id != principal_id:
+                raise CompileRunNotYours(str(run_id))
+            settled = await runs.settle(
+                connection,
+                run_id,
+                state=CompileRunState.FAILED,
+                error_summary=error_summary,
+            )
+            if settled is None:
+                raise await self._settle_failure(connection, runs, run_id)
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.compile",
+                outcome="failed",
+                request_id=request_id,
+                principal_id=principal_id,
+                target_type="compile_run",
+                target_id=str(run_id),
+            )
+            return settled
+
+    @staticmethod
+    async def _settle_failure(
+        connection: AsyncConnection,
+        runs: "VaultCompileRunRepository",
+        run_id: UUID,
+    ) -> Exception:
+        """Which of the two reasons a settle matched no row."""
+
+        existing = await runs.get(connection, run_id)
+        if existing is None:
+            return CompileRunNotFound(str(run_id))
+        return CompileRunAlreadySettled(str(run_id))
+
+
+def _plan_items(
+    *,
+    pages: Sequence[VaultDocument],
+    notes: Mapping[str, NoteCompileState],
+    all_pages: bool,
+) -> tuple[CompileWorkItem, ...]:
+    """Which pages need writing, and why.
+
+    Ported from the Stage-A engine's ``compute_stale`` and ``plan``, and kept
+    diffable against them the way ``governance.py`` is kept diffable against
+    ``vault_contrib.core`` (ADR 0004). Three reasons a page is stale, and they
+    are not interchangeable:
+
+    - **missing** -- it cites a note that no longer exists. The page makes a
+      claim about provenance that is no longer true.
+    - **stale** -- a source moved after the page was compiled, or has since
+      been flagged. The synthesis is out of date rather than wrong.
+    - **new-source** -- a note no page covers at all. Not a stale page; an
+      absent one.
+
+    Pure, and takes plain data rather than a connection, so the ordering rules
+    can be tested without a database.
+    """
+
+    items: list[CompileWorkItem] = []
+    covered: set[str] = set()
+
+    for page in pages:
+        covered.update(page.source_ids)
+        page_sources = [sid for sid in page.source_ids if sid in notes]
+        missing = len(page_sources) != len(page.source_ids)
+        flagged = any(
+            notes[sid].status != DocumentStatus.ACTIVE.value
+            for sid in page_sources
+        )
+        moved = page.compiled_at is not None and any(
+            notes[sid].updated_at > page.compiled_at for sid in page_sources
+        )
+        if all_pages or missing or flagged or moved:
+            items.append(
+                CompileWorkItem(
+                    page_id=page.id,
+                    title=page.title,
+                    reason="missing" if missing else "stale",
+                    source_ids=tuple(page.source_ids),
+                )
+            )
+
+    for note_id, note in sorted(notes.items()):
+        if note_id in covered or note.status != DocumentStatus.ACTIVE.value:
+            continue
+        if note.declined and not all_pages:
+            # Considered and declined. Re-offering it every run would make the
+            # plan permanently non-empty, which is the state in which nobody
+            # reads it -- and that is the whole reason this check exists.
+            #
+            # It used to be a frontier comparison, and the difference is not
+            # cosmetic. A frontier said "the corpus had moved this far", so a
+            # note *excluded* from a plan was covered by it just the same as one
+            # offered and refused: a flagged note advanced the frontier past
+            # itself, and approving it later moved no timestamp, so it was never
+            # offered again. Only notes somebody actually declined are marked
+            # here, so a note nobody was shown stays offered.
+            continue
+        items.append(
+            CompileWorkItem(
+                page_id=None,
+                title=None,
+                reason="new-source",
+                source_ids=(note_id,),
+            )
+        )
+
+    return tuple(items)

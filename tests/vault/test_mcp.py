@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from app.vault.auth import VaultScope
-from app.vault.mcp import derive_idempotency_key
+from app.vault.mcp import _TOOL_SCOPES, derive_idempotency_key
 from app.vault.settings import vault_enabled
 from tests.vault.test_routes import _drop, _issue
 
@@ -128,6 +128,20 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
                 "vault_retire_note",
             ],
         ),
+        # The privileged set lives on this mount too, gated by scope rather than
+        # by a second application (ADR 0026). A credential holding every write
+        # verb still does not see them.
+        (
+            (VaultScope.READ, VaultScope.REVIEW),
+            [
+                "vault_search",
+                "vault_get_note",
+                "vault_list_review_cases",
+                "vault_read_review_case",
+                "vault_decide_review_case",
+                "vault_set_promotion_status",
+            ],
+        ),
     ],
 )
 def test_tool_list_is_filtered_by_the_credential_scopes(
@@ -152,6 +166,51 @@ def test_tool_list_is_filtered_by_the_credential_scopes(
         _drop(credential_id)
 
     assert sorted(_tool_names(payload)) == sorted(expected)
+
+
+def test_the_reviewing_shape_cannot_retire_or_overwrite() -> None:
+    """The operating rule ADR 0026 rests on, asserted rather than trusted.
+
+    Scope filtering makes the tool surface a function of which credential is in
+    which client, so the boundary is configuration. The rule is that a reviewing
+    credential holds `vault:read` and `vault:review` and nothing else -- and
+    this is what that buys: a session that can adjudicate cannot also delete an
+    endorsed note or overwrite one, because those tools are absent from it for
+    exactly the reason the review tools are absent from an ordinary session.
+
+    A unit assertion on the registry rather than an HTTP round trip, because the
+    claim is about which scopes gate which tools and not about the transport.
+    """
+
+    reviewing = {VaultScope.READ, VaultScope.REVIEW}
+    visible = {
+        name
+        for name, (scope, _operation) in _TOOL_SCOPES.items()
+        if scope in reviewing
+    }
+
+    assert "vault_decide_review_case" in visible
+    assert "vault_retire_note" not in visible
+    assert "vault_update_note" not in visible
+    assert "vault_contribute" not in visible
+
+
+def test_every_review_tool_requires_the_review_scope() -> None:
+    """One scope for the whole privileged set.
+
+    ADR 0023: a credential that may triage the review queue is the same one that
+    may triage the promotion queue, and an ordinary contributor holds neither.
+    """
+
+    privileged = {
+        "vault_list_review_cases",
+        "vault_read_review_case",
+        "vault_decide_review_case",
+        "vault_set_promotion_status",
+    }
+
+    assert privileged <= set(_TOOL_SCOPES)
+    assert all(_TOOL_SCOPES[name][0] == VaultScope.REVIEW for name in privileged)
 
 
 def test_a_withheld_tool_is_still_refused_when_called_directly(
@@ -284,3 +343,92 @@ def test_derived_key_satisfies_the_contribution_contract() -> None:
 
     assert 8 <= len(key) <= 128
     assert re.fullmatch(r"[A-Za-z0-9._:-]+", key)
+
+
+def test_setting_promotion_status_over_mcp_moves_the_note(
+    client: TestClient,
+) -> None:
+    """The verb ADR 0023 built and left with no transport at all.
+
+    End to end over the adapter rather than against the service, because the
+    service half was already covered by ``test_promotion.py`` -- what is new is
+    that a reviewing session can reach it, and that the response says where the
+    note went.
+    """
+
+    import asyncio
+    from uuid import uuid4
+
+    from sqlalchemy import delete
+
+    from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
+    from app.vault.repository import VaultDocumentRepository
+    from app.vault.tables import vault_documents
+    from tests.vault.test_search import vault_service
+
+    note_id = f"test-mcp-promo-{uuid4().hex}"
+    transactions, engine = vault_service()
+
+    async def seed() -> None:
+        try:
+            async with transactions.transaction() as connection:
+                await VaultDocumentRepository().insert(
+                    connection,
+                    NewVaultDocument(
+                        id=note_id,
+                        kind=DocumentKind.NOTE,
+                        doc_type="Agent Note",
+                        vault_path=f"Agent/notes/{note_id}.md",
+                        status=DocumentStatus.ACTIVE,
+                        doc_status="Active",
+                        title="Worth a human reading",
+                        body="A note somebody proposed for promotion.",
+                        contributed_by="agent:test-mcp-promo",
+                        provenance={"fixture": True},
+                    ),
+                )
+        finally:
+            await engine.dispose()
+
+    async def cleanup() -> None:
+        service, disposable = vault_service()
+        try:
+            async with service.transaction() as connection:
+                await connection.execute(
+                    delete(vault_documents).where(
+                        vault_documents.c.id == note_id
+                    )
+                )
+        finally:
+            await disposable.dispose()
+
+    asyncio.run(seed())
+    credential_id, token = _issue((VaultScope.READ, VaultScope.REVIEW))
+    try:
+        payload = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "vault_set_promotion_status",
+                "arguments": {
+                    "note_id": note_id,
+                    "promotion_status": "candidate",
+                },
+            },
+        )
+    finally:
+        _drop(credential_id)
+        asyncio.run(cleanup())
+
+    assert not isinstance(payload, Response), (
+        f"expected a JSON-RPC response, got HTTP "
+        f"{getattr(payload, 'status_code', '?')}"
+    )
+    assert payload["result"]["isError"] is False
+    body = json.loads(payload["result"]["content"][0]["text"])
+    assert body["promotion_status"] == "candidate"
+    assert body["moved"] is True
+    assert body["vault_path"] == (
+        "Agent/Promotion Candidates/worth-a-human-reading.md"
+    )

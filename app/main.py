@@ -207,6 +207,31 @@ def create_app() -> FastAPI:
         # application must own its own.
         app.state.vault_mcp_app = build_vault_mcp_app()
         app.mount("/api/v1/vault/mcp", app.state.vault_mcp_app)
+
+        # 4b. The OAuth authorization server (vault ADR 0024), root-mounted
+        #     because RFC 9728 fixes the protected-resource metadata path
+        #     relative to the host, and because the SDK builds /authorize and
+        #     friends from issuer_url — so both have to agree they live at the
+        #     root. Registered here for the same reason every explicit route is:
+        #     before the SPA catch-all.
+        #
+        #     Gated on VAULT_PUBLIC_URL rather than a boolean of its own. These
+        #     routes publish discovery metadata containing absolute URLs, so a
+        #     deployment that cannot state its own origin cannot serve them
+        #     correctly — and ADR 0024 is explicit that advertising an
+        #     authorization server before one answers is worse than the honest
+        #     dead end of a bare 401. Absence of the variable is therefore the
+        #     off switch, and it needs no second flag to forget to set.
+        public_url = (os.environ.get("VAULT_PUBLIC_URL") or "").rstrip("/")
+        if public_url:
+            from app.vault.oauth_routes import build_vault_oauth_routes
+
+            app.router.routes.extend(
+                build_vault_oauth_routes(
+                    issuer_url=public_url,
+                    mcp_url=f"{public_url}/api/v1/vault/mcp",
+                )
+            )
     # 5. SPA assets mount — MUST come before the SPA catch-all router below.
     spa_routes.mount_spa_assets(app)
     # 6. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.

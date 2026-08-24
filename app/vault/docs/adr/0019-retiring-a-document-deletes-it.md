@@ -4,7 +4,9 @@ Date: 2026-08-14
 
 ## Status
 
-Accepted.
+Accepted. Amended 2026-08-21: a review case no longer blocks retirement once it has been
+decided, and `vault_review_cases.candidate_document_id` became nullable and non-unique to
+allow it (migration 0011). See "Amendment: a settled case releases its candidate" below.
 
 ## Context
 
@@ -90,6 +92,73 @@ contribution and update before checking references. Without it, retirement could
 observe no case, a concurrent contribution could record the document as duplicate
 evidence, and retirement could then delete that evidence. The serialization cost is
 accepted because retirement is deliberately rare and tightly rate-limited.
+
+## Amendment: a settled case releases its candidate (2026-08-21)
+
+The rule above -- that a candidate reference blocks retirement "in every review state" --
+was argued from a database mechanic: the foreign key was durable and non-cascading, so a
+resolved case would pass the service check and then fail at the constraint. That was true,
+and the consequence went unnoticed.
+
+**A note flagged once could never be deleted.** Nothing settles a case, and even a settled
+one kept blocking, so `flagged` was effectively a permanent state with no exit. The load
+probe demonstrated it in practice: its own duplicate contributions flagged, opened cases, and
+could not be cleaned up afterwards -- while the probe's closing output told the operator to
+retire them once the case was settled, advice that could not work. It is also a
+data-protection problem the first time a flagged note contains a secret.
+
+### What changed
+
+`candidate_document_id` is now **nullable and not unique**, and `delete` clears it -- exactly
+what `vault_write_requests.document_id` has always done, for the reason this ADR already
+gives about the ledger: the record outlives its subject and states what is true.
+
+Retirement is refused only by an **unresolved** case. That is no longer a constraint
+mechanic but a judgement: a review still in progress needs its subject, and retiring it out
+from under the reviewer destroys what they are deciding about. A finished case does not need
+it, and survives the deletion with a null pointer.
+
+The JSON evidence rule is unchanged -- it already blocked only while pending.
+
+Dropping UNIQUE is a separate change with a separate reason: one case per candidate forever
+means a wrong decision can only be corrected by overwriting the record of the first one,
+which destroys the history the table exists to keep. The two are independent, since Postgres
+treats NULLs as distinct.
+
+### What a decision does
+
+`VaultReviewService` gives the enum the meaning the schema never defined:
+
+| State | Means | The note |
+| ----- | ----- | -------- |
+| `accepted` | the flag was a false positive | goes `active`, rejoins search and dedup |
+| `rejected` | it really is a duplicate | is **deleted** |
+| `superseded` | reserved, unreachable | -- |
+
+Deletion rather than archival, and that follows this ADR's own line rather than departing
+from it. A review candidate is always a **brand-new** note: `insert_pending` is called from
+one place, the contribute path's `Flag` branch, with the note it has just written, and the
+update path refuses on collision instead of opening a case. So a rejected candidate is
+content that was never endorsed and whose substance is already in the corpus -- that is what
+the case asserted. Archive what is overtaken; delete what is wrong.
+
+`superseded` stays unreachable deliberately. It shipped with the schema carrying no defined
+meaning, which is how it came to be read two ways; inventing one now would repeat the
+mistake rather than fix it.
+
+### The surface is REST-only, on purpose
+
+> **Superseded in part by ADR 0026 (2026-08-22).** The reasoning below stands; the conclusion
+> about *where* the tools live does not. There is no separate admin MCP — the review and
+> promotion tools sit on the existing mount, filtered by `list_tools` on the credential's
+> scopes, which is the same "absent from the surface injected text can name" defence reached
+> by a different route. The REST routes described here are unchanged and remain.
+
+Reading a case means serving `flagged` content -- by construction the least-vetted text in
+the corpus -- and a decide verb can publish or destroy a note. ADR 0021's defence against
+injected instructions is the privileged tool being **absent** from the surface the injected
+text can name, so the review routes are gated on `vault:review` and are not MCP tools. A
+separate admin MCP is where they would go if they ever do.
 
 ## Consequences
 

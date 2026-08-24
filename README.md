@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/EricMay256/HighScoreServer/actions/workflows/ci.yml/badge.svg)](https://github.com/EricMay256/HighScoreServer/actions/workflows/ci.yml)
 
-A production-deployed game leaderboard backend built with FastAPI and PostgreSQL. Designed as a reusable backend for Unity games — drop in the included C# client and get a fully functional leaderboard with silent guest auth, per-period score history, rank and percentile, and a public web view.
+A production-deployed game leaderboard backend built with FastAPI and PostgreSQL. Designed as a reusable backend for Unity games — drop in the [Unity client](https://github.com/EricMay256/hss-unity) and get a fully functional leaderboard with silent guest auth, per-period score history, rank and percentile, and a public web view.
 
 Architectural decisions are captured as [ADRs](docs/adr/README.md), and Known Limitations documents the current tradeoffs.
 
@@ -93,8 +93,9 @@ flowchart LR
   per-mode tabs, rank, percentile, and medal highlights for the top three, plus a
   React/TanStack Query SPA at `/app` served from the same origin. The Jinja2
   views remain the canonical no-JavaScript path rather than a fallback.
-- **Unity C# client** — drop-in `LeaderboardService.cs` with coroutine-based
-  API calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
+- **Unity C# client** — maintained in its own repository,
+  [hss-unity](https://github.com/EricMay256/hss-unity): coroutine-based API
+  calls, typed response models, and an `ApiResult<T>` wrapper that surfaces
   errors without exceptions. Handles the full auth lifecycle including silent
   guest login, token storage via PlayerPrefs, and account claiming.
 - **Error tracking** — Sentry integration captures unhandled exceptions with full 
@@ -105,7 +106,7 @@ flowchart LR
 ### Knowledge-platform bounded context
 
 The cloud knowledge platform is staged in this service as an isolated `app/vault/` package,
-with its own decision log of 20 ADRs under
+with its own decision log under
 [`app/vault/docs/adr/`](app/vault/docs/adr/). It exposes an authenticated HTTP adapter —
 hybrid lexical and vector search fused by reciprocal rank, fetch by id, and a governed write
 path covering contribution, replacement, and retirement — over one application-service layer.
@@ -114,9 +115,16 @@ It uses SQLAlchemy Core (not the ORM) for vault persistence, and keeps all knowl
 in PostgreSQL rather than in this public repository.
 
 The routes are registered only when `VAULT_ENABLED` is true, so a default deployment publishes
-no vault schema and no vault endpoints. An MCP adapter is intended over the same service layer
-but is **not built** — it is the reason the layer is separate from the HTTP surface, not
-something the package currently ships.
+no vault schema and no vault endpoints. A second adapter — MCP, mounted at
+`/api/v1/vault/mcp/` — sits over the same application-service layer, which is why that layer
+is separate from the HTTP surface. Which tools a caller can see is decided by its credential's
+scopes, and that filtering is a security boundary rather than tidiness: see
+[ADR 0021](app/vault/docs/adr/0021-mcp-is-a-second-adapter-with-scope-shaped-tools.md).
+
+Granting someone access — choosing scopes, minting a credential, registering the MCP server or
+configuring REST, verifying, and revoking — is documented end to end under "Granting an agent
+access" in
+[`app/vault/docs/vault-configuration.md`](app/vault/docs/vault-configuration.md).
 
 The package boundary is also an extraction seam: the eventual target keeps HSS and the private
 knowledge runtime in focused repositories and lets private composition CI build the combined
@@ -669,107 +677,59 @@ one-line summary of each decision.
 
 ## Unity Client
 
-The `UnityClient/` directory contains a drop-in C# leaderboard client for Unity 6.
+The Unity client is **not** in this repository. It lives in
+[hss-unity](https://github.com/EricMay256/hss-unity): a drop-in C# leaderboard
+client for Unity 6, with coroutine-based API calls, typed request/response
+models, an `ApiResult<T>` wrapper that surfaces errors without exceptions, and a
+`LeaderboardConfig` ScriptableObject. Installation and the client's own API
+surface are documented there.
 
-| File | Purpose |
-|---|---|
-| `LeaderboardService.cs` | All HTTP communication with the API |
-| `LeaderboardModels.cs` | Typed request/response models |
-| `LeaderboardConfig.cs` | ScriptableObject for base URL and API key configuration |
-| `LeaderboardExample.cs` | Annotated usage example covering the full auth and score lifecycle |
+What follows is the server-side half of the integration — the behavior a client
+integrator needs and that only this repository can answer for. See also
+[Related Repositories](#related-repositories) for the C++ and Unreal clients.
 
-### Setup
-1. Copy the `UnityClient/` files into your Unity project
-2. Install [Newtonsoft.Json for Unity] via Package Manager
-3. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
-4. Set the base URL to your Heroku app URL (no trailing slash)
-5. Gitignore your config asset
-6. **Note on `submitted_at`**: the field is typed as `string` on `ScoreResponse`, not `DateTime`.
+### Pointing the client at this server
+
+1. Install the client into your Unity project per the instructions in
+   [hss-unity](https://github.com/EricMay256/hss-unity), including
+   Newtonsoft.Json for Unity via Package Manager
+2. Create a config asset: **Assets → Create → UBear → LeaderboardConfig**
+3. Set the base URL to the deployment you are targeting, **no trailing slash** —
+   the live instance is `https://high-score-server-9db572197af4.herokuapp.com`,
+   or your own app from [Deployment](#deployment)
+4. Gitignore the config asset — it holds the API key alongside the base URL, and
+   the key is not meant for version control
+5. **Note on `submitted_at`**: the field is typed as `string` on `ScoreResponse`, not `DateTime`.
    This is a deliberate dodge of Newtonsoft's default local-time conversion, which would silently
    shift timestamps based on the player's device timezone. Parse it explicitly with
    `DateTimeOffset.Parse(...)` if you need a typed value — the server always emits UTC ISO 8601.
 
-### Authentication lifecycle
+### What the auth lifecycle looks like from the client
 
-The client handles auth silently. On first launch, call `GuestLogin()` — a guest
-account is created server-side and tokens are stored in `PlayerPrefs`. On every
-subsequent launch the stored token is used directly. No login screen is required
-to submit scores.
+Auth is silent by design. On first launch the client calls guest login, the
+server creates a real `users` row (`is_guest = true`) and issues tokens, and the
+client stores them in `PlayerPrefs`. On every subsequent launch the stored token
+is used directly. No login screen is required to submit scores.
 
-Guest accounts can be upgraded to claimed accounts at any time via `Claim()`.
-All existing scores transfer automatically since they are already associated with
-the user's ID server-side.
-
-```csharp
-private void Start()
-{
-    if (!_service.IsAuthenticated)
-        StartCoroutine(_service.GuestLogin(OnGuestLogin));
-}
-
-// Upgrade to a claimed account from a registration form
-public void ClaimAccount(string email, string password)
-{
-    StartCoroutine(_service.Claim(email, password, OnClaimed));
-}
-```
-Logout is best-effort. `_service.Logout()` attempts to revoke the refresh
-token server-side, but clears the locally stored tokens regardless of whether
-the server call succeeds. This is the right behavior — a failed logout should
-not leave the client in a state where it thinks it's still authenticated —
-but it means a logout during network failure succeeds locally and fails
-server-side, leaving the refresh token valid until its natural expiry. The
-mitigation is the refresh token's own lifetime, which is short enough that
-the window of exposure is bounded.
-
-### Submitting scores
+Guest accounts can be upgraded to claimed accounts at any time via the claim
+endpoint. All existing scores transfer automatically, because they were already
+associated with that user's ID server-side — the account is upgraded in place,
+not replaced. The full sequence is diagrammed under
+[Authentication lifecycle](#authentication-lifecycle) above.
 
 Score submission requires an authenticated user. The player name is derived
 server-side from the Bearer token — callers supply only the score and game mode.
-The server upserts — if the player already has a better score, the existing
-record is preserved and returned.
+The server upserts on best: if the player already has a better score for that
+mode and period, the existing record is preserved and returned.
 
-```csharp
-public void OnGameOver(int finalScore)
-{
-    StartCoroutine(_service.SubmitScore(finalScore, "classic", OnScoreSubmitted));
-}
-
-private void OnScoreSubmitted(ApiResult<ScoreResponse> result)
-{
-    if (!result.Success)
-    {
-        Debug.LogWarning($"[Leaderboard] {result.Error}");
-        return;
-    }
-    Debug.Log($"Rank #{result.Data.Rank} — best score: {result.Data.Score}");
-}
-```
-
-### Fetching the leaderboard
-
-```csharp
-// period is a TimePeriod, described in the Enums region of LeaderboardModels.cs
-StartCoroutine(_service.GetScores("classic", OnScoresReceived, period: TimePeriod.Weekly));
-
-private void OnScoresReceived(ApiResult<LeaderboardResponse> result)
-{
-    if (!result.Success) return;
-
-    foreach (ScoreResponse entry in result.Data.Scores)
-        Debug.Log($"#{entry.Rank} {entry.Player}: {entry.Score} ({entry.Percentile:F1}%)");
-}
-```
-
-### Known limitations
-- **Automatic retry on 401** — `EnsureAuthenticated` handles the missing-token
-  case by falling through to guest login, but does not detect 401 responses
-  from expired tokens mid-session. If a request fails with a 401, call
-  `RefreshTokens()` and retry. Automatic retry is a known future improvement.
-- **Token storage** — tokens are stored in `PlayerPrefs`, which is not encrypted.
-  This is standard Unity practice for session tokens. The correct long-term
-  answer is server-side revocation (JTI denylist) rather than client-side
-  encryption.
+Logout is best-effort on purpose. The client attempts to revoke the refresh
+token server-side but clears the locally stored tokens regardless of whether
+that call succeeds — a failed logout should not leave the client believing it is
+still authenticated. The consequence is that a logout during a network failure
+succeeds locally and fails server-side, leaving the refresh token valid until
+its natural expiry. The mitigation is that lifetime itself, which is short
+enough to bound the window. Access tokens have no kill switch at all within
+their 60-minute life; see [Known Limitations](#known-limitations).
 
 
 ## Project Structure
@@ -817,11 +777,6 @@ HighScoreServer/
 │   ├── test_validation.py            # Tiered validator units
 │   ├── test_prune_guests.py          # Integration tests for guest pruning
 │   └── test_prune_idempotency_keys.py # Integration tests for idempotency-key pruning
-├── UnityClient/
-│   ├── LeaderboardService.cs
-│   ├── LeaderboardModels.cs
-│   ├── LeaderboardConfig.cs
-│   └── LeaderboardExample.cs
 ├── alembic.ini
 ├── requirements.txt
 ├── Procfile

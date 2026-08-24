@@ -13,6 +13,7 @@ durable than removability comments scattered across modules, which go stale sile
 | `app/vault/` | package root | Intra-package imports are already relative, so this is a directory move, not a rewrite. `tests/vault/test_boundaries.py` enforces the property. |
 | `app/vault/AGENTS.md` | package root | Already inside the package; needs no edit. |
 | `app/vault/docs/` | package docs | Architecture, configuration runbook, extraction manifest, and the vault ADR lineage. |
+| `app/vault/templates/` | package assets | Built 2026-08-21 (vault ADR 0024): `login.html`, the operator login and consent page. The first non-documentation asset in the package. Deliberately the vault's own rather than HSS's root `templates/`, with its own environment in `templating.py`: a page extending the host's `base.html` would not move with the package, and `test_boundaries.py` could not catch it because it scans imports rather than templates. |
 | `app/vault/docs/adr/` | package docs | Independent lineage starting at 0001. Does not interleave with HSS's `docs/adr/`. |
 | Vault-owned tests listed below | package tests | Package tests currently import `app.vault.…`; repoint those imports and provide the standalone fixtures described below. Do **not** move the directory wholesale. |
 
@@ -20,8 +21,8 @@ durable than removability comments scattered across modules, which go stale sile
 
 | Owner | Current tests | Extraction action |
 | ---- | ---- | ---- |
-| Vault package | `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_governance.py`, `test_origin.py`, `test_read_policy.py`, `test_repositories.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
-| Private composition | `test_contributions.py`, `test_routes.py`, `test_rate_limit.py`, `test_schema_drift.py`, `tests/vault/conftest.py` | Move to the composing application or split package-only cases out. Replace HSS's global `TestClient(app.main.app)` with a standalone vault application factory; provide package-owned migrated Postgres/pgvector and credential fixtures. |
+| Vault package | `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_credential_scopes.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_governance.py`, `test_hash_operator_password_script.py`, `test_oauth_store.py`, `test_origin.py`, `test_passwords.py`, `test_promotion.py`, `test_prune_oauth.py`, `test_wiki_import.py`, `test_read_policy.py`, `test_repositories.py`, `test_reviews.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
+| Private composition | `test_compile.py`, `test_contributions.py`, `test_oauth_flow.py`, `test_routes.py`, `test_rate_limit.py`, `test_schema_drift.py`, `tests/vault/conftest.py` | Move to the composing application or split package-only cases out. Replace HSS's global `TestClient(app.main.app)` with a standalone vault application factory; provide package-owned migrated Postgres/pgvector and credential fixtures. |
 | HSS host | `test_hss_pool_config.py` | Keep in HSS and move out of `tests/vault/`; it verifies `app.db`, not the extracted package. |
 | Dual-lineage composition | `test_migrations.py`, `migration_helpers.py` | Keep the shared-vs-separate topology cases with the composition owner. Move vault-only upgrade/downgrade, offline-render, and extracted revision-graph cases with the vault lineage. |
 | Boundary contract | `test_boundaries.py` | Split: package-to-host and historical-migration checks move with the vault; the reverse host-to-vault scan stays in HSS. |
@@ -45,7 +46,10 @@ easy to overlook:
 | `scripts/measure_embedding_latency.py` | Provider latency measurement for the retry-budget decision. Same convention and the same absolute imports to repoint. |
 | `scripts/measure_dedup_similarity.py` | Derives `Policy.flag_at` for the configured embedding model (ADR 0016 amendment, ADR 0017). Same convention and imports; also imports `app.vault.calibration`. |
 | `scripts/vault_load_probe.py` | Drives concurrent traffic and reports what the connection pool did, for the enablement pool review. Same convention and imports; also imports `app.vault.measurement`. |
-| `scripts/issue_vault_credential.py` | Issues, lists, and revokes agent credentials. Same convention and imports. |
+| `scripts/issue_vault_credential.py` | Issues, lists, revokes, and adjusts the scopes of agent credentials (`grant` / `revoke-scope`, vault ADR 0024). Same convention and imports. |
+| `scripts/import_vault_wiki.py` | One-off: imports the Stage-A `Agent/wiki/` pages as `kind='wiki'` rows (ADR 0027). Same convention and imports. Retire it once it has run. |
+| `scripts/prune_vault_oauth.py` | Prunes expired OAuth state and long-revoked OAuth credentials (ADR 0024). Same convention and imports. |
+| `scripts/hash_vault_operator_password.py` | Prints the bcrypt hash for `VAULT_OPERATOR_PASSWORD_HASH` (ADR 0024). Same convention; imports `app.vault.passwords` and nothing else, so it needs no database and only that one import repointed. |
 | `scripts/export_vault_markdown.py` | Projects the `Agent/` tree out as markdown (ADR 0022). Same convention and imports; also imports `app.vault.export`. |
 | `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. |
 
@@ -74,6 +78,18 @@ HSS's alone. It stays in both. The vault repo must declare it; nothing else chan
 
 `httpx` is shared: the vault's embedding adapter uses it, and HSS uses it for Steam ticket
 validation. It stays in both.
+
+`Jinja2` is shared as of ADR 0024's login page: HSS renders its Jinja2 views from a root
+`templates/` directory and the vault renders its own from `app/vault/templates/` through
+`app/vault/templating.py`, with separate environments and no shared base template. Two
+independent users of one library, like `slowapi` — it stays in both, and the vault repo must
+declare it.
+
+`bcrypt` is shared as of ADR 0024's operator login: `app/vault/passwords.py` hashes the operator
+password with it, and `app/auth.py` hashes user passwords. Two independent users again, and the
+duplication is deliberate — `app/vault/` may contain no `from app.`, so the vault carries its own
+ten-line wrapper rather than a host dependency the package could not take with it. It stays in
+both, and the vault repo must declare it.
 
 **No embedding client appears here.** Vault ADR 0005 selected OpenAI and deliberately called the
 REST endpoint through `httpx` rather than the `openai` SDK, so the adapter added no package. If

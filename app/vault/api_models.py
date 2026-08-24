@@ -1,8 +1,9 @@
 """Pydantic models for the vault transport boundary.
 
 Search and document retrieval over HTTP, plus the governed write path:
-contribution (ADR 0016) and full replacement (ADR 0018). Review, compile, and
-export have models in neither this module nor the router yet.
+contribution (ADR 0016), full replacement (ADR 0018), the review queue
+(ADR 0019's amendment), and wiki compilation. Export has models in neither this
+module nor the router yet.
 
 Persistence records and SQLAlchemy table definitions intentionally live in
 separate modules.
@@ -11,11 +12,20 @@ separate modules.
 import json
 from datetime import datetime
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
-from .domain import DocumentKind, DocumentStatus, VaultDocument, VectorSearchStatus
+from .domain import (
+    CompileWorkItem,
+    DocumentKind,
+    DocumentStatus,
+    VaultCompileRun,
+    VaultDocument,
+    VaultReviewCase,
+    VectorSearchStatus,
+)
 from .facets import normalize_facets
 
 
@@ -223,7 +233,26 @@ class VaultContributionResponse(BaseModel):
         default=False,
         description="True when this response replays an earlier identical request.",
     )
-    similars: list[VaultSimilarNote] = Field(default_factory=list)
+    similars: list[VaultSimilarNote] = Field(
+        default_factory=list,
+        description=(
+            "Existing NOTES the candidate scored against. This is what the "
+            "dedup gate judged, so a high score here is what 'flagged' means. "
+            "`note_id` is a document id, resolvable with GET /notes/{id}."
+        ),
+    )
+    related_pages: list[VaultSimilarNote] = Field(
+        default_factory=list,
+        description=(
+            "Compiled WIKI PAGES near this note. CONTEXT, NOT A VERDICT: a "
+            "page restates the notes it was built from, so resembling one is "
+            "expected and is never why a contribution is flagged. Useful for "
+            "deciding whether to extend an existing synthesis. Every entry is "
+            "a wiki page by construction -- the query filters on kind -- and "
+            "`note_id` carries its document id, the same id space every other "
+            "surface uses and resolvable with GET /notes/{id}."
+        ),
+    )
     errors: list[str] = Field(default_factory=list)
 
 
@@ -403,3 +432,253 @@ def canonical_request_digest(body: VaultContributionRequest) -> bytes:
         sort_keys=True,
     )
     return sha256(canonical.encode("utf-8")).digest()
+
+
+class VaultSimilarEvidence(BaseModel):
+    """One note a flagged contribution scored against.
+
+    Shaped like ``VaultSimilarNote`` but read from stored JSON rather than a
+    live query, so the fields are what the write path recorded at decision time
+    and not what the corpus says now. A reviewer is judging the comparison that
+    was actually made.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    note_id: str | None = None
+    title: str | None = None
+    score: float | None = None
+
+
+class VaultReviewCaseSummary(BaseModel):
+    """One case as it appears in the queue."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_case_id: UUID
+    # None once the candidate has been deleted by a rejection.
+    candidate_note_id: str | None
+    state: str
+    reason: str
+    similar: list[VaultSimilarEvidence] = Field(default_factory=list)
+    created_at: datetime
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    decision_note: str | None = None
+
+
+class VaultReviewQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pending: list[VaultReviewCaseSummary]
+    count: int
+
+
+class VaultReviewCaseResponse(BaseModel):
+    """A case plus the content being judged.
+
+    ``candidate`` is the flagged note in full. The public read surface withholds
+    ``flagged`` (ADR 0008) because its consumer is a model that will not check
+    the status field; a reviewer is the opposite consumer and cannot adjudicate
+    what they cannot read.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    review_case: VaultReviewCaseSummary
+    candidate: VaultDocumentDetail | None
+
+
+class VaultReviewDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accepted", "rejected"] = Field(
+        description=(
+            "'accepted': the flag was a false positive, so the note is "
+            "published and rejoins search and dedup. 'rejected': the note "
+            "really is a duplicate, so it is DELETED -- its content is already "
+            "in the corpus, which is what the case said. 'superseded' exists in "
+            "the schema but is reserved and not accepted here."
+        ),
+    )
+    decision_note: str | None = Field(default=None, max_length=2_000)
+
+
+class VaultReviewDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    review_case: VaultReviewCaseSummary
+    candidate: Literal["published", "deleted", "absent"] = Field(
+        description=(
+            "What happened to the note: 'published' if it is now active, "
+            "'deleted' if it was removed, 'absent' if it was already gone."
+        ),
+    )
+
+
+def review_case_summary(case: VaultReviewCase) -> VaultReviewCaseSummary:
+    """Project a domain review case onto its transport shape.
+
+    Here rather than in either adapter, for the reason ``document_detail`` is:
+    two copies eventually disagree about what a case looks like.
+    """
+
+    return VaultReviewCaseSummary(
+        review_case_id=case.id,
+        candidate_note_id=case.candidate_document_id,
+        state=case.state.value,
+        reason=case.reason,
+        similar=[VaultSimilarEvidence.model_validate(item) for item in case.similar_documents],
+        created_at=case.created_at,
+        decided_at=case.decided_at,
+        decided_by=case.decided_by,
+        decision_note=case.decision_note,
+    )
+
+
+class VaultCompileWorkItem(BaseModel):
+    """One page a run should write, and why.
+
+    Note **ids**, never bodies. The compiling agent fetches what it needs
+    through the ordinary read surface, which is already policy-checked (ADR
+    0014); inlining bodies here would be a second read path with its own
+    disclosure rules and a response the size of the corpus.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    page_id: str | None = Field(
+        default=None,
+        description=(
+            "The existing page to rewrite, or null for a page that does not "
+            "exist yet. Pass it back as `page_id` when writing."
+        ),
+    )
+    title: str | None = None
+    reason: Literal["stale", "missing", "new-source"] = Field(
+        description=(
+            "'stale': a source moved after the page was compiled, or has since "
+            "been flagged. 'missing': the page cites a note that no longer "
+            "exists. 'new-source': a note no page covers at all."
+        ),
+    )
+    source_ids: list[str]
+
+
+class VaultCompileRunSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID
+    state: Literal["running", "succeeded", "failed"]
+    compiled_by: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    input_frontier: dict[str, Any] = Field(default_factory=dict)
+    output_frontier: dict[str, Any] = Field(default_factory=dict)
+    error_summary: str | None = None
+
+
+class VaultCompilePlanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run: VaultCompileRunSummary
+    items: list[VaultCompileWorkItem]
+    count: int
+
+
+class VaultCompilePageRequest(BaseModel):
+    """One compiled page, written by the agent that synthesized it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=100_000)
+    source_ids: list[str] = Field(
+        min_length=1,
+        description=(
+            "The notes this page was synthesized from. Validated: unlike a "
+            "note's related_ids, provenance naming something that does not "
+            "exist is refused rather than stored."
+        ),
+    )
+    summary: str | None = Field(default=None, max_length=2_000)
+    tags: list[str] = Field(default_factory=list)
+    related_ids: list[str] = Field(default_factory=list)
+    page_id: str | None = Field(
+        default=None,
+        description=(
+            "Rewrite this existing page rather than creating one. From the "
+            "plan item's `page_id`."
+        ),
+    )
+
+
+class VaultCompileSettleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    error_summary: str | None = Field(
+        default=None,
+        max_length=2_000,
+        description=(
+            "Required when failing a run; ignored when finishing one. A failed "
+            "run keeps the pages it wrote and publishes no frontier, so the "
+            "next plan re-covers what it did not finish."
+        ),
+    )
+
+
+class VaultCompileDeclineRequest(BaseModel):
+    """Notes this run considered and decided not to compile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_ids: list[str] = Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "Notes the run looked at and is refusing. Each is marked declined "
+            "and stops appearing as a `new-source` work item -- until the note "
+            "itself changes, which makes the decline stale and offers it again. "
+            "Ids that resolve to no live note are refused rather than ignored."
+        ),
+    )
+
+
+class VaultCompileDeclineResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    declined_note_ids: list[str]
+    declined_at: datetime = Field(
+        description=(
+            "When the judgement was recorded. A decline is compared against the "
+            "note's own `updated_at`, so an edit after this instant re-offers it."
+        ),
+    )
+
+
+def compile_run_summary(run: VaultCompileRun) -> VaultCompileRunSummary:
+    """Project a domain compile run onto its transport shape.
+
+    Here rather than in either adapter, for the reason ``document_detail`` is:
+    two copies eventually disagree about what a run looks like.
+    """
+
+    return VaultCompileRunSummary(
+        run_id=run.id,
+        state=run.state.value,
+        compiled_by=run.compiler_principal_id,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        input_frontier=run.input_frontier,
+        output_frontier=run.output_frontier,
+        error_summary=run.error_summary,
+    )
+
+
+def compile_work_item(item: CompileWorkItem) -> VaultCompileWorkItem:
+    return VaultCompileWorkItem(
+        page_id=item.page_id,
+        title=item.title,
+        reason=item.reason,  # type: ignore[arg-type]
+        source_ids=list(item.source_ids),
+    )

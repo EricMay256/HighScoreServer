@@ -668,7 +668,9 @@ def test_provider_failure_is_logged_as_an_error_without_the_query(
     asyncio.run(exercise())
 
     failures = [
-        record for record in caplog.records if record.levelname == "ERROR"
+        record
+        for record in _records_from(caplog, "app.vault.service")
+        if record.levelname == "ERROR"
     ]
     assert len(failures) == 1
     # The exception type is recorded so the fault is diagnosable...
@@ -677,6 +679,20 @@ def test_provider_failure_is_logged_as_an_error_without_the_query(
     # ...but the query is user content and must not reach the logs, directly
     # or via an exception message that quoted it.
     assert "secret-query-text" not in caplog.text
+
+
+def _records_from(caplog: pytest.LogCaptureFixture, logger: str) -> list:
+    """Only this logger's records.
+
+    `caplog.records` is every record the run produced, not the ones
+    `caplog.at_level` named -- and these tests do async work over a real pool,
+    so a *different* test's `psycopg_pool` worker can log an error inside this
+    window and fail an assertion about a search that behaved perfectly. Observed
+    as an intermittent failure of the no-error test carrying three pending
+    pool-worker errors it had nothing to do with.
+    """
+
+    return [record for record in caplog.records if record.name == logger]
 
 
 def test_missing_provider_is_not_logged_as_an_error(
@@ -704,7 +720,11 @@ def test_missing_provider_is_not_logged_as_an_error(
 
     # A deliberate lexical-only deployment must not generate error noise on
     # every single search, or the real failures stop being visible.
-    assert [record for record in caplog.records if record.levelname == "ERROR"] == []
+    assert [
+        record
+        for record in _records_from(caplog, "app.vault.service")
+        if record.levelname == "ERROR"
+    ] == []
 
 
 def test_search_without_a_provider_is_lexical_only(

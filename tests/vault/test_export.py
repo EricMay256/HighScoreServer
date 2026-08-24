@@ -23,14 +23,17 @@ from app.vault.domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    PromotionStatus,
     VaultDocument,
 )
 from app.vault.export import (
+    CORPUS_OWNED_PATH_PREFIXES,
     EXPORTED_PATH_PREFIXES,
     ExportPathError,
     ExportReport,
     VaultExportService,
     render_document,
+    render_wiki_index,
     resolve_export_path,
     utc_timestamp,
 )
@@ -312,9 +315,6 @@ def test_wiki_pages_render_with_compile_provenance() -> None:
     [
         # The AI Contribution Policy forbids agents the Human layer outright.
         "Human/06 Reference/Postgres.md",
-        # folders.yml marks this engine_managed: false, and the Promotion
-        # Policy calls it a human-curated queue kept outside the engine.
-        "Agent/Promotion Candidates/candidate.md",
         # No `Agent/**` catch-all exists, so an unclassified subfolder is not
         # projected either.
         "Agent/experiments/scratch.md",
@@ -340,10 +340,21 @@ def test_exported_prefixes_are_all_under_the_agent_tree() -> None:
 
 class _StubTransactions:
     """Stands in for VaultTransactionService: the export loop never uses the
-    connection for anything but handing it to the repository."""
+    connection for anything but handing it to the repository.
+
+    Records the isolation level it was asked for, which is the one thing about
+    the transaction the exporter genuinely depends on -- paging under READ
+    COMMITTED sees a different corpus on every page.
+    """
+
+    def __init__(self) -> None:
+        self.isolation_levels: list[str | None] = []
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[None]:
+    async def transaction(
+        self, isolation_level: str | None = None
+    ) -> AsyncIterator[None]:
+        self.isolation_levels.append(isolation_level)
         yield None
 
 
@@ -451,24 +462,30 @@ def test_a_removed_document_leaves_an_orphan_that_prune_deletes(
     assert not (tmp_path / retired.vault_path).exists()
 
 
-def test_prune_never_reaches_outside_the_engine_managed_folders(
+def test_prune_never_reaches_outside_the_folders_the_corpus_owns(
     tmp_path: Path,
 ) -> None:
-    """``Agent/INDEX.md`` and the promotion queue are written by someone else."""
+    """Two files nothing may delete, kept out for two different reasons.
+
+    ``Agent/INDEX.md`` sits under no exported prefix at all. The Stage-A pages
+    under ``Agent/wiki/`` sit under one the export *writes* but the corpus does
+    not *own* -- which is the distinction ADR 0023 drew when it replaced the
+    occupancy test with an explicit owned set.
+    """
 
     (tmp_path / "Agent").mkdir()
     index = tmp_path / "Agent" / "INDEX.md"
     index.write_text("wiki index\n", encoding="utf-8")
-    candidates = tmp_path / "Agent" / "Promotion Candidates"
-    candidates.mkdir()
-    candidate = candidates / "worth-keeping.md"
-    candidate.write_text("a human wrote this\n", encoding="utf-8")
+    wiki = tmp_path / "Agent" / "wiki"
+    wiki.mkdir()
+    stage_a = wiki / "compiled-page.md"
+    stage_a.write_text("written by another librarian\n", encoding="utf-8")
 
     report = export_to(tmp_path, (make_document(),), apply=True, prune=True)
 
     assert report.prunable == []
     assert index.exists()
-    assert candidate.exists()
+    assert stage_a.exists()
 
 
 def test_list_under_path_prefixes_pages_the_agent_tree(
@@ -556,3 +573,284 @@ def test_list_under_path_prefixes_pages_the_agent_tree(
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+def test_prune_leaves_a_prefix_the_corpus_does_not_own(tmp_path: Path) -> None:
+    """The hazard this guard exists for, caught against the real corpus.
+
+    ``Agent/wiki/`` is an exported prefix, but the service holds no wiki
+    documents -- compilation is not built yet, and the Stage-A librarian still
+    owns 15 compiled pages there. Without this guard, one ``--apply --prune``
+    against the live vault deletes every one of them, because no row accounts
+    for any of them.
+
+    ADR 0012 answers the same question the same way for reconciliation: sweep
+    only after a complete walk, and refuse an implausible one.
+
+    The guard used to read the hazard off occupancy -- no rows under the prefix,
+    so leave it alone. It now reads it off ``CORPUS_OWNED_PATH_PREFIXES``, which
+    gives the same answer here and a different one for an owned folder that is
+    legitimately empty. See the promotion-candidate test below.
+    """
+
+    wiki = tmp_path / "Agent" / "wiki"
+    wiki.mkdir(parents=True)
+    for name in ("_index.md", "compiled-page.md"):
+        (wiki / name).write_text("written by another librarian\n", encoding="utf-8")
+
+    # A corpus of notes only -- nothing under Agent/wiki/.
+    report = export_to(tmp_path, (make_document(),), apply=True, prune=True)
+
+    assert report.prunable == []
+    assert report.pruned == 0
+    assert (wiki / "_index.md").exists()
+    assert (wiki / "compiled-page.md").exists()
+
+
+def test_prune_still_sweeps_a_prefix_the_corpus_does_populate(tmp_path: Path) -> None:
+    """The guard narrows the sweep; it does not disable it."""
+
+    retired = make_document(
+        id="deaddeaddeaddeaddeaddeaddeaddead",
+        vault_path="Agent/notes/deaddeaddeaddeaddeaddeaddeaddead.md",
+    )
+    export_to(tmp_path, (make_document(), retired), apply=True)
+
+    report = export_to(tmp_path, (make_document(),), apply=True, prune=True)
+
+    assert report.pruned == 1
+    assert not (tmp_path / retired.vault_path).exists()
+
+
+def test_a_candidate_is_projected_into_the_promotion_folder(
+    tmp_path: Path,
+) -> None:
+    """Routing is ``vault_path``, and the exporter writes wherever it points.
+
+    ADR 0010 requires the column to be byte-identical to the governance
+    scanner's ``rel_path``, so the export cannot re-derive a directory from
+    ``promotion_status`` without putting the row and the file under different
+    ``folders.yml`` rules. ``VaultPromotionService`` moves the two together;
+    this module just writes.
+    """
+
+    candidate = make_document(
+        id="0bad0bad0bad0bad0bad0bad0bad0bad",
+        vault_path="Agent/Promotion Candidates/worth-promoting.md",
+        promotion_status=PromotionStatus.CANDIDATE,
+    )
+
+    report = export_to(tmp_path, (make_document(), candidate), apply=True)
+
+    written = tmp_path / "Agent" / "Promotion Candidates" / "worth-promoting.md"
+    assert report.written == 2
+    assert written.exists()
+
+
+def test_the_last_candidate_settling_empties_the_folder(tmp_path: Path) -> None:
+    """The concrete bug ADR 0023 names, and the reason occupancy was wrong.
+
+    Promote the only candidate and the folder has zero rows. An occupancy test
+    reads that as "the corpus is not authoritative here" and skips the sweep,
+    stranding a file that still advertises a candidacy which ended. Ownership
+    does not move when the last row leaves.
+    """
+
+    candidate = make_document(
+        id="0bad0bad0bad0bad0bad0bad0bad0bad",
+        vault_path="Agent/Promotion Candidates/worth-promoting.md",
+        promotion_status=PromotionStatus.CANDIDATE,
+    )
+    export_to(tmp_path, (make_document(), candidate), apply=True)
+    stranded = tmp_path / "Agent" / "Promotion Candidates" / "worth-promoting.md"
+    assert stranded.exists()
+
+    # Promoted: the row is back under Agent/notes/, and nothing populates the
+    # candidates prefix any more.
+    promoted = make_document(
+        id="0bad0bad0bad0bad0bad0bad0bad0bad",
+        vault_path="Agent/notes/worth-promoting.md",
+        promotion_status=PromotionStatus.PROMOTED,
+    )
+    report = export_to(
+        tmp_path, (make_document(), promoted), apply=True, prune=True
+    )
+
+    assert report.prunable == [
+        "Agent/Promotion Candidates/worth-promoting.md"
+    ]
+    assert report.pruned == 1
+    assert not stranded.exists()
+
+
+def test_every_owned_prefix_is_one_the_export_also_writes() -> None:
+    """Sweeping a folder the export never writes would delete unconditionally.
+
+    The owned set is a subset of the exported set by construction, and this is
+    the assertion that keeps it one when either constant grows.
+    """
+
+    assert set(CORPUS_OWNED_PATH_PREFIXES) <= set(EXPORTED_PATH_PREFIXES)
+
+
+# ------------------------------------------------------- the wiki index ----
+
+
+def make_page(**overrides: object) -> VaultDocument:
+    """A compiled wiki page, with the provenance its CHECK constraint wants."""
+
+    page = VaultDocument(
+        id="cafe0001",
+        kind=DocumentKind.WIKI,
+        status=DocumentStatus.ACTIVE,
+        vault_path="Agent/wiki/idempotency-and-identity.md",
+        title="Idempotency and Identity",
+        body="Synthesis.",
+        summary="What makes a request the same request.",
+        contributed_by="agent:librarian",
+        provenance={},
+        schema_version=1,
+        created_at=CREATED_AT,
+        updated_at=UPDATED_AT,
+        doc_type="Wiki Page",
+        doc_status="Current",
+        compile_run_id=UUID("11111111-1111-1111-1111-111111111111"),
+        compiled_by="agent:librarian",
+        compiled_at=UPDATED_AT,
+    )
+    return replace(page, **overrides)  # type: ignore[arg-type]
+
+
+def test_no_pages_means_no_index() -> None:
+    """Writing "_0 notes._" would create a file to describe nothing.
+
+    Absent also lets the prune guard remove a stale index once `Agent/wiki/`
+    becomes a corpus-owned prefix.
+    """
+
+    assert render_wiki_index([make_document()]) is None
+
+
+def test_the_index_lists_every_page_with_its_summary() -> None:
+    index = render_wiki_index([make_document(), make_page()])
+
+    assert index is not None
+    assert index.vault_path == "Agent/wiki/_index.md"
+    assert "_1 notes._" in index.content
+    assert (
+        "- [[idempotency-and-identity]] - What makes a request the same request."
+        in index.content
+    )
+    # A note is not a page, whatever prefix it sits under.
+    assert make_document().title not in index.content
+
+
+def test_index_entries_sort_by_slug_case_insensitively() -> None:
+    """What the Stage-A renderer does, and what keeps the file from churning
+    when a title changes but its path does not."""
+
+    pages = [
+        make_page(id="a", vault_path="Agent/wiki/Zebra.md", title="Z"),
+        make_page(id="b", vault_path="Agent/wiki/apple.md", title="A"),
+    ]
+
+    index = render_wiki_index(pages)
+
+    assert index is not None
+    assert index.content.index("[[apple]]") < index.content.index("[[Zebra]]")
+
+
+def test_index_timestamps_come_from_the_pages_not_the_clock() -> None:
+    """The module's whole contract is a zero-line diff on an unchanged corpus.
+
+    Stage A stamped `LastUpdated` with `now()` and read the previous file to
+    preserve `CreatedAt`. Neither is available here -- this module parses no
+    markdown -- so both are derived: earliest page and latest page.
+    """
+
+    early = make_page(id="a", vault_path="Agent/wiki/a.md")
+    late = make_page(
+        id="b",
+        vault_path="Agent/wiki/b.md",
+        created_at=CREATED_AT + timedelta(days=2),
+        updated_at=UPDATED_AT + timedelta(days=2),
+    )
+
+    index = render_wiki_index([early, late])
+
+    assert index is not None
+    assert f"CreatedAt: {utc_timestamp(CREATED_AT)}" in index.content
+    assert f"LastUpdated: {utc_timestamp(UPDATED_AT + timedelta(days=2))}" in index.content
+
+
+def test_index_timestamps_follow_origin_for_an_imported_page() -> None:
+    """So the index agrees with the files it indexes.
+
+    An imported page projects its upstream dates rather than the moment its row
+    landed; an index reporting the import instead would disagree with every
+    entry in it.
+    """
+
+    imported = make_page(
+        origin={
+            "created_at": "2026-08-13T18:56:41Z",
+            "updated_at": "2026-08-13T18:56:41Z",
+        }
+    )
+
+    index = render_wiki_index([imported])
+
+    assert index is not None
+    assert "CreatedAt: 2026-08-13T18:56:41Z" in index.content
+    assert "LastUpdated: 2026-08-13T18:56:41Z" in index.content
+
+
+def test_the_index_is_written_and_never_pruned(tmp_path: Path) -> None:
+    """It is generated rather than stored, so no row accounts for it.
+
+    That is exactly what the prune sweep looks for, which is why the export has
+    to add it to the expected set rather than only writing it.
+    """
+
+    documents = (make_document(), make_page())
+
+    first = export_to(tmp_path, documents, apply=True, prune=True)
+    index = tmp_path / "Agent" / "wiki" / "_index.md"
+
+    assert index.exists()
+    assert first.prunable == []
+
+    second = export_to(tmp_path, documents, apply=True, prune=True)
+
+    assert second.written == 0
+    assert second.unchanged == 3
+    assert index.exists()
+
+
+def test_the_walk_is_read_at_repeatable_read(tmp_path: Path) -> None:
+    """Sharing a transaction is not what makes the paged walk consistent.
+
+    Under the server default, READ COMMITTED, every statement takes a fresh
+    snapshot -- so the loop saw the corpus move between pages while its
+    docstring claimed it could not. The cursor makes that worse rather than
+    better: `vault_path` is mutable, and promotion exists to move one, so a
+    document can cross the cursor and be exported twice under two paths or not
+    at all. Since the same walk feeds both the writes and the prune set, an
+    `--apply --prune` run could then delete a document's old export without
+    having written its new one.
+
+    Asserted on what the exporter *asks the transaction for*, because that is
+    the entire fix and it is invisible in the output otherwise -- a passing
+    export proves nothing about isolation when nothing is writing concurrently.
+    """
+
+    transactions = _StubTransactions()
+    service = VaultExportService(
+        transactions,  # type: ignore[arg-type]
+        _StubDocuments((make_document(),)),  # type: ignore[arg-type]
+        page_size=2,
+    )
+
+    asyncio.run(service.export(tmp_path))
+
+    assert transactions.isolation_levels == ["REPEATABLE READ"]

@@ -3,11 +3,15 @@
 Written 2026-08-19 at the end of the session that landed the MCP adapter and ADR 0022.
 Read ADR 0022 first; this file is the execution plan for it and assumes its decisions.
 
+> **Superseded 2026-08-22 by [`HANDOFF-VAULT-IMPLEMENTATION.md`](HANDOFF-VAULT-IMPLEMENTATION.md).**
+> The exporter and the metadata work below shipped. This file is kept for the reasoning,
+> not the plan — do not start a session from the prompt at the bottom of it.
+
 ## Read these before touching anything
 
 1. `app/vault/docs/adr/0022-two-trees-one-writer-each.md` — the governing decision.
 2. `app/vault/AGENTS.md` — the whole file. Several invariants below are restatements.
-3. In the **private knowledge-platform repository** (`C:\Users\yarom\Code\knowledge-platform`
+3. In the **private knowledge-platform repository** (`knowledge-platform`, checked out wherever you keep it
    on the machine this was written on):
    - `Vault/00 Governance/AI Contribution Policy.md` — where AI may read and write.
    - `Vault/00 Governance/Promotion Policy.md` — how agent memory becomes human knowledge.
@@ -74,7 +78,7 @@ in the **other** repository. Do it before anything relies on either side.
 
 - Reconciliation stops scanning `Agent/`. ADR 0012's sweep is scoped by path prefix
   specifically so this does not require rewriting it.
-- The `knowledge-vault` skill (`C:\Users\yarom\.claude\skills\knowledge-vault`) currently
+- The `knowledge-vault` skill (the `knowledge-vault` skill directory under your Claude config) currently
   drives `vault_contrib` against the markdown layer. It must reach the service instead.
 - Until both are done, the Stage A engine and the service are **two writers to one tree**,
   which is the round trip ADR 0022 exists to prevent.

@@ -2,22 +2,37 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .auth import VaultCredential
+from .constants import (
+    AUTHORIZATION_CODE_TTL_SECONDS,
+    OAUTH_CLIENT_LOCK_KEY,
+    PENDING_AUTHORIZATION_TTL_SECONDS,
+    REFRESH_TOKEN_TTL_SECONDS,
+)
 from .domain import (
+    CompileRunState,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    NoteCompileState,
+    PendingAuthorization,
+    PromotionStatus,
+    RegisteredOAuthClient,
     ReviewState,
+    StoredAuthorizationCode,
+    StoredRefreshToken,
+    VaultCompileRun,
     VaultDocument,
     VaultReviewCase,
 )
@@ -25,8 +40,13 @@ from .read_policy import readable_path_predicate
 from .tables import (
     vault_agent_credentials,
     vault_audit_events,
+    vault_compile_runs,
     vault_document_embeddings,
     vault_documents,
+    vault_oauth_authorization_codes,
+    vault_oauth_clients,
+    vault_oauth_pending_authorizations,
+    vault_oauth_refresh_tokens,
     vault_review_cases,
     vault_write_requests,
 )
@@ -47,6 +67,7 @@ DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.vault_path,
     vault_documents.c.status,
     vault_documents.c.doc_status,
+    vault_documents.c.promotion_status,
     vault_documents.c.title,
     vault_documents.c.summary,
     vault_documents.c.body,
@@ -78,6 +99,11 @@ def document_from_row(row: RowMapping) -> VaultDocument:
         vault_path=row["vault_path"],
         status=DocumentStatus(row["status"]),
         doc_status=row["doc_status"],
+        promotion_status=(
+            None
+            if row["promotion_status"] is None
+            else PromotionStatus(row["promotion_status"])
+        ),
         title=row["title"],
         summary=row["summary"],
         body=row["body"],
@@ -209,6 +235,120 @@ class VaultDocumentRepository:
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
 
+    async def set_status(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        status: DocumentStatus,
+        doc_status: str | None,
+    ) -> VaultDocument | None:
+        """Move a document's visibility state and its Status Map value together.
+
+        The two are different things (ADR 0011) and neither derives from the
+        other, which is precisely why they move in one statement: a review
+        decision changes both, and leaving one behind would publish a note
+        still labelled ``Flagged`` or label an unpublished one ``Active``.
+
+        Content is untouched -- this is not a small ``replace_content``, and
+        ``updated_at`` deliberately does not move: adjudicating a note is not
+        editing it, and the export would otherwise churn every reviewed file.
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .values(status=status.value, doc_status=doc_status)
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def set_promotion_status(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        promotion_status: PromotionStatus | None,
+        vault_path: str,
+    ) -> VaultDocument | None:
+        """Move candidacy and the path it routes to, in one statement.
+
+        The folder is a projection of the field (ADR 0023), and the projection
+        is ``vault_path``: the exporter writes a candidate under
+        ``Agent/Promotion Candidates/`` because the row says that is where it
+        lives, not because the exporter re-derives a directory. ADR 0010
+        requires ``vault_path`` to stay byte-identical to the governance
+        scanner's ``rel_path``, so a file in one folder and a row naming
+        another would resolve its ``allowed_types`` and ``validation_mode``
+        against the wrong rule. The two therefore move together or not at all,
+        the same way ``set_status`` moves ``status`` and ``doc_status``.
+
+        ``updated_at`` deliberately does not move, and here that is
+        load-bearing rather than tidy: the rendered content is byte-identical
+        either side of the move, which is what makes git show a rename and
+        follow the file's history. Bumping the timestamp would rewrite
+        ``LastUpdated`` and turn every promotion into a rename plus an edit.
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .values(
+                promotion_status=(
+                    None if promotion_status is None else promotion_status.value
+                ),
+                vault_path=vault_path,
+            )
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def set_compile_provenance(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        compile_run_id: UUID,
+        compiled_by: str,
+        compiled_at: datetime,
+    ) -> VaultDocument | None:
+        """Re-attribute a page to the run that has just rewritten it.
+
+        Separate from ``replace_content`` on purpose. That method leaves compile
+        provenance alone because an ordinary update must not be able to claim it
+        produced a page -- ``contributed_by`` stays put there for the same
+        reason. A recompile genuinely *is* a compilation, so it moves the
+        provenance in its own statement, and the two callers cannot be confused
+        for one another.
+
+        All three provenance columns move together, and ``compiled_at`` has to
+        be among them: ``replace_content`` deliberately ignores it, so a
+        recompiled page would otherwise keep the timestamp of the run before
+        last and stay permanently "stale" in every subsequent plan. It comes
+        from the *run's start*, not from ``now()``, so every page in one run
+        carries one timestamp -- otherwise "was this note newer than the page"
+        would depend on where in the run the page happened to be written.
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.kind == DocumentKind.WIKI.value)
+            .values(
+                compile_run_id=compile_run_id,
+                compiled_by=compiled_by,
+                compiled_at=compiled_at,
+            )
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
     async def get_by_id(
         self,
         connection: AsyncConnection,
@@ -250,10 +390,17 @@ class VaultDocumentRepository:
     ) -> tuple[VaultDocument, ...]:
         """One ordered page of the documents living under any of ``prefixes``.
 
-        Ordered by ``vault_path`` and paged by keyset rather than OFFSET, so a
-        full walk is stable under concurrent writes and never revisits a row.
+        Ordered by ``vault_path`` and paged by keyset rather than OFFSET.
         ``vault_path`` is UNIQUE, which is what makes it a total order and a
         legal cursor.
+
+        **Keyset paging alone does not make the walk stable, and this docstring
+        used to claim it did.** OFFSET is the thing it beats: it cannot skip or
+        repeat rows because of *insertions* behind the cursor. But the cursor
+        column is mutable -- promotion moves a `vault_path` on purpose -- so a
+        row can still cross the cursor and be seen twice or never. What closes
+        that is the caller reading every page in one REPEATABLE READ
+        transaction, which is what `VaultExportService.documents` does.
 
         Unfiltered by status and by ``ai_read``, for the reason ``get_by_id``
         gives: which rows a surface may see is that surface's policy. The
@@ -333,6 +480,14 @@ class VaultDocumentRepository:
             .where(vault_write_requests.c.document_id == document_id)
             .values(document_id=None)
         )
+        # Review cases follow the same rule for the same reason: the judgement
+        # is durable and the thing judged need not be. Nullable since migration
+        # 0011; before it, a flagged note could never be deleted at all.
+        await connection.execute(
+            update(vault_review_cases)
+            .where(vault_review_cases.c.candidate_document_id == document_id)
+            .values(candidate_document_id=None)
+        )
         result = await connection.execute(
             delete(vault_documents).where(vault_documents.c.id == document_id)
         )
@@ -345,22 +500,32 @@ class VaultDocumentRepository:
     ) -> int:
         """Count review references that prevent retiring a document.
 
-        Candidate references block in every state because the database foreign
-        key is durable and non-cascading. JSON evidence has no foreign key and
-        blocks only while the review remains unresolved.
+        **Only an unresolved case blocks.** ADR 0019 originally blocked on a
+        candidate reference in every state, because the foreign key was durable
+        and non-cascading and a decided case would have passed the service check
+        only to fail at the constraint. Migration 0011 made the pointer nullable
+        and ``delete`` clears it, so that mechanical reason is gone -- and with
+        it the consequence, that a note flagged once could never be deleted.
+
+        What remains is a judgement rather than a constraint: a review still in
+        progress needs its subject, so retiring it out from under the reviewer
+        is refused. A settled one does not, and its record survives the deletion
+        with a null candidate.
+
+        JSON evidence is unchanged and blocks on the same rule it always did --
+        it names what a pending judgement was reached against, and has no
+        foreign key to enforce it.
         """
 
         result = await connection.execute(
             select(func.count())
             .select_from(vault_review_cases)
             .where(
+                vault_review_cases.c.state == ReviewState.PENDING.value,
                 or_(
                     vault_review_cases.c.candidate_document_id == document_id,
-                    and_(
-                        vault_review_cases.c.state == ReviewState.PENDING.value,
-                        vault_review_cases.c.similar_documents.contains(
-                            [{"note_id": document_id}]
-                        ),
+                    vault_review_cases.c.similar_documents.contains(
+                        [{"note_id": document_id}]
                     ),
                 ),
             )
@@ -451,6 +616,83 @@ class VaultReviewCaseRepository:
         result = await connection.execute(statement)
         return _review_case_from_row(result.mappings().one())
 
+    async def get(
+        self,
+        connection: AsyncConnection,
+        review_case_id: UUID,
+    ) -> VaultReviewCase | None:
+        result = await connection.execute(
+            select(*vault_review_cases.c).where(
+                vault_review_cases.c.id == review_case_id
+            )
+        )
+        row = result.mappings().one_or_none()
+        return _review_case_from_row(row) if row is not None else None
+
+    async def list_pending(
+        self,
+        connection: AsyncConnection,
+        limit: int = 50,
+    ) -> tuple[VaultReviewCase, ...]:
+        """Unresolved cases, oldest first.
+
+        Oldest first because a review queue is a backlog rather than a feed:
+        the case most at risk of being forgotten is the one that has waited
+        longest. ``idx_vault_review_cases_state_created`` serves exactly this
+        ordering and predicate -- it was created with the schema, before
+        anything queried it.
+        """
+
+        result = await connection.execute(
+            select(*vault_review_cases.c)
+            .where(vault_review_cases.c.state == ReviewState.PENDING.value)
+            .order_by(vault_review_cases.c.created_at, vault_review_cases.c.id)
+            .limit(limit)
+        )
+        return tuple(_review_case_from_row(row) for row in result.mappings())
+
+    async def decide(
+        self,
+        connection: AsyncConnection,
+        review_case_id: UUID,
+        *,
+        state: ReviewState,
+        decided_by: str,
+        decision_note: str | None = None,
+    ) -> VaultReviewCase | None:
+        """Settle a pending case. Returns None when no *pending* row matched.
+
+        The state filter is the concurrency guard, not a convenience: two
+        reviewers deciding the same case at once must not both believe they
+        won, because each decision also moves the document. The loser gets None
+        and the caller reports a conflict.
+
+        ``decided_by`` comes from the credential rather than the body, for the
+        reason ``contributed_by`` does -- a reviewer must not be able to sign
+        someone else's name to a judgement.
+        """
+
+        if state is ReviewState.PENDING:
+            raise ValueError("a decision cannot leave a case pending")
+
+        statement = (
+            update(vault_review_cases)
+            .where(
+                vault_review_cases.c.id == review_case_id,
+                vault_review_cases.c.state == ReviewState.PENDING.value,
+            )
+            .values(
+                state=state.value,
+                decided_at=func.now(),
+                decided_by=decided_by,
+                decision_note=decision_note,
+            )
+            .returning(*vault_review_cases.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _review_case_from_row(row) if row is not None else None
+
 
 class VaultAgentCredentialRepository:
     """Lookup and last-used tracking for operator-issued agent credentials."""
@@ -498,6 +740,81 @@ class VaultAgentCredentialRepository:
             revoked_at=row["revoked_at"],
             last_used_at=row["last_used_at"],
         )
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        credential_id: str,
+        principal_id: str,
+        display_name: str,
+        secret_sha256: bytes,
+        scopes: Sequence[str],
+        expires_at: datetime | None = None,
+    ) -> VaultCredential:
+        """Insert a credential row.
+
+        Used by the OAuth provider, which mints one per authorization and one
+        per refresh rotation -- ADR 0024's "an issued access token *is* a
+        credential row". ``scripts/issue_vault_credential.py`` writes its own
+        insert rather than calling this: it runs against a database the
+        application may not be pointed at, and an operator tool sharing the
+        request path's code would make a schema change silently break the tool
+        that repairs schema problems.
+
+        The caller supplies ``secret_sha256`` rather than the secret, so the
+        plaintext never crosses this boundary and cannot be logged by a query
+        echo.
+        """
+
+        statement = (
+            insert(vault_agent_credentials)
+            .values(
+                id=credential_id,
+                principal_id=principal_id,
+                display_name=display_name,
+                secret_sha256=secret_sha256,
+                scopes=sorted(set(scopes)),
+                expires_at=expires_at,
+            )
+            .returning(*self._columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one()
+        return VaultCredential(
+            id=row["id"],
+            principal_id=row["principal_id"],
+            display_name=row["display_name"],
+            secret_sha256=bytes(row["secret_sha256"]),
+            scopes=tuple(row["scopes"]),
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            revoked_at=row["revoked_at"],
+            last_used_at=row["last_used_at"],
+        )
+
+    async def revoke(
+        self,
+        connection: AsyncConnection,
+        credential_ids: Sequence[str],
+    ) -> int:
+        """Mark credentials revoked. Idempotent, and never deletes.
+
+        ``revoked_at IS NULL`` in the predicate keeps the first revocation's
+        timestamp, which is the one an incident reconstruction wants. The row
+        survives so that ``last_used_at`` and the audit trail still name
+        something.
+        """
+
+        if not credential_ids:
+            return 0
+        result = await connection.execute(
+            update(vault_agent_credentials)
+            .where(vault_agent_credentials.c.id.in_(list(credential_ids)))
+            .where(vault_agent_credentials.c.revoked_at.is_(None))
+            .values(revoked_at=func.now())
+        )
+        return result.rowcount or 0
 
     async def touch(
         self,
@@ -696,3 +1013,805 @@ class VaultAuditEventRepository:
                 latency_ms=latency_ms,
             )
         )
+
+
+def _registered_client_from_row(row: RowMapping) -> RegisteredOAuthClient:
+    return RegisteredOAuthClient(
+        client_id=row["client_id"],
+        client_info=dict(row["client_info"]),
+        registered_at=row["registered_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def _pending_authorization_from_row(row: RowMapping) -> PendingAuthorization:
+    return PendingAuthorization(
+        client_id=row["client_id"],
+        params=dict(row["params"]),
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        csrf_sha256=row["csrf_sha256"],
+    )
+
+
+def _authorization_code_from_row(row: RowMapping) -> StoredAuthorizationCode:
+    return StoredAuthorizationCode(
+        client_id=row["client_id"],
+        scopes=tuple(row["scopes"]),
+        code_challenge=row["code_challenge"],
+        redirect_uri=row["redirect_uri"],
+        redirect_uri_provided_explicitly=row["redirect_uri_provided_explicitly"],
+        resource=row["resource"],
+        subject=row["subject"],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+    )
+
+
+def hash_oauth_secret(secret: str) -> bytes:
+    """The 32 bytes stored for a nonce or an authorization code.
+
+    Deliberately the same construction ``auth.hash_secret`` uses for agent
+    secrets, and correct for the same reason: both are machine-generated with
+    full entropy, so there is no dictionary a work factor would slow down. It
+    is emphatically *not* the right tool for the operator password, which is
+    why ``passwords.py`` exists and uses bcrypt instead.
+
+    A separate function rather than an import from ``auth`` because these are
+    different secrets with different lifetimes; if one ever needs a different
+    construction, the other should not silently follow.
+    """
+
+    return sha256(secret.encode("utf-8")).digest()
+
+
+class VaultOAuthClientRepository:
+    """Dynamically registered OAuth clients.
+
+    Registration is open by decision (ADR 0024) -- the web client has no client
+    id to present and the specification expects it to self-register -- which is
+    why a registration grants nothing on its own. What gates access is the
+    authorization an operator personally approves, and the scopes the resulting
+    credential carries.
+    """
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        client_id: str,
+    ) -> RegisteredOAuthClient | None:
+        result = await connection.execute(
+            select(vault_oauth_clients).where(
+                vault_oauth_clients.c.client_id == client_id
+            )
+        )
+        row = result.mappings().one_or_none()
+        return _registered_client_from_row(row) if row is not None else None
+
+    async def upsert(
+        self,
+        connection: AsyncConnection,
+        *,
+        client_id: str,
+        client_info: Mapping[str, Any],
+        expires_at: datetime | None = None,
+    ) -> RegisteredOAuthClient:
+        """Store a registration, replacing any earlier one for the same id.
+
+        Upsert rather than insert because the SDK generates the client id and a
+        client may legitimately re-register -- one that lost its secret repeats
+        the flow, and refusing would leave it permanently unable to reconnect
+        under an id it still holds. Nothing is lost: a registration carries no
+        history and grants no privilege, so the current one is the only one
+        that matters.
+        """
+
+        statement = (
+            pg_insert(vault_oauth_clients)
+            .values(
+                client_id=client_id,
+                client_info=dict(client_info),
+                expires_at=expires_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[vault_oauth_clients.c.client_id],
+                set_={
+                    "client_info": dict(client_info),
+                    "expires_at": expires_at,
+                },
+            )
+            .returning(*vault_oauth_clients.c)
+        )
+        result = await connection.execute(statement)
+        return _registered_client_from_row(result.mappings().one())
+
+    def _stale_conditions(self, retention_days: int) -> tuple[Any, ...]:
+        """Old enough, with nothing live attached.
+
+        One definition, read by both the delete and the dry-run count. Two
+        copies of a predicate that must agree will drift, and a dry run whose
+        answer differs from the delete it previews is worse than no dry run --
+        it is a wrong answer an operator acted on.
+
+        **Not keyed on ``expires_at``.** Registration is open, the SDK leaves
+        ``client_secret_expiry_seconds`` unset, and nothing else supplies one --
+        so every row was NULL there and an expiry-only sweep deleted nothing
+        while `/register` grew the table without bound. Age plus liveness is the
+        rule that actually prunes.
+
+        **Liveness is three things, not one**, because all three cascade. A
+        refresh token that can still renew is the obvious case: deleting its
+        client revokes a working connector, which comes back as
+        `invalid_client` with no explanation. The other two are an authorization
+        *in flight* -- a pending authorization on the operator's screen right
+        now, and a code minted seconds ago and not yet exchanged. Pruning
+        through either window destroys the flow silently, and the client reports
+        an expired or invalid request that names nothing an operator could act
+        on.
+
+        That window is not exotic. An old registration reaches exactly this
+        state when its refresh token has expired and the connector reconnects,
+        which is the ordinary way back: old-with-no-live-token *is* the
+        reconnecting client.
+
+        A consumed-and-rotated refresh family does not protect its client, since
+        the successor row is the live one and it is checked too.
+        """
+
+        live_refresh = (
+            select(vault_oauth_refresh_tokens.c.client_id)
+            .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+            .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
+            .distinct()
+            .scalar_subquery()
+        )
+        pending = (
+            select(vault_oauth_pending_authorizations.c.client_id)
+            .where(vault_oauth_pending_authorizations.c.expires_at > func.now())
+            .distinct()
+            .scalar_subquery()
+        )
+        codes = (
+            select(vault_oauth_authorization_codes.c.client_id)
+            .where(vault_oauth_authorization_codes.c.expires_at > func.now())
+            .distinct()
+            .scalar_subquery()
+        )
+        return (
+            vault_oauth_clients.c.registered_at
+            < func.now() - func.make_interval(0, 0, 0, retention_days),
+            vault_oauth_clients.c.client_id.not_in(live_refresh),
+            vault_oauth_clients.c.client_id.not_in(pending),
+            vault_oauth_clients.c.client_id.not_in(codes),
+        )
+
+    async def delete_stale(
+        self,
+        connection: AsyncConnection,
+        retention_days: int,
+    ) -> int:
+        """Remove registrations that are old and have nothing live attached.
+
+        Takes ``OAUTH_CLIENT_LOCK_KEY`` first, and `oauth.authorize` takes the
+        same lock before parking a pending authorization. The conditions below
+        describe rows that *exist*; starting an authorization is the transition
+        into that state, and without serializing the two this sweep can read
+        "nothing live", delete the registration, and commit while an
+        `/authorize` already past its client lookup is about to write the very
+        row that would have spared it.
+
+        Taken in the repository rather than by the caller because there is
+        nothing else this method could correctly be -- unlocked, it is the race.
+        The corpus lock sits in the service layer instead, but that lock has one
+        call path and this one is reached from a script.
+        """
+
+        await connection.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": OAUTH_CLIENT_LOCK_KEY},
+        )
+        result = await connection.execute(
+            delete(vault_oauth_clients).where(
+                *self._stale_conditions(retention_days)
+            )
+        )
+        return result.rowcount or 0
+
+    async def count_stale(
+        self,
+        connection: AsyncConnection,
+        retention_days: int,
+    ) -> int:
+        """What ``delete_stale`` would remove, without removing it."""
+
+        result = await connection.execute(
+            select(func.count())
+            .select_from(vault_oauth_clients)
+            .where(*self._stale_conditions(retention_days))
+        )
+        return int(result.scalar_one())
+
+
+class VaultOAuthPendingAuthorizationRepository:
+    """Authorizations in flight between ``/authorize`` and the login form.
+
+    In Postgres and not in a dict, which is the constraint the 2026-08-22 spike
+    established rather than assumed: registration arrives server-to-server from
+    the vendor's backend while ``/authorize`` is a browser navigation, so the
+    two halves reliably land on different Gunicorn workers. An in-memory store
+    fails deterministically, and only in production.
+    """
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        nonce: str,
+        client_id: str,
+        params: Mapping[str, Any],
+        csrf_token: str | None = None,
+        ttl_seconds: int = PENDING_AUTHORIZATION_TTL_SECONDS,
+    ) -> PendingAuthorization:
+        statement = (
+            insert(vault_oauth_pending_authorizations)
+            .values(
+                nonce_sha256=hash_oauth_secret(nonce),
+                client_id=client_id,
+                params=dict(params),
+                csrf_sha256=(
+                    None if csrf_token is None else hash_oauth_secret(csrf_token)
+                ),
+                expires_at=func.now() + timedelta(seconds=ttl_seconds),
+            )
+            .returning(*vault_oauth_pending_authorizations.c)
+        )
+        result = await connection.execute(statement)
+        return _pending_authorization_from_row(result.mappings().one())
+
+    async def peek(
+        self,
+        connection: AsyncConnection,
+        nonce: str,
+    ) -> PendingAuthorization | None:
+        """Read one without consuming it, for rendering the login form.
+
+        The GET that shows the form must not spend the nonce -- an operator who
+        reloads the page, or whose browser prefetches it, would otherwise find
+        their authorization already gone. Consumption belongs to the POST, which
+        is the step that mints a code. Expiry is still applied, so an expired
+        nonce renders the same refusal it would on submit.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_pending_authorizations)
+            .where(
+                vault_oauth_pending_authorizations.c.nonce_sha256
+                == hash_oauth_secret(nonce)
+            )
+            .where(vault_oauth_pending_authorizations.c.expires_at > func.now())
+        )
+        row = result.mappings().one_or_none()
+        return _pending_authorization_from_row(row) if row is not None else None
+
+    async def redeem(
+        self,
+        connection: AsyncConnection,
+        nonce: str,
+    ) -> PendingAuthorization | None:
+        """Consume one pending authorization, or return None.
+
+        ``DELETE ... RETURNING`` with the expiry in the predicate, so single use
+        is one atomic statement. A check-then-delete is two that a concurrent
+        redemption can interleave, and this is the step that mints an
+        authorization code -- letting it run twice would issue two codes for one
+        approval.
+
+        None covers an unknown nonce, an expired one, and one already redeemed,
+        and the caller must not tell them apart: ADR 0024 renders one failure
+        message for every outcome, because a page distinguishing "bad password"
+        from "unknown request" hands an attacker a probe for valid attempts.
+        """
+
+        statement = (
+            delete(vault_oauth_pending_authorizations)
+            .where(
+                vault_oauth_pending_authorizations.c.nonce_sha256
+                == hash_oauth_secret(nonce)
+            )
+            .where(vault_oauth_pending_authorizations.c.expires_at > func.now())
+            .returning(*vault_oauth_pending_authorizations.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _pending_authorization_from_row(row) if row is not None else None
+
+    async def delete_expired(self, connection: AsyncConnection) -> int:
+        result = await connection.execute(
+            delete(vault_oauth_pending_authorizations).where(
+                vault_oauth_pending_authorizations.c.expires_at <= func.now()
+            )
+        )
+        return result.rowcount or 0
+
+
+class VaultOAuthAuthorizationCodeRepository:
+    """Minted authorization codes, between the login form and ``/token``.
+
+    Same single-use idiom and same hashing as the pending store above, for the
+    same reasons. The TTL is much shorter because redeeming a code is a
+    machine-to-machine round trip that happens immediately, where a pending
+    authorization waits on a person reading a consent screen.
+    """
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        code: str,
+        client_id: str,
+        scopes: Sequence[str],
+        code_challenge: str,
+        redirect_uri: str,
+        redirect_uri_provided_explicitly: bool,
+        resource: str | None = None,
+        subject: str | None = None,
+        ttl_seconds: int = AUTHORIZATION_CODE_TTL_SECONDS,
+    ) -> StoredAuthorizationCode:
+        statement = (
+            insert(vault_oauth_authorization_codes)
+            .values(
+                code_sha256=hash_oauth_secret(code),
+                client_id=client_id,
+                scopes=list(scopes),
+                code_challenge=code_challenge,
+                redirect_uri=redirect_uri,
+                redirect_uri_provided_explicitly=redirect_uri_provided_explicitly,
+                resource=resource,
+                subject=subject,
+                expires_at=func.now() + timedelta(seconds=ttl_seconds),
+            )
+            .returning(*vault_oauth_authorization_codes.c)
+        )
+        result = await connection.execute(statement)
+        return _authorization_code_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        code: str,
+    ) -> StoredAuthorizationCode | None:
+        """Look a code up without consuming it.
+
+        The SDK's protocol splits ``load_authorization_code`` from
+        ``exchange_authorization_code``, so the load must not be the redemption:
+        a failed exchange after a consuming load would destroy a code the client
+        is still entitled to use. Redemption is ``redeem`` below, called from
+        the exchange.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_authorization_codes)
+            .where(
+                vault_oauth_authorization_codes.c.code_sha256
+                == hash_oauth_secret(code)
+            )
+            .where(vault_oauth_authorization_codes.c.expires_at > func.now())
+        )
+        row = result.mappings().one_or_none()
+        return _authorization_code_from_row(row) if row is not None else None
+
+    async def redeem(
+        self,
+        connection: AsyncConnection,
+        code: str,
+    ) -> StoredAuthorizationCode | None:
+        """Consume one code, atomically, or return None.
+
+        RFC 6749 requires an authorization code be single-use. This statement is
+        what makes reuse detectable at all: the second redemption returns None
+        because the first deleted the row, rather than both succeeding.
+        """
+
+        statement = (
+            delete(vault_oauth_authorization_codes)
+            .where(
+                vault_oauth_authorization_codes.c.code_sha256
+                == hash_oauth_secret(code)
+            )
+            .where(vault_oauth_authorization_codes.c.expires_at > func.now())
+            .returning(*vault_oauth_authorization_codes.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _authorization_code_from_row(row) if row is not None else None
+
+    async def delete_expired(self, connection: AsyncConnection) -> int:
+        result = await connection.execute(
+            delete(vault_oauth_authorization_codes).where(
+                vault_oauth_authorization_codes.c.expires_at <= func.now()
+            )
+        )
+        return result.rowcount or 0
+
+
+def _refresh_token_from_row(row: RowMapping) -> StoredRefreshToken:
+    return StoredRefreshToken(
+        family_id=row["family_id"],
+        client_id=row["client_id"],
+        credential_id=row["credential_id"],
+        scopes=tuple(row["scopes"]),
+        subject=row["subject"],
+        created_at=row["created_at"],
+        expires_at=row["expires_at"],
+        consumed_at=row["consumed_at"],
+    )
+
+
+class VaultOAuthRefreshTokenRepository:
+    """Refresh tokens, rotated on every use with replay detection.
+
+    The one OAuth table that marks consumption rather than deleting, and the
+    difference carries a security property rather than a preference. A deleted
+    row cannot be told from a token that never existed; a consumed one can, and
+    presenting a consumed refresh token is positive evidence that a token was
+    captured. OAuth 2.1 requires a public client's refresh token to be
+    sender-constrained or rotated with replay detection, and this is the
+    detection half.
+    """
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        token: str,
+        family_id: UUID,
+        client_id: str,
+        credential_id: str,
+        scopes: Sequence[str],
+        subject: str | None = None,
+        ttl_seconds: int = REFRESH_TOKEN_TTL_SECONDS,
+    ) -> StoredRefreshToken:
+        statement = (
+            insert(vault_oauth_refresh_tokens)
+            .values(
+                token_sha256=hash_oauth_secret(token),
+                family_id=family_id,
+                client_id=client_id,
+                credential_id=credential_id,
+                scopes=list(scopes),
+                subject=subject,
+                expires_at=func.now() + timedelta(seconds=ttl_seconds),
+            )
+            .returning(*vault_oauth_refresh_tokens.c)
+        )
+        result = await connection.execute(statement)
+        return _refresh_token_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        token: str,
+    ) -> StoredRefreshToken | None:
+        """Look one up without consuming it, expired or consumed included.
+
+        Unfiltered on purpose, unlike the authorization-code repository's
+        ``get``. The SDK's ``load_refresh_token`` decides validity itself -- it
+        compares ``expires_at`` and pretends an expired token does not exist --
+        and the replay check needs to see a consumed row precisely because it is
+        consumed. Filtering here would hide the evidence.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_refresh_tokens).where(
+                vault_oauth_refresh_tokens.c.token_sha256 == hash_oauth_secret(token)
+            )
+        )
+        row = result.mappings().one_or_none()
+        return _refresh_token_from_row(row) if row is not None else None
+
+    async def consume(
+        self,
+        connection: AsyncConnection,
+        token: str,
+    ) -> StoredRefreshToken | None:
+        """Mark one used, atomically, or return None if it was already used.
+
+        ``consumed_at IS NULL`` in the predicate is what makes rotation
+        single-use under concurrency: two simultaneous refreshes both match the
+        digest, one wins the UPDATE, the other returns None and is treated as a
+        replay. Expiry is in the predicate too, so the database clock decides
+        it rather than the caller's.
+        """
+
+        statement = (
+            update(vault_oauth_refresh_tokens)
+            .where(
+                vault_oauth_refresh_tokens.c.token_sha256 == hash_oauth_secret(token)
+            )
+            .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+            .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
+            .values(consumed_at=func.now())
+            .returning(*vault_oauth_refresh_tokens.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _refresh_token_from_row(row) if row is not None else None
+
+    async def client_and_family_for_credential(
+        self,
+        connection: AsyncConnection,
+        credential_id: str,
+    ) -> tuple[str, UUID] | None:
+        """Which OAuth client and rotation family a credential belongs to.
+
+        None for an operator-issued credential, which belongs to neither -- and
+        that is the answer the revocation endpoint needs. The SDK compares the
+        loaded token's ``client_id`` against the authenticated client's before
+        calling ``revoke_token``, so returning something that is not a client id
+        makes revocation a silent 200 that revokes nothing.
+
+        Ordered so the newest row wins. A family rotates, so one credential has
+        exactly one row -- but the query is written not to depend on that.
+        """
+
+        result = await connection.execute(
+            select(
+                vault_oauth_refresh_tokens.c.client_id,
+                vault_oauth_refresh_tokens.c.family_id,
+            )
+            .where(vault_oauth_refresh_tokens.c.credential_id == credential_id)
+            .order_by(vault_oauth_refresh_tokens.c.created_at.desc())
+            .limit(1)
+        )
+        row = result.one_or_none()
+        return (row[0], row[1]) if row is not None else None
+
+    async def credential_ids_in_family(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+    ) -> tuple[str, ...]:
+        """Every access credential ever minted in one rotation chain.
+
+        The replay response: revoke all of them. Which one the attacker holds
+        is unknown, so the answer is the whole family rather than a guess.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_refresh_tokens.c.credential_id)
+            .where(vault_oauth_refresh_tokens.c.family_id == family_id)
+            .distinct()
+        )
+        return tuple(result.scalars())
+
+    async def consume_family(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+    ) -> int:
+        """Burn every unconsumed token in a chain, so none can be rotated again."""
+
+        result = await connection.execute(
+            update(vault_oauth_refresh_tokens)
+            .where(vault_oauth_refresh_tokens.c.family_id == family_id)
+            .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+            .values(consumed_at=func.now())
+        )
+        return result.rowcount or 0
+
+    async def delete_expired(self, connection: AsyncConnection) -> int:
+        """Prune by expiry, never by consumption.
+
+        A consumed token has to outlive its own rotation or replay detection
+        stops working -- the whole point is recognising it when it comes back.
+        Expiry is the safe boundary: past it, ``load_refresh_token`` would
+        refuse the token anyway, so forgetting it costs nothing.
+        """
+
+        result = await connection.execute(
+            delete(vault_oauth_refresh_tokens).where(
+                vault_oauth_refresh_tokens.c.expires_at <= func.now()
+            )
+        )
+        return result.rowcount or 0
+
+
+def _compile_run_from_row(row: RowMapping) -> VaultCompileRun:
+    return VaultCompileRun(
+        id=row["id"],
+        compiler_principal_id=row["compiler_principal_id"],
+        state=CompileRunState(row["state"]),
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+        input_frontier=dict(row["input_frontier"]),
+        output_frontier=dict(row["output_frontier"]),
+        error_summary=row["error_summary"],
+    )
+
+
+class VaultCompileRunRepository:
+    """The lifecycle of one compile pass.
+
+    A run is `running` with no `completed_at`, or settled with one -- the
+    schema's completion CHECK admits nothing else, which is why every
+    transition here sets both columns together.
+    """
+
+    async def start(
+        self,
+        connection: AsyncConnection,
+        *,
+        run_id: UUID,
+        compiler_principal_id: str,
+        input_frontier: Mapping[str, Any],
+    ) -> VaultCompileRun:
+        statement = (
+            insert(vault_compile_runs)
+            .values(
+                id=run_id,
+                compiler_principal_id=compiler_principal_id,
+                input_frontier=dict(input_frontier),
+            )
+            .returning(*vault_compile_runs.c)
+        )
+        result = await connection.execute(statement)
+        return _compile_run_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        run_id: UUID,
+    ) -> VaultCompileRun | None:
+        result = await connection.execute(
+            select(vault_compile_runs).where(vault_compile_runs.c.id == run_id)
+        )
+        row = result.mappings().one_or_none()
+        return _compile_run_from_row(row) if row is not None else None
+
+    async def settle(
+        self,
+        connection: AsyncConnection,
+        run_id: UUID,
+        *,
+        state: CompileRunState,
+        output_frontier: Mapping[str, Any] | None = None,
+        error_summary: str | None = None,
+    ) -> VaultCompileRun | None:
+        """Move a run out of ``running``, or return None if it already left.
+
+        ``state = 'running'`` in the predicate is the concurrency guard, the
+        same shape the review decision uses: two finishes race, one wins, and
+        the loser is told the run was already settled rather than overwriting
+        the first outcome.
+        """
+
+        statement = (
+            update(vault_compile_runs)
+            .where(vault_compile_runs.c.id == run_id)
+            .where(vault_compile_runs.c.state == CompileRunState.RUNNING.value)
+            .values(
+                state=state.value,
+                completed_at=func.now(),
+                output_frontier=dict(output_frontier or {}),
+                error_summary=error_summary,
+            )
+            .returning(*vault_compile_runs.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _compile_run_from_row(row) if row is not None else None
+
+    async def note_frontier(self, connection: AsyncConnection) -> str | None:
+        """The latest ``updated_at`` across notes, as ISO-8601 text.
+
+        Text rather than a timestamp because it is stored in JSONB and compared
+        against what a previous run recorded; keeping one representation
+        removes a class of "the string sorted differently from the instant"
+        bug the Stage-A compiler had to fix explicitly.
+
+        Notes only. A wiki page's own ``updated_at`` must never advance the
+        frontier: the frontier answers "how far has the *source* corpus
+        moved", and a compile run that counted its own output would mark
+        everything it just wrote as already covered.
+        """
+
+        result = await connection.execute(
+            select(func.max(vault_documents.c.updated_at)).where(
+                vault_documents.c.kind == DocumentKind.NOTE.value
+            )
+        )
+        latest = result.scalar_one_or_none()
+        return latest.astimezone(UTC).isoformat() if latest is not None else None
+
+
+class VaultWikiPageRepository:
+    """Reads over the compiled layer, for planning a run.
+
+    Separate from ``VaultDocumentRepository`` because the questions are
+    different: that one fetches a document, this one asks which pages exist,
+    what they cite, and which notes nothing covers.
+    """
+
+    async def list_pages(
+        self,
+        connection: AsyncConnection,
+    ) -> tuple[VaultDocument, ...]:
+        """Every active wiki page.
+
+        Unpaged, deliberately: a corpus with enough wiki pages to need paging
+        here has other problems, and the planner needs all of them at once to
+        compute coverage. Fifteen pages today.
+        """
+
+        result = await connection.execute(
+            select(*DOCUMENT_DOMAIN_COLUMNS)
+            .where(vault_documents.c.kind == DocumentKind.WIKI.value)
+            .where(vault_documents.c.status == DocumentStatus.ACTIVE.value)
+            .order_by(vault_documents.c.vault_path)
+        )
+        return tuple(document_from_row(row) for row in result.mappings())
+
+    async def note_states(
+        self,
+        connection: AsyncConnection,
+    ) -> dict[str, NoteCompileState]:
+        """Every note's compile-planning state, keyed by id.
+
+        Three columns rather than whole documents: coverage and staleness are
+        decided by when a note last moved, whether it is still endorsed, and
+        whether a compiler already declined it. Loading bodies to answer that
+        would read the corpus into memory for nothing.
+
+        Includes flagged and archived notes on purpose. A page citing a note
+        that has since been flagged is *stale* -- that is one of the three
+        reasons the Stage-A planner recognises -- and it cannot be detected by
+        a query that only sees active ones.
+        """
+
+        result = await connection.execute(
+            select(
+                vault_documents.c.id,
+                vault_documents.c.updated_at,
+                vault_documents.c.status,
+                vault_documents.c.compile_declined_at,
+            ).where(vault_documents.c.kind == DocumentKind.NOTE.value)
+        )
+        return {
+            row["id"]: NoteCompileState(
+                updated_at=row["updated_at"],
+                status=row["status"],
+                declined_at=row["compile_declined_at"],
+            )
+            for row in result.mappings()
+        }
+
+    async def decline_notes(
+        self,
+        connection: AsyncConnection,
+        note_ids: Sequence[str],
+        *,
+        declined_at: datetime,
+    ) -> tuple[str, ...]:
+        """Mark notes as considered-and-declined. Returns the ids it reached.
+
+        ``kind = 'note'`` in the predicate rather than trusting the caller: the
+        column carries a CHECK forbidding it on a wiki page, so a page id would
+        otherwise turn a caller's mistake into a constraint violation instead of
+        a 422. Ids that match nothing come back absent, which is how the service
+        tells the caller which ones did not resolve.
+
+        Re-declining an already-declined note moves the timestamp forward. That
+        is correct: the judgement was made again, against whatever the note says
+        now, and the decline is only stale relative to a *later* edit.
+        """
+
+        if not note_ids:
+            return ()
+        result = await connection.execute(
+            update(vault_documents)
+            .where(vault_documents.c.id.in_(list(note_ids)))
+            .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            .values(compile_declined_at=declined_at)
+            .returning(vault_documents.c.id)
+        )
+        return tuple(row[0] for row in result)

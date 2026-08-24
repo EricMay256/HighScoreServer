@@ -196,6 +196,7 @@ def test_postgresql_specific_vault_ddl_matches_contract(
             "vault_compile_run_state": ["running", "succeeded", "failed"],
             "vault_document_kind": ["note", "wiki"],
             "vault_document_status": ["active", "flagged", "archived"],
+            "vault_promotion_status": ["candidate", "promoted", "retracted"],
             "vault_review_state": [
                 "pending",
                 "accepted",

@@ -9,6 +9,7 @@ from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
     ARRAY,
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     Computed,
@@ -60,6 +61,13 @@ review_state_enum = ENUM(
     "rejected",
     "superseded",
     name="vault_review_state",
+    schema=VAULT_SCHEMA,
+)
+promotion_status_enum = ENUM(
+    "candidate",
+    "promoted",
+    "retracted",
+    name="vault_promotion_status",
     schema=VAULT_SCHEMA,
 )
 write_request_state_enum = ENUM(
@@ -150,6 +158,20 @@ vault_documents = Table(
     # read surface's visibility gate and cannot represent a Wiki Page's
     # Current/Stub. See ADR 0011.
     Column("doc_status", Text),
+    # Whether a human has proposed this note for the Human layer. A third
+    # independent question alongside `status` and `doc_status`, and NULL --
+    # never proposed -- is the ordinary state. `candidate` is the only value
+    # the export routes on; `promoted` and `retracted` record that the
+    # judgement was made and settled. See ADR 0023.
+    Column("promotion_status", promotion_status_enum),
+    # When a compiler was shown this note and decided it did not warrant a wiki
+    # page. NULL -- not declined -- is the ordinary state. This replaces the
+    # compile frontier as what stops the plan re-offering a note forever, and it
+    # replaces it because a per-run timestamp could not tell "considered and
+    # declined" from "never offered". A decline expires when the note changes:
+    # the planner treats it as stale once `updated_at` is later. See ADR 0027
+    # and migration 0015.
+    Column("compile_declined_at", DateTime(timezone=True)),
     Column("title", Text, nullable=False),
     Column("summary", Text),
     Column("body", Text, nullable=False),
@@ -321,6 +343,12 @@ vault_documents = Table(
         "AND compiled_by IS NOT NULL AND compiled_at IS NOT NULL)",
         name="vault_documents_compile_provenance_consistent",
     ),
+    # Declining is refusing to write a page *from a note*; there is no reading
+    # under which a wiki page is declined.
+    CheckConstraint(
+        "kind = 'note' OR compile_declined_at IS NULL",
+        name="vault_documents_decline_is_note_only",
+    ),
 )
 
 # Embeddings live beside the documents rather than on them so a corpus can hold
@@ -371,6 +399,11 @@ vault_review_cases = Table(
     "vault_review_cases",
     metadata,
     Column("id", UUID(as_uuid=True), primary_key=True),
+    # Nullable, and not unique. The pointer is cleared when a candidate is
+    # retired, so the judgement outlives what it judged -- the same shape
+    # `vault_write_requests.document_id` uses for the same reason. Not unique
+    # because a decision that turns out wrong needs a second case rather than
+    # an overwrite of the first. See migration 0011 and ADR 0019's amendment.
     Column(
         "candidate_document_id",
         Text,
@@ -378,7 +411,6 @@ vault_review_cases = Table(
             "vault.vault_documents.id",
             name="vault_review_cases_candidate_document_id_fkey",
         ),
-        nullable=False,
     ),
     Column(
         "state",
@@ -402,10 +434,6 @@ vault_review_cases = Table(
     Column("decided_at", DateTime(timezone=True)),
     Column("decided_by", Text),
     Column("decision_note", Text),
-    UniqueConstraint(
-        "candidate_document_id",
-        name="vault_review_cases_candidate_document_id_key",
-    ),
     CheckConstraint(
         "btrim(reason) <> ''",
         name="vault_review_cases_reason_nonempty",
@@ -529,6 +557,233 @@ vault_agent_credentials = Table(
         "'vault:delete', 'vault:review', 'vault:compile', "
         "'vault:export']::text[]",
         name="vault_agent_credentials_scopes_known",
+    ),
+)
+
+# The OAuth authorization server's state, per ADR 0024. Deliberately *not* a
+# token store: an issued access token is a `vault_agent_credentials` row, so
+# scopes, revocation, quotas and attribution keep working through one mechanism
+# instead of two that could disagree.
+#
+# All three live in Postgres rather than process memory because registration
+# arrives server-to-server from the vendor's backend while `/authorize` is a
+# browser navigation, and the two halves land on different workers. See
+# migration 0013.
+vault_oauth_clients = Table(
+    "vault_oauth_clients",
+    metadata,
+    Column("client_id", Text, primary_key=True),
+    # The SDK's OAuthClientInformationFull, dumped faithfully. JSONB rather
+    # than a column per field: RFC 7591 registrations carry metadata this
+    # schema did not anticipate, and projecting into columns would drop
+    # whatever did not fit. Same reasoning as vault_documents.frontmatter.
+    Column("client_info", JSONB, nullable=False),
+    Column(
+        "registered_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    # Open registration means unbounded rows, so they expire and get pruned.
+    # NULL is a client that does not, which an operator may create deliberately.
+    Column("expires_at", DateTime(timezone=True)),
+    CheckConstraint(
+        "btrim(client_id) <> ''",
+        name="vault_oauth_clients_client_id_nonempty",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(client_info) = 'object'",
+        name="vault_oauth_clients_info_is_object",
+    ),
+)
+
+# One in-flight authorization, waiting for the operator to come back from the
+# login form. Keyed by the SHA-256 of a nonce the vault mints, never the nonce
+# itself (ADR 0015's rule for machine-generated secrets). Redeemed by
+# DELETE ... RETURNING, which is why there is no `consumed_at`: a
+# check-then-mark is two statements a concurrent redemption can interleave.
+vault_oauth_pending_authorizations = Table(
+    "vault_oauth_pending_authorizations",
+    metadata,
+    Column("nonce_sha256", LargeBinary, primary_key=True),
+    Column(
+        "client_id",
+        Text,
+        ForeignKey(
+            "vault.vault_oauth_clients.client_id",
+            name="vault_oauth_pending_authorizations_client_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    # The SDK's AuthorizationParams, including the PKCE code_challenge, which
+    # waits here until /token redeems the code this becomes.
+    Column("params", JSONB, nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    # SHA-256 of the CSRF token the login form carries in a hidden field.
+    # Server-side rather than a signed token, because signing would need a third
+    # secret to configure and rotate, while a row already exists per
+    # authorization and gives single use for free. See migration 0014.
+    Column("csrf_sha256", LargeBinary),
+    CheckConstraint(
+        "octet_length(nonce_sha256) = 32",
+        name="vault_oauth_pending_nonce_length",
+    ),
+    CheckConstraint(
+        "csrf_sha256 IS NULL OR octet_length(csrf_sha256) = 32",
+        name="vault_oauth_pending_csrf_length",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(params) = 'object'",
+        name="vault_oauth_pending_params_is_object",
+    ),
+    CheckConstraint(
+        "expires_at > created_at",
+        name="vault_oauth_pending_expires_after_creation",
+    ),
+)
+
+# An authorization code between the login form and /token. Same hashing and
+# same single-use idiom as the pending authorization above.
+vault_oauth_authorization_codes = Table(
+    "vault_oauth_authorization_codes",
+    metadata,
+    Column("code_sha256", LargeBinary, primary_key=True),
+    Column(
+        "client_id",
+        Text,
+        ForeignKey(
+            "vault.vault_oauth_clients.client_id",
+            name="vault_oauth_authorization_codes_client_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    # A column rather than a key inside a blob, unlike client_info: this set is
+    # the vault's own and is copied straight onto vault_agent_credentials.scopes
+    # when the code is redeemed, so the two carry the same shape.
+    Column(
+        "scopes",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column("code_challenge", Text, nullable=False),
+    Column("redirect_uri", Text, nullable=False),
+    Column("redirect_uri_provided_explicitly", Boolean, nullable=False),
+    Column("resource", Text),
+    Column("subject", Text),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "octet_length(code_sha256) = 32",
+        name="vault_oauth_codes_code_length",
+    ),
+    CheckConstraint(
+        "btrim(code_challenge) <> ''",
+        name="vault_oauth_codes_challenge_nonempty",
+    ),
+    CheckConstraint(
+        "btrim(redirect_uri) <> ''",
+        name="vault_oauth_codes_redirect_uri_nonempty",
+    ),
+    CheckConstraint(
+        "expires_at > created_at",
+        name="vault_oauth_codes_expires_after_creation",
+    ),
+    # Mirrors vault_agent_credentials_scopes_known rather than the narrower
+    # OAuth baseline. ADR 0024 makes the baseline what a client may *request*,
+    # enforced in application code, while an operator may widen a specific
+    # credential afterwards -- a stricter constraint here would forbid a code
+    # minted for a widened client, which the ADR calls expected rather than
+    # exceptional.
+    CheckConstraint(
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
+        "'vault:delete', 'vault:review', 'vault:compile', "
+        "'vault:export']::text[]",
+        name="vault_oauth_codes_scopes_known",
+    ),
+)
+
+# Refresh tokens, rotated on every use with replay detection. OAuth 2.1 requires
+# a public client's refresh token to be sender-constrained or rotated with
+# detection, and rotation is the one available here.
+#
+# `consumed_at` rather than the DELETE ... RETURNING the other transient tables
+# use, and the difference is the point: presenting an already-rotated refresh
+# token is positive evidence a token was captured, and the response is revoking
+# the whole `family_id` chain rather than failing one request. That needs the
+# consumed digest remembered. See migration 0014.
+vault_oauth_refresh_tokens = Table(
+    "vault_oauth_refresh_tokens",
+    metadata,
+    Column("token_sha256", LargeBinary, primary_key=True),
+    # Constant across every rotation descending from one authorization, which
+    # is what makes "revoke the chain" expressible. Not a foreign key: the
+    # family outlives any particular row in it.
+    Column("family_id", UUID(as_uuid=True), nullable=False),
+    Column(
+        "client_id",
+        Text,
+        ForeignKey(
+            "vault.vault_oauth_clients.client_id",
+            name="vault_oauth_refresh_tokens_client_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    # The access credential this token renews. A rotation revokes this one as it
+    # mints the next. CASCADE fires only on a real delete -- ordinary revocation
+    # sets `revoked_at` and leaves the row in place.
+    Column(
+        "credential_id",
+        Text,
+        ForeignKey(
+            "vault.vault_agent_credentials.id",
+            name="vault_oauth_refresh_tokens_credential_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    Column(
+        "scopes",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column("subject", Text),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("consumed_at", DateTime(timezone=True)),
+    CheckConstraint(
+        "octet_length(token_sha256) = 32",
+        name="vault_oauth_refresh_token_length",
+    ),
+    CheckConstraint(
+        "expires_at > created_at",
+        name="vault_oauth_refresh_expires_after_creation",
+    ),
+    CheckConstraint(
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
+        "'vault:delete', 'vault:review', 'vault:compile', "
+        "'vault:export']::text[]",
+        name="vault_oauth_refresh_scopes_known",
     ),
 )
 
@@ -668,4 +923,30 @@ Index(
     "idx_vault_compile_runs_state_started",
     vault_compile_runs.c.state,
     vault_compile_runs.c.started_at.desc(),
+)
+
+# Pruning walks all three OAuth tables by expiry. The clients index is partial
+# because a client with no expiry is never a pruning candidate, and indexing
+# those rows would cost writes to answer nothing; the other two columns are NOT
+# NULL, so a partial index there would exclude nothing.
+Index(
+    "vault_oauth_clients_expires_at_idx",
+    vault_oauth_clients.c.expires_at,
+    postgresql_where=vault_oauth_clients.c.expires_at.is_not(None),
+)
+Index(
+    "vault_oauth_pending_expires_at_idx",
+    vault_oauth_pending_authorizations.c.expires_at,
+)
+Index(
+    "vault_oauth_codes_expires_at_idx",
+    vault_oauth_authorization_codes.c.expires_at,
+)
+Index(
+    "vault_oauth_refresh_family_idx",
+    vault_oauth_refresh_tokens.c.family_id,
+)
+Index(
+    "vault_oauth_refresh_expires_at_idx",
+    vault_oauth_refresh_tokens.c.expires_at,
 )

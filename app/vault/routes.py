@@ -14,7 +14,7 @@ leaderboard ``API_KEY`` are not vault credentials.
 """
 
 import logging
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -30,20 +30,34 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api_models import (
+    VaultCompileDeclineRequest,
+    VaultCompileDeclineResponse,
+    VaultCompilePageRequest,
+    VaultCompilePlanResponse,
+    VaultCompileRunSummary,
+    VaultCompileSettleRequest,
     VaultContributionRequest,
     VaultContributionResponse,
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultReviewCaseResponse,
+    VaultReviewDecisionRequest,
+    VaultReviewDecisionResponse,
+    VaultReviewQueueResponse,
     VaultSearchHit,
     VaultSearchResponse,
     VaultSimilarNote,
     canonical_request_digest,
+    compile_run_summary,
+    compile_work_item,
     document_detail,
+    review_case_summary,
 )
 from .auth import VaultCredential, VaultScope
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
+from .domain import ReviewState, VaultCompileRun
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError, EmbeddingInputTooLong
 from .principal import (
@@ -58,17 +72,28 @@ from .read_policy import READABLE_STATUSES
 from .repository import VaultDocumentRepository
 from .service import (
     REQUEST_DIGEST_VERSION,
+    CompilePageRequest,
+    CompileRunAlreadySettled,
+    CompileRunNotFound,
+    CompileRunNotYours,
+    CompileTargetNotAPage,
     ContributionRequest,
     DedupUnavailable,
     DocumentNotFound,
     DocumentUnderReview,
     IdempotencyConflict,
     RetireRequest,
+    ReviewCaseAlreadyDecided,
+    ReviewCaseNotFound,
+    ReviewDecisionRequest,
+    UnresolvedSources,
     UpdateRequest,
     UpdateWouldDuplicate,
+    VaultCompileService,
     VaultContributionService,
     VaultDocumentRetireService,
     VaultDocumentUpdateService,
+    VaultReviewService,
     VaultSearchService,
     VaultTransactionService,
 )
@@ -401,6 +426,10 @@ async def contribute(
             VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
             for s in outcome.similars
         ],
+        related_pages=[
+            VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
+            for s in outcome.related_pages
+        ],
         errors=list(outcome.errors),
     )
 
@@ -564,3 +593,458 @@ async def retire_vault_document(
         ) from exc
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def require_review_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.REVIEW,), credentials)
+
+
+async def review_list_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "review_list")
+    return credential
+
+
+async def review_read_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "review_read")
+    return credential
+
+
+async def review_decide_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "review_decide")
+    return credential
+
+
+def _review_service() -> VaultReviewService:
+    return VaultReviewService(VaultTransactionService(get_vault_engine()))
+
+
+@router.get(
+    "/reviews",
+    response_model=VaultReviewQueueResponse,
+    dependencies=[Depends(review_list_quota)],
+    summary="List near-duplicate cases awaiting a decision",
+)
+async def list_review_queue(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> VaultReviewQueueResponse:
+    """The unresolved review backlog, oldest first.
+
+    Oldest first because this is a backlog rather than a feed: the case most at
+    risk of being forgotten is the one that has waited longest.
+    """
+
+    cases = await _review_service().list_pending(limit)
+    return VaultReviewQueueResponse(
+        pending=[review_case_summary(case) for case in cases],
+        count=len(cases),
+    )
+
+
+@router.get(
+    "/reviews/{review_case_id}",
+    response_model=VaultReviewCaseResponse,
+    dependencies=[Depends(review_read_quota)],
+    summary="Read one review case and the note it concerns",
+)
+async def read_review_case(review_case_id: UUID) -> VaultReviewCaseResponse:
+    """One case, with the flagged note in full.
+
+    This is the only surface that serves ``flagged`` content. ADR 0008 withholds
+    it everywhere else because the consumer there is a model that will not check
+    the status field; a reviewer is the opposite consumer, and cannot adjudicate
+    a note they cannot read. That is also why the whole review surface is gated
+    on its own scope and stays off the MCP tool list (ADR 0021).
+    """
+
+    try:
+        case, candidate = await _review_service().get(review_case_id)
+    except ReviewCaseNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Review case not found",
+        ) from exc
+
+    return VaultReviewCaseResponse(
+        review_case=review_case_summary(case),
+        candidate=document_detail(candidate) if candidate is not None else None,
+    )
+
+
+@router.post(
+    "/reviews/{review_case_id}/decision",
+    response_model=VaultReviewDecisionResponse,
+    dependencies=[Depends(review_decide_quota)],
+    summary="Settle one review case",
+)
+async def decide_review_case(
+    request: Request,
+    body: VaultReviewDecisionRequest,
+    review_case_id: UUID,
+    credential: VaultCredential = Depends(review_decide_quota),
+) -> VaultReviewDecisionResponse:
+    """Accept or reject a flagged contribution.
+
+    ``accepted`` publishes the note. ``rejected`` **deletes** it: a review
+    candidate is always a brand-new note, so a duplicate judged redundant at
+    birth has no history to preserve and its content is already in the corpus.
+    ADR 0019 archives what is overtaken and deletes what is wrong.
+
+    The decision is recorded either way. A rejected case survives with a null
+    candidate pointer rather than vanishing with the note.
+    """
+
+    try:
+        outcome = await _review_service().decide(
+            ReviewDecisionRequest(
+                review_case_id=review_case_id,
+                state=ReviewState(body.decision),
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+                decision_note=body.decision_note,
+            )
+        )
+    except ReviewCaseNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Review case not found",
+        ) from exc
+    except ReviewCaseAlreadyDecided as exc:
+        # 409 rather than 404: the case exists and someone else settled it.
+        # Nothing was changed by this request, and the caller should re-read
+        # rather than retry.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Review case has already been decided",
+        ) from exc
+
+    return VaultReviewDecisionResponse(
+        review_case=review_case_summary(outcome.review_case),
+        candidate=outcome.candidate,
+    )
+
+
+async def require_compile_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.COMPILE,), credentials)
+
+
+async def compile_plan_quota(
+    credential: VaultCredential = Depends(require_compile_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "compile_plan")
+    return credential
+
+
+async def compile_write_quota(
+    credential: VaultCredential = Depends(require_compile_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "compile_write")
+    return credential
+
+
+async def compile_settle_quota(
+    credential: VaultCredential = Depends(require_compile_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "compile_settle")
+    return credential
+
+
+def _compile_service() -> VaultCompileService:
+    return VaultCompileService(
+        VaultTransactionService(get_vault_engine()),
+        get_embedding_provider(),
+    )
+
+
+@router.post(
+    "/compile/runs",
+    response_model=VaultCompilePlanResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(compile_plan_quota)],
+    summary="Open a compile run and plan the pages it should write",
+)
+async def plan_compile_run(
+    all_pages: bool = Query(
+        default=False,
+        description=(
+            "Force a full recompile. The default is incremental: only pages "
+            "whose sources moved, and only notes written since the last "
+            "successful run's frontier."
+        ),
+    ),
+    credential: VaultCredential = Depends(compile_plan_quota),
+) -> VaultCompilePlanResponse:
+    """Open a run and describe the work.
+
+    The service plans; the agent synthesizes. Which pages are stale is a query;
+    writing the prose that distils four notes into one page is not, which is
+    why this returns work items rather than pages.
+
+    Opening a run has a cost worth knowing: the row is created `running` and
+    stays that way until finished or failed, and only a successful run
+    publishes a frontier. A loop that plans without settling accumulates runs
+    nobody closed, which is why the quota here is the tightest of the three.
+    """
+
+    plan = await _compile_service().plan(
+        credential.principal_id, all_pages=all_pages
+    )
+    return VaultCompilePlanResponse(
+        run=compile_run_summary(plan.run),
+        items=[compile_work_item(item) for item in plan.items],
+        count=len(plan.items),
+    )
+
+
+@router.post(
+    "/compile/runs/{run_id}/pages",
+    response_model=VaultDocumentDetail,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(compile_write_quota)],
+    summary="Write one compiled wiki page into an open run",
+)
+async def write_compile_page(
+    request: Request,
+    body: VaultCompilePageRequest,
+    run_id: UUID,
+    credential: VaultCredential = Depends(compile_write_quota),
+) -> VaultDocumentDetail:
+    """Store one page, embedded and attributed to this run.
+
+    No dedup gate: a compiled page restates its sources by construction, so
+    scoring it against them would flag every page ever written. Pages are still
+    embedded, because search must be able to return synthesis.
+
+    `source_ids` are validated and refused when unresolved. That is the
+    opposite of a note's `related_ids`, which ADR 0025 keeps opaque on purpose
+    -- provenance naming something that never existed is a false claim rather
+    than a dangling edge.
+    """
+
+    try:
+        page = await _compile_service().write_page(
+            CompilePageRequest(
+                run_id=run_id,
+                title=body.title,
+                body=body.body,
+                source_ids=tuple(body.source_ids),
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+                summary=body.summary,
+                tags=tuple(body.tags),
+                related_ids=tuple(body.related_ids),
+                page_id=body.page_id,
+            )
+        )
+    except CompileRunNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Compile run not found",
+        ) from exc
+    except CompileRunNotYours as exc:
+        # 409 and not 403: the scope already permits writing wiki pages, and the
+        # caller may open its own run whenever it likes. What it may not do is
+        # attribute work to someone else's run -- a consistency rule about this
+        # run, not a permission the caller lacks.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run belongs to a different principal",
+        ) from exc
+    except CompileRunAlreadySettled as exc:
+        # 409 rather than 404: the run exists, and the caller can open a new
+        # one. A page attributed to a settled run would make its provenance a
+        # lie, which is why this is refused rather than accepted late.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run is already settled; open a new run",
+        ) from exc
+    except UnresolvedSources as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except CompileTargetNotAPage as exc:
+        # 422 and not 404: the document exists, so "not found" would send the
+        # caller looking for a missing row instead of at the id it sent. Same
+        # status as UnresolvedSources, and for the same reason -- a field in the
+        # body names the wrong kind of thing.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except DocumentNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Page not found",
+        ) from exc
+    except DedupUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return document_detail(page)
+
+
+@router.post(
+    "/compile/runs/{run_id}/declines",
+    response_model=VaultCompileDeclineResponse,
+    dependencies=[Depends(compile_write_quota)],
+    summary="Record notes this run considered and will not compile",
+)
+async def decline_compile_notes(
+    request: Request,
+    body: VaultCompileDeclineRequest,
+    run_id: UUID,
+    credential: VaultCredential = Depends(compile_write_quota),
+) -> VaultCompileDeclineResponse:
+    """Say so, rather than leaving the planner to infer it from a timestamp.
+
+    This is what lets the plan be empty without the service having to guess. A
+    note nobody declined keeps being offered; a note declined here stops, until
+    it changes.
+
+    On the write quota rather than the settle one: it is a mutation the run
+    makes repeatedly, like writing a page, not the single act of closing out.
+    """
+
+    service = _compile_service()
+    try:
+        declined, declined_at = await service.decline(
+            run_id,
+            credential.principal_id,
+            request.headers.get("X-Request-Id") or uuid4().hex,
+            body.note_ids,
+        )
+    except CompileRunNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Compile run not found",
+        ) from exc
+    except CompileRunNotYours as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run belongs to a different principal",
+        ) from exc
+    except CompileRunAlreadySettled as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run is already settled; open a new run",
+        ) from exc
+    except UnresolvedSources as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    return VaultCompileDeclineResponse(
+        declined_note_ids=list(declined),
+        declined_at=declined_at,
+    )
+
+
+@router.post(
+    "/compile/runs/{run_id}/finish",
+    response_model=VaultCompileRunSummary,
+    dependencies=[Depends(compile_settle_quota)],
+    summary="Mark a compile run succeeded and publish its frontier",
+)
+async def finish_compile_run(
+    request: Request,
+    run_id: UUID,
+    credential: VaultCredential = Depends(compile_settle_quota),
+) -> VaultCompileRunSummary:
+    """Settle a run, publishing the frontier it was planned against.
+
+    Not a frontier read here: that would count a note written *after* planning
+    as covered, when the plan never mentioned it and the compiler never saw it,
+    and no later plan would offer it either. Publishing the plan-time frontier
+    may re-offer something this run already handled, which is harmless — a page
+    covering a note removes it from `new-source` anyway.
+    """
+
+    return compile_run_summary(
+        await _settle(
+            run_id,
+            credential,
+            request,
+            fail_with=None,
+        )
+    )
+
+
+@router.post(
+    "/compile/runs/{run_id}/fail",
+    response_model=VaultCompileRunSummary,
+    dependencies=[Depends(compile_settle_quota)],
+    summary="Abandon a compile run, keeping the pages it wrote",
+)
+async def fail_compile_run(
+    request: Request,
+    body: VaultCompileSettleRequest,
+    run_id: UUID,
+    credential: VaultCredential = Depends(compile_settle_quota),
+) -> VaultCompileRunSummary:
+    """Abandon a run without discarding its work.
+
+    Deliberately not a rollback. Pages a failed run committed are real
+    synthesis and their provenance is accurate; throwing them away to reach a
+    tidier state would lose work. What the failure changes is the frontier -- a
+    failed run publishes none, so the next plan re-covers what this one left.
+    """
+
+    if not (body.error_summary or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="error_summary is required when failing a run",
+        )
+    return compile_run_summary(
+        await _settle(run_id, credential, request, fail_with=body.error_summary)
+    )
+
+
+async def _settle(
+    run_id: UUID,
+    credential: VaultCredential,
+    request: Request,
+    *,
+    fail_with: str | None,
+) -> VaultCompileRun:
+    """Shared error rendering for the two settle verbs."""
+
+    service = _compile_service()
+    request_id = request.headers.get("X-Request-Id") or uuid4().hex
+    try:
+        if fail_with is None:
+            return await service.finish(run_id, credential.principal_id, request_id)
+        return await service.fail(
+            run_id, credential.principal_id, request_id, fail_with
+        )
+    except CompileRunNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Compile run not found",
+        ) from exc
+    except CompileRunNotYours as exc:
+        # 409 and not 403: the scope already permits writing wiki pages, and the
+        # caller may open its own run whenever it likes. What it may not do is
+        # attribute work to someone else's run -- a consistency rule about this
+        # run, not a permission the caller lacks.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run belongs to a different principal",
+        ) from exc
+    except CompileRunAlreadySettled as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run is already settled",
+        ) from exc
