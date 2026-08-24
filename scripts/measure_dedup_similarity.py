@@ -57,7 +57,6 @@ import sys
 from dataclasses import dataclass
 
 from sqlalchemy import select
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.env import load_environment
@@ -67,7 +66,7 @@ from app.vault.calibration import (
     CalibrationBands,
     derive_flag_at,
 )
-from app.vault.db import create_vault_engine
+from app.vault.db import create_vault_engine, describe_database
 from app.vault.domain import DocumentStatus
 from app.vault.embedding_runtime import create_embedding_provider
 from app.vault.embedding_text import assemble_embedding_text
@@ -76,13 +75,6 @@ from app.vault.measurement import percentile
 from app.vault.read_policy import readable_path_predicate
 from app.vault.settings import EmbeddingSettings, VaultSettings
 from app.vault.tables import vault_document_embeddings, vault_documents
-
-
-def describe_database(url: str) -> str:
-    """Host, port, and database name only — never the credential."""
-
-    parsed = make_url(url)
-    return f"{parsed.host}:{parsed.port}/{parsed.database}"
 
 
 def cosine(left: list[float], right: list[float]) -> float:

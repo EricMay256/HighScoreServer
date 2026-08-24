@@ -64,7 +64,7 @@ from dataclasses import replace
 from sqlalchemy import delete, func, select
 
 from app.env import load_environment
-from app.vault.db import create_vault_engine
+from app.vault.db import create_vault_engine, describe_database
 from app.vault.oauth import PRINCIPAL_PREFIX
 from app.vault.repository import (
     VaultOAuthAuthorizationCodeRepository,
@@ -86,6 +86,8 @@ REVOKED_CREDENTIAL_RETENTION_DAYS = 30
 
 def _transactions() -> tuple[VaultTransactionService, object]:
     settings = replace(VaultSettings.from_environment(), enabled=True)
+    # This script deletes rows. It names the database before it does.
+    print(f"database   : {describe_database(settings.database_url)}")
     engine, observer = create_vault_engine(settings)
     return VaultTransactionService(engine, observer), engine
 

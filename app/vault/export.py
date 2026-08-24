@@ -105,16 +105,20 @@ EXPORTED_PATH_PREFIXES: tuple[str, ...] = (
 )
 
 # Which of those the corpus *owns*, and may therefore delete files from. A
-# narrower set than what may be written, and the difference is deliberate:
-# `Agent/wiki/` is still populated by 14 pages the Stage-A librarian loop wrote
-# and the service has never seen, so an export that swept it would delete
-# another writer's work.
+# narrower set than what may be written, and the difference is deliberate.
 #
-# **Compilation now exists (ADR 0027), and that is not sufficient.** The gate is
-# whether those fourteen files exist as rows, not whether the code that could
-# produce them exists. Adding `Agent/wiki/` here before they are imported or
-# recompiled is a one-line diff that deletes every one of them on the next
-# `--apply --prune`. Do it after, and verify with a dry run first.
+# **`Agent/wiki/` joined this set on 2026-08-24, once its fourteen pages existed
+# as rows.** They were written by the Stage-A librarian loop and the service had
+# never seen them, so until then an export that swept this prefix would have
+# deleted another writer's work. The gate was never whether the code that could
+# produce them existed (ADR 0027 shipped first) but whether the rows did:
+# `scripts/import_vault_wiki.py --apply` put them there, verified as 14 wiki
+# documents with complete compile provenance across 4 historical runs.
+#
+# The ordering is the whole point, and reversing it is a one-line diff that
+# deletes every one of those files on the next `--apply --prune`. Anything added
+# here in future waits for its rows the same way, and a dry run confirms the
+# expected set before pruning.
 #
 # Explicit rather than derived from occupancy, per ADR 0023. "Sweep the
 # prefixes that have rows" looks equivalent and is not: an owned folder is
@@ -125,6 +129,7 @@ CORPUS_OWNED_PATH_PREFIXES: tuple[str, ...] = (
     "Agent/Promotion Candidates/",
     "Agent/notes/",
     "Agent/review/",
+    "Agent/wiki/",
 )
 
 # Ported from vault_contrib.vault_frontmatter.SCHEMA_ORDER, with four keys the
