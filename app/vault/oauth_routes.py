@@ -56,6 +56,7 @@ from .oauth import (
     new_secret,
 )
 from .passwords import verify_password
+from .public_url import report_public_url_drift
 from .rate_limit import (
     build_registration_guard,
     get_login_limiter,
@@ -398,6 +399,28 @@ def _endpoint_name(path: str) -> str:
     return f"vault_oauth_{cleaned or 'root'}"
 
 
+def _observed(route: Any) -> Any:
+    """Report, once, whether `VAULT_PUBLIC_URL` matches the observed host.
+
+    Wrapped here rather than folded into `_guarded` because they are different
+    concerns wearing the same shape: one spends a rate-limit token and can
+    refuse the request, this one only looks. See `public_url` for why the
+    observation is never used to build anything.
+    """
+
+    inner = getattr(route, "app", None)
+    if inner is None:
+        return route
+
+    async def observing(scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            report_public_url_drift(Request(scope, receive=receive))
+        await inner(scope, receive, send)
+
+    route.app = observing
+    return route
+
+
 def _guarded(route: Any, charge: Any = None) -> Any:
     """Charge the pre-auth IP guard before the route runs.
 
@@ -524,10 +547,15 @@ def build_vault_oauth_routes(issuer_url: str, mcp_url: str) -> list[Route]:
     # unauthenticated call, so it draws on its own far tighter bucket instead
     # of the general pre-auth allowance.
     registration_charge = build_registration_guard()
+    # Guard outermost, observation inside it: a request that is refused for rate
+    # limiting should cost nothing else, and the drift line is about traffic the
+    # server actually served.
     return [
         _guarded(
-            _named(route),
-            registration_charge if getattr(route, "path", "") == "/register" else None,
+            _observed(_named(route)),
+            registration_charge
+            if getattr(route, "path", "") == "/register"
+            else None,
         )
         for route in routes
     ]

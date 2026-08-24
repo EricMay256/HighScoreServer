@@ -216,6 +216,12 @@ Configuration rather than a table, deliberately: there is exactly one, it has no
 lifecycle a schema would model, rotation is `heroku config:set`, and a config
 var's backups circulate less widely than a database's do.
 
+**Rotating it is cheap and safe, so rotate on any doubt.** Generate a new hash
+and set it; that is the whole procedure. Nothing already issued depends on the
+password — it gates future consent approvals only, so live credentials, refresh
+families and MCP sessions all keep working. The cost is one release and one
+re-approval the next time a client authorizes.
+
 Unset is a supported state and means the password identity method is not
 configured for this deployment. It is never treated as "any password works" —
 the login refuses outright, the same way `VAULT_ENABLED` defaulting to false
@@ -235,6 +241,37 @@ prints the password to the terminal; one that takes it as an argument leaves it
 in shell history and in the process table. `getpass` avoids both, and on Windows
 it reads the console directly — which also means the script cannot be driven by
 piping into it, on purpose.
+
+> **PowerShell will happily echo this secret if a command mis-parses. Observed
+> 2026-08-24, with the hash on the clipboard.**
+>
+> `curl` in PowerShell is an alias for `Invoke-WebRequest`, which shares none of
+> curl's flags. A command like `curl -s https://host/path` does not fail
+> cleanly: the flag binds somewhere unintended, `Uri` ends up unbound, and
+> PowerShell **prompts for it** —
+>
+> ```
+> cmdlet Invoke-WebRequest at command pipeline position 1
+> Supply values for the following parameters:
+> Uri:
+> ```
+>
+> A prompt looks like an invitation to paste, and whatever is pasted is
+> **echoed in the clear** and stays in the scrollback. A bcrypt hash pasted
+> there is a hash rather than a password, so it is not directly usable — but it
+> is the credential guarding the consent screen, and it should not be on screen.
+>
+> Two habits avoid it. Use **`curl.exe`**, never bare `curl`, so the flags mean
+> what they say. And **never answer an unexpected parameter prompt** — press
+> `Ctrl+C`, read the command again, and retype it. The prompt means PowerShell
+> did not understand what you typed, so nothing good follows from feeding it a
+> secret.
+>
+> The good news, if it happens: PSReadLine records submitted *command lines*,
+> not parameter-prompt responses, so the value does not reach
+> `ConsoleHost_history.txt`. Verify with
+> `Select-String -Path (Get-PSReadLineOption).HistorySavePath -SimpleMatch '$2b$'`
+> and expect no matches. Clear the scrollback or close the terminal regardless.
 
 #### Setting it
 
@@ -350,6 +387,35 @@ An operator password is chosen by a person, so the work factor is exactly the
 point, and it runs once per authorization rather than once per request. Vault
 ADR 0015 says explicitly not to carry the SHA-256 reasoning across to
 human-chosen passwords; this is where that matters.
+
+### The server tells you when `VAULT_PUBLIC_URL` goes stale
+
+`VAULT_PUBLIC_URL` is configuration rather than something derived per request,
+for three reasons: the OAuth routes are built at application assembly, before
+any request exists; deriving an issuer from the `Host` header would let a forged
+header point `token_endpoint` at somebody else's server; and its absence is the
+feature's off switch.
+
+What configuration cannot do is notice that it has gone stale — after a custom
+domain, a proxy, or a renamed app. A stale value publishes discovery documents
+pointing somewhere wrong, and the symptom surfaces at the *client* as "this
+server does not support OAuth", a long way from the cause.
+
+So the first OAuth request of each process compares the configured origin with
+the one the request arrived on and logs the result once:
+
+```
+INFO  vault oauth public url matches the host requests arrive on
+WARN  vault oauth public url does not match the host requests arrive on;
+      discovery metadata advertises https://… while requests arrive on https://…
+```
+
+The observed value is **only** ever logged. It is never used to build a URL —
+reading `Host` to write a log line is safe in a way that reading it to publish
+an issuer is not. On a warning, the configured value is still what clients are
+sent to, so the fix is to update `VAULT_PUBLIC_URL`, not to trust the header.
+
+A trailing slash is not drift: `main.py` strips it and the check agrees.
 
 ## Migration lineages
 
@@ -502,6 +568,59 @@ command as a single argument:
 ```bash
 heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
 ```
+
+### `heroku pg:psql` is broken on this Windows install
+
+It shells out to a bundled `psql` through a path containing a space and fails
+before connecting:
+
+```
+'C:\Program' is not recognized as an internal or external command
+```
+
+Nothing to do with credentials or the database. Go around it with the project's
+own interpreter, which needs no `psql` at all:
+
+```powershell
+$env:DATABASE_URL = (heroku config:get DATABASE_URL --app <app>)
+.\.venv\Scripts\python.exe -c "import os, psycopg; u = os.environ['DATABASE_URL'].replace('postgres://','postgresql://',1); u += ('&' if '?' in u else '?') + 'sslmode=require'; c = psycopg.connect(u); print(c.execute('select version_num from vault.vault_alembic_version').fetchone())"
+Remove-Item Env:DATABASE_URL
+```
+
+This is also the *better* check for "what schema is live", because it resolves
+the URL exactly as the scripts do — see the next entry.
+
+### `alembic current` needs `-c alembic-vault.ini`, or it answers the wrong question
+
+There are two lineages. Without the flag you get the leaderboard one, which
+tops out at `0004_auth_identities` — a plausible-looking answer to a question
+you did not ask:
+
+```bash
+heroku run "python -m alembic -c alembic-vault.ini current" --app <app>
+```
+
+A vault revision reads `00NN_<name>`, currently `0015_note_compile_declined`.
+If you see `0004_auth_identities`, you checked the leaderboard lineage.
+
+### Which database a script is about to touch
+
+Every script that writes, deletes, or exports now prints its target before
+acting:
+
+```
+database   : ec2-…-1.compute.amazonaws.com:5432/d7abc…
+```
+
+Read that line. `VaultSettings` resolves `VAULT_DATABASE_URL` first and falls
+back to `DATABASE_URL`, `load_environment` fills either from `.env` when the
+process has none, and `$env:` variables die with the terminal — so "which
+database am I talking to" has three possible answers and only this line reports
+which one won.
+
+A `--dry-run` or a missing `--apply` on `import_vault_wiki` **contacts no
+database at all**; it returns before an engine is built. A passing dry run
+therefore says nothing whatsoever about the target.
 
 ### PowerShell has no inline environment prefix
 
@@ -1056,6 +1175,8 @@ revoke needs to know they have not.
 | `429` | Quota, per principal per operation. Buckets are per process, so the real ceiling is the limit times the worker count |
 | `503` on a write | No embedding provider, so the dedup gate cannot run. The write path refuses rather than inserting un-deduplicated content |
 | `409` on a contribution | An idempotency key was reused for different content. Change one or the other; do not loop |
+| A client reports the server does not support OAuth | Discovery is not answering on the URL it was configured with. Check both well-known forms — RFC 9728 derives the metadata path from the resource path, so `…/mcp` and `…/mcp/` are two different documents — and check the logs for the `VAULT_PUBLIC_URL` drift warning |
+| `column … does not exist` from a script | The target database is behind the code. Confirm the vault lineage with `-c alembic-vault.ini`, and read the `database :` line the script prints — a stale `$env:DATABASE_URL`, or none at all, silently falls back to `.env` |
 
 A `flagged` result is **not** an error. It is a settled `200` outcome meaning the
 note was written for review, and retrying it creates a second note that flags
