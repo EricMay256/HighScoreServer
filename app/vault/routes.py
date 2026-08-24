@@ -30,6 +30,8 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api_models import (
+    VaultCompileDeclineRequest,
+    VaultCompileDeclineResponse,
     VaultCompilePageRequest,
     VaultCompilePlanResponse,
     VaultCompileRunSummary,
@@ -891,6 +893,63 @@ async def write_compile_page(
         ) from exc
 
     return document_detail(page)
+
+
+@router.post(
+    "/compile/runs/{run_id}/declines",
+    response_model=VaultCompileDeclineResponse,
+    dependencies=[Depends(compile_write_quota)],
+    summary="Record notes this run considered and will not compile",
+)
+async def decline_compile_notes(
+    request: Request,
+    body: VaultCompileDeclineRequest,
+    run_id: UUID,
+    credential: VaultCredential = Depends(compile_write_quota),
+) -> VaultCompileDeclineResponse:
+    """Say so, rather than leaving the planner to infer it from a timestamp.
+
+    This is what lets the plan be empty without the service having to guess. A
+    note nobody declined keeps being offered; a note declined here stops, until
+    it changes.
+
+    On the write quota rather than the settle one: it is a mutation the run
+    makes repeatedly, like writing a page, not the single act of closing out.
+    """
+
+    service = _compile_service()
+    try:
+        declined, declined_at = await service.decline(
+            run_id,
+            credential.principal_id,
+            request.headers.get("X-Request-Id") or uuid4().hex,
+            body.note_ids,
+        )
+    except CompileRunNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Compile run not found",
+        ) from exc
+    except CompileRunNotYours as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run belongs to a different principal",
+        ) from exc
+    except CompileRunAlreadySettled as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Compile run is already settled; open a new run",
+        ) from exc
+    except UnresolvedSources as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    return VaultCompileDeclineResponse(
+        declined_note_ids=list(declined),
+        declined_at=declined_at,
+    )
 
 
 @router.post(

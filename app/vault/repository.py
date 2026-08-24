@@ -25,6 +25,7 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    NoteCompileState,
     PendingAuthorization,
     PromotionStatus,
     RegisteredOAuthClient,
@@ -1753,12 +1754,13 @@ class VaultWikiPageRepository:
     async def note_states(
         self,
         connection: AsyncConnection,
-    ) -> dict[str, tuple[datetime, str]]:
-        """Every note's ``(updated_at, status)``, keyed by id.
+    ) -> dict[str, NoteCompileState]:
+        """Every note's compile-planning state, keyed by id.
 
-        Two columns rather than whole documents: staleness is decided by when
-        a note last moved and whether it is still endorsed, and loading bodies
-        to answer that would read the corpus into memory for nothing.
+        Three columns rather than whole documents: coverage and staleness are
+        decided by when a note last moved, whether it is still endorsed, and
+        whether a compiler already declined it. Loading bodies to answer that
+        would read the corpus into memory for nothing.
 
         Includes flagged and archived notes on purpose. A page citing a note
         that has since been flagged is *stale* -- that is one of the three
@@ -1771,9 +1773,45 @@ class VaultWikiPageRepository:
                 vault_documents.c.id,
                 vault_documents.c.updated_at,
                 vault_documents.c.status,
+                vault_documents.c.compile_declined_at,
             ).where(vault_documents.c.kind == DocumentKind.NOTE.value)
         )
         return {
-            row["id"]: (row["updated_at"], row["status"])
+            row["id"]: NoteCompileState(
+                updated_at=row["updated_at"],
+                status=row["status"],
+                declined_at=row["compile_declined_at"],
+            )
             for row in result.mappings()
         }
+
+    async def decline_notes(
+        self,
+        connection: AsyncConnection,
+        note_ids: Sequence[str],
+        *,
+        declined_at: datetime,
+    ) -> tuple[str, ...]:
+        """Mark notes as considered-and-declined. Returns the ids it reached.
+
+        ``kind = 'note'`` in the predicate rather than trusting the caller: the
+        column carries a CHECK forbidding it on a wiki page, so a page id would
+        otherwise turn a caller's mistake into a constraint violation instead of
+        a 422. Ids that match nothing come back absent, which is how the service
+        tells the caller which ones did not resolve.
+
+        Re-declining an already-declined note moves the timestamp forward. That
+        is correct: the judgement was made again, against whatever the note says
+        now, and the decline is only stale relative to a *later* edit.
+        """
+
+        if not note_ids:
+            return ()
+        result = await connection.execute(
+            update(vault_documents)
+            .where(vault_documents.c.id.in_(list(note_ids)))
+            .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            .values(compile_declined_at=declined_at)
+            .returning(vault_documents.c.id)
+        )
+        return tuple(row[0] for row in result)

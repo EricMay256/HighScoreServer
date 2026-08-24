@@ -17,13 +17,14 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text, update
 
 from app.vault.auth import VaultScope
 from app.vault.domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    NoteCompileState,
     VaultDocument,
 )
 from app.vault.repository import VaultDocumentRepository
@@ -78,14 +79,24 @@ def _page(
     )
 
 
-def _notes(**overrides: tuple[datetime, str]) -> dict[str, tuple[datetime, str]]:
-    base = {"note-1": (COMPILED_AT - timedelta(hours=1), "active")}
+def _note(
+    updated_at: datetime = COMPILED_AT,
+    status: str = "active",
+    declined_at: datetime | None = None,
+) -> NoteCompileState:
+    return NoteCompileState(
+        updated_at=updated_at, status=status, declined_at=declined_at
+    )
+
+
+def _notes(**overrides: NoteCompileState) -> dict[str, NoteCompileState]:
+    base = {"note-1": _note(COMPILED_AT - timedelta(hours=1))}
     base.update(overrides)
     return base
 
 
 def test_a_page_whose_sources_have_not_moved_is_not_replanned() -> None:
-    items = _plan_items(pages=[_page()], notes=_notes(), since=None, all_pages=False)
+    items = _plan_items(pages=[_page()], notes=_notes(), all_pages=False)
 
     assert items == ()
 
@@ -93,8 +104,7 @@ def test_a_page_whose_sources_have_not_moved_is_not_replanned() -> None:
 def test_a_source_edited_after_compilation_makes_a_page_stale() -> None:
     items = _plan_items(
         pages=[_page()],
-        notes=_notes(**{"note-1": (COMPILED_AT + timedelta(hours=1), "active")}),
-        since=None,
+        notes=_notes(**{"note-1": _note(COMPILED_AT + timedelta(hours=1))}),
         all_pages=False,
     )
 
@@ -111,8 +121,9 @@ def test_a_source_that_has_since_been_flagged_makes_a_page_stale() -> None:
 
     items = _plan_items(
         pages=[_page()],
-        notes=_notes(**{"note-1": (COMPILED_AT - timedelta(hours=1), "flagged")}),
-        since=None,
+        notes=_notes(
+            **{"note-1": _note(COMPILED_AT - timedelta(hours=1), "flagged")}
+        ),
         all_pages=False,
     )
 
@@ -125,7 +136,6 @@ def test_a_source_that_no_longer_exists_is_missing_not_stale() -> None:
     items = _plan_items(
         pages=[_page(source_ids=("note-1", "note-gone"))],
         notes=_notes(),
-        since=None,
         all_pages=False,
     )
 
@@ -135,8 +145,7 @@ def test_a_source_that_no_longer_exists_is_missing_not_stale() -> None:
 def test_a_note_no_page_covers_is_a_new_source() -> None:
     items = _plan_items(
         pages=[_page()],
-        notes=_notes(**{"note-2": (COMPILED_AT, "active")}),
-        since=None,
+        notes=_notes(**{"note-2": _note(COMPILED_AT)}),
         all_pages=False,
     )
 
@@ -145,45 +154,76 @@ def test_a_note_no_page_covers_is_a_new_source() -> None:
     ]
 
 
-def test_an_uncovered_note_older_than_the_frontier_is_not_re_offered() -> None:
+def test_a_declined_note_is_not_re_offered() -> None:
     """Otherwise the plan becomes a backlog nobody can clear.
 
-    A note older than the last successful run's frontier and still uncovered
-    was either deliberately left out or already offered and declined. Offering
-    it again every run makes the plan permanently non-empty.
+    A note a compiler looked at and refused should stay refused. Offering it
+    again every run makes the plan permanently non-empty, which is the state in
+    which nobody reads it.
     """
 
-    old = COMPILED_AT - timedelta(days=1)
     items = _plan_items(
         pages=[],
-        notes={"note-2": (old, "active")},
-        since=COMPILED_AT.isoformat(),
+        notes={
+            "note-2": _note(
+                COMPILED_AT - timedelta(days=1), declined_at=COMPILED_AT
+            )
+        },
         all_pages=False,
     )
 
     assert items == ()
 
 
-def test_a_note_written_after_the_frontier_is_offered() -> None:
-    fresh = COMPILED_AT + timedelta(hours=1)
+def test_a_note_edited_after_being_declined_is_offered_again() -> None:
+    """A note that changed since the judgement is a different note.
+
+    The frontier gave this for free, because an edit moved the note past the
+    bookmark by construction. An explicit decline has to say it, and this is
+    where it is said.
+    """
+
     items = _plan_items(
         pages=[],
-        notes={"note-2": (fresh, "active")},
-        since=COMPILED_AT.isoformat(),
+        notes={
+            "note-2": _note(
+                COMPILED_AT + timedelta(hours=1), declined_at=COMPILED_AT
+            )
+        },
         all_pages=False,
     )
 
     assert [i.reason for i in items] == ["new-source"]
 
 
-def test_all_pages_replans_everything_regardless_of_frontier() -> None:
-    """The full flush an operator wants after changing the page model."""
+def test_an_undeclined_note_is_offered_however_old_it_is() -> None:
+    """The case the frontier could not express, and the reason it was replaced.
+
+    Age is not a judgement. A note nobody was ever shown -- because it was
+    flagged when the only run happened, say -- has to keep being offered
+    however far in the past it sits. Under a frontier this note was
+    indistinguishable from one that had been considered and refused.
+    """
+
+    ancient = COMPILED_AT - timedelta(days=365)
+    items = _plan_items(
+        pages=[], notes={"note-2": _note(ancient)}, all_pages=False
+    )
+
+    assert [i.reason for i in items] == ["new-source"]
+
+
+def test_all_pages_replans_everything_including_declined_notes() -> None:
+    """The full flush an operator wants after changing the page model.
+
+    It is also the recovery path when a decline turns out to have been wrong,
+    which is why it has to ignore them rather than merely ignore coverage.
+    """
 
     old = COMPILED_AT - timedelta(days=1)
     items = _plan_items(
         pages=[_page()],
-        notes=_notes(**{"note-2": (old, "active")}),
-        since=COMPILED_AT.isoformat(),
+        notes=_notes(**{"note-2": _note(old, declined_at=COMPILED_AT)}),
         all_pages=True,
     )
 
@@ -195,8 +235,7 @@ def test_a_flagged_note_is_never_offered_as_a_new_source() -> None:
 
     items = _plan_items(
         pages=[],
-        notes={"note-2": (COMPILED_AT, "flagged")},
-        since=None,
+        notes={"note-2": _note(COMPILED_AT, "flagged")},
         all_pages=False,
     )
 
@@ -929,3 +968,209 @@ def test_a_run_cannot_be_settled_by_another_principal(
         f"/api/v1/vault/compile/runs/{run_id}/finish", headers=_auth(compile_token)
     )
     assert mine.status_code == 200
+
+
+# ------------------------------------------------------- declining a note ----
+
+
+def _decline(client: TestClient, token: str, run_id: str, note_ids: list[str]):
+    return client.post(
+        f"/api/v1/vault/compile/runs/{run_id}/declines",
+        json={"note_ids": note_ids},
+        headers=_auth(token),
+    )
+
+
+def _set_status(note_id: str, status: DocumentStatus, doc_status: str) -> None:
+    transactions, engine = vault_service()
+
+    async def go() -> None:
+        try:
+            async with transactions.transaction() as connection:
+                await VaultDocumentRepository().set_status(
+                    connection, note_id, status=status, doc_status=doc_status
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+
+
+def _touch(note_id: str) -> None:
+    """Move a note's `updated_at` without changing anything a reader sees."""
+
+    transactions, engine = vault_service()
+
+    async def go() -> None:
+        try:
+            async with transactions.transaction() as connection:
+                await connection.execute(
+                    update(vault_documents)
+                    .where(vault_documents.c.id == note_id)
+                    .values(updated_at=text("now() + interval '1 second'"))
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+
+
+def _offered(client: TestClient, token: str, note_id: str) -> bool:
+    plan = _plan(client, token).json()
+    return any(item["source_ids"] == [note_id] for item in plan["items"])
+
+
+def test_declining_a_note_stops_it_being_offered(
+    client: TestClient, compile_token: str
+) -> None:
+    note_id = _seed_note(title="Not worth a page")
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+    assert _offered(client, compile_token, note_id)
+
+    response = _decline(client, compile_token, run_id, [note_id])
+
+    assert response.status_code == 200
+    assert response.json()["declined_note_ids"] == [note_id]
+    assert not _offered(client, compile_token, note_id)
+
+
+def test_a_declined_note_is_offered_again_once_it_changes(
+    client: TestClient, compile_token: str
+) -> None:
+    """The decline is about the note as it stood, not the note forever."""
+
+    note_id = _seed_note(title="Declined, then rewritten")
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+    _decline(client, compile_token, run_id, [note_id])
+    assert not _offered(client, compile_token, note_id)
+
+    _touch(note_id)
+
+    assert _offered(client, compile_token, note_id)
+
+
+def test_all_pages_ignores_declines(
+    client: TestClient, compile_token: str
+) -> None:
+    """The recovery path when a decline was wrong."""
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+    _decline(client, compile_token, run_id, [note_id])
+
+    plan = _plan(client, compile_token, all_pages=True).json()
+
+    assert any(item["source_ids"] == [note_id] for item in plan["items"])
+
+
+def test_a_flagged_note_approved_later_is_still_offered(
+    client: TestClient, compile_token: str
+) -> None:
+    """The bug the frontier caused, reachable through the ordinary review flow.
+
+    A flagged note is deliberately never offered as a new source -- but it used
+    to count toward the frontier all the same, because that was
+    `max(updated_at)` across every note whatever its status. And `set_status`
+    deliberately does not move `updated_at`, since adjudicating a note is not
+    editing it. So: flagged, a run succeeds and publishes a frontier past it,
+    a reviewer approves it, and no incremental plan ever offers it again.
+
+    No misbehaviour anywhere -- two correct decisions and a timestamp standing
+    in for a judgement. Declines cannot express it: nobody declined this note,
+    so nothing suppresses it.
+    """
+
+    note_id = _seed_note(title="Flagged at plan time, approved later")
+    _set_status(note_id, DocumentStatus.FLAGGED, "Flagged")
+
+    # A run happens while it is flagged. It is correctly not offered.
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+    assert not _offered(client, compile_token, note_id)
+    client.post(
+        f"/api/v1/vault/compile/runs/{run_id}/finish", headers=_auth(compile_token)
+    )
+
+    _set_status(note_id, DocumentStatus.ACTIVE, "Active")
+
+    assert _offered(client, compile_token, note_id)
+
+
+def test_declining_an_unknown_id_is_refused(
+    client: TestClient, compile_token: str
+) -> None:
+    """Silently dropping it would leave the note offered forever, unexplained."""
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    response = _decline(
+        client, compile_token, run_id, [note_id, f"{PREFIX}{uuid4().hex}"]
+    )
+
+    assert response.status_code == 422
+    assert "unresolved source id" in response.json()["detail"]
+    # Refused as a whole: the good id is not declined either.
+    assert _offered(client, compile_token, note_id)
+
+
+def test_a_wiki_page_id_cannot_be_declined(
+    client: TestClient, compile_token: str
+) -> None:
+    """Declining is refusing to write a page *from a note*.
+
+    The repository filters on `kind` rather than trusting the caller, so a page
+    id resolves to nothing and comes back a 422 -- not a constraint violation
+    and not a silently ignored request.
+    """
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+    page = _write(client, compile_token, run_id, source_ids=[note_id])
+    assert page.status_code == 201, page.text
+    page_id = page.json()["note_id"]
+
+    response = _decline(client, compile_token, run_id, [page_id])
+
+    assert response.status_code == 422
+
+
+def test_a_run_cannot_decline_for_another_principal(
+    client: TestClient, compile_token: str
+) -> None:
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+
+    other_id, other_token = _issue(
+        scopes=(VaultScope.READ, VaultScope.WRITE, VaultScope.COMPILE)
+    )
+    try:
+        response = _decline(client, other_token, run_id, [note_id])
+        assert response.status_code == 409
+    finally:
+        _drop(other_id)
+
+
+def test_a_settled_run_cannot_decline(
+    client: TestClient, compile_token: str
+) -> None:
+    """A judgement must not attach to a run that has reported its result."""
+
+    note_id = _seed_note()
+    run_id = _plan(client, compile_token).json()["run"]["run_id"]
+    client.post(
+        f"/api/v1/vault/compile/runs/{run_id}/finish", headers=_auth(compile_token)
+    )
+
+    response = _decline(client, compile_token, run_id, [note_id])
+
+    assert response.status_code == 409
+
+
+def test_declining_requires_the_compile_scope(client: TestClient) -> None:
+    note_id = _seed_note()
+    writer_id, writer_token = _issue(scopes=(VaultScope.READ, VaultScope.WRITE))
+    try:
+        response = _decline(client, writer_token, str(uuid4()), [note_id])
+        assert response.status_code == 403
+    finally:
+        _drop(writer_id)

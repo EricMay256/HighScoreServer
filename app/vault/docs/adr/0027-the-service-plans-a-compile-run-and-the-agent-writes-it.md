@@ -34,9 +34,13 @@ Three endpoints, `vault:compile`:
 ```
 POST /compile/runs                  open a run, return work items
 POST /compile/runs/{id}/pages       store one page, embedded, attributed to the run
+POST /compile/runs/{id}/declines    record notes this run refuses  (added 2026-08-24)
 POST /compile/runs/{id}/finish      settle it and publish a frontier
 POST /compile/runs/{id}/fail        settle it and publish none
 ```
+
+*(`finish` still publishes a frontier, and it is history rather than an input — planning reads
+declines. See the 2026-08-24 amendment.)*
 
 The division is the Stage-A engine's, and it is the only one available: deciding that a page
 is stale is a query, and distilling four notes into a paragraph is not.
@@ -216,10 +220,83 @@ note the librarian consciously passed over, every run forever, is the state this
 to avoid. `all_pages=true` re-offers everything, which is the recovery path when a decline was
 wrong.
 
-What that costs is real and worth naming: a *buggy* compiler that opens a run, writes nothing,
-and finishes successfully advances the frontier past notes it never covered, and only
-`all_pages=true` will surface them again. Making the plan binding — persisting work items and
+What that costs is real and worth naming: a compiler that opens a run, writes nothing, and
+finishes successfully advances the frontier past notes it never covered, and only
+`all_pages=true` will surface them again. Making the plan *binding* — persisting work items and
 their state, requiring each write to consume one, refusing `finish` while items are unresolved —
-would close that, and would need an Alembic revision and an explicit representation of "declined"
-so that declining stays possible. **Deferred rather than dismissed**, and recorded here so the
-next person meets a decision instead of a silence.
+would close that. It was deferred here, and then **superseded**: the amendment below fixes the
+same problem at its source for a fraction of the cost, so binding work items are no longer
+proposed.
+
+## Amendment, 2026-08-24 — a decline is recorded on the note; the frontier stops planning
+
+**The frontier is replaced by `vault_documents.compile_declined_at`** (migration 0015). The run
+row keeps `input_frontier` and `output_frontier` as its own history — when the source corpus
+stood where it did — and planning no longer reads either.
+
+### Why: the frontier conflated two states, and the second one really happened
+
+A frontier records *when*. The question the planner is actually asking is *whether somebody
+judged this note*, and a timestamp cannot distinguish "considered and refused" from "never
+offered at all". That is not theoretical. It is reachable through the ordinary review workflow,
+with no misbehaviour anywhere, because two correct decisions meet:
+
+- **A flagged note is never offered as a new source** — decided above, so that compilation
+  cannot launder content the write path declined to endorse.
+- **`set_status` does not move `updated_at`** — decided in the repository, because adjudicating
+  a note is not editing it and the export would otherwise churn every reviewed file.
+
+So: a note is contributed and flagged; a run is planned and the note is excluded from it, but
+still counts toward `note_frontier`, which is `max(updated_at)` across every note *whatever its
+status*; the run succeeds and publishes that frontier; a reviewer approves the note; its
+`updated_at` never moved. It is now active, uncovered, and permanently below the frontier. No
+incremental plan will ever offer it again, and only `all_pages=true` recovers it.
+
+Marking the decline cannot express that, because only a note somebody actually declined is
+marked. A note nobody was shown stays unmarked and keeps being offered — which is what
+`test_a_flagged_note_approved_later_is_still_offered` pins.
+
+### What it looks like
+
+```
+POST /compile/runs/{id}/declines     {"note_ids": [...]}
+```
+
+- **A decline expires when the note changes.** Stale once `updated_at > compile_declined_at`: a
+  note edited since the judgement is a different note. The frontier gave this for free, by
+  construction; an explicit decline has to state it, and stating it is better than inheriting it.
+- **A separate call, not a field on `finish`.** For the reason pages are separate — a run that
+  declines and then fails keeps its declines, exactly as it keeps its pages. Both are real
+  judgements and discarding them to reach a tidier state throws the work away.
+- **Declining a note the plan did not offer is allowed**, because the plan is advice. Refusing it
+  would leave a librarian who noticed something in passing with nowhere to put that.
+- **An id that resolves to no live note is a 422**, not a silent no-op, for the reason
+  `source_ids` are validated: a decline naming nothing would leave the note offered forever with
+  nothing to explain why. A wiki page id resolves to nothing here too — declining is refusing to
+  write a page *from a note*, which the column's CHECK also says.
+- **`all_pages=true` ignores declines**, which is what makes it the recovery path when a
+  judgement was wrong.
+- **One audit event per note**, carrying the principal. The note keeps only the timestamp: who
+  and when is the audit trail's job (ADR 0002), and a run is a time window, so a range revert
+  works without putting a run reference on the note. Migration 0015 records why that reference
+  would be actively harmful — it would pin runs open against `ON DELETE RESTRICT`, and
+  `vault_documents_compile_provenance_consistent` already says a note carries no compile run.
+
+### The first plan after this deploys is a large one
+
+No note is declined yet, so nothing suppresses anything: the first plan offers every uncovered
+active note rather than only those newer than the last run's frontier. That is the intended
+effect rather than a migration artefact — it surfaces precisely what the frontier had been
+hiding, including whatever the flagged-then-approved case had stranded for good. A librarian
+works through it once and declines what it does not want, and from then on the plan is short
+because refusals are recorded instead of inferred.
+
+`all_pages=true` becomes almost redundant on that first run, which is the clearest sign the
+frontier had been doing two jobs and only admitting to one.
+
+### What this does not change
+
+The plan is still advice. Nothing requires a write to correspond to a work item, and `finish`
+still does not check that anything was done — a compiler that declines everything is stating a
+position, which is the whole point. What changed is that the position now has to be *stated*
+rather than inferred from the clock.

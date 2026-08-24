@@ -164,6 +164,14 @@ vault_documents = Table(
     # the export routes on; `promoted` and `retracted` record that the
     # judgement was made and settled. See ADR 0023.
     Column("promotion_status", promotion_status_enum),
+    # When a compiler was shown this note and decided it did not warrant a wiki
+    # page. NULL -- not declined -- is the ordinary state. This replaces the
+    # compile frontier as what stops the plan re-offering a note forever, and it
+    # replaces it because a per-run timestamp could not tell "considered and
+    # declined" from "never offered". A decline expires when the note changes:
+    # the planner treats it as stale once `updated_at` is later. See ADR 0027
+    # and migration 0015.
+    Column("compile_declined_at", DateTime(timezone=True)),
     Column("title", Text, nullable=False),
     Column("summary", Text),
     Column("body", Text, nullable=False),
@@ -334,6 +342,12 @@ vault_documents = Table(
         "OR (kind = 'wiki' AND compile_run_id IS NOT NULL "
         "AND compiled_by IS NOT NULL AND compiled_at IS NOT NULL)",
         name="vault_documents_compile_provenance_consistent",
+    ),
+    # Declining is refusing to write a page *from a note*; there is no reading
+    # under which a wiki page is declined.
+    CheckConstraint(
+        "kind = 'note' OR compile_declined_at IS NULL",
+        name="vault_documents_decline_is_note_only",
     ),
 )
 

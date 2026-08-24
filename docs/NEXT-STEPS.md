@@ -10,14 +10,24 @@ read to know what to pick up.
 **State:** on `dev`. Suite green (554 vault, 796 full). PR #14 merges the
 22-commit gap into `main` and is open for review.
 
-**Production is three revisions behind `dev`'s schema:** it sits at vault lineage
+**Production is four revisions behind `dev`'s schema:** it sits at vault lineage
 `0011_review_candidate_optional` with 70 documents, all active, none flagged,
 none unembedded, every path a title slug. The review flow shipped in release
-v64. `0012_document_promotion_status`, `0013_oauth_authorization_server` and
-`0014_oauth_refresh_and_csrf` deploy with the next release. All three are
-additive and need no backfill — one nullable column, one enum, four empty
-tables — and none changes any running behaviour: the OAuth routes are not even
-registered unless `VAULT_PUBLIC_URL` is set, which it is not.
+v64. `0012_document_promotion_status`, `0013_oauth_authorization_server`,
+`0014_oauth_refresh_and_csrf` and `0015_note_compile_declined` deploy with the
+next release. All four are additive and need no backfill — two nullable columns,
+one enum, four empty tables.
+
+Three of them change no running behaviour: the OAuth routes are not even
+registered unless `VAULT_PUBLIC_URL` is set, which it is not. **`0015` does
+change one thing, deliberately.** Compile planning stops reading the frontier
+and reads per-note declines instead, and no note is declined yet — so the first
+plan after deploy offers every uncovered active note rather than only those
+newer than the last run's frontier. That is the intended effect: it surfaces
+exactly what the frontier had been suppressing, including anything the
+flagged-then-approved bug had stranded permanently. Nothing is granted
+`vault:compile` today, so nothing will actually run that plan until an operator
+issues a credential for it.
 
 **ADRs 0023, 0024 and 0025 are all Accepted as of 2026-08-22.** What remains is
 implementation, listed below; no decision blocks it.

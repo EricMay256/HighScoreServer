@@ -4,11 +4,9 @@ import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC
-from typing import Any
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
 from sqlalchemy import text as text_sql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -21,6 +19,7 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    NoteCompileState,
     PromotionStatus,
     ReviewState,
     VaultCompileRun,
@@ -70,7 +69,6 @@ from .search import (
     reciprocal_rank_fusion,
 )
 from .slug import resolve_vault_path
-from .tables import vault_compile_runs
 
 
 logger = logging.getLogger(__name__)
@@ -1583,10 +1581,13 @@ class VaultCompileService:
         runs = VaultCompileRunRepository()
 
         async with self._transactions.transaction() as connection:
+            # Still recorded on the run, and no longer read when planning.
+            # `output_frontier` is the run's own history -- when the source
+            # corpus stood where it did -- while what a note has been *judged*
+            # to be now lives on the note.
             frontier = await runs.note_frontier(connection)
             pages = await documents.list_pages(connection)
             notes = await documents.note_states(connection)
-            last_frontier = await self._last_frontier(connection)
             run = await runs.start(
                 connection,
                 run_id=run_id,
@@ -1603,31 +1604,8 @@ class VaultCompileService:
                 target_id=str(run_id),
             )
 
-        items = _plan_items(
-            pages=pages,
-            notes=notes,
-            since=None if all_pages else last_frontier,
-            all_pages=all_pages,
-        )
+        items = _plan_items(pages=pages, notes=notes, all_pages=all_pages)
         return CompilePlan(run=run, items=items)
-
-    @staticmethod
-    async def _last_frontier(connection: AsyncConnection) -> str | None:
-        """The output frontier of the most recent successful run.
-
-        Successful only: a failed run's frontier would claim coverage for
-        pages it never wrote, so the next incremental plan would skip exactly
-        the notes the failure left uncompiled.
-        """
-
-        result = await connection.execute(
-            select(vault_compile_runs.c.output_frontier)
-            .where(vault_compile_runs.c.state == CompileRunState.SUCCEEDED.value)
-            .order_by(vault_compile_runs.c.completed_at.desc())
-            .limit(1)
-        )
-        row = result.scalar_one_or_none()
-        return (row or {}).get("frontier_at") if row is not None else None
 
     # ---------------------------------------------------------- write page --
 
@@ -1818,6 +1796,87 @@ class VaultCompileService:
             compiled_at=run.started_at,
         )
 
+    # -------------------------------------------------------------- decline --
+
+    async def decline(
+        self,
+        run_id: UUID,
+        principal_id: str,
+        request_id: str,
+        note_ids: Sequence[str],
+    ) -> tuple[tuple[str, ...], datetime]:
+        """Record that this run considered these notes and wants no page.
+
+        The counterpart to ``write_page``, and the reason the plan can ever be
+        empty. Without it the planner has to *infer* refusal from the passage of
+        time, which is what the frontier did and what it could not do correctly:
+        "I looked and decided against it" and "nobody ever showed me this" are
+        different facts and only one of them should suppress a future offer.
+
+        A separate call rather than a field on ``finish``, for the reason pages
+        are separate: a run that declines and then fails keeps its declines, the
+        same way it keeps its pages. Both are real judgements, and discarding
+        them to reach a tidier state throws the work away.
+
+        Declining a note the plan did not offer is allowed, deliberately -- the
+        plan is advice (ADR 0027). Refusing it would mean a librarian who
+        noticed something in passing had nowhere to put that.
+
+        Ids that resolve to no live note are refused rather than ignored, the
+        way a page's ``source_ids`` are: a decline naming nothing is a caller
+        error, and silently dropping it would leave the note being offered
+        forever with nothing to explain why.
+        """
+
+        runs = VaultCompileRunRepository()
+        documents = VaultWikiPageRepository()
+        declined_at = datetime.now(UTC)
+
+        async with self._transactions.transaction() as connection:
+            # The corpus lock, for the reason `finish` and `write_page` take it:
+            # a judgement must not attach to a run that has already reported its
+            # result, and the state check below is only a guard while the settle
+            # path contends for the same lock.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            run = await runs.get(connection, run_id)
+            if run is None:
+                raise CompileRunNotFound(str(run_id))
+            if run.compiler_principal_id != principal_id:
+                raise CompileRunNotYours(str(run_id))
+            if run.state is not CompileRunState.RUNNING:
+                raise CompileRunAlreadySettled(str(run_id))
+
+            requested = tuple(dict.fromkeys(note_ids))
+            reached = await documents.decline_notes(
+                connection, requested, declined_at=declined_at
+            )
+            unresolved = [
+                note_id for note_id in requested if note_id not in set(reached)
+            ]
+            if unresolved:
+                raise UnresolvedSources(unresolved)
+
+            audit = VaultAuditEventRepository()
+            for note_id in reached:
+                # One event per note, not one per call: each is a judgement
+                # about a particular note, and `target_id` holds one id. This is
+                # also where "who declined it, and when" lives -- the note keeps
+                # only the timestamp, deliberately (see migration 0015).
+                await audit.record(
+                    connection,
+                    operation="vault.compile",
+                    outcome="declined",
+                    request_id=request_id,
+                    principal_id=principal_id,
+                    target_type="document",
+                    target_id=note_id,
+                )
+
+        return reached, declined_at
+
     # --------------------------------------------------------------- settle --
 
     async def finish(
@@ -1951,8 +2010,7 @@ class VaultCompileService:
 def _plan_items(
     *,
     pages: Sequence[VaultDocument],
-    notes: Mapping[str, tuple[Any, str]],
-    since: str | None,
+    notes: Mapping[str, NoteCompileState],
     all_pages: bool,
 ) -> tuple[CompileWorkItem, ...]:
     """Which pages need writing, and why.
@@ -1981,10 +2039,11 @@ def _plan_items(
         page_sources = [sid for sid in page.source_ids if sid in notes]
         missing = len(page_sources) != len(page.source_ids)
         flagged = any(
-            notes[sid][1] != DocumentStatus.ACTIVE.value for sid in page_sources
+            notes[sid].status != DocumentStatus.ACTIVE.value
+            for sid in page_sources
         )
         moved = page.compiled_at is not None and any(
-            notes[sid][0] > page.compiled_at for sid in page_sources
+            notes[sid].updated_at > page.compiled_at for sid in page_sources
         )
         if all_pages or missing or flagged or moved:
             items.append(
@@ -1996,16 +2055,22 @@ def _plan_items(
                 )
             )
 
-    for note_id, (updated_at, status) in sorted(notes.items()):
-        if note_id in covered or status != DocumentStatus.ACTIVE.value:
+    for note_id, note in sorted(notes.items()):
+        if note_id in covered or note.status != DocumentStatus.ACTIVE.value:
             continue
-        if since is not None and not all_pages:
-            # Only notes the last successful run did not see. A note older than
-            # the frontier and still uncovered was deliberately left out, or was
-            # already offered and declined; re-offering it every run turns the
-            # plan into a permanent backlog nobody can clear.
-            if updated_at.astimezone(UTC).isoformat() <= since:
-                continue
+        if note.declined and not all_pages:
+            # Considered and declined. Re-offering it every run would make the
+            # plan permanently non-empty, which is the state in which nobody
+            # reads it -- and that is the whole reason this check exists.
+            #
+            # It used to be a frontier comparison, and the difference is not
+            # cosmetic. A frontier said "the corpus had moved this far", so a
+            # note *excluded* from a plan was covered by it just the same as one
+            # offered and refused: a flagged note advanced the frontier past
+            # itself, and approving it later moved no timestamp, so it was never
+            # offered again. Only notes somebody actually declined are marked
+            # here, so a note nobody was shown stays offered.
+            continue
         items.append(
             CompileWorkItem(
                 page_id=None,

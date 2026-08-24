@@ -169,11 +169,19 @@ be edited when it does.
   same ground would look like a duplicate of a document that exists only because that note
   does. Pages are still *embedded* — search returning synthesis is the point — they are simply
   not adjudicated. Do not "restore" the filter for symmetry with the read path.
-  A successful run publishes the frontier it was **planned** against — its own
-  `input_frontier` — never one read at `finish`. Reading it at settlement loses notes
-  permanently: a note landing after the plan is never offered to that run, and a finish-time
-  maximum then covers its timestamp so no later plan offers it either. A **failed run
-  publishes none** (a failed frontier would claim coverage for pages nobody wrote).
+  **What stops a note being re-offered is a decline on the note, not a frontier.**
+  `compile_declined_at` (migration 0015) records that a compiler was shown a note and refused
+  it; planning reads that and no longer reads any frontier. The run still stores
+  `input_frontier`/`output_frontier` as its own history — do not plan from them again. The
+  reason is that a timestamp cannot tell "considered and refused" from "never offered", and the
+  difference was a real bug: a flagged note is deliberately never offered, yet it counted toward
+  `max(updated_at)` all the same, and `set_status` deliberately does not move `updated_at`, so
+  approving it later left it permanently below the bookmark and never offered again. Two correct
+  decisions and a clock standing in for a judgement.
+  A **decline expires when the note changes** (`updated_at > compile_declined_at`) — the
+  frontier gave that for free, this has to state it. `all_pages=true` ignores declines, which is
+  what makes it the recovery path. Declining a note the plan did not offer is allowed; declining
+  an id that resolves to no live note is a 422, and a wiki page id is one of those.
   **`write_page`, `finish` and `fail` all take the corpus advisory lock.** `write_page`'s
   check that the run is still running is only a guard because the settle path contends for the
   same lock; without it a page commits into a settled run. `source_ids` are re-validated under

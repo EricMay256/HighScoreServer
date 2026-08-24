@@ -627,6 +627,35 @@ class VaultCompileSettleRequest(BaseModel):
     )
 
 
+class VaultCompileDeclineRequest(BaseModel):
+    """Notes this run considered and decided not to compile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_ids: list[str] = Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "Notes the run looked at and is refusing. Each is marked declined "
+            "and stops appearing as a `new-source` work item -- until the note "
+            "itself changes, which makes the decline stale and offers it again. "
+            "Ids that resolve to no live note are refused rather than ignored."
+        ),
+    )
+
+
+class VaultCompileDeclineResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    declined_note_ids: list[str]
+    declined_at: datetime = Field(
+        description=(
+            "When the judgement was recorded. A decline is compared against the "
+            "note's own `updated_at`, so an edit after this instant re-offers it."
+        ),
+    )
+
+
 def compile_run_summary(run: VaultCompileRun) -> VaultCompileRunSummary:
     """Project a domain compile run onto its transport shape.
 

@@ -197,6 +197,39 @@ class NewVaultDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class NoteCompileState:
+    """What the compile planner needs to know about one note.
+
+    Three fields rather than a whole ``VaultDocument`` because staleness and
+    coverage are decided by when a note moved, whether it is still endorsed, and
+    whether a compiler already declined it -- loading bodies to answer that would
+    read the corpus into memory for nothing.
+
+    A named type rather than a tuple: the third field arrived when declines
+    replaced the frontier, and ``(updated_at, status, declined_at)`` positionally
+    is the kind of thing a reader has to go and check.
+    """
+
+    updated_at: datetime
+    status: str
+    # When a compiler was shown this note and decided against a page. None is
+    # the ordinary state. Stale -- and therefore ignored -- once `updated_at` is
+    # later than it: a note that changed since the judgement is a different note.
+    declined_at: datetime | None = None
+
+    @property
+    def declined(self) -> bool:
+        """Whether the decline still stands.
+
+        The comparison is the whole rule. The frontier it replaced got this for
+        free, because a note editing itself past the frontier was re-offered by
+        construction; stating it is better than inheriting it.
+        """
+
+        return self.declined_at is not None and self.updated_at <= self.declined_at
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentEmbedding:
     """One document's vector under one embedding profile.
 

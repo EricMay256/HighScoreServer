@@ -165,7 +165,7 @@ def test_complete_vault_lineage_renders_offline_sql() -> None:
 
     rendered = output.getvalue()
     assert "CREATE TABLE vault.vault_documents" in rendered
-    assert "0014_oauth_refresh_and_csrf" in rendered
+    assert "0015_note_compile_declined" in rendered
 
 
 def test_revision_graph_loads_from_extracted_migration_package(
@@ -186,7 +186,7 @@ def test_revision_graph_loads_from_extracted_migration_package(
     config.set_main_option("script_location", str(extracted_migrations))
     revisions = list(ScriptDirectory.from_config(config).walk_revisions())
 
-    assert revisions[0].revision == "0014_oauth_refresh_and_csrf"
+    assert revisions[0].revision == "0015_note_compile_declined"
     assert revisions[-1].revision == "0001_vault_foundation"
 
 
@@ -208,7 +208,7 @@ def test_shared_database_builds_independent_schema_lineages(
     }
     assert version(shared_url, "public", "alembic_version") == ("0004_auth_identities")
     assert version(shared_url, "vault", "vault_alembic_version") == (
-        "0014_oauth_refresh_and_csrf"
+        "0015_note_compile_declined"
     )
     assert vault_foreign_key_schemas(shared_url) == {("vault", "vault")}
     assert vector_extension_version(shared_url) is not None
@@ -241,7 +241,7 @@ def test_separate_databases_remain_configuration_only(
         "vault_alembic_version",
     }
     assert version(vault_url, "vault", "vault_alembic_version") == (
-        "0014_oauth_refresh_and_csrf"
+        "0015_note_compile_declined"
     )
     assert vector_extension_version(vault_url) is not None
 
@@ -266,5 +266,5 @@ def test_roll_forward_application_rollback_keeps_both_migration_graphs(
         "0004_auth_identities"
     )
     assert version(shared_url, "vault", "vault_alembic_version") == (
-        "0014_oauth_refresh_and_csrf"
+        "0015_note_compile_declined"
     )
