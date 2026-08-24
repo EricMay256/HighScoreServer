@@ -1,50 +1,40 @@
 # Next steps
 
-Current as of 2026-08-22. A short, ordered list — the *why now* and the blocking
+Current as of 2026-08-24. A short, ordered list — the *why now* and the blocking
 relationships, not the detail. `HANDOFF-VAULT-IMPLEMENTATION.md` holds the context
 this list assumes — inherited state, the conventions that bite, what is unsettled.
 `HANDOFF.md` holds the full task list and session history; `HANDOFF-METADATA.md`
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** on `dev`. Suite green (554 vault, 796 full). PR #14 merges the
-22-commit gap into `main` and is open for review.
+**State:** merged. `main` and `dev` are level at the PR #16 merge; the vault work
+described below is all shipped and deployed (release v68). Suite green (855 full).
 
-**Production is four revisions behind `dev`'s schema:** it sits at vault lineage
-`0011_review_candidate_optional` with 70 documents, all active, none flagged,
-none unembedded, every path a title slug. The review flow shipped in release
-v64. `0012_document_promotion_status`, `0013_oauth_authorization_server`,
-`0014_oauth_refresh_and_csrf` and `0015_note_compile_declined` deploy with the
-next release. All four are additive and need no backfill — two nullable columns,
-one enum, four empty tables.
+**Production is current.** Vault lineage `0015_note_compile_declined`, 70 notes and
+14 wiki pages, four compile runs, no note declined yet, one live credential. The
+migrations landed in v67 and the wiki import ran against production the same day.
 
-Three of them change no running behaviour: the OAuth routes are not even
-registered unless `VAULT_PUBLIC_URL` is set, which it is not. **`0015` does
-change one thing, deliberately.** Compile planning stops reading the frontier
-and reads per-note declines instead, and no note is declined yet — so the first
-plan after deploy offers every uncovered active note rather than only those
-newer than the last run's frontier. That is the intended effect: it surfaces
-exactly what the frontier had been suppressing, including anything the
-flagged-then-approved bug had stranded permanently. Nothing is granted
-`vault:compile` today, so nothing will actually run that plan until an operator
-issues a credential for it.
+**One deferred behaviour is now live and worth expecting.** `0015` stopped compile
+planning reading the frontier; it reads per-note declines instead, and nothing is
+declined. So the first plan run offers every uncovered active note rather than only
+those newer than the last run's frontier. That is the intended effect — it surfaces
+what the frontier had been suppressing, including anything the flagged-then-approved
+bug had stranded permanently. Nothing holds `vault:compile` today, so no plan runs
+until an operator issues a credential for it.
 
-**ADRs 0023, 0024 and 0025 are all Accepted as of 2026-08-22.** What remains is
-implementation, listed below; no decision blocks it.
+**ADRs 0023 through 0027 are Accepted and implemented.** The six items below are
+kept as a record of what was done and why, rather than as work to pick up; what is
+genuinely open is under "Deferred, unchanged" at the end, plus the operator choices
+in item 5's closing note.
 
 ---
 
-## 1. Merge `dev` into `main` — **PR open**
+## 1. Merge `dev` into `main` — **done**
 
-Twenty-two commits, including every piece of vault documentation written this month.
-This is not bookkeeping: someone looking for the MCP setup instructions could not
-find them, because they were on `dev` and GitHub shows `main`. Documentation on a
-non-default branch is documentation nobody reads.
-
-Nothing on Heroku tracks `main`, so this changes no running behaviour.
-
-[PR #14](https://github.com/EricMay256/HighScoreServer/pull/14) is open and
-fast-forwardable. Awaiting a human on the merge button.
+[PR #14](https://github.com/EricMay256/HighScoreServer/pull/14) merged 2026-08-24,
+followed by [#16](https://github.com/EricMay256/HighScoreServer/pull/16). Every piece
+of vault documentation written this month is on the default branch, which was the
+point: documentation on a non-default branch is documentation nobody reads.
 
 ## 2. Implement ADR 0023 — promotion candidacy — **done**
 
@@ -126,7 +116,7 @@ no credential carries that name any more — and it is the right thing to keep f
 the next bulk import. Note that a *new* credential named `importer` would inherit
 that headroom.
 
-## 5. Compilation (Phase 4) — **built; one operator step left**
+## 5. Compilation (Phase 4) — **done**
 
 The last markdown writer. `Agent/wiki/` was produced by the Stage-A librarian loop
 because the service had no compile path; it has one now (ADR 0027).
@@ -139,8 +129,9 @@ because the service had no compile path; it has one now (ADR 0027).
 - ✅ `scripts/import_vault_wiki.py` — the one-off bridge, verified end to end
   against the test database
 - ✅ the `_index.md` renderer, in the exporter rather than as a row
-- ⬜ **run the import against production, then add `Agent/wiki/` to
-  `CORPUS_OWNED_PATH_PREFIXES`.** In that order, and not before.
+- ✅ the import ran against production (14 pages, 4 runs), and `Agent/wiki/`
+  joined `CORPUS_OWNED_PATH_PREFIXES` afterwards — in that order, which was the
+  load-bearing part
 
 **It is 14 pages, not 15** — every earlier doc said 15, including this one,
 and nobody counted. There is also an `_index.md` and a `_frontier.yml`. The
@@ -218,9 +209,12 @@ human-layer import.** `folders.yml` governs `ai_write` and has no per-credential
 **`superseded` is a reserved review state** with no decision path that sets it.
 Leave it that way until there is a case that needs it and a reason to write down.
 
-**The knowledge-vault skill's compile loop is its last Stage-A writer.** Note
-contribution moved to the service; wiki compilation did not, and cannot until
-item 5 lands.
+**The knowledge-vault skill's compile loop is its last Stage-A writer, and it is
+now unblocked.** Note contribution moved to the service; wiki compilation could not
+until item 5 landed, and item 5 has landed. Retiring `compile plan`/`write`/`finish`
+in the knowledge-platform engine is what makes ADR 0022's one-writer-per-tree true
+of `Agent/wiki/`. It lives in the other repository, so it is not this list's to
+tick.
 
 **Batch fetch by id is planned and deferred** (ADR 0025). `GET /notes?ids=a,b,c`
 removes the round trip per hop without letting the vault walk the graph, and
