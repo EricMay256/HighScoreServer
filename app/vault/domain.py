@@ -78,6 +78,22 @@ class ReviewState(str, Enum):
     SUPERSEDED = "superseded"
 
 
+class AmendmentProposalState(str, Enum):
+    """Lifecycle of an immutable proposed change to an existing note."""
+
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    STALE = "stale"
+
+
+class AmendmentProposalKind(str, Enum):
+    """Closed set of changes an amendment proposal may carry."""
+
+    REPLACEMENT = "replacement"
+    BODY_DIFF = "body_diff"
+
+
 class WriteRequestState(str, Enum):
     PROCESSING = "processing"
     INSERTED = "inserted"
@@ -125,6 +141,9 @@ class VaultDocument:
     schema_version: int
     created_at: datetime
     updated_at: datetime
+    # Monotonic content version used by amendment proposals as their compare-
+    # and-swap token. Lifecycle-only changes do not move it.
+    content_revision: int = 1
     # Governance Type Dictionary value, validated against types.yml at the
     # write boundary rather than here. None means untyped, which is a real
     # state rather than missing data. See ADR 0009.
@@ -263,6 +282,26 @@ class VaultReviewCase:
 
 
 @dataclass(frozen=True, slots=True)
+class VaultAmendmentProposal:
+    """An immutable candidate change awaiting bounded adjudication."""
+
+    id: UUID
+    target_document_id: str
+    target_revision: int
+    change_kind: AmendmentProposalKind
+    change: dict[str, Any]
+    rationale: str
+    state: AmendmentProposalState
+    proposed_by: str
+    created_at: datetime
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    decision_note: str | None = None
+    applied_revision: int | None = None
+    removals_acknowledged: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class PoolSnapshot:
     pool_size: int
     checked_out: int
@@ -294,6 +333,24 @@ class RegisteredOAuthClient:
     client_info: dict[str, Any]
     registered_at: datetime
     expires_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthGrant:
+    """One operator-approved OAuth authorization and its rotating family.
+
+    ``authorized_scopes`` came through OAuth consent and is restricted to the
+    baseline. ``entitled_scopes`` came only from the operator CLI. Keeping the
+    two sets distinct prevents a refresh request from manufacturing privilege
+    while allowing operator authority to survive access-token rotation.
+    """
+
+    family_id: UUID
+    client_id: str
+    authorized_scopes: tuple[str, ...]
+    entitled_scopes: tuple[str, ...]
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

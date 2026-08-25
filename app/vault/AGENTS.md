@@ -201,6 +201,17 @@ be edited when it does.
   opened rather than overwriting the first. Only a **pending** case blocks retirement now;
   ADR 0019's "every state" rule made a flagged note permanently undeletable. `superseded` is
   reserved and unreachable — do not give it a meaning without a case that needs one.
+- **An amendment proposal is workflow state, never a document.** Migration 0016 and ADR
+  0028. It stores either an immutable full replacement or a bounded body diff against
+  `content_revision`, stays outside search/dedup/compile/export, and is applied only through
+  `vault:review`. Body diffs may add, edit, or remove exact lines; metadata and large changes
+  require replacement. Review materializes the complete result, canonical diff, and removal
+  summary. Any removed body line requires explicit acknowledgement, persisted on the proposal.
+  Acceptance compares
+  the base under the corpus lock; a changed or missing target settles `stale`. The reviewing
+  credential still holds no `vault:update`: it may select an existing proposal but cannot
+  compose arbitrary content. `content_revision` moves on `replace_content` only, not review,
+  promotion, compile decline, or other lifecycle changes.
 - **The review surface is REST *and* MCP, and the MCP half is scope-gated.** Reading a case
   serves `flagged` content, the least-vetted text in the corpus, and deciding publishes or
   destroys a note — so the tools exist only for a credential holding `vault:review`, which is
@@ -323,6 +334,9 @@ be edited when it does.
   granting it, and "retire" reads as reversible when ADR 0019 makes it not.
 - *What* a credential may read is ADR 0014's path policy, a property of the
   folder rather than of the credential.
+- **`vault:propose` is OAuth-baseline but non-mutating.** It writes an untrusted amendment
+  record, not corpus content. Applying one is `vault:review`, and direct replacement remains
+  `vault:update`; do not collapse any of the three.
 
 ### The OAuth authorization server (ADR 0024)
 
@@ -435,11 +449,11 @@ be edited when it does.
   `load_authorization_code` must **not** consume: the SDK splits load from exchange, and a
   consuming load would destroy a code on a failed exchange the client is still entitled to
   retry.
-- **`vault_oauth_authorization_codes.scopes` mirrors `vault_agent_credentials_scopes_known`,
-  not the OAuth baseline.** `OAUTH_BASELINE_SCOPES` is what a client may *request*, enforced in
-  application code; an operator may widen a specific credential afterwards, which ADR 0024 calls
-  expected rather than exceptional. Tightening the column CHECK to the baseline would forbid the
-  widened case at a layer no application code could permit.
+- **`vault_oauth_authorization_codes.scopes` is OAuth-baseline only.** Operator entitlements
+  do not exist until the code exchange creates a refresh family (ADR 0029). Accepting a
+  privileged scope on the code would let consent state cross the operator boundary before the
+  durable grant exists. Refresh-token scopes remain wider because they project the effective
+  union for the SDK; the grant row is still authoritative.
 - **`passwords.py` is bcrypt and duplicates `app/auth.py` on purpose.** `app/vault/` may contain
   no `from app.`, so a ten-line wrapper is cheaper than a host dependency the package cannot
   take with it. bcrypt rather than `auth.hash_secret`'s SHA-256 because ADR 0015's
@@ -471,6 +485,12 @@ be edited when it does.
   `sha256(secret)` is stored, so there is no way to hand back a token for an existing row.
   Revoked credential rows therefore accumulate, one per refresh, and want pruning alongside
   `vault_oauth_clients`. They grant nothing in the meantime.
+- **Persistent OAuth authority belongs to the refresh family, not the client or access
+  credential.** ADR 0029 and migration 0017. `vault_oauth_grants` keeps consented baseline
+  scopes separate from operator entitlements and each rotation projects their union. The
+  operator commands update the live credential too; static `grant` refuses OAuth rows. A new
+  browser authorization is a new family and inherits nothing. `vault:review` is accepted only
+  for a separately authorized read-only family, preserving ADR 0026's reviewer role.
 - **`load_authorization_code` must not consume.** The SDK splits load from exchange and does
   real work between them — PKCE, the `redirect_uri` round trip, expiry — so a consuming load
   would destroy a code whenever any of those failed, when the client may still retry.

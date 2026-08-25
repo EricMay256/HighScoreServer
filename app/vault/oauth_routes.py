@@ -95,6 +95,7 @@ MAX_DISPLAYED_CLIENT_NAME = 80
 SCOPE_DESCRIPTIONS: dict[str, str] = {
     "vault:read": "search the vault and read notes",
     "vault:write": "add new notes",
+    "vault:propose": "propose amendments to existing notes",
     "vault:update": "replace the contents of existing notes",
     "vault:delete": "permanently delete notes",
     "vault:review": "adjudicate flagged notes and promotion candidates",

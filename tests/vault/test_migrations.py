@@ -2,6 +2,7 @@ import shutil
 import sys
 from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -31,12 +32,14 @@ from vault_migrations.helpers import (
 
 VAULT_TABLES = {
     "vault_agent_credentials",
+    "vault_amendment_proposals",
     "vault_audit_events",
     "vault_compile_runs",
     "vault_document_embeddings",
     "vault_documents",
     "vault_oauth_authorization_codes",
     "vault_oauth_clients",
+    "vault_oauth_grants",
     "vault_oauth_pending_authorizations",
     "vault_oauth_refresh_tokens",
     "vault_review_cases",
@@ -165,7 +168,7 @@ def test_complete_vault_lineage_renders_offline_sql() -> None:
 
     rendered = output.getvalue()
     assert "CREATE TABLE vault.vault_documents" in rendered
-    assert "0015_note_compile_declined" in rendered
+    assert "0017_oauth_entitlements" in rendered
 
 
 def test_revision_graph_loads_from_extracted_migration_package(
@@ -186,7 +189,7 @@ def test_revision_graph_loads_from_extracted_migration_package(
     config.set_main_option("script_location", str(extracted_migrations))
     revisions = list(ScriptDirectory.from_config(config).walk_revisions())
 
-    assert revisions[0].revision == "0015_note_compile_declined"
+    assert revisions[0].revision == "0017_oauth_entitlements"
     assert revisions[-1].revision == "0001_vault_foundation"
 
 
@@ -208,7 +211,7 @@ def test_shared_database_builds_independent_schema_lineages(
     }
     assert version(shared_url, "public", "alembic_version") == ("0004_auth_identities")
     assert version(shared_url, "vault", "vault_alembic_version") == (
-        "0015_note_compile_declined"
+        "0017_oauth_entitlements"
     )
     assert vault_foreign_key_schemas(shared_url) == {("vault", "vault")}
     assert vector_extension_version(shared_url) is not None
@@ -241,9 +244,75 @@ def test_separate_databases_remain_configuration_only(
         "vault_alembic_version",
     }
     assert version(vault_url, "vault", "vault_alembic_version") == (
-        "0015_note_compile_declined"
+        "0017_oauth_entitlements"
     )
     assert vector_extension_version(vault_url) is not None
+
+
+def test_oauth_entitlement_migration_backfills_existing_families_fail_closed(
+    disposable_database_urls: dict[str, str],
+) -> None:
+    database_url = disposable_database_urls["shared"]
+    run_vault_migration(database_url, "head")
+    config = Config(str(REPO_ROOT / "alembic-vault.ini"))
+    with migration_environment(
+        database_url_value=database_url,
+        vault_database_url_value=database_url,
+    ):
+        command.downgrade(config, "0016_amendment_proposals")
+    family_id = uuid4()
+    client_id = f"migration-client-{uuid4()}"
+    credential_id = uuid4().hex[:16]
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            """
+            INSERT INTO vault.vault_oauth_clients (client_id, client_info)
+            VALUES (%s, '{}'::jsonb)
+            """,
+            (client_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO vault.vault_agent_credentials (
+                id, principal_id, display_name, secret_sha256, scopes
+            ) VALUES (%s, %s, 'migration fixture', %s, %s)
+            """,
+            (
+                credential_id,
+                f"oauth-{client_id}",
+                bytes(32),
+                ["vault:read", "vault:update"],
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO vault.vault_oauth_refresh_tokens (
+                token_sha256, family_id, client_id, credential_id,
+                scopes, expires_at
+            ) VALUES (%s, %s, %s, %s, %s, now() + interval '1 day')
+            """,
+            (
+                bytes([1]) * 32,
+                family_id,
+                client_id,
+                credential_id,
+                ["vault:read", "vault:update"],
+            ),
+        )
+
+    run_vault_migration(database_url, "head")
+
+    with psycopg.connect(database_url) as connection:
+        row = connection.execute(
+            """
+            SELECT authorized_scopes, entitled_scopes
+            FROM vault.vault_oauth_grants
+            WHERE family_id = %s
+            """,
+            (family_id,),
+        ).fetchone()
+    assert row == (["vault:read"], [])
 
 
 def test_roll_forward_application_rollback_keeps_both_migration_graphs(
@@ -266,5 +335,5 @@ def test_roll_forward_application_rollback_keeps_both_migration_graphs(
         "0004_auth_identities"
     )
     assert version(shared_url, "vault", "vault_alembic_version") == (
-        "0015_note_compile_declined"
+        "0017_oauth_entitlements"
     )

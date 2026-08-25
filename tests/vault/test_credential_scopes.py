@@ -1,9 +1,7 @@
-"""Widening and narrowing a credential's scopes without rotating its secret.
+"""Widening and narrowing a static credential without rotating its secret.
 
-Vault ADR 0024 requires this to exist before OAuth ships: every OAuth client
-starts at the read+write baseline, some will need more, and the alternative --
-a hand-written ``UPDATE`` against production -- does not survive becoming
-routine.
+OAuth-minted credentials deliberately use ADR 0029's family-level entitlement
+commands instead; these tests pin the older static-credential operation.
 
 Against the database, because the operations worth pinning are all about a row:
 that a revoked credential is refused rather than silently widened, that a
@@ -274,11 +272,7 @@ def test_an_expired_credential_is_refused(capsys) -> None:
 
 
 def test_a_credential_expiring_in_the_future_is_not_refused() -> None:
-    """The expiry check is about *expired*, not about *having an expiry*.
-
-    OAuth-minted credentials all carry one, and they are exactly the rows this
-    command exists to widen.
-    """
+    """The expiry check is about *expired*, not about *having an expiry*."""
 
     credential_id = _seed(expires_at=datetime.now(UTC) + timedelta(days=1))
 

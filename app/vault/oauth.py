@@ -34,12 +34,11 @@ is not HTTP.
 client to self-register, so anyone may. A registration is not an authorization:
 what gates access is the operator personally approving one at the login page,
 and the scopes the resulting credential carries -- capped at
-``OAUTH_BASELINE_SCOPES`` by ``ClientRegistrationOptions``. ``vault:update``,
-``vault:delete`` and ``vault:review`` are unreachable by request, which is a
-security decision rather than a convenience one: ADR 0021's defence against text
-injected into the corpus is that a destructive tool is absent from the surface
-that text can name, and a web-authorized client has no retire tool to be talked
-into using.
+``OAUTH_BASELINE_SCOPES`` by ``ClientRegistrationOptions``. The baseline includes
+``vault:propose`` because proposals are inert workflow records; ``vault:update``,
+``vault:delete`` and ``vault:review`` remain unreachable by request. ADR 0021's
+defence therefore still holds: a web-authorized client can suggest an exact
+replacement but cannot apply, alter, or delete established knowledge.
 """
 
 import logging
@@ -74,6 +73,7 @@ from .repository import (
     VaultAuditEventRepository,
     VaultOAuthAuthorizationCodeRepository,
     VaultOAuthClientRepository,
+    VaultOAuthGrantRepository,
     VaultOAuthPendingAuthorizationRepository,
     VaultOAuthRefreshTokenRepository,
 )
@@ -213,6 +213,7 @@ class VaultAuthorizationProvider(
         # `routes.py` does.
         self._transactions_for = transactions
         self._clients = VaultOAuthClientRepository()
+        self._grants = VaultOAuthGrantRepository()
         self._pending = VaultOAuthPendingAuthorizationRepository()
         self._codes = VaultOAuthAuthorizationCodeRepository()
         self._refresh = VaultOAuthRefreshTokenRepository()
@@ -405,12 +406,19 @@ class VaultAuthorizationProvider(
         async with self._transactions_for().transaction() as connection:
             redeemed = await self._codes.redeem(connection, authorization_code.code)
             if redeemed is not None:
+                family_id = uuid4()
+                await self._grants.create(
+                    connection,
+                    family_id=family_id,
+                    client_id=client.client_id,
+                    authorized_scopes=redeemed.scopes,
+                )
                 return await self._issue(
                     connection,
                     client=client,
                     scopes=redeemed.scopes,
                     subject=redeemed.subject,
-                    family_id=uuid4(),
+                    family_id=family_id,
                     operation="vault.oauth.authorize",
                 )
 
@@ -739,9 +747,18 @@ class VaultAuthorizationProvider(
         this one.
         """
 
+        authorized = sorted(set(scopes) & set(OAUTH_BASELINE_SCOPES))
+        grant = await self._grants.set_authorized_scopes(
+            connection,
+            family_id,
+            authorized,
+        )
+        if grant is None:
+            raise RuntimeError("OAuth refresh family has no durable grant")
+
         credential_id = secrets.token_hex(_ID_BYTES)
         secret = new_secret()
-        granted = sorted(set(scopes))
+        granted = sorted(set(grant.authorized_scopes) | set(grant.entitled_scopes))
         principal_id = principal_for_client(client)
 
         await self._credentials.create(

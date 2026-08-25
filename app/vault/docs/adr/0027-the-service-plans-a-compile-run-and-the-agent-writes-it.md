@@ -212,7 +212,8 @@ persisted per work item — the run row holds the frontier and the opener, and t
 in the `plan()` response.
 
 That follows from what the scope means. `vault:compile` is the permission to write wiki pages;
-it is operator-granted, cannot be requested through OAuth (the baseline is read and write only),
+it is operator-granted, cannot be requested through OAuth (the baseline is read, write, and
+non-mutating amendment proposal only),
 and is currently granted to nothing. A holder writing a page the plan did not mention is doing
 the thing the scope is for. And an empty successful run is not a failure to complete work — it is
 the documented way to decline, which is exactly what the frontier exists to record. Re-offering a

@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     Double,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -61,6 +62,14 @@ review_state_enum = ENUM(
     "rejected",
     "superseded",
     name="vault_review_state",
+    schema=VAULT_SCHEMA,
+)
+amendment_proposal_state_enum = ENUM(
+    "pending",
+    "accepted",
+    "rejected",
+    "stale",
+    name="vault_amendment_proposal_state",
     schema=VAULT_SCHEMA,
 )
 promotion_status_enum = ENUM(
@@ -246,6 +255,12 @@ vault_documents = Table(
     ),
     Column("schema_version", Integer, nullable=False),
     Column(
+        "content_revision",
+        BigInteger,
+        nullable=False,
+        server_default=text("1"),
+    ),
+    Column(
         "created_at",
         DateTime(timezone=True),
         nullable=False,
@@ -294,6 +309,10 @@ vault_documents = Table(
     CheckConstraint(
         "schema_version > 0",
         name="vault_documents_schema_version_positive",
+    ),
+    CheckConstraint(
+        "content_revision > 0",
+        name="vault_documents_content_revision_positive",
     ),
     # Shape only, never vocabulary: which names are legal belongs to types.yml
     # and is checked in application code, so that adding a type stays a data
@@ -446,6 +465,85 @@ vault_review_cases = Table(
     ),
 )
 
+vault_amendment_proposals = Table(
+    "vault_amendment_proposals",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    # A correlation id rather than an FK: the durable proposal and judgement
+    # must survive retirement of their target, just as audit target ids do.
+    Column("target_document_id", Text, nullable=False),
+    Column("target_revision", BigInteger, nullable=False),
+    Column("change_kind", Text, nullable=False),
+    Column("change", JSONB, nullable=False),
+    Column("rationale", Text, nullable=False),
+    Column(
+        "state",
+        amendment_proposal_state_enum,
+        nullable=False,
+        server_default=text("'pending'"),
+    ),
+    Column("proposed_by", Text, nullable=False),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("decided_at", DateTime(timezone=True)),
+    Column("decided_by", Text),
+    Column("decision_note", Text),
+    Column("applied_revision", BigInteger),
+    Column(
+        "removals_acknowledged",
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    ),
+    CheckConstraint(
+        "btrim(target_document_id) <> ''",
+        name="vault_amendment_proposals_target_nonempty",
+    ),
+    CheckConstraint(
+        "target_revision > 0",
+        name="vault_amendment_proposals_target_revision_positive",
+    ),
+    CheckConstraint(
+        "change_kind IN ('replacement', 'body_diff')",
+        name="vault_amendment_proposals_change_kind_known",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(change) = 'object'",
+        name="vault_amendment_proposals_change_object",
+    ),
+    CheckConstraint(
+        "(change_kind = 'body_diff' "
+        "AND jsonb_typeof(change -> 'body_diff') = 'string' "
+        "AND change - 'body_diff' = '{}'::jsonb) OR "
+        "(change_kind = 'replacement' "
+        "AND jsonb_typeof(change -> 'title') = 'string' "
+        "AND jsonb_typeof(change -> 'body') = 'string')",
+        name="vault_amendment_proposals_change_shape",
+    ),
+    CheckConstraint(
+        "btrim(rationale) <> ''",
+        name="vault_amendment_proposals_rationale_nonempty",
+    ),
+    CheckConstraint(
+        "btrim(proposed_by) <> ''",
+        name="vault_amendment_proposals_proposer_nonempty",
+    ),
+    CheckConstraint(
+        "(state = 'pending' AND decided_at IS NULL AND decided_by IS NULL "
+        "AND applied_revision IS NULL AND removals_acknowledged = false) OR "
+        "(state = 'accepted' AND decided_at IS NOT NULL AND decided_by IS NOT NULL "
+        "AND applied_revision IS NOT NULL) OR "
+        "(state IN ('rejected', 'stale') AND decided_at IS NOT NULL "
+        "AND decided_by IS NOT NULL AND applied_revision IS NULL "
+        "AND removals_acknowledged = false)",
+        name="vault_amendment_proposals_decision_consistent",
+    ),
+)
+
 vault_write_requests = Table(
     "vault_write_requests",
     metadata,
@@ -553,7 +651,7 @@ vault_agent_credentials = Table(
     # deletion are their own verbs, so a credential that may add a note does not
     # thereby may destroy one.
     CheckConstraint(
-        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:propose', 'vault:update', "
         "'vault:delete', 'vault:review', 'vault:compile', "
         "'vault:export']::text[]",
         name="vault_agent_credentials_scopes_known",
@@ -594,6 +692,63 @@ vault_oauth_clients = Table(
     CheckConstraint(
         "jsonb_typeof(client_info) = 'object'",
         name="vault_oauth_clients_info_is_object",
+    ),
+)
+
+# One durable authorization grant per refresh family. OAuth consent controls
+# only ``authorized_scopes``; the operator CLI alone controls
+# ``entitled_scopes``. Access credentials are projections of their union.
+vault_oauth_grants = Table(
+    "vault_oauth_grants",
+    metadata,
+    Column("family_id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "client_id",
+        Text,
+        ForeignKey(
+            "vault.vault_oauth_clients.client_id",
+            name="vault_oauth_grants_client_id_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    Column(
+        "authorized_scopes",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column(
+        "entitled_scopes",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint(
+        "authorized_scopes <@ ARRAY['vault:read', 'vault:write', "
+        "'vault:propose']::text[]",
+        name="vault_oauth_grants_authorized_scopes_baseline",
+    ),
+    CheckConstraint(
+        "entitled_scopes <@ ARRAY['vault:update', 'vault:delete', "
+        "'vault:review', 'vault:compile', 'vault:export']::text[]",
+        name="vault_oauth_grants_entitled_scopes_privileged",
+    ),
+    CheckConstraint(
+        "NOT (authorized_scopes && entitled_scopes)",
+        name="vault_oauth_grants_scope_sets_disjoint",
     ),
 )
 
@@ -702,16 +857,11 @@ vault_oauth_authorization_codes = Table(
         "expires_at > created_at",
         name="vault_oauth_codes_expires_after_creation",
     ),
-    # Mirrors vault_agent_credentials_scopes_known rather than the narrower
-    # OAuth baseline. ADR 0024 makes the baseline what a client may *request*,
-    # enforced in application code, while an operator may widen a specific
-    # credential afterwards -- a stricter constraint here would forbid a code
-    # minted for a widened client, which the ADR calls expected rather than
-    # exceptional.
+    # Authorization codes carry consented scopes only. Operator entitlements
+    # attach later to the refresh family (ADR 0029), so accepting one here
+    # would collapse the two authorities before the grant even exists.
     CheckConstraint(
-        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
-        "'vault:delete', 'vault:review', 'vault:compile', "
-        "'vault:export']::text[]",
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:propose']::text[]",
         name="vault_oauth_codes_scopes_known",
     ),
 )
@@ -742,6 +892,12 @@ vault_oauth_refresh_tokens = Table(
             ondelete="CASCADE",
         ),
         nullable=False,
+    ),
+    ForeignKeyConstraint(
+        ["family_id"],
+        ["vault.vault_oauth_grants.family_id"],
+        name="vault_oauth_refresh_tokens_family_id_fkey",
+        ondelete="CASCADE",
     ),
     # The access credential this token renews. A rotation revokes this one as it
     # mints the next. CASCADE fires only on a real delete -- ordinary revocation
@@ -780,7 +936,7 @@ vault_oauth_refresh_tokens = Table(
         name="vault_oauth_refresh_expires_after_creation",
     ),
     CheckConstraint(
-        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:update', "
+        "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:propose', 'vault:update', "
         "'vault:delete', 'vault:review', 'vault:compile', "
         "'vault:export']::text[]",
         name="vault_oauth_refresh_scopes_known",
@@ -891,6 +1047,11 @@ Index(
     "idx_vault_review_cases_state_created",
     vault_review_cases.c.state,
     vault_review_cases.c.created_at,
+)
+Index(
+    "idx_vault_amendment_proposals_state_created",
+    vault_amendment_proposals.c.state,
+    vault_amendment_proposals.c.created_at,
 )
 Index(
     "idx_vault_write_requests_created",

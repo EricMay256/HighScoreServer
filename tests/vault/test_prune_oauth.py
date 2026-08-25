@@ -20,6 +20,7 @@ from app.vault.tables import (
     vault_agent_credentials,
     vault_oauth_authorization_codes,
     vault_oauth_clients,
+    vault_oauth_grants,
     vault_oauth_pending_authorizations,
     vault_oauth_refresh_tokens,
 )
@@ -187,6 +188,7 @@ def test_a_consumed_refresh_token_survives_until_it_expires(capsys) -> None:
     client_id = f"test-prune-{uuid4().hex}"
     credential_id = _credential(OAUTH_PRINCIPAL, revoked_days_ago=None)
     token_digest = uuid4().bytes + uuid4().bytes
+    family_id = uuid4()
 
     async def seed(connection):
         await connection.execute(
@@ -195,9 +197,17 @@ def test_a_consumed_refresh_token_survives_until_it_expires(capsys) -> None:
             )
         )
         await connection.execute(
+            insert(vault_oauth_grants).values(
+                family_id=family_id,
+                client_id=client_id,
+                authorized_scopes=[VaultScope.READ],
+                entitled_scopes=[],
+            )
+        )
+        await connection.execute(
             insert(vault_oauth_refresh_tokens).values(
                 token_sha256=token_digest,
-                family_id=uuid4(),
+                family_id=family_id,
                 client_id=client_id,
                 credential_id=credential_id,
                 scopes=[VaultScope.READ],
@@ -264,6 +274,7 @@ def test_a_registration_with_a_live_refresh_token_is_never_pruned(capsys) -> Non
 
     client_id = f"test-prune-{uuid4().hex}"
     credential_id = _credential(OAUTH_PRINCIPAL, revoked_days_ago=None)
+    family_id = uuid4()
 
     async def seed(connection):
         await connection.execute(
@@ -274,9 +285,17 @@ def test_a_registration_with_a_live_refresh_token_is_never_pruned(capsys) -> Non
             )
         )
         await connection.execute(
+            insert(vault_oauth_grants).values(
+                family_id=family_id,
+                client_id=client_id,
+                authorized_scopes=[VaultScope.READ],
+                entitled_scopes=[],
+            )
+        )
+        await connection.execute(
             insert(vault_oauth_refresh_tokens).values(
                 token_sha256=uuid4().bytes + uuid4().bytes,
-                family_id=uuid4(),
+                family_id=family_id,
                 client_id=client_id,
                 credential_id=credential_id,
                 scopes=[VaultScope.READ],

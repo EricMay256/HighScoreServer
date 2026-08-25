@@ -193,6 +193,12 @@ def test_postgresql_specific_vault_ddl_matches_contract(
         for enum_name, enum_value in enum_rows:
             enum_values.setdefault(enum_name, []).append(enum_value)
         assert enum_values == {
+            "vault_amendment_proposal_state": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale",
+            ],
             "vault_compile_run_state": ["running", "succeeded", "failed"],
             "vault_document_kind": ["note", "wiki"],
             "vault_document_status": ["active", "flagged", "archived"],

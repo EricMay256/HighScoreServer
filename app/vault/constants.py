@@ -136,11 +136,25 @@ def resolve_text_search_config() -> str:
 # specific one afterwards. Above-baseline scopes are granted deliberately,
 # never requested.
 #
-# Restricting the web path to read and write is a security decision rather than
-# a convenience one: ADR 0021's defence against injected instructions is that a
-# destructive tool is absent from the surface untrusted note text can name, and
-# a web-authorized client has no retire tool to be talked into using.
-OAUTH_BASELINE_SCOPES: tuple[str, ...] = ("vault:read", "vault:write")
+# Restricting the web path to read, contribute, and propose is a security
+# decision rather than a convenience one. A proposal cannot mutate the corpus;
+# destructive update/delete and privileged review remain unreachable.
+OAUTH_BASELINE_SCOPES: tuple[str, ...] = (
+    "vault:read",
+    "vault:write",
+    "vault:propose",
+)
+
+# Scopes a client may receive only through a deliberate operator entitlement.
+# Kept separate from the baseline so neither OAuth registration, consent, nor
+# refresh can turn a client-controlled scope string into privilege escalation.
+OAUTH_OPERATOR_ENTITLEMENT_SCOPES: tuple[str, ...] = (
+    "vault:update",
+    "vault:delete",
+    "vault:review",
+    "vault:compile",
+    "vault:export",
+)
 
 # How long an authorization may sit waiting for the operator to finish the login
 # form. Generous for a person reading a consent screen and typing a password,

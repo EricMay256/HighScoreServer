@@ -4,7 +4,10 @@ Date: 2026-08-21
 
 ## Status
 
-Accepted 2026-08-22.
+Accepted 2026-08-22. Amended 2026-08-24 by ADR 0028: `vault:propose` joined the
+OAuth baseline as a non-corpus-mutating capability. Amended 2026-08-25 by ADR
+0029: persistent operator entitlements belong to one refresh family rather
+than to a rotating access credential.
 
 Design settled. The 2026-08-22 spike confirmed `/authorize` runs in the operator's system
 browser, so both identity methods are reachable, and left three constraints recorded under
@@ -21,19 +24,22 @@ a configuration step (`VAULT_PUBLIC_URL` and `VAULT_OPERATOR_PASSWORD_HASH`), do
 - Migration `0014_oauth_refresh_and_csrf` — `vault_oauth_refresh_tokens` and a CSRF token on
   the pending authorization. See the amendment below; refresh tokens are a decision this ADR
   did not make and now does.
+- Migration `0017_oauth_entitlements` — `vault_oauth_grants`, separating consented baseline
+  scopes from persistent operator-granted authority for one refresh family.
 - `app/vault/oauth.py` — the ten-method provider. `app/vault/oauth_routes.py` — the login page
   and route assembly. `app/vault/templating.py` and `app/vault/templates/login.html` — the
   vault's own Jinja2 environment, the first non-documentation asset in the package.
 - `oauth_spike.py` is deleted, its two reusable parts — the route wiring and the slowapi
   labelling workaround — carried into `oauth_routes.py`.
-- `scripts/issue_vault_credential.py` gains `grant` and `revoke-scope`, which this ADR requires:
-  they are the only supported way an above-baseline scope reaches an OAuth client, and they
-  replace the hand-written `UPDATE` on `scopes` that did not scale to a routine operation.
+- `scripts/issue_vault_credential.py` provides `grant-oauth` and
+  `revoke-oauth-scope`, the only supported way above-baseline authority reaches
+  an OAuth family. ADR 0029 supersedes this ADR's original credential-level
+  procedure because that authority disappeared at refresh.
 
-Four implementation choices are recorded under "Consequences": where the operator hash lives,
-why the code table's scope CHECK is wider than the baseline, why absence of `VAULT_PUBLIC_URL`
-is the on/off switch, and why the login POST redeems the nonce whether or not the password was
-correct. (That last one originally read "before checking the password", describing an ordering
+Implementation choices are recorded under "Consequences": where the operator hash lives,
+why absence of `VAULT_PUBLIC_URL` is the on/off switch, and why the login POST redeems the nonce
+whether or not the password was correct. ADR 0029 has since made the authorization-code scope
+CHECK baseline-only. (The login choice originally read "before checking the password", describing an ordering
 the 2026-08-23 amendment below had to reverse — bcrypt now runs before the transaction that
 redeems and mints together. What survives is the property, not the sequence: one submit spends
 one authorization.)
@@ -217,29 +223,26 @@ the specification expects to self-register. That means **anyone can register a c
 is by design and is why it grants nothing on its own: a registered client still has to complete
 an authorization the operator personally approves.
 
-`ClientRegistrationOptions` sets read and write as the **baseline**, not a ceiling:
+`ClientRegistrationOptions` sets read, write, and propose as the **baseline**, not a ceiling:
 
-- `default_scopes`: `vault:read`, `vault:write` — what a self-registering client receives
-- `valid_scopes`: `vault:read`, `vault:write` — the most a client may *request*
+- `default_scopes`: `vault:read`, `vault:write`, `vault:propose` — what a self-registering client receives
+- `valid_scopes`: `vault:read`, `vault:write`, `vault:propose` — the most a client may *request*
 
 The distinction matters. A client can never ask for more than the baseline, so
 `vault:update`, `vault:delete`, and `vault:review` are unreachable by request — a
 self-registering client asking for them is refused by construction rather than by an operator
-noticing on a consent screen. But the credential row is an ordinary row, and an operator may
-widen a *specific* one afterwards.
+noticing on a consent screen. An operator may entitle one specific authorization
+family afterwards; the resulting access credential remains an ordinary row.
 
 That asymmetry is the point: above-baseline scopes are **granted deliberately, never
 requested**. It is the same rule migration `0007` established when it split the write verbs and
 deliberately granted nothing — "a migration reruns, and one that re-applies privilege would
 silently restore permissions on every rebuild, rollback, or staging refresh."
 
-Widening is therefore expected rather than exceptional, which it was not before: every OAuth
-client starts at the baseline, and some will need more. `issue_vault_credential` has no
-subcommand for it — the documented method is a raw `UPDATE` on `scopes` — and that does not
-scale to a routine operation against production. **This ADR requires a supported
-grant/revoke-scope command** before OAuth ships. The `scopes` column already carries a CHECK
-constraining it to the known set, so the command is thin; what it buys is that changing a
-privilege stops being hand-written SQL.
+Widening is expected rather than exceptional, but it must survive credential
+rotation without becoming client-controlled. ADR 0029 supplies the family-level
+grant and explicit operator commands; hand-written scope updates and
+credential-level widening are no longer supported for OAuth tokens.
 
 ### Two identity methods, both built, chosen by configuration
 
@@ -320,7 +323,8 @@ wrong until 2026-08-23 and it undercut the sentence above it. Registration is op
 else about the client. An attacker registers as "Claude", points the redirect at a host they
 control, and sends the operator a genuine `/authorize` link on the real vault domain — trusted
 name, right site, plausible scopes, and nothing on the screen distinguishing it from the real
-request. Approving it hands over `vault:read` and `vault:write`.
+request. Approving it hands over the OAuth baseline (`vault:read`, `vault:write`, and,
+since ADR 0028, `vault:propose`).
 
 The claim "registration grants nothing until the operator personally approves *a particular
 client*" is only true if the operator can tell which client that is. So the page shows the two
@@ -419,7 +423,7 @@ residual risk is re-authorization initiated from mobile, which the password meth
 Both identity methods stay in the decision regardless. What this measurement settles is which
 one to reach for first, and it is Google.
 
-### Two things the persistence layer had to settle (2026-08-21)
+### Persistence choices settled on 2026-08-21 and amended by ADR 0029
 
 **The operator hash is configuration, not a table.** The decision above says "from config or
 its own table" without choosing. It is `VAULT_OPERATOR_PASSWORD_HASH`, because there is exactly
@@ -429,12 +433,11 @@ var's do. Unset is a supported state meaning the password method is not configur
 deployment, and it must never be read as "any password works": the login refuses outright, the
 way `VAULT_ENABLED` defaulting to false serves no vault rather than an unguarded one.
 
-**The authorization-code table's scope CHECK mirrors `vault_agent_credentials`, not the OAuth
-baseline.** The baseline is what a *client may request*, and this ADR is explicit that an
-operator may widen a specific credential afterwards — "expected rather than exceptional". A
-CHECK constraining the column to `vault:read` and `vault:write` would forbid the widened case
-at a layer no application code could permit, turning a supported operation into an integrity
-error. The narrower rule belongs where it is enforceable and overridable: application code.
+**The authorization-code table's scope CHECK is now baseline-only.** The original decision
+mirrored `vault_agent_credentials` so a widened credential would not be rejected. ADR 0029
+moved operator authority to the refresh family, which does not exist until code exchange.
+Consequently a privileged scope on an authorization code can only be invalid consent state,
+and migration 0017 tightens the database boundary accordingly.
 
 **Absence of `VAULT_PUBLIC_URL` is the on/off switch, and there is no second flag.** The spike
 had one (`VAULT_OAUTH_SPIKE_ENABLED`) because it needed to be inert while it existed. The real
@@ -477,10 +480,9 @@ OAuth client is unchanged in every observable way.
 ### A web session is a different trust context
 
 The corpus is untrusted, agent-written text. ADR 0021's defence against injected instructions is
-that a destructive tool is absent from the surface the text can name, and restricting OAuth to
-read and write preserves that — a web-authorized client has no retire tool to be talked into
-using. This is why the scope restriction above is a security decision rather than a
-convenience one.
+that a destructive tool is absent from the surface the text can name. Adding `vault:propose`
+preserves that boundary because the tool stores inert workflow state and cannot apply it; a
+web-authorized client still has no update, retire, or review tool to be talked into using.
 
 ### What this does not decide
 

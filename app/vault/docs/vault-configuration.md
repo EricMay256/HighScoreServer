@@ -350,11 +350,12 @@ what `issue_vault_credential list` shows. A name-derived principal collided acro
 separately registered clients that chose the same name, which meant sharing an
 idempotency namespace and a quota; see vault ADR 0024's 2026-08-23 amendment.
 
-**Scopes are capped at `vault:read` and `vault:write`.** A client cannot request
+**Scopes are capped at `vault:read`, `vault:write`, and `vault:propose`.** A client cannot request
 more — `vault:update`, `vault:delete` and `vault:review` are unreachable through
 this path by construction, not by an operator declining on a screen. That is a
 security decision: ADR 0021's defence against instructions injected into note
 text is that a destructive tool is absent from the surface that text can name.
+`vault:propose` stores an inert, revision-bound suggestion; it cannot apply it.
 
 **Access tokens live one hour; refresh tokens thirty days.** The client renews
 itself, so the operator authorizes roughly monthly rather than hourly. Each
@@ -456,6 +457,13 @@ heroku pg:psql --app <app> -c   "SELECT name, installed_version FROM pg_availabl
 Vault migrations may enable the database-wide `vector` extension, but they
 never import Markdown, generate embeddings, or read the private
 knowledge-platform repository.
+
+Migration `0016_amendment_proposals` adds `content_revision`, the durable amendment workflow,
+and the `vault:propose` scope vocabulary. Proposal rows are adjudication history rather than
+disposable queue entries. Its downgrade therefore **refuses while any proposal row exists**;
+removing that history must be a separate, deliberate data decision, never an incidental
+rollback step. Production recovery remains a forward application release—do not downgrade
+0016 merely to run an older slug.
 
 ## Pre-deployment verification
 
@@ -830,13 +838,22 @@ credential into the wrong database is silent.
 | --- | --- |
 | `vault:read` | Search, and fetch by id |
 | `vault:write` | Contribute a new note — **and nothing else** |
+| `vault:propose` | Submit an immutable, revision-bound full replacement or bounded body diff for review; does not edit the note |
 | `vault:update` | Replace an existing note's content |
 | `vault:delete` | Retire a note, **destroying it** (vault ADR 0019) |
-| `vault:review` | List, read, and decide near-duplicate review cases. **The only scope that serves `flagged` content**, so grant it narrowly |
-| `vault:compile`, `vault:export` | Recognised, granted by no route yet |
+| `vault:review` | List, read, and decide near-duplicate cases and amendment proposals. It applies accepted amendments and is **the only scope that serves `flagged` content**, so grant it narrowly |
+| `vault:compile` | Plan, write, and settle wiki compilation runs; operator-granted only |
+| `vault:export` | Recognised for the future export surface; currently granted by no route |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
 ADR 0020.
+
+`vault:propose` and `vault:review` are deliberately separate capability profiles. An ordinary
+agent may author inert proposals but cannot apply them. A reviewer should hold exactly
+`vault:read vault:review`: it can inspect and decide stored proposals but cannot compose a new
+change through `vault:propose`, directly replace through `vault:update`, or retire through
+`vault:delete`. Keep the per-call scope checks and the MCP tool-list filtering; neither replaces
+the other.
 
 **A credential issued before 2026-08-15 holds `vault:write` alone**, so its
 replace and retire calls now return `403`. Migration `0007_write_scope_split`
@@ -910,12 +927,23 @@ bucket. Exceeding one returns `429` with `Retry-After` in whole seconds.
 | `search` | 30/min | 10 |
 | `get_note` | 120/min | 30 |
 | `contribute` | 30/min | 20 |
+| `amendment_propose` | 30/min | 20 |
+| `amendment_list` | 60/min | 20 |
+| `amendment_read` | 60/min | 20 |
+| `amendment_decide` | 10/min | 5 |
 | `update` | 30/min | 20 |
 | `retire` | 10/min | 5 |
+| `review_list` | 60/min | 20 |
+| `review_read` | 60/min | 20 |
+| `review_decide` | 10/min | 5 |
+| `compile_plan` | 6/min | 3 |
+| `compile_write` | 30/min | 20 |
+| `compile_settle` | 10/min | 5 |
 | `snapshot` | 2/hour | 1 |
 
-`retire` is deliberately the tightest bucket: retirement is rare and
-irreversible, and a loop that deletes is worse than a loop that writes.
+`retire`, `review_decide`, and `amendment_decide` have tight decision buckets because they
+destroy, publish, or replace corpus content. `compile_plan` is tighter still in sustained rate
+because every abandoned plan leaves a running workflow row; page writes retain batch headroom.
 
 The **pre-auth guard** is IP-keyed and charged *before* the credential is looked
 up, because verifying a credential is itself a database round trip and the quota
@@ -980,10 +1008,10 @@ the job:
 
 | Who | Scopes | Why |
 | --- | ------ | --- |
-| An ordinary agent or person contributing notes | `vault:read vault:write` | Search, fetch, contribute. The common case |
+| An ordinary agent or person contributing notes | `vault:read vault:write vault:propose` | Search, fetch, contribute, and suggest consolidation without edit authority |
 | A read-only consumer | `vault:read` | Retrieval with no way to write |
 | A corpus import or backfill | `vault:read vault:write vault:update` | Replacement is a separate verb |
-| A reviewer adjudicating flagged notes | `vault:read vault:review` | **Serves `flagged` content**, the least-vetted text in the corpus |
+| A reviewer adjudicating flagged notes or amendments | `vault:read vault:review` | Reads untrusted proposal previews, applies accepted amendments, and **serves `flagged` content**; keep it separate from ordinary agent credentials |
 | Nobody, by default | `vault:delete` | Retirement destroys a note (ADR 0019). Grant per incident, revoke after |
 
 Withholding a scope is a **prompt-injection boundary, not tidiness**. The MCP
@@ -996,14 +1024,14 @@ issuing two looks like ceremony; that is exactly how `vault:write` came to mean
 ### 2. Mint the credential
 
 ```bash
-python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write
+python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose
 ```
 
 Against production, set `DATABASE_URL` explicitly for the command — issuing into
 the wrong database is silent. On a dyno it is already set:
 
 ```bash
-heroku run --app <app> "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write"
+heroku run --app <app> "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose"
 ```
 
 Quote the whole remote command. `heroku run` parses the line first and claims
@@ -1071,7 +1099,97 @@ a file the agent writes, and never printed.
 
 Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
 `POST /api/v1/vault/contributions`, `PUT /api/v1/vault/notes/{id}`, and
-`DELETE /api/v1/vault/notes/{id}`, all taking `Authorization: Bearer <token>`.
+`DELETE /api/v1/vault/notes/{id}`, plus the amendment workflow below. All take
+`Authorization: Bearer <token>`.
+
+| Method and path | Scope | Purpose |
+| --- | --- | --- |
+| `POST /api/v1/vault/amendment-proposals` | `vault:propose` | Store an inert, revision-bound proposal |
+| `GET /api/v1/vault/amendment-proposals` | `vault:review` | List pending proposals without their change bodies |
+| `GET /api/v1/vault/amendment-proposals/{proposal_id}` | `vault:review` | Read the stored change, current target, and materialized preview |
+| `POST /api/v1/vault/amendment-proposals/{proposal_id}/decision` | `vault:review` | Accept or reject the exact stored change |
+
+An amendment request carries a discriminated `change`. Use
+`{"kind":"body_diff","body_diff":"..."}` for a compact unified diff against the body.
+Hunks may add, edit, or remove lines but must anchor to exact existing text. The service refuses
+patches over 50,000 characters, 20 hunks, 200 changed lines, or the per-note 25%/20-line budget;
+use `{"kind":"replacement","replacement":{...all content fields...}}` for metadata or
+larger changes. Both forms require the note's current `content_revision` as `base_revision`; a
+mismatch returns 409 at proposal time and settles stale at review time.
+
+`replacement` uses the same complete caller-controlled content shape as `PUT /notes/{id}`;
+omitted optional fields are cleared rather than inherited:
+
+```json
+{
+  "kind": "replacement",
+  "replacement": {
+    "title": "Complete title",
+    "body": "Complete body",
+    "summary": null,
+    "tags": [],
+    "aliases": [],
+    "facets": {},
+    "related_ids": [],
+    "source_ids": [],
+    "source_url": null
+  }
+}
+```
+
+Reading a pending proposal returns `preview`: the complete resulting body, canonical unified
+diff, and an explicit list of removed lines with their original line numbers. The preview is
+null when the target is missing or no longer at the base revision. Accepting a proposal whose
+preview reports removals requires `"acknowledge_removals": true`; the settled record preserves
+that acknowledgement in `proposal.removals_acknowledged`.
+
+The complete REST flow, with secrets omitted, is:
+
+```http
+POST /api/v1/vault/amendment-proposals
+Content-Type: application/json
+
+{
+  "target_note_id": "note-id",
+  "base_revision": 3,
+  "change": {
+    "kind": "body_diff",
+    "body_diff": "@@ -4,2 +4,2 @@\n-old guidance\n+corrected guidance\n context"
+  },
+  "rationale": "The old command is no longer valid."
+}
+```
+
+Submission returns a pending proposal id. The reviewer lists the queue, then reads only the
+selected proposal:
+
+```http
+GET /api/v1/vault/amendment-proposals/{proposal_id}
+```
+
+Its `preview` contains `resulting_body`, `unified_diff`, `added_line_count`, `removed_lines`
+with original line numbers, `removed_line_count`, `hunk_count`, and
+`requires_removal_acknowledgement`. `preview` is null if the target is missing or no longer at
+`base_revision`; the service never previews a silent rebase.
+
+After reviewing the complete result and removal summary:
+
+```http
+POST /api/v1/vault/amendment-proposals/{proposal_id}/decision
+Content-Type: application/json
+
+{
+  "decision": "accepted",
+  "decision_note": "Verified against the current tool behavior.",
+  "acknowledge_removals": true
+}
+```
+
+Omit `acknowledge_removals` when rejecting or when the preview reports no removals. Attempting
+to accept a removal without it returns 409 and leaves the proposal pending. If the target
+changes after preview, acceptance returns a settled `stale` outcome and writes no corpus
+content. A successful acceptance reports the new `content_revision` and persists
+`removals_acknowledged`; rejection and staleness do not require an embedding provider.
 
 ### 5. Verify
 
@@ -1101,8 +1219,10 @@ claude mcp remove vault
 ```
 
 Then check the tools: the ones that appear should match the scopes granted — a
-`vault:read vault:write` credential shows `vault_search`, `vault_get_note`, and
-`vault_contribute`, and nothing else. **A server added mid-session does not
+`vault:read vault:write vault:propose` credential shows `vault_search`, `vault_get_note`,
+`vault_contribute`, `vault_propose_note_amendment`, and `vault_propose_note_body_diff`, and no
+privileged tools. The body-diff tool handles focused additions, edits, and removals; use the
+full amendment tool for metadata or large changes. **A server added mid-session does not
 appear in that session**; the tool set is fixed at startup, so restart the agent
 before concluding the registration failed.
 
@@ -1121,39 +1241,67 @@ which is how a registration that silently failed becomes visible.
 Rotation is revoke-then-issue; there is no re-key, because the secret was never
 stored.
 
-#### Widening and narrowing without rotating
+#### Changing static credentials without rotating
 
 ```bash
 python -m scripts.issue_vault_credential grant --id <credential-id> --scopes vault:update
 python -m scripts.issue_vault_credential revoke-scope --id <credential-id> --scopes vault:update
 ```
 
-Both change what an existing credential may do and leave its secret alone, so
+These commands change what a static credential may do and leave its secret alone, so
 nothing has to be redistributed — that is the difference from revoke-then-issue,
 and the reason to reach for these instead.
 
 Both print the scope set before and after. Both are additive/subtractive rather
 than a replacement: `grant` never removes a scope the operator did not name, and
 naming a scope already held (or already absent) reports `No change` and writes
-nothing.
+nothing. They deliberately refuse OAuth-minted credential ids: changing one
+rotating row would disappear at refresh while looking permanent to the operator.
 
-**This is the only supported way an OAuth client receives an above-baseline
-scope.** Vault ADR 0024 caps what a client may *request* at `vault:read` and
-`vault:write`, so `vault:update`, `vault:delete` and `vault:review` are
-unreachable through the authorization flow by construction. An operator grants
-them deliberately, to one named credential, with this command. Before it existed
-the documented method was a hand-written `UPDATE` on the `scopes` column, which
-is not something that should become routine against production.
+#### Persistently entitling one OAuth authorization
+
+OAuth caps what a client may request at `vault:read`, `vault:write`, and
+`vault:propose`. Above-baseline authority is granted by an operator to one
+refresh family, never requested by the client:
+
+```bash
+python -m scripts.issue_vault_credential grant-oauth --id <credential-id> --scopes vault:update
+python -m scripts.issue_vault_credential revoke-oauth-scope --id <credential-id> --scopes vault:update
+```
+
+The id may name the current credential or an older rotated credential in the
+same family. It is a lookup handle, not the persistence target. The command
+prints the client id, grant family, and entitlement set before and after;
+updates the current access credential and refresh token immediately; and
+records an operator audit event. Every later refresh recomputes the credential
+from the consented baseline plus the current entitlements.
+
+This is intentionally narrower than granting a client registration. A new
+browser authorization creates a new family and inherits no privileged scopes,
+even when it uses the same registration. Revocation of an entitlement narrows
+the live token and future rotations but leaves the OAuth session active.
+
+`vault:review` has an additional separation-of-duties guard: it can be granted
+only to a separately authorized family holding `vault:read` alone. The final
+set is exactly `vault:read vault:review`. Do not widen an ordinary
+read/write/propose agent into a reviewer. Likewise, prefer distinct families
+for importer (`read`, `write`, `update`), compiler (`read`, `compile`), and any
+future exporter (`read`, `export`) rather than accumulating roles on one agent.
+
+Baseline scopes are not legal entitlements, and OAuth cannot request
+`vault:update`, `vault:delete`, `vault:review`, `vault:compile`, or
+`vault:export`. Before these commands existed, widening meant a hand-written
+database update; that is no longer a supported production procedure.
 
 Three refusals worth knowing about:
 
-- **A revoked credential is refused, not widened.** Scopes on a revoked row grant
+- **A revoked static credential is refused, not widened.** Scopes on a revoked row grant
   nothing, and an operator reaching for `grant` there is plausibly hoping it will
   un-revoke the credential. It will not, so the command says so instead of
   succeeding silently. Issue a new credential.
-- **An expired credential is refused** for the same reason. A credential whose
-  expiry is still in the future is fine — every OAuth-minted credential has one,
-  and those are exactly the rows this command exists for.
+- **An expired static credential is refused** for the same reason. OAuth
+  entitlement commands instead require a live refresh token in the family; a
+  dead family must reauthorize and receive a new, deliberately granted role.
 - **An unknown scope name is refused before any write**, with the list of real
   ones. The database CHECK would catch it too, but as an integrity error naming a
   constraint.

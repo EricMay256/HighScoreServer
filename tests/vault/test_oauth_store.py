@@ -476,15 +476,8 @@ def test_the_code_is_stored_hashed() -> None:
     assert [row[0] for row in rows] == [hash_oauth_secret(code)]
 
 
-def test_a_code_may_carry_scopes_above_the_oauth_baseline() -> None:
-    """ADR 0024 makes the baseline what a client may *request*, not a ceiling.
-
-    An operator widens a specific credential afterwards, which the ADR calls
-    expected rather than exceptional -- so the CHECK here mirrors
-    ``vault_agent_credentials_scopes_known`` and not the narrower baseline. A
-    stricter column constraint would forbid the widened case at the database
-    layer, where no application code could permit it.
-    """
+def test_a_code_cannot_carry_operator_entitlements() -> None:
+    """Consent state cannot manufacture the operator half of ADR 0029."""
 
     client_id = _register()
     code = uuid4().hex
@@ -500,9 +493,8 @@ def test_a_code_may_carry_scopes_above_the_oauth_baseline() -> None:
             redirect_uri_provided_explicitly=True,
         )
 
-    minted = run(create)
-
-    assert minted.scopes == ("vault:read", "vault:write", "vault:update")
+    with pytest.raises(Exception, match="vault_oauth_codes_scopes_known"):
+        run(create)
 
 
 def test_an_unknown_scope_is_refused_by_the_database() -> None:

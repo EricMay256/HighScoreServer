@@ -10,14 +10,13 @@ Usage:
     Issue:   python -m scripts.issue_vault_credential issue --name "claude-code" --scopes vault:read
     List:    python -m scripts.issue_vault_credential list
     Revoke:  python -m scripts.issue_vault_credential revoke --id <credential-id>
-    Widen:   python -m scripts.issue_vault_credential grant --id <credential-id> --scopes vault:update
-    Narrow:  python -m scripts.issue_vault_credential revoke-scope --id <credential-id> --scopes vault:update
+    Widen static: python -m scripts.issue_vault_credential grant --id <credential-id> --scopes vault:update
+    Entitle OAuth: python -m scripts.issue_vault_credential grant-oauth --id <credential-id> --scopes vault:update
 
-`grant` and `revoke-scope` change what an existing credential may do without
-rotating its secret, which is what makes them different from revoke-then-issue.
-Vault ADR 0024 requires them: OAuth clients all start at the read+write baseline
-and some will need more, and the alternative -- a hand-written UPDATE against
-production -- does not survive becoming routine.
+`grant` and `revoke-scope` adjust static credentials. OAuth authority belongs
+to its refresh family instead: `grant-oauth` and `revoke-oauth-scope` update the
+durable grant and the live credential together, so rotation preserves the
+operator's decision without letting the client request it.
 
 Environment variables:
     DATABASE_URL   Required. The vault schema must already be migrated.
@@ -33,15 +32,22 @@ import secrets
 import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from sqlalchemy import func, insert, select, update
 
 from app.env import load_environment
 from app.vault.auth import TOKEN_PREFIX, VaultScope, hash_secret
+from app.vault.constants import OAUTH_OPERATOR_ENTITLEMENT_SCOPES
 from app.vault.db import create_vault_engine, describe_database
+from app.vault.repository import (
+    VaultAuditEventRepository,
+    VaultOAuthGrantRepository,
+    VaultOAuthRefreshTokenRepository,
+)
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings
-from app.vault.tables import vault_agent_credentials
+from app.vault.tables import vault_agent_credentials, vault_oauth_refresh_tokens
 
 
 # Order is the order an operator reads them in, so the three write verbs sit
@@ -51,6 +57,7 @@ from app.vault.tables import vault_agent_credentials
 KNOWN_SCOPES = (
     VaultScope.READ,
     VaultScope.WRITE,
+    VaultScope.PROPOSE,
     VaultScope.UPDATE,
     VaultScope.DELETE,
     VaultScope.REVIEW,
@@ -63,6 +70,10 @@ KNOWN_SCOPES = (
 # '_' in a token is unambiguously the separator (ids may contain '_').
 _ID_BYTES = 8
 _SECRET_BYTES = 32
+
+
+class _UnsafeOAuthEntitlementCombination(Exception):
+    """The requested grant would collapse a separated reviewer role."""
 
 
 def _transactions() -> tuple[VaultTransactionService, object]:
@@ -235,6 +246,19 @@ async def _adjust_scopes(
                 )
                 return 1
 
+            oauth_family = await connection.execute(
+                select(vault_oauth_refresh_tokens.c.family_id)
+                .where(vault_oauth_refresh_tokens.c.credential_id == credential_id)
+                .limit(1)
+            )
+            if oauth_family.scalar_one_or_none() is not None:
+                print(
+                    f"{credential_id} is OAuth-minted. Use grant-oauth or "
+                    "revoke-oauth-scope so the change survives rotation.",
+                    file=sys.stderr,
+                )
+                return 1
+
             # Refused rather than allowed-but-useless. Widening a credential
             # nothing can present is at best confusing and at worst a step
             # somebody takes while thinking it un-revokes one. Narrowing is
@@ -296,17 +320,7 @@ async def _adjust_scopes(
 
 
 async def grant(credential_id: str, scopes: list[str]) -> int:
-    """Widen a credential. ADR 0024 requires this to exist before OAuth ships.
-
-    Every OAuth client starts at the read+write baseline and some will need
-    more; before this the only documented way to widen was a hand-written
-    UPDATE against production, which does not survive becoming routine.
-
-    Above-baseline scopes are granted deliberately and never requested, which
-    is what makes an operator command the right shape for it: `valid_scopes`
-    stops a client asking for `vault:update`, and this is the only way it can
-    receive one.
-    """
+    """Widen a static credential; OAuth credentials are refused by the helper."""
 
     return await _adjust_scopes(credential_id, scopes, granting=True)
 
@@ -321,6 +335,116 @@ async def revoke_scope(credential_id: str, scopes: list[str]) -> int:
     """
 
     return await _adjust_scopes(credential_id, scopes, granting=False)
+
+
+async def _adjust_oauth_entitlements(
+    credential_id: str,
+    scopes: list[str],
+    *,
+    granting: bool,
+) -> int:
+    """Change operator authority on the OAuth family containing a credential."""
+
+    invalid = sorted(set(scopes) - set(OAUTH_OPERATOR_ENTITLEMENT_SCOPES))
+    if invalid:
+        print(
+            "OAuth entitlements must be operator-only scopes; invalid: "
+            f"{', '.join(invalid)}",
+            file=sys.stderr,
+        )
+        print(
+            "Entitlement scopes: "
+            f"{', '.join(OAUTH_OPERATOR_ENTITLEMENT_SCOPES)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    transactions, engine = _transactions()
+    try:
+        async with transactions.transaction() as connection:
+            refresh = VaultOAuthRefreshTokenRepository()
+            identity = await refresh.client_and_family_for_credential(
+                connection, credential_id
+            )
+            if identity is None:
+                print(
+                    f"{credential_id!r} is not an OAuth-minted credential.",
+                    file=sys.stderr,
+                )
+                return 1
+            client_id, family_id = identity
+            if not await refresh.live_credential_ids(connection, family_id):
+                print(
+                    f"OAuth grant {family_id} has no live refresh token. "
+                    "Authorize a new session instead.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            adjusted = await VaultOAuthGrantRepository().adjust_entitlements(
+                connection,
+                family_id,
+                scopes,
+                granting=granting,
+            )
+            if adjusted is None:
+                print(
+                    f"OAuth grant {family_id} does not exist.",
+                    file=sys.stderr,
+                )
+                return 1
+            _grant, before, after = adjusted
+            effective = set(_grant.authorized_scopes) | set(after)
+            if VaultScope.REVIEW in effective and effective != {
+                VaultScope.READ,
+                VaultScope.REVIEW,
+            }:
+                raise _UnsafeOAuthEntitlementCombination
+            if before != after:
+                await VaultAuditEventRepository().record(
+                    connection,
+                    operation=(
+                        "vault.oauth.entitlement.grant"
+                        if granting
+                        else "vault.oauth.entitlement.revoke"
+                    ),
+                    outcome="applied",
+                    request_id=uuid4().hex,
+                    principal_id="operator-cli",
+                    target_type="oauth_grant",
+                    target_id=str(family_id),
+                )
+    except _UnsafeOAuthEntitlementCombination:
+        print(
+            "vault:review requires a separate OAuth authorization holding "
+            "exactly vault:read plus vault:review. Authorize a read-only "
+            "family before granting review authority.",
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        await engine.dispose()
+
+    print(f"client id      : {client_id}")
+    print(f"grant family   : {family_id}")
+    print(f"reference cred : {credential_id}")
+    print(f"before         : {', '.join(before) or '(none)'}")
+    print(f"after          : {', '.join(after) or '(none)'}")
+    if before == after:
+        print("No change.")
+    return 0
+
+
+async def grant_oauth(credential_id: str, scopes: list[str]) -> int:
+    return await _adjust_oauth_entitlements(
+        credential_id, scopes, granting=True
+    )
+
+
+async def revoke_oauth_scope(credential_id: str, scopes: list[str]) -> int:
+    return await _adjust_oauth_entitlements(
+        credential_id, scopes, granting=False
+    )
 
 
 def main() -> int:
@@ -355,8 +479,8 @@ def main() -> int:
     # Widening and narrowing are separate subcommands rather than one with a
     # sign, because the two are not equally consequential and the command an
     # operator types should say which one they meant. `grant` is also the only
-    # supported way an above-baseline scope ever reaches an OAuth client
-    # (vault ADR 0024).
+    # supported only for static credentials. OAuth families use the explicit
+    # commands below so an operator can see the persistence boundary.
     grant_parser = commands.add_parser(
         "grant",
         help="Add scopes to an existing credential.",
@@ -381,6 +505,20 @@ def main() -> int:
         help=f"Scopes to remove. Known: {', '.join(KNOWN_SCOPES)}",
     )
 
+    grant_oauth_parser = commands.add_parser(
+        "grant-oauth",
+        help="Persistently entitle one OAuth authorization across refresh.",
+    )
+    grant_oauth_parser.add_argument("--id", required=True, dest="credential_id")
+    grant_oauth_parser.add_argument("--scopes", nargs="+", required=True)
+
+    revoke_oauth_parser = commands.add_parser(
+        "revoke-oauth-scope",
+        help="Remove persistent authority from one OAuth authorization.",
+    )
+    revoke_oauth_parser.add_argument("--id", required=True, dest="credential_id")
+    revoke_oauth_parser.add_argument("--scopes", nargs="+", required=True)
+
     arguments = parser.parse_args()
     load_environment()
 
@@ -394,6 +532,10 @@ def main() -> int:
         coroutine = grant(arguments.credential_id, arguments.scopes)
     elif arguments.command == "revoke-scope":
         coroutine = revoke_scope(arguments.credential_id, arguments.scopes)
+    elif arguments.command == "grant-oauth":
+        coroutine = grant_oauth(arguments.credential_id, arguments.scopes)
+    elif arguments.command == "revoke-oauth-scope":
+        coroutine = revoke_oauth_scope(arguments.credential_id, arguments.scopes)
     else:
         coroutine = revoke(arguments.credential_id)
 

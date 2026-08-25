@@ -20,18 +20,22 @@ from .constants import (
     REFRESH_TOKEN_TTL_SECONDS,
 )
 from .domain import (
+    AmendmentProposalKind,
+    AmendmentProposalState,
     CompileRunState,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
     NoteCompileState,
+    OAuthGrant,
     PendingAuthorization,
     PromotionStatus,
     RegisteredOAuthClient,
     ReviewState,
     StoredAuthorizationCode,
     StoredRefreshToken,
+    VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
     VaultReviewCase,
@@ -39,12 +43,14 @@ from .domain import (
 from .read_policy import readable_path_predicate
 from .tables import (
     vault_agent_credentials,
+    vault_amendment_proposals,
     vault_audit_events,
     vault_compile_runs,
     vault_document_embeddings,
     vault_documents,
     vault_oauth_authorization_codes,
     vault_oauth_clients,
+    vault_oauth_grants,
     vault_oauth_pending_authorizations,
     vault_oauth_refresh_tokens,
     vault_review_cases,
@@ -83,6 +89,7 @@ DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.source_url,
     vault_documents.c.provenance,
     vault_documents.c.schema_version,
+    vault_documents.c.content_revision,
     vault_documents.c.created_at,
     vault_documents.c.updated_at,
     vault_documents.c.compile_run_id,
@@ -119,6 +126,7 @@ def document_from_row(row: RowMapping) -> VaultDocument:
         source_url=row["source_url"],
         provenance=dict(row["provenance"]),
         schema_version=row["schema_version"],
+        content_revision=row["content_revision"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         compile_run_id=row["compile_run_id"],
@@ -149,6 +157,25 @@ def _review_case_from_row(row: RowMapping) -> VaultReviewCase:
         decided_at=row["decided_at"],
         decided_by=row["decided_by"],
         decision_note=row["decision_note"],
+    )
+
+
+def _amendment_proposal_from_row(row: RowMapping) -> VaultAmendmentProposal:
+    return VaultAmendmentProposal(
+        id=row["id"],
+        target_document_id=row["target_document_id"],
+        target_revision=row["target_revision"],
+        change_kind=AmendmentProposalKind(row["change_kind"]),
+        change=dict(row["change"]),
+        rationale=row["rationale"],
+        state=AmendmentProposalState(row["state"]),
+        proposed_by=row["proposed_by"],
+        created_at=row["created_at"],
+        decided_at=row["decided_at"],
+        decided_by=row["decided_by"],
+        decision_note=row["decision_note"],
+        applied_revision=row["applied_revision"],
+        removals_acknowledged=row["removals_acknowledged"],
     )
 
 
@@ -200,6 +227,8 @@ class VaultDocumentRepository:
         connection: AsyncConnection,
         document_id: str,
         content: NewVaultDocument,
+        *,
+        expected_revision: int | None = None,
     ) -> VaultDocument | None:
         """Replace one document's caller-supplied content in place.
 
@@ -214,9 +243,13 @@ class VaultDocumentRepository:
         separate existence check.
         """
 
+        statement = update(vault_documents).where(vault_documents.c.id == document_id)
+        if expected_revision is not None:
+            statement = statement.where(
+                vault_documents.c.content_revision == expected_revision
+            )
         statement = (
-            update(vault_documents)
-            .where(vault_documents.c.id == document_id)
+            statement
             .values(
                 title=content.title,
                 summary=content.summary,
@@ -228,6 +261,7 @@ class VaultDocumentRepository:
                 source_ids=list(content.source_ids),
                 source_url=content.source_url,
                 updated_at=func.now(),
+                content_revision=vault_documents.c.content_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -629,6 +663,7 @@ class VaultReviewCaseRepository:
         row = result.mappings().one_or_none()
         return _review_case_from_row(row) if row is not None else None
 
+
     async def list_pending(
         self,
         connection: AsyncConnection,
@@ -692,6 +727,114 @@ class VaultReviewCaseRepository:
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return _review_case_from_row(row) if row is not None else None
+
+
+class VaultAmendmentProposalRepository:
+    """Persistence for immutable proposed note changes."""
+
+    async def insert_pending(
+        self,
+        connection: AsyncConnection,
+        *,
+        target_document_id: str,
+        target_revision: int,
+        change_kind: AmendmentProposalKind,
+        change: Mapping[str, Any],
+        rationale: str,
+        proposed_by: str,
+        proposal_id: UUID | None = None,
+    ) -> VaultAmendmentProposal:
+        statement = (
+            insert(vault_amendment_proposals)
+            .values(
+                id=proposal_id or uuid4(),
+                target_document_id=target_document_id,
+                target_revision=target_revision,
+                change_kind=change_kind.value,
+                change=dict(change),
+                rationale=rationale,
+                state=AmendmentProposalState.PENDING.value,
+                proposed_by=proposed_by,
+            )
+            .returning(*vault_amendment_proposals.c)
+        )
+        result = await connection.execute(statement)
+        return _amendment_proposal_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        proposal_id: UUID,
+    ) -> VaultAmendmentProposal | None:
+        result = await connection.execute(
+            select(*vault_amendment_proposals.c).where(
+                vault_amendment_proposals.c.id == proposal_id
+            )
+        )
+        row = result.mappings().one_or_none()
+        return _amendment_proposal_from_row(row) if row is not None else None
+
+    async def list_pending(
+        self,
+        connection: AsyncConnection,
+        limit: int = 50,
+    ) -> tuple[VaultAmendmentProposal, ...]:
+        result = await connection.execute(
+            select(*vault_amendment_proposals.c)
+            .where(
+                vault_amendment_proposals.c.state
+                == AmendmentProposalState.PENDING.value
+            )
+            .order_by(
+                vault_amendment_proposals.c.created_at,
+                vault_amendment_proposals.c.id,
+            )
+            .limit(limit)
+        )
+        return tuple(
+            _amendment_proposal_from_row(row) for row in result.mappings()
+        )
+
+    async def decide(
+        self,
+        connection: AsyncConnection,
+        proposal_id: UUID,
+        *,
+        state: AmendmentProposalState,
+        decided_by: str,
+        decision_note: str | None = None,
+        applied_revision: int | None = None,
+        removals_acknowledged: bool = False,
+    ) -> VaultAmendmentProposal | None:
+        if state is AmendmentProposalState.PENDING:
+            raise ValueError("a decision cannot leave a proposal pending")
+        if (state is AmendmentProposalState.ACCEPTED) != (
+            applied_revision is not None
+        ):
+            raise ValueError("only an accepted proposal has an applied revision")
+        if removals_acknowledged and state is not AmendmentProposalState.ACCEPTED:
+            raise ValueError("only an accepted proposal may acknowledge removals")
+
+        statement = (
+            update(vault_amendment_proposals)
+            .where(
+                vault_amendment_proposals.c.id == proposal_id,
+                vault_amendment_proposals.c.state
+                == AmendmentProposalState.PENDING.value,
+            )
+            .values(
+                state=state.value,
+                decided_at=func.now(),
+                decided_by=decided_by,
+                decision_note=decision_note,
+                applied_revision=applied_revision,
+                removals_acknowledged=removals_acknowledged,
+            )
+            .returning(*vault_amendment_proposals.c)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _amendment_proposal_from_row(row) if row is not None else None
 
 
 class VaultAgentCredentialRepository:
@@ -1024,6 +1167,17 @@ def _registered_client_from_row(row: RowMapping) -> RegisteredOAuthClient:
     )
 
 
+def _oauth_grant_from_row(row: RowMapping) -> OAuthGrant:
+    return OAuthGrant(
+        family_id=row["family_id"],
+        client_id=row["client_id"],
+        authorized_scopes=tuple(row["authorized_scopes"]),
+        entitled_scopes=tuple(row["entitled_scopes"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
 def _pending_authorization_from_row(row: RowMapping) -> PendingAuthorization:
     return PendingAuthorization(
         client_id=row["client_id"],
@@ -1230,6 +1384,123 @@ class VaultOAuthClientRepository:
             .where(*self._stale_conditions(retention_days))
         )
         return int(result.scalar_one())
+
+
+class VaultOAuthGrantRepository:
+    """Durable OAuth authority for one rotating refresh family.
+
+    Consent and operator authority are separate columns because they have
+    separate actors. The access credential is only a projection of their
+    union; refresh therefore cannot lose an operator grant or preserve one the
+    operator revoked.
+    """
+
+    async def create(
+        self,
+        connection: AsyncConnection,
+        *,
+        family_id: UUID,
+        client_id: str,
+        authorized_scopes: Sequence[str],
+    ) -> OAuthGrant:
+        result = await connection.execute(
+            insert(vault_oauth_grants)
+            .values(
+                family_id=family_id,
+                client_id=client_id,
+                authorized_scopes=sorted(set(authorized_scopes)),
+                entitled_scopes=[],
+            )
+            .returning(*vault_oauth_grants.c)
+        )
+        return _oauth_grant_from_row(result.mappings().one())
+
+    async def get(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> OAuthGrant | None:
+        statement = select(vault_oauth_grants).where(
+            vault_oauth_grants.c.family_id == family_id
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return _oauth_grant_from_row(row) if row is not None else None
+
+    async def set_authorized_scopes(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+        scopes: Sequence[str],
+    ) -> OAuthGrant | None:
+        result = await connection.execute(
+            update(vault_oauth_grants)
+            .where(vault_oauth_grants.c.family_id == family_id)
+            .values(
+                authorized_scopes=sorted(set(scopes)),
+                updated_at=func.now(),
+            )
+            .returning(*vault_oauth_grants.c)
+        )
+        row = result.mappings().one_or_none()
+        return _oauth_grant_from_row(row) if row is not None else None
+
+    async def adjust_entitlements(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+        scopes: Sequence[str],
+        *,
+        granting: bool,
+    ) -> tuple[OAuthGrant, tuple[str, ...], tuple[str, ...]] | None:
+        """Change the operator half and update the currently live token.
+
+        The grant row is locked so concurrent operator changes compose. The
+        same transaction updates the unconsumed refresh row and its access
+        credential; persistence across future rotations must not cost a delay
+        before the current session receives (or loses) the authority.
+        """
+
+        grant = await self.get(connection, family_id, for_update=True)
+        if grant is None:
+            return None
+        before = set(grant.entitled_scopes)
+        after = before | set(scopes) if granting else before - set(scopes)
+        if after != before:
+            result = await connection.execute(
+                update(vault_oauth_grants)
+                .where(vault_oauth_grants.c.family_id == family_id)
+                .values(entitled_scopes=sorted(after), updated_at=func.now())
+                .returning(*vault_oauth_grants.c)
+            )
+            grant = _oauth_grant_from_row(result.mappings().one())
+
+            effective = sorted(set(grant.authorized_scopes) | after)
+            live_credentials = (
+                select(vault_oauth_refresh_tokens.c.credential_id)
+                .where(vault_oauth_refresh_tokens.c.family_id == family_id)
+                .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+                .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
+            )
+            await connection.execute(
+                update(vault_agent_credentials)
+                .where(vault_agent_credentials.c.id.in_(live_credentials))
+                .where(vault_agent_credentials.c.revoked_at.is_(None))
+                .values(scopes=effective)
+            )
+            await connection.execute(
+                update(vault_oauth_refresh_tokens)
+                .where(vault_oauth_refresh_tokens.c.family_id == family_id)
+                .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+                .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
+                .values(scopes=effective)
+            )
+
+        return grant, tuple(sorted(before)), tuple(sorted(after))
 
 
 class VaultOAuthPendingAuthorizationRepository:
@@ -1565,6 +1836,19 @@ class VaultOAuthRefreshTokenRepository:
         )
         row = result.one_or_none()
         return (row[0], row[1]) if row is not None else None
+
+    async def live_credential_ids(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+    ) -> tuple[str, ...]:
+        result = await connection.execute(
+            select(vault_oauth_refresh_tokens.c.credential_id)
+            .where(vault_oauth_refresh_tokens.c.family_id == family_id)
+            .where(vault_oauth_refresh_tokens.c.consumed_at.is_(None))
+            .where(vault_oauth_refresh_tokens.c.expires_at > func.now())
+        )
+        return tuple(result.scalars())
 
     async def credential_ids_in_family(
         self,

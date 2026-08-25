@@ -109,7 +109,15 @@ The cloud knowledge platform is staged in this service as an isolated `app/vault
 with its own decision log under
 [`app/vault/docs/adr/`](app/vault/docs/adr/). It exposes an authenticated HTTP adapter —
 hybrid lexical and vector search fused by reciprocal rank, fetch by id, and a governed write
-path covering contribution, replacement, and retirement — over one application-service layer.
+path covering contribution, revision-bound amendment proposals, privileged replacement, and
+retirement — over one application-service layer. Ordinary OAuth-authorized agents may propose
+body diffs or full replacements under `vault:propose`, but only a separately scoped reviewer
+may apply them; see
+[vault ADR 0028](app/vault/docs/adr/0028-amendments-are-revision-bound-proposals.md).
+Above-baseline OAuth authority is an operator entitlement on one refresh family, so it
+survives token rotation without spreading to other sessions or becoming requestable by the
+client; reviewer families must be separately authorized read-only sessions. See
+[vault ADR 0029](app/vault/docs/adr/0029-oauth-entitlements-belong-to-the-refresh-family.md).
 Access is by operator-issued agent credentials, not by player JWTs or the leaderboard API key.
 It uses SQLAlchemy Core (not the ORM) for vault persistence, and keeps all knowledge content
 in PostgreSQL rather than in this public repository.
