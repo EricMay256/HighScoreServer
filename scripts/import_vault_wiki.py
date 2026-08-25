@@ -9,8 +9,8 @@ once it has run the engine's ``compile plan``/``write``/``finish`` and the
 0022's "one writer per tree" is finally true of ``Agent/wiki/``.
 
 Usage:
-    Dry run:  python -m scripts.import_vault_wiki --vault-root <path>
-    Apply:    python -m scripts.import_vault_wiki --vault-root <path> --apply
+    Dry run:  python -m scripts.import_vault_wiki --vault-root <path> --map <import-map.json>
+    Apply:    python -m scripts.import_vault_wiki --vault-root <path> --map <import-map.json> --apply
 
 Environment variables:
     DATABASE_URL              Required. VAULT_DATABASE_URL takes precedence.
@@ -28,13 +28,15 @@ recently completed successful run, so the value from Stage A's ``_frontier.yml``
 goes on that one alone. It preserves "notes up to here had already been
 considered"; putting it on all four would be harmless but false.
 
-**Ids and paths are preserved exactly.** ``vault_path`` keeps the existing slug
-rather than being re-derived from the title, because ADR 0010 requires it to
-equal the governance scanner's ``rel_path`` and because a re-slugged path would
-make the next export delete and recreate every file instead of leaving them
-alone. Verified before this was written: all 49 ``SourceIDs`` across the fourteen
-pages resolve against the 61 notes on disk, so the August re-import preserved
-note identity and the imported provenance is not dangling.
+**Paths are preserved; source ids are resolved.** ``vault_path`` keeps the
+existing slug rather than being re-derived from the title, because ADR 0010
+requires it to equal the governance scanner's ``rel_path`` and because a
+re-slugged path would make the next export delete and recreate every file
+instead of leaving them alone. ``SourceIDs`` are different: the service mints a
+new id on each note import, so an id that resolves against markdown may be stale
+in the database. Import maps are composed across generations and each source is
+repointed at the one live id in its equivalence class. An unresolved or
+ambiguous source refuses the import rather than storing false provenance.
 
 **What the frontmatter parser handles, and what it refuses.** These files were
 written by the canonical renderer -- scalars and block sequences, nothing else --
@@ -80,6 +82,7 @@ from app.vault.repository import (
 from app.vault.service import AGENT_WIKI_DIRECTORY, VaultTransactionService
 from app.vault.settings import EmbeddingSettings, VaultSettings
 from app.vault.tables import vault_compile_runs, vault_documents
+from scripts.remap_vault_reference_ids import Resolution, load_maps, remap, resolve
 
 
 # Files under `Agent/wiki/` that are not pages. `_index.md` is a generated
@@ -93,6 +96,10 @@ _KEY_VALUE = re.compile(r"^([A-Za-z][A-Za-z0-9_]*): ?(.*)$")
 
 class FrontmatterError(ValueError):
     """A file this parser will not guess at."""
+
+
+class ReferenceResolutionError(ValueError):
+    """A wiki source id cannot be proven to name exactly one live note."""
 
 
 def parse_note(text: str) -> tuple[dict[str, Any], str]:
@@ -224,6 +231,50 @@ def read_frontier(wiki_directory: Path) -> str | None:
     return None
 
 
+def resolve_page_source_ids(
+    pages: list[WikiPageFile],
+    resolution: Resolution,
+    live_ids: set[str],
+) -> list[WikiPageFile]:
+    """Return pages whose ``SourceIDs`` name the current database rows.
+
+    A missing source is fatal here even though the standalone remediation
+    script preserves and reports it. The remediation must not erase evidence
+    from an existing row; an import must not create new false provenance.
+    """
+
+    if resolution.ambiguous:
+        live = sorted(
+            source_id
+            for candidates in resolution.ambiguous.values()
+            for source_id in candidates
+        )
+        raise ReferenceResolutionError(
+            "import maps connect an upstream note to multiple live ids: "
+            + ", ".join(live)
+        )
+
+    resolved: list[WikiPageFile] = []
+    missing: dict[str, list[str]] = {}
+    for page in pages:
+        source_ids = _as_list(page.metadata.get("SourceIDs"))
+        mapped = remap(source_ids, resolution.canonical)
+        for source_id in mapped:
+            if source_id not in live_ids:
+                missing.setdefault(source_id, []).append(page.path.name)
+        metadata = dict(page.metadata)
+        metadata["SourceIDs"] = mapped
+        resolved.append(replace(page, metadata=metadata))
+
+    if missing:
+        details = "; ".join(
+            f"{source_id} ({', '.join(sorted(paths))})"
+            for source_id, paths in sorted(missing.items())
+        )
+        raise ReferenceResolutionError(f"unresolved wiki SourceIDs: {details}")
+    return resolved
+
+
 def _build_document(page: WikiPageFile, run_id: UUID, principal_id: str) -> NewVaultDocument:
     """One page as the row it becomes.
 
@@ -272,6 +323,7 @@ def _build_document(page: WikiPageFile, run_id: UUID, principal_id: str) -> NewV
 async def run_import(
     wiki_directory: Path,
     principal_id: str,
+    map_paths: list[Path],
     apply: bool,
 ) -> int:
     pages = read_pages(wiki_directory)
@@ -310,6 +362,7 @@ async def run_import(
     # resolved to, and the operator is the only one who knows whether that
     # is the database they meant.
     print(f"database   : {describe_database(settings.database_url)}")
+    classes = load_maps(map_paths)
     embedding = EmbeddingSettings.from_environment()
     if not embedding.api_key:
         # Refused rather than degraded. The read path may fall back to lexical
@@ -331,11 +384,23 @@ async def run_import(
     try:
         async with transactions.transaction() as connection:
             existing = await connection.execute(
-                select(vault_documents.c.vault_path).where(
-                    vault_documents.c.kind == DocumentKind.WIKI.value
+                select(
+                    vault_documents.c.id,
+                    vault_documents.c.vault_path,
+                    vault_documents.c.kind,
                 )
             )
-            taken = set(existing.scalars())
+            existing_rows = existing.all()
+            live_ids = {
+                row.id
+                for row in existing_rows
+                if row.kind == DocumentKind.NOTE.value
+            }
+            taken = {
+                row.vault_path
+                for row in existing_rows
+                if row.kind == DocumentKind.WIKI.value
+            }
         collisions = [p.slug for p in pages if f"{AGENT_WIKI_DIRECTORY}{p.slug}.md" in taken]
         if collisions:
             # Refuse rather than upsert. This script exists to run once, and a
@@ -346,6 +411,16 @@ async def run_import(
                 f"({', '.join(sorted(collisions)[:3])}...). This import runs once.",
                 file=sys.stderr,
             )
+            return 1
+
+        try:
+            pages = resolve_page_source_ids(
+                pages,
+                resolve(classes, live_ids),
+                live_ids,
+            )
+        except ReferenceResolutionError as error:
+            print(f"Refusing: {error}", file=sys.stderr)
             return 1
 
         # Embed before the transaction that writes, for the reason the write
@@ -420,6 +495,15 @@ def main() -> int:
         help="Principal recorded as contributed_by (default: wiki-importer).",
     )
     parser.add_argument(
+        "--map",
+        dest="maps",
+        action="append",
+        default=[],
+        type=Path,
+        help="An import-map.json used to resolve SourceIDs. Repeat for each "
+        "import generation; order does not matter.",
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Write. Without it this reports what it would do and exits.",
@@ -431,7 +515,7 @@ def main() -> int:
     if not wiki.is_dir():
         parser.error(f"no Agent/wiki directory under {arguments.vault_root}")
 
-    coroutine = run_import(wiki, arguments.principal, arguments.apply)
+    coroutine = run_import(wiki, arguments.principal, arguments.maps, arguments.apply)
 
     # See scripts/issue_vault_credential.py; a no-op on Linux/Heroku.
     if sys.platform == "win32":

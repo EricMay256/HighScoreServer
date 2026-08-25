@@ -550,6 +550,41 @@ SELECT contributed_by, count(*) FROM vault.vault_documents GROUP BY 1 ORDER BY 2
 11. **Revoke the import credential**, and any other write credential that has outlived its
     purpose.
 
+### Repairing reference ids after an earlier re-import
+
+Each service import mints new note ids. An import map proves that an upstream id and the
+minted service id name the same logical note; supplying maps from multiple generations lets
+the repair compose that evidence across a wipe and re-import.
+
+Run the repair against the current database without `--apply` first:
+
+```bash
+python -m scripts.remap_vault_reference_ids --map <current-import-map.json> --map <older-import-map.json>
+```
+
+Unlike `import_vault_wiki`, this dry run contacts the database: read the printed `database :`
+target and inspect every proposed `source_ids` and `related_ids` rewrite. References with no
+live target are preserved and reported. A class containing more than one live id is reported
+as ambiguous and is never guessed. Apply only after that report is understood:
+
+```bash
+python -m scripts.remap_vault_reference_ids --map <current-import-map.json> --map <older-import-map.json> --apply
+```
+
+The apply is idempotent; a second run should propose zero rewrites. Follow it with the wiki
+integrity check and a dry-run export.
+
+For future Stage-A wiki imports, pass the same maps to `import_vault_wiki`:
+
+```bash
+python -m scripts.import_vault_wiki --vault-root <vault> --map <current-import-map.json> --map <older-import-map.json> --apply
+```
+
+That importer resolves every `SourceIDs` value against live note rows before writing a page
+and refuses the entire import if any source is unresolved or ambiguous. Its no-`--apply` dry
+run still parses files only and contacts no database, so it cannot validate the maps or live
+ids.
+
 ### If the import fails partway
 
 **Do not re-wipe.** The importer is idempotent per `(principal, key)`, so re-running it
@@ -608,7 +643,7 @@ you did not ask:
 heroku run "python -m alembic -c alembic-vault.ini current" --app <app>
 ```
 
-A vault revision reads `00NN_<name>`, currently `0015_note_compile_declined`.
+A vault revision reads `00NN_<name>`, currently `0017_oauth_entitlements`.
 If you see `0004_auth_identities`, you checked the leaderboard lineage.
 
 ### Which database a script is about to touch

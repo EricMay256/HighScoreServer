@@ -18,9 +18,12 @@ import pytest
 from app.vault.export import NOTE_KEY_ORDER, WIKI_KEY_ORDER, dump_note
 from scripts.import_vault_wiki import (
     FrontmatterError,
+    ReferenceResolutionError,
     WikiPageFile,
     parse_note,
+    resolve_page_source_ids,
 )
+from scripts.remap_vault_reference_ids import IdentityClasses, resolve
 
 
 CANONICAL = """---
@@ -185,3 +188,42 @@ def test_a_page_reports_its_run_and_its_compiled_instant() -> None:
     assert page.run_key == "run_20260813_184935"
     assert page.compiled_at == datetime(2026, 8, 13, 18, 56, 45, tzinfo=UTC)
     assert page.compiled_by == "agent:librarian"
+
+
+def test_source_ids_are_repointed_at_the_live_note_before_import() -> None:
+    stage_a = "stage-a-note"
+    live = "live-note"
+    classes = IdentityClasses()
+    classes.union(stage_a, live)
+    page = _page("run", "2026-08-13T18:56:45Z")
+    page.metadata["SourceIDs"] = [stage_a]
+
+    [resolved_page] = resolve_page_source_ids(
+        [page], resolve(classes, {live}), {live}
+    )
+
+    assert resolved_page.metadata["SourceIDs"] == [live]
+    assert page.metadata["SourceIDs"] == [stage_a]
+
+
+def test_an_unresolved_source_refuses_the_import() -> None:
+    page = _page("run", "2026-08-13T18:56:45Z")
+    page.metadata["SourceIDs"] = ["missing-note"]
+
+    with pytest.raises(ReferenceResolutionError, match="missing-note"):
+        resolve_page_source_ids([page], resolve(IdentityClasses(), set()), set())
+
+
+def test_an_ambiguous_source_map_refuses_the_import() -> None:
+    classes = IdentityClasses()
+    classes.union("stage-a-note", "live-one")
+    classes.union("stage-a-note", "live-two")
+    page = _page("run", "2026-08-13T18:56:45Z")
+    page.metadata["SourceIDs"] = ["stage-a-note"]
+
+    with pytest.raises(ReferenceResolutionError, match="multiple live ids"):
+        resolve_page_source_ids(
+            [page],
+            resolve(classes, {"live-one", "live-two"}),
+            {"live-one", "live-two"},
+        )
