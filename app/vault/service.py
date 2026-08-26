@@ -10,9 +10,17 @@ from uuid import UUID, uuid4
 from sqlalchemy import text as text_sql
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from .body_diff import (
+    BodyChangeSummary,
+    BodyDiffError,
+    apply_body_unified_diff,
+    summarize_body_change,
+)
 from .constants import NOTE_SCHEMA_VERSION, WIKI_SCHEMA_VERSION
 from .db import VaultPoolObserver, acquire_vault_connection
 from .domain import (
+    AmendmentProposalKind,
+    AmendmentProposalState,
     CompileRunState,
     CompileWorkItem,
     DocumentEmbedding,
@@ -22,6 +30,7 @@ from .domain import (
     NoteCompileState,
     PromotionStatus,
     ReviewState,
+    VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
     VaultReviewCase,
@@ -52,6 +61,7 @@ from .governance import (
 from .origin import normalize_origin, validate_origin
 from .read_policy import READABLE_STATUSES
 from .repository import (
+    VaultAmendmentProposalRepository,
     VaultAuditEventRepository,
     VaultCompileRunRepository,
     VaultDocumentEmbeddingRepository,
@@ -1047,6 +1057,512 @@ class VaultDocumentUpdateService:
             contributed_by=existing.contributed_by,
             source_url=request.source_url,
             provenance=existing.provenance,
+        )
+
+
+class AmendmentProposalNotFound(Exception):
+    """No amendment proposal carries that id."""
+
+
+class AmendmentProposalAlreadyDecided(Exception):
+    """The proposal was settled before this decision reached it."""
+
+
+class AmendmentBaseRevisionMismatch(Exception):
+    """The proposed base is not the target's current content revision."""
+
+
+class AmendmentRemovalAcknowledgementRequired(Exception):
+    """Acceptance omitted the explicit acknowledgement required for removals."""
+
+
+@dataclass(frozen=True, slots=True)
+class AmendmentProposalRequest:
+    target_document_id: str
+    base_revision: int
+    change_kind: AmendmentProposalKind
+    rationale: str
+    principal_id: str
+    request_id: str
+    replacement: UpdateRequest | None = None
+    body_diff: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AmendmentDecisionRequest:
+    proposal_id: UUID
+    state: AmendmentProposalState
+    principal_id: str
+    request_id: str
+    decision_note: str | None = None
+    acknowledge_removals: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AmendmentDecisionOutcome:
+    proposal: VaultAmendmentProposal
+    outcome: str
+    target: VaultDocument | None
+
+
+class VaultAmendmentService:
+    """Submit and adjudicate immutable, revision-bound note changes.
+
+    Proposal submission does not touch the searchable corpus and therefore does
+    not embed or deduplicate. Acceptance runs the same validation, embedding,
+    deduplication, advisory-lock and vector-persistence rules as direct update,
+    then settles the proposal in that same transaction.
+    """
+
+    def __init__(
+        self,
+        transactions: VaultTransactionService,
+        provider: EmbeddingProvider | None,
+        policy: Policy = DEFAULT_POLICY,
+        similar_limit: int = 5,
+    ) -> None:
+        self._transactions = transactions
+        self._provider = provider
+        self._policy = policy
+        self._similar_limit = similar_limit
+
+    async def propose(self, request: AmendmentProposalRequest) -> VaultAmendmentProposal:
+        documents = VaultDocumentRepository()
+        proposals = VaultAmendmentProposalRepository()
+
+        async with self._transactions.transaction() as connection:
+            # Serialize the base-revision check with every content mutation.
+            # Without the lock, a direct update could commit between this read
+            # and the proposal insert, creating a proposal already stale while
+            # returning success to its author.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            target = await documents.get_by_id(
+                connection,
+                request.target_document_id,
+                statuses=READABLE_STATUSES,
+                readable_only=True,
+            )
+            if target is None or target.kind is not DocumentKind.NOTE:
+                raise DocumentNotFound(request.target_document_id)
+            if target.content_revision != request.base_revision:
+                raise AmendmentBaseRevisionMismatch(request.target_document_id)
+
+            try:
+                update_request = self._request_update(request, target)
+                candidate = VaultDocumentUpdateService._build_candidate(
+                    target, update_request
+                )
+            except (BodyDiffError, FacetNameCollision) as exc:
+                raise ValueError(str(exc)) from exc
+            errors = validate(candidate) + validate_facets(candidate.facets)
+            if errors:
+                raise ValueError("; ".join(errors))
+            rationale = request.rationale.strip()
+            if not rationale:
+                raise ValueError("rationale must contain non-whitespace text")
+
+            change = self._change_payload(request)
+            proposal = await proposals.insert_pending(
+                connection,
+                target_document_id=target.id,
+                target_revision=target.content_revision,
+                change_kind=request.change_kind,
+                change=change,
+                rationale=rationale,
+                proposed_by=f"agent:{request.principal_id}",
+            )
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.amendment.propose",
+                outcome="pending",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="amendment_proposal",
+                target_id=str(proposal.id),
+            )
+            return proposal
+
+    async def list_pending(self, limit: int = 50) -> tuple[VaultAmendmentProposal, ...]:
+        async with self._transactions.transaction() as connection:
+            return await VaultAmendmentProposalRepository().list_pending(
+                connection, limit
+            )
+
+    async def get(
+        self, proposal_id: UUID
+    ) -> tuple[VaultAmendmentProposal, VaultDocument | None]:
+        async with self._transactions.transaction() as connection:
+            proposal = await VaultAmendmentProposalRepository().get(
+                connection, proposal_id
+            )
+            if proposal is None:
+                raise AmendmentProposalNotFound(str(proposal_id))
+            target = await VaultDocumentRepository().get_by_id(
+                connection, proposal.target_document_id
+            )
+            return proposal, target
+
+    def preview(
+        self,
+        proposal: VaultAmendmentProposal,
+        target: VaultDocument | None,
+    ) -> BodyChangeSummary | None:
+        """Materialize a review preview only against the proposal's exact base."""
+
+        if target is None or target.content_revision != proposal.target_revision:
+            return None
+        update_request = self._update_request(
+            proposal,
+            target,
+            principal_id="preview",
+            request_id="preview",
+        )
+        candidate = VaultDocumentUpdateService._build_candidate(target, update_request)
+        return summarize_body_change(target.body, candidate.body)
+
+    async def decide(
+        self, request: AmendmentDecisionRequest
+    ) -> AmendmentDecisionOutcome:
+        if request.state is AmendmentProposalState.PENDING:
+            raise ValueError("a decision cannot leave a proposal pending")
+        if request.state is AmendmentProposalState.STALE:
+            raise ValueError("stale is determined by the service")
+        if request.state is AmendmentProposalState.REJECTED:
+            return await self._reject(request)
+        return await self._accept(request)
+
+    async def _reject(
+        self, request: AmendmentDecisionRequest
+    ) -> AmendmentDecisionOutcome:
+        proposals = VaultAmendmentProposalRepository()
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            existing = await proposals.get(connection, request.proposal_id)
+            if existing is None:
+                raise AmendmentProposalNotFound(str(request.proposal_id))
+            decided = await proposals.decide(
+                connection,
+                request.proposal_id,
+                state=AmendmentProposalState.REJECTED,
+                decided_by=f"agent:{request.principal_id}",
+                decision_note=request.decision_note,
+            )
+            if decided is None:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+            await self._audit_decision(connection, request, "rejected")
+            target = await VaultDocumentRepository().get_by_id(
+                connection, existing.target_document_id
+            )
+            return AmendmentDecisionOutcome(decided, "rejected", target)
+
+    async def _accept(
+        self, request: AmendmentDecisionRequest
+    ) -> AmendmentDecisionOutcome:
+        proposals = VaultAmendmentProposalRepository()
+        documents = VaultDocumentRepository()
+        embeddings = VaultDocumentEmbeddingRepository()
+
+        async with self._transactions.transaction() as connection:
+            proposal = await proposals.get(connection, request.proposal_id)
+            if proposal is None:
+                raise AmendmentProposalNotFound(str(request.proposal_id))
+            if proposal.state is not AmendmentProposalState.PENDING:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+            target = await documents.get_by_id(
+                connection, proposal.target_document_id
+            )
+            preflight_stale = (
+                target is None
+                or target.content_revision != proposal.target_revision
+            )
+            stored = (
+                await embeddings.get(
+                    connection, target.id, self._provider.profile_id
+                )
+                if not preflight_stale and self._provider is not None
+                else None
+            )
+
+        if preflight_stale:
+            return await self._settle_stale(request, proposal)
+        if target is None:
+            raise AssertionError("a non-stale amendment target must exist")
+
+        update_request = self._update_request(
+            proposal,
+            target,
+            principal_id=request.principal_id,
+            request_id=request.request_id,
+        )
+        candidate = VaultDocumentUpdateService._build_candidate(target, update_request)
+        body_summary = summarize_body_change(target.body, candidate.body)
+        if (
+            body_summary.requires_removal_acknowledgement
+            and not request.acknowledge_removals
+        ):
+            raise AmendmentRemovalAcknowledgementRequired(
+                "acceptance removes existing lines; set acknowledge_removals=true "
+                "after reviewing the removal summary"
+            )
+        if self._provider is None:
+            raise DedupUnavailable(
+                "No embedding provider is configured; refusing to write without dedup"
+            )
+        errors = validate(candidate) + validate_facets(candidate.facets)
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        embedding_text = assemble_embedding_text(candidate)
+        text_digest = embedding_text_digest(embedding_text)
+        re_embed = stored is None or stored.text_sha256 != text_digest
+        vector = (
+            await embed_one(
+                self._provider, embedding_text, EmbeddingInputKind.DOCUMENT
+            )
+            if re_embed
+            else stored.vector
+        )
+
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            current_proposal = await proposals.get(connection, request.proposal_id)
+            if current_proposal is None:
+                raise AmendmentProposalNotFound(str(request.proposal_id))
+            if current_proposal.state is not AmendmentProposalState.PENDING:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+
+            current = await documents.get_by_id(
+                connection, current_proposal.target_document_id
+            )
+            if (
+                current is None
+                or current.content_revision != current_proposal.target_revision
+            ):
+                decided = await proposals.decide(
+                    connection,
+                    request.proposal_id,
+                    state=AmendmentProposalState.STALE,
+                    decided_by=f"agent:{request.principal_id}",
+                    decision_note=request.decision_note,
+                )
+                if decided is None:
+                    raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+                await self._audit_decision(connection, request, "stale")
+                return AmendmentDecisionOutcome(decided, "stale", current)
+
+            similars = await VaultSearchRepository().find_similar(
+                connection,
+                embedding=vector,
+                profile_id=self._provider.profile_id,
+                limit=self._similar_limit,
+                exclude_document_id=current.id,
+            )
+            match decide(candidate, similars, self._policy):
+                case Insert():
+                    pass
+                case Flag(reason=reason, similars=sims):
+                    raise UpdateWouldDuplicate(f"amendment refused: {reason}", sims)
+                case Reject(reason=reason, conflicting_id=conflicting):
+                    raise UpdateWouldDuplicate(
+                        f"amendment refused: {reason} (conflicts with {conflicting})",
+                        similars,
+                    )
+                case Link():
+                    raise NotImplementedError("Link is disabled under the current policy")
+                case Merge():
+                    raise NotImplementedError("Merge is disabled under the current policy")
+
+            updated = await documents.replace_content(
+                connection,
+                current.id,
+                candidate,
+                expected_revision=current_proposal.target_revision,
+            )
+            if updated is None:
+                raise AmendmentBaseRevisionMismatch(current.id)
+            await embeddings.upsert(
+                connection,
+                DocumentEmbedding(
+                    document_id=current.id,
+                    profile_id=self._provider.profile_id,
+                    vector=vector,
+                    text_sha256=text_digest,
+                ),
+            )
+            decided = await proposals.decide(
+                connection,
+                request.proposal_id,
+                state=AmendmentProposalState.ACCEPTED,
+                decided_by=f"agent:{request.principal_id}",
+                decision_note=request.decision_note,
+                applied_revision=updated.content_revision,
+                removals_acknowledged=(
+                    body_summary.requires_removal_acknowledgement
+                    and request.acknowledge_removals
+                ),
+            )
+            if decided is None:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+            await self._audit_decision(connection, request, "accepted")
+            return AmendmentDecisionOutcome(decided, "accepted", updated)
+
+    async def _settle_stale(
+        self,
+        request: AmendmentDecisionRequest,
+        proposal: VaultAmendmentProposal,
+    ) -> AmendmentDecisionOutcome:
+        proposals = VaultAmendmentProposalRepository()
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            current = await proposals.get(connection, proposal.id)
+            if current is None:
+                raise AmendmentProposalNotFound(str(proposal.id))
+            decided = await proposals.decide(
+                connection,
+                proposal.id,
+                state=AmendmentProposalState.STALE,
+                decided_by=f"agent:{request.principal_id}",
+                decision_note=request.decision_note,
+            )
+            if decided is None:
+                raise AmendmentProposalAlreadyDecided(str(proposal.id))
+            await self._audit_decision(connection, request, "stale")
+            target = await VaultDocumentRepository().get_by_id(
+                connection, proposal.target_document_id
+            )
+            return AmendmentDecisionOutcome(decided, "stale", target)
+
+    @staticmethod
+    def _replacement_payload(request: UpdateRequest) -> dict[str, object]:
+        return {
+            "title": request.title,
+            "body": request.body,
+            "summary": request.summary,
+            "tags": list(request.tags),
+            "aliases": list(request.aliases),
+            "facets": request.facets,
+            "related_ids": list(request.related_ids),
+            "source_ids": list(request.source_ids),
+            "source_url": request.source_url,
+        }
+
+    @classmethod
+    def _change_payload(cls, request: AmendmentProposalRequest) -> dict[str, object]:
+        if request.change_kind is AmendmentProposalKind.REPLACEMENT:
+            if request.replacement is None or request.body_diff is not None:
+                raise ValueError("replacement proposals require only replacement content")
+            return cls._replacement_payload(request.replacement)
+        if request.body_diff is None or request.replacement is not None:
+            raise ValueError("body-diff proposals require only body_diff")
+        return {"body_diff": request.body_diff}
+
+    @classmethod
+    def _request_update(
+        cls,
+        request: AmendmentProposalRequest,
+        target: VaultDocument,
+    ) -> UpdateRequest:
+        if request.change_kind is AmendmentProposalKind.REPLACEMENT:
+            if request.replacement is None or request.body_diff is not None:
+                raise ValueError("replacement proposals require only replacement content")
+            return request.replacement
+        if request.body_diff is None or request.replacement is not None:
+            raise ValueError("body-diff proposals require only body_diff")
+        result = apply_body_unified_diff(target.body, request.body_diff)
+        return cls._body_only_update(
+            target,
+            result.body,
+            principal_id=request.principal_id,
+            request_id=request.request_id,
+        )
+
+    @staticmethod
+    def _body_only_update(
+        target: VaultDocument,
+        body: str,
+        *,
+        principal_id: str,
+        request_id: str,
+    ) -> UpdateRequest:
+        return UpdateRequest(
+            document_id=target.id,
+            title=target.title,
+            body=body,
+            principal_id=principal_id,
+            request_id=request_id,
+            summary=target.summary,
+            tags=target.tags,
+            aliases=target.aliases,
+            facets=target.facets,
+            related_ids=target.related_ids,
+            source_ids=target.source_ids,
+            source_url=target.source_url,
+        )
+
+    @staticmethod
+    def _update_request(
+        proposal: VaultAmendmentProposal,
+        target: VaultDocument,
+        *,
+        principal_id: str,
+        request_id: str,
+    ) -> UpdateRequest:
+        if proposal.change_kind is AmendmentProposalKind.BODY_DIFF:
+            patch = proposal.change.get("body_diff")
+            if not isinstance(patch, str):
+                raise ValueError("stored body-diff proposal is malformed")
+            try:
+                body = apply_body_unified_diff(target.body, patch).body
+            except BodyDiffError as exc:
+                raise ValueError(str(exc)) from exc
+            return VaultAmendmentService._body_only_update(
+                target,
+                body,
+                principal_id=principal_id,
+                request_id=request_id,
+            )
+        content = proposal.change
+        return UpdateRequest(
+            document_id=proposal.target_document_id,
+            title=str(content["title"]),
+            body=str(content["body"]),
+            principal_id=principal_id,
+            request_id=request_id,
+            summary=content.get("summary"),
+            tags=tuple(content.get("tags", ())),
+            aliases=tuple(content.get("aliases", ())),
+            facets=dict(content.get("facets", {})),
+            related_ids=tuple(content.get("related_ids", ())),
+            source_ids=tuple(content.get("source_ids", ())),
+            source_url=content.get("source_url"),
+        )
+
+    @staticmethod
+    async def _audit_decision(
+        connection: AsyncConnection,
+        request: AmendmentDecisionRequest,
+        outcome: str,
+    ) -> None:
+        await VaultAuditEventRepository().record(
+            connection,
+            operation="vault.amendment.review",
+            outcome=outcome,
+            request_id=request.request_id,
+            principal_id=request.principal_id,
+            target_type="amendment_proposal",
+            target_id=str(request.proposal_id),
         )
 
 @dataclass(frozen=True, slots=True)

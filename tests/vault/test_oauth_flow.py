@@ -24,8 +24,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
 
-from app.vault.auth import VaultScope
+from app.vault import oauth_routes
+from app.vault.auth import VaultScope, parse_token
 from app.vault.constants import OAUTH_BASELINE_SCOPES
+from app.vault.google_oidc import GOOGLE_CALLBACK_PATH, GOOGLE_LOGIN_PATH
 from app.vault.oauth import LOGIN_PATH, PRINCIPAL_PREFIX
 from app.vault.oauth_routes import FAILURE_MESSAGE
 from app.vault.passwords import hash_password
@@ -38,6 +40,11 @@ from app.vault.tables import (
     vault_oauth_clients,
     vault_oauth_pending_authorizations,
     vault_oauth_refresh_tokens,
+)
+from scripts.issue_vault_credential import (
+    grant,
+    grant_oauth,
+    revoke_oauth_scope,
 )
 from tests.vault.test_routes import _drop, _issue
 from tests.vault.test_search import vault_service
@@ -139,7 +146,12 @@ def register(client: TestClient, name: str = "Claude") -> str:
     return register_full(client, name)["client_id"]
 
 
-def authorize(client: TestClient, client_id: str, state: str = "opaque-state"):
+def authorize(
+    client: TestClient,
+    client_id: str,
+    state: str = "opaque-state",
+    scopes: tuple[str, ...] = OAUTH_BASELINE_SCOPES,
+):
     """Follow ``/authorize`` to the login page, returning its query parameters."""
 
     response = client.get(
@@ -151,7 +163,7 @@ def authorize(client: TestClient, client_id: str, state: str = "opaque-state"):
             "code_challenge": _challenge(VERIFIER),
             "code_challenge_method": "S256",
             "state": state,
-            "scope": " ".join(OAUTH_BASELINE_SCOPES),
+            "scope": " ".join(scopes),
         },
         follow_redirects=False,
     )
@@ -367,6 +379,133 @@ def test_the_consent_screen_names_the_client_and_its_scopes(
         assert scope in page.text
     assert page.headers["X-Frame-Options"] == "DENY"
     assert page.headers["Cache-Control"] == "no-store"
+
+
+def test_google_and_password_are_independent_operator_login_methods(
+    oauth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "VAULT_GOOGLE_OIDC_CLIENT_ID", "test.apps.googleusercontent.com"
+    )
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_ALLOWED_EMAILS", "operator@example.com")
+    client_id = register(oauth_client)
+    params = authorize(oauth_client, client_id)
+    query = {"req": params["req"][0], "csrf": params["csrf"][0]}
+
+    page = oauth_client.get(LOGIN_PATH, params=query)
+
+    assert 'type="password"' in page.text
+    assert "Authorize with Google" in page.text
+
+    start = oauth_client.get(GOOGLE_LOGIN_PATH, params=query, follow_redirects=False)
+    assert start.status_code == 302
+    google_query = parse_qs(urlparse(start.headers["location"]).query)
+    assert google_query["state"] == [f'{query["req"]}.{query["csrf"]}']
+    assert google_query["nonce"] == [query["req"]]
+
+    observed: dict[str, str] = {}
+
+    async def authenticate_google(
+        code: str,
+        *,
+        redirect_uri: str,
+        expected_nonce: str,
+        settings: object,
+        client: object = None,
+    ) -> str:
+        observed.update(
+            code=code,
+            redirect_uri=redirect_uri,
+            expected_nonce=expected_nonce,
+        )
+        return "operator:google:stable-subject"
+
+    monkeypatch.setattr(
+        oauth_routes, "authenticate_google_code", authenticate_google
+    )
+    callback = oauth_client.get(
+        GOOGLE_CALLBACK_PATH,
+        params={"code": "google-code", "state": google_query["state"][0]},
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 303, callback.text
+    assert observed == {
+        "code": "google-code",
+        "redirect_uri": f"{PUBLIC_URL}{GOOGLE_CALLBACK_PATH}",
+        "expected_nonce": query["req"],
+    }
+    outer_code = parse_qs(urlparse(callback.headers["location"]).query)["code"][0]
+    tokens = exchange(oauth_client, client_id, outer_code)
+    assert tokens["access_token"].startswith("hssv1_")
+
+    transactions, engine = vault_service()
+
+    async def refresh_subject() -> str | None:
+        try:
+            async with transactions.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_oauth_refresh_tokens.c.subject)
+                )
+                return result.scalar_one()
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(refresh_subject()) == "operator:google:stable-subject"
+
+
+def test_google_can_be_configured_without_the_operator_password(
+    oauth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VAULT_OPERATOR_PASSWORD_HASH", raising=False)
+    monkeypatch.setenv(
+        "VAULT_GOOGLE_OIDC_CLIENT_ID", "test.apps.googleusercontent.com"
+    )
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_ALLOWED_EMAILS", "operator@example.com")
+    client_id = register(oauth_client)
+    params = authorize(oauth_client, client_id)
+
+    page = oauth_client.get(
+        LOGIN_PATH, params={"req": params["req"][0], "csrf": params["csrf"][0]}
+    )
+
+    assert "Authorize with Google" in page.text
+    assert 'type="password"' not in page.text
+
+
+def test_a_rejected_google_identity_burns_the_pending_authorization(
+    oauth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "VAULT_GOOGLE_OIDC_CLIENT_ID", "test.apps.googleusercontent.com"
+    )
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_ALLOWED_EMAILS", "operator@example.com")
+    client_id = register(oauth_client)
+    params = authorize(oauth_client, client_id)
+    query = {"req": params["req"][0], "csrf": params["csrf"][0]}
+    start = oauth_client.get(GOOGLE_LOGIN_PATH, params=query, follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+
+    async def reject_google(*args: object, **kwargs: object) -> str:
+        raise oauth_routes.GoogleOIDCError
+
+    monkeypatch.setattr(oauth_routes, "authenticate_google_code", reject_google)
+    rejected = oauth_client.get(
+        GOOGLE_CALLBACK_PATH,
+        params={"code": "rejected-code", "state": state},
+        follow_redirects=False,
+    )
+    password_retry = submit_login(oauth_client, params)
+
+    assert rejected.status_code == password_retry.status_code == 400
+    assert rejected.text == password_retry.text
+    assert _minted_scopes() == []
 
 
 def test_a_client_name_carrying_markup_is_escaped(
@@ -622,6 +761,147 @@ def test_a_refresh_may_narrow_scopes_but_not_widen_them(
     assert widened.status_code == 400
 
 
+def test_operator_entitlement_applies_now_and_survives_refresh(
+    oauth_client: TestClient,
+) -> None:
+    """Authority belongs to the family, not the one-hour credential row."""
+
+    client_id, tokens = full_flow(oauth_client)
+    parsed = parse_token(tokens["access_token"])
+    assert parsed is not None
+
+    assert asyncio.run(grant_oauth(parsed.credential_id, [VaultScope.UPDATE])) == 0
+    assert VaultScope.UPDATE in _credential_scopes(parsed.credential_id)
+
+    refreshed = _refresh(oauth_client, client_id, tokens["refresh_token"])
+    assert refreshed.status_code == 200, refreshed.text
+    renewed = refreshed.json()
+    assert VaultScope.UPDATE in renewed["scope"].split()
+    renewed_parsed = parse_token(renewed["access_token"])
+    assert renewed_parsed is not None
+    assert VaultScope.UPDATE in _credential_scopes(renewed_parsed.credential_id)
+
+
+def test_refresh_scope_narrowing_cannot_remove_operator_entitlement(
+    oauth_client: TestClient,
+) -> None:
+    client_id, tokens = full_flow(oauth_client)
+    parsed = parse_token(tokens["access_token"])
+    assert parsed is not None
+    asyncio.run(grant_oauth(parsed.credential_id, [VaultScope.COMPILE]))
+
+    narrowed = oauth_client.post(
+        "/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id": client_id,
+            "scope": VaultScope.READ,
+        },
+    )
+
+    assert narrowed.status_code == 200, narrowed.text
+    assert set(narrowed.json()["scope"].split()) == {
+        VaultScope.READ,
+        VaultScope.COMPILE,
+    }
+
+
+def test_revoking_entitlement_narrows_the_live_and_next_credentials(
+    oauth_client: TestClient,
+) -> None:
+    client_id, tokens = full_flow(oauth_client)
+    parsed = parse_token(tokens["access_token"])
+    assert parsed is not None
+    asyncio.run(grant_oauth(parsed.credential_id, [VaultScope.COMPILE]))
+
+    assert (
+        asyncio.run(revoke_oauth_scope(parsed.credential_id, [VaultScope.COMPILE]))
+        == 0
+    )
+    assert VaultScope.COMPILE not in _credential_scopes(parsed.credential_id)
+
+    refreshed = _refresh(oauth_client, client_id, tokens["refresh_token"])
+    assert refreshed.status_code == 200, refreshed.text
+    assert VaultScope.COMPILE not in refreshed.json()["scope"].split()
+
+
+def test_entitlement_is_bounded_to_one_authorization_family(
+    oauth_client: TestClient,
+) -> None:
+    """A fresh operator approval is not silently widened by an older grant."""
+
+    client_id, first = full_flow(oauth_client)
+    parsed = parse_token(first["access_token"])
+    assert parsed is not None
+    asyncio.run(grant_oauth(parsed.credential_id, [VaultScope.UPDATE]))
+
+    params = authorize(oauth_client, client_id)
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"]
+    second = exchange(oauth_client, client_id, code[0])
+
+    assert VaultScope.UPDATE not in second["scope"].split()
+
+
+def test_review_entitlement_requires_a_separate_read_only_family(
+    oauth_client: TestClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client_id, ordinary = full_flow(oauth_client)
+    ordinary_parsed = parse_token(ordinary["access_token"])
+    assert ordinary_parsed is not None
+    assert (
+        asyncio.run(grant_oauth(ordinary_parsed.credential_id, [VaultScope.REVIEW]))
+        == 2
+    )
+    assert "separate OAuth authorization" in capsys.readouterr().err
+
+    params = authorize(oauth_client, client_id, scopes=(VaultScope.READ,))
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"][0]
+    reviewer = exchange(oauth_client, client_id, code)
+    reviewer_parsed = parse_token(reviewer["access_token"])
+    assert reviewer_parsed is not None
+
+    assert (
+        asyncio.run(grant_oauth(reviewer_parsed.credential_id, [VaultScope.REVIEW]))
+        == 0
+    )
+    assert _credential_scopes(reviewer_parsed.credential_id) == [
+        VaultScope.READ,
+        VaultScope.REVIEW,
+    ]
+
+
+def test_static_scope_command_refuses_an_oauth_credential(
+    oauth_client: TestClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, tokens = full_flow(oauth_client)
+    parsed = parse_token(tokens["access_token"])
+    assert parsed is not None
+
+    code = asyncio.run(grant(parsed.credential_id, [VaultScope.UPDATE]))
+
+    assert code == 1
+    assert "Use grant-oauth" in capsys.readouterr().err
+
+
+def test_baseline_scope_cannot_be_smuggled_in_as_an_entitlement(
+    oauth_client: TestClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, tokens = full_flow(oauth_client)
+    parsed = parse_token(tokens["access_token"])
+    assert parsed is not None
+
+    code = asyncio.run(grant_oauth(parsed.credential_id, [VaultScope.READ]))
+
+    assert code == 2
+    assert "operator-only" in capsys.readouterr().err
+
+
 def test_revoking_a_refresh_token_kills_its_access_token(
     oauth_client: TestClient,
 ) -> None:
@@ -716,6 +996,24 @@ def _minted_scopes() -> list[list[str]]:
                     )
                 )
                 return [sorted(row[0]) for row in result]
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def _credential_scopes(credential_id: str) -> list[str]:
+    transactions, engine = vault_service()
+
+    async def run() -> list[str]:
+        try:
+            async with transactions.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_agent_credentials.c.scopes).where(
+                        vault_agent_credentials.c.id == credential_id
+                    )
+                )
+                return sorted(result.scalar_one())
         finally:
             await engine.dispose()
 

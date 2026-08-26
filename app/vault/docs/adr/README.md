@@ -36,3 +36,5 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0025 | [The vault stores edges and does not traverse them](0025-the-vault-stores-edges-and-does-not-traverse-them.md) | Accepted |
 | 0026 | [Privileged tools live on the one mount, gated by the credential's scopes](0026-privileged-tools-are-gated-by-scope-on-one-mount.md) | Accepted (reverses the separate admin MCP that 0019 and 0023 assumed) |
 | 0027 | [The service plans a compile run; the agent writes it](0027-the-service-plans-a-compile-run-and-the-agent-writes-it.md) | Accepted (amends 0016's "no dedup, no write" for wiki pages) |
+| 0028 | [Amendments are revision-bound proposals, not notes](0028-amendments-are-revision-bound-proposals.md) | Accepted (amended 2026-08-25: bounded general body diffs and removal acknowledgement) |
+| 0029 | [Operator-granted OAuth entitlements belong to the refresh family](0029-oauth-entitlements-belong-to-the-refresh-family.md) | Accepted |

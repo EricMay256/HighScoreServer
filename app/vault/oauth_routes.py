@@ -8,26 +8,24 @@ so issuer and routes have to agree about where they live.
 - RFC 9728 protected-resource metadata, naming this authorization server.
 - The SDK's own ``/authorize``, ``/token``, ``/register``, ``/revoke`` and RFC
   8414 metadata, over ``VaultAuthorizationProvider``.
-- ``GET`` and ``POST /vault/login`` -- this module's only original HTTP, and the
-  step ``authorize`` hands off to.
+- The consent page, password POST, and Google OIDC redirect/callback under
+  ``/vault/login`` -- the identity step ``authorize`` hands off to.
 
 **Starlette routes, not a FastAPI router**, because the SDK returns Starlette
 ``Route`` objects and these have to sit beside them in one list the host
 extends onto its router. Nothing here is in the OpenAPI schema, which is
 correct: a login form is not an API.
 
-**The login page is stateless.** The password is entered once per authorization
-and there is no session cookie -- ADR 0024's decision, on the grounds that
-authorizing a client is rare and a session would be a third credential type with
-its own lifetime, storage and revocation story. Everything that has to survive
-the round trip is in the pending-authorization row.
+**The login page is stateless.** Password or Google is chosen per authorization
+and there is no session cookie -- ADR 0024's decision, on the grounds that a
+session would be a third credential type with its own lifetime, storage and
+revocation story. Everything that has to survive the round trip is in the
+pending-authorization row or Google's signed response.
 
-**One failure message, whatever failed.** A wrong password, an expired nonce, a
-nonce that never existed, a bad CSRF token, and an unconfigured operator
-password all render the same sentence. ADR 0015's rule about ``401`` versus
-``403`` applied to a form: a page that distinguished them would hand an attacker
-a probe for valid authorization attempts, and the operator loses nothing because
-they know which of the two they just did.
+**One failure message, whatever failed.** A wrong password, rejected Google
+identity, expired nonce, unknown nonce, or bad state/CSRF token all render the
+same sentence. ADR 0015's rule about ``401`` versus ``403`` applied to a form:
+distinguishing them would hand an attacker a probe for valid authorizations.
 """
 
 import hmac
@@ -48,6 +46,14 @@ from starlette.routing import Route
 
 from .constants import OAUTH_BASELINE_SCOPES, OAUTH_CLIENT_LOCK_KEY
 from .db import get_vault_engine
+from .google_oidc import (
+    GOOGLE_CALLBACK_PATH,
+    GOOGLE_LOGIN_PATH,
+    GoogleOIDCError,
+    GoogleOIDCSettings,
+    authenticate_google_code,
+    authorization_url,
+)
 from .oauth import (
     LOGIN_PATH,
     NONCE_PARAM,
@@ -56,6 +62,7 @@ from .oauth import (
     new_secret,
 )
 from .passwords import verify_password
+from .public_url import configured_public_url, report_public_url_drift
 from .rate_limit import (
     build_registration_guard,
     get_login_limiter,
@@ -77,8 +84,7 @@ logger = logging.getLogger(__name__)
 # The single message every failure renders. Deliberately says nothing about
 # which check failed.
 FAILURE_MESSAGE = (
-    "That did not work. Check the password and try the authorization again "
-    "from the client."
+    "That did not work. Try the authorization again from the client."
 )
 
 # How much of a client's self-declared name the consent screen will show.
@@ -94,6 +100,7 @@ MAX_DISPLAYED_CLIENT_NAME = 80
 SCOPE_DESCRIPTIONS: dict[str, str] = {
     "vault:read": "search the vault and read notes",
     "vault:write": "add new notes",
+    "vault:propose": "propose amendments to existing notes",
     "vault:update": "replace the contents of existing notes",
     "vault:delete": "permanently delete notes",
     "vault:review": "adjudicate flagged notes and promotion candidates",
@@ -102,8 +109,7 @@ SCOPE_DESCRIPTIONS: dict[str, str] = {
 }
 
 # Identifies which method authenticated the operator, recorded on the
-# authorization code so an audit can tell a password login from a future Google
-# one after the fact.
+# authorization code so an audit can distinguish it from Google after the fact.
 PASSWORD_SUBJECT = "operator:password"
 
 
@@ -133,6 +139,8 @@ def _page(
     scopes: tuple[str, ...] = (),
     nonce: str = "",
     csrf_token: str = "",
+    password_configured: bool = False,
+    google_login_url: str | None = None,
     error: str | None = None,
 ) -> HTMLResponse:
     body = render(
@@ -146,6 +154,8 @@ def _page(
         csrf_token=csrf_token,
         nonce_param=NONCE_PARAM,
         login_path=LOGIN_PATH,
+        password_configured=password_configured,
+        google_login_url=google_login_url,
         error=error,
     )
     return HTMLResponse(
@@ -235,6 +245,32 @@ def _requested_scopes(pending: Any) -> tuple[str, ...]:
     return tuple(scopes) if scopes else tuple(OAUTH_BASELINE_SCOPES)
 
 
+def _google_redirect_uri() -> str:
+    """The configured callback Google must have allowlisted."""
+
+    return f"{configured_public_url()}{GOOGLE_CALLBACK_PATH}"
+
+
+def _google_state(nonce: str, csrf_token: str) -> str:
+    """Bind Google's callback to the pending authorization and its CSRF token."""
+
+    return f"{nonce}.{csrf_token}"
+
+
+def _parse_google_state(state: str) -> tuple[str, str] | None:
+    nonce, separator, csrf_token = state.partition(".")
+    if not separator or not nonce or not csrf_token:
+        return None
+    return nonce, csrf_token
+
+
+def _csrf_matches(pending: Any, submitted_csrf: str) -> bool:
+    expected = pending.csrf_sha256
+    return expected is not None and hmac.compare_digest(
+        bytes(expected), hash_oauth_secret(submitted_csrf)
+    )
+
+
 async def login_form(request: Request) -> Response:
     """Render the consent screen. Reads the nonce; does not spend it.
 
@@ -251,6 +287,12 @@ async def login_form(request: Request) -> Response:
         return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
 
     pending, client = loaded
+    google = GoogleOIDCSettings.from_environment()
+    google_login_url = None
+    if google is not None:
+        google_login_url = GOOGLE_LOGIN_PATH + "?" + urlencode(
+            {NONCE_PARAM: nonce, "csrf": csrf_token}
+        )
     return _page(
         request_valid=True,
         client_name=_client_display_name(client),
@@ -259,7 +301,48 @@ async def login_form(request: Request) -> Response:
         scopes=_requested_scopes(pending),
         nonce=nonce,
         csrf_token=csrf_token,
+        password_configured=operator_password_hash() is not None,
+        google_login_url=google_login_url,
     )
+
+
+async def _redeem_and_mint(
+    nonce: str,
+    subject: str | None,
+) -> tuple[Any | None, str | None]:
+    """Spend one pending request and conditionally mint its client code.
+
+    Authentication happens before this helper. Redemption and code creation
+    remain one transaction, under the OAuth client lock, for the stale-client
+    pruning race described in ADR 0024.
+    """
+
+    code = new_secret()
+    transactions = _transactions()
+    async with transactions.transaction() as connection:
+        await connection.execute(
+            sql_text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": OAUTH_CLIENT_LOCK_KEY},
+        )
+        redeemed = await VaultOAuthPendingAuthorizationRepository().redeem(
+            connection, nonce
+        )
+        if redeemed is not None and subject is not None:
+            params = redeemed.params
+            await VaultOAuthAuthorizationCodeRepository().create(
+                connection,
+                code=code,
+                client_id=redeemed.client_id,
+                scopes=_requested_scopes(redeemed),
+                code_challenge=params["code_challenge"],
+                redirect_uri=str(params["redirect_uri"]),
+                redirect_uri_provided_explicitly=bool(
+                    params.get("redirect_uri_provided_explicitly", True)
+                ),
+                resource=params.get("resource"),
+                subject=subject,
+            )
+    return redeemed, code if redeemed is not None and subject is not None else None
 
 
 async def login_submit(request: Request) -> Response:
@@ -303,10 +386,7 @@ async def login_submit(request: Request) -> Response:
     # authorization, so the token lives there and is single-use for free. A
     # missing digest -- a row written before migration 0014 -- is refused, not
     # waved through.
-    expected = pending.csrf_sha256
-    if expected is None or not hmac.compare_digest(
-        bytes(expected), hash_oauth_secret(submitted_csrf)
-    ):
+    if not _csrf_matches(pending, submitted_csrf):
         logger.warning("vault oauth login rejected: csrf mismatch")
         return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
 
@@ -326,31 +406,9 @@ async def login_submit(request: Request) -> Response:
     # this package keeps naming.
     password_ok = await verify_password(password, stored_hash)
 
-    transactions = _transactions()
-    code = new_secret()
-    async with transactions.transaction() as connection:
-        await connection.execute(
-            sql_text("SELECT pg_advisory_xact_lock(:key)"),
-            {"key": OAUTH_CLIENT_LOCK_KEY},
-        )
-        redeemed = await VaultOAuthPendingAuthorizationRepository().redeem(
-            connection, nonce
-        )
-        if redeemed is not None and password_ok:
-            params = redeemed.params
-            await VaultOAuthAuthorizationCodeRepository().create(
-                connection,
-                code=code,
-                client_id=redeemed.client_id,
-                scopes=_requested_scopes(redeemed),
-                code_challenge=params["code_challenge"],
-                redirect_uri=str(params["redirect_uri"]),
-                redirect_uri_provided_explicitly=bool(
-                    params.get("redirect_uri_provided_explicitly", True)
-                ),
-                resource=params.get("resource"),
-                subject=PASSWORD_SUBJECT,
-            )
+    redeemed, code = await _redeem_and_mint(
+        nonce, PASSWORD_SUBJECT if password_ok else None
+    )
 
     if redeemed is None:
         # Raced by another submit, expired, or its registration was pruned --
@@ -362,6 +420,8 @@ async def login_submit(request: Request) -> Response:
         return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
 
     params = redeemed.params
+    if code is None:
+        return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
 
     logger.info(
         "vault oauth authorization approved",
@@ -369,6 +429,79 @@ async def login_submit(request: Request) -> Response:
     )
     return RedirectResponse(
         _client_redirect(params, code),
+        status_code=303,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def google_login_start(request: Request) -> Response:
+    """Redirect a valid pending authorization to Google's OIDC endpoint."""
+
+    nonce = request.query_params.get(NONCE_PARAM, "")
+    csrf_token = request.query_params.get("csrf", "")
+    loaded = await _load_pending(nonce)
+    settings = GoogleOIDCSettings.from_environment()
+    if loaded is None or settings is None:
+        return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
+    pending, _client = loaded
+    if not _csrf_matches(pending, csrf_token):
+        logger.warning("vault oauth Google login rejected: csrf mismatch")
+        return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
+
+    return RedirectResponse(
+        authorization_url(
+            settings,
+            redirect_uri=_google_redirect_uri(),
+            state=_google_state(nonce, csrf_token),
+            nonce=nonce,
+        ),
+        status_code=302,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def google_login_callback(request: Request) -> Response:
+    """Verify Google identity, then mint the outer vault authorization code."""
+
+    parsed_state = _parse_google_state(request.query_params.get("state", ""))
+    if parsed_state is None:
+        return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
+    nonce, csrf_token = parsed_state
+    loaded = await _load_pending(nonce)
+    settings = GoogleOIDCSettings.from_environment()
+    if loaded is None or settings is None:
+        return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
+    pending, _client = loaded
+    if not _csrf_matches(pending, csrf_token):
+        logger.warning("vault oauth Google callback rejected: state mismatch")
+        return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
+
+    subject: str | None = None
+    code = request.query_params.get("code", "")
+    if code and "error" not in request.query_params:
+        try:
+            subject = await authenticate_google_code(
+                code,
+                redirect_uri=_google_redirect_uri(),
+                expected_nonce=nonce,
+                settings=settings,
+            )
+        except GoogleOIDCError as error:
+            logger.warning(
+                "vault oauth Google login rejected",
+                extra={"error_type": type(error.__cause__ or error).__name__},
+            )
+
+    redeemed, client_code = await _redeem_and_mint(nonce, subject)
+    if redeemed is None or client_code is None:
+        return _page(request_valid=False, status_code=400, error=FAILURE_MESSAGE)
+
+    logger.info(
+        "vault oauth authorization approved through Google",
+        extra={"client_id": redeemed.client_id},
+    )
+    return RedirectResponse(
+        _client_redirect(redeemed.params, client_code),
         status_code=303,
         headers={"Cache-Control": "no-store"},
     )
@@ -396,6 +529,28 @@ def _client_redirect(params: dict[str, Any], code: str) -> str:
 def _endpoint_name(path: str) -> str:
     cleaned = path.strip("/").replace("/", "_").replace(".", "_").replace("-", "_")
     return f"vault_oauth_{cleaned or 'root'}"
+
+
+def _observed(route: Any) -> Any:
+    """Report, once, whether `VAULT_PUBLIC_URL` matches the observed host.
+
+    Wrapped here rather than folded into `_guarded` because they are different
+    concerns wearing the same shape: one spends a rate-limit token and can
+    refuse the request, this one only looks. See `public_url` for why the
+    observation is never used to build anything.
+    """
+
+    inner = getattr(route, "app", None)
+    if inner is None:
+        return route
+
+    async def observing(scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            report_public_url_drift(Request(scope, receive=receive))
+        await inner(scope, receive, send)
+
+    route.app = observing
+    return route
 
 
 def _guarded(route: Any, charge: Any = None) -> Any:
@@ -509,6 +664,12 @@ def build_vault_oauth_routes(issuer_url: str, mcp_url: str) -> list[Route]:
             revocation_options=RevocationOptions(enabled=True),
         ),
         Route(LOGIN_PATH, endpoint=login_form, methods=["GET"]),
+        Route(GOOGLE_LOGIN_PATH, endpoint=google_login_start, methods=["GET"]),
+        Route(
+            GOOGLE_CALLBACK_PATH,
+            endpoint=limiter(google_login_callback),
+            methods=["GET"],
+        ),
         # The POST carries its own bucket, far tighter than the 600/min pre-auth
         # guard. A public password endpoint is a brute-force target: bcrypt's
         # cost factor is the first defence and the IP guard the second, and
@@ -524,10 +685,15 @@ def build_vault_oauth_routes(issuer_url: str, mcp_url: str) -> list[Route]:
     # unauthenticated call, so it draws on its own far tighter bucket instead
     # of the general pre-auth allowance.
     registration_charge = build_registration_guard()
+    # Guard outermost, observation inside it: a request that is refused for rate
+    # limiting should cost nothing else, and the drift line is about traffic the
+    # server actually served.
     return [
         _guarded(
-            _named(route),
-            registration_charge if getattr(route, "path", "") == "/register" else None,
+            _observed(_named(route)),
+            registration_charge
+            if getattr(route, "path", "") == "/register"
+            else None,
         )
         for route in routes
     ]

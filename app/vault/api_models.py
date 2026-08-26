@@ -12,15 +12,19 @@ separate modules.
 import json
 from datetime import datetime
 from hashlib import sha256
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
+from .body_diff import MAX_BODY_DIFF_CHARS, BodyChangeSummary
 from .domain import (
+    AmendmentProposalKind,
+    AmendmentProposalState,
     CompileWorkItem,
     DocumentKind,
     DocumentStatus,
+    VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
     VaultReviewCase,
@@ -210,6 +214,116 @@ class VaultDocumentUpdateResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class VaultReplacementChange(BaseModel):
+    """A complete caller-controlled content replacement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["replacement"]
+    replacement: VaultDocumentUpdateRequest
+
+
+class VaultBodyDiffChange(BaseModel):
+    """A bounded unified diff against only the note body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["body_diff"]
+    body_diff: str = Field(min_length=1, max_length=MAX_BODY_DIFF_CHARS)
+
+
+VaultAmendmentChange = Annotated[
+    VaultReplacementChange | VaultBodyDiffChange,
+    Field(discriminator="kind"),
+]
+
+
+class VaultAmendmentProposalRequest(BaseModel):
+    """An immutable change proposed against one document revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_note_id: str = Field(min_length=1, max_length=256)
+    base_revision: int = Field(ge=1)
+    change: VaultAmendmentChange
+    rationale: str = Field(min_length=1, max_length=2_000)
+
+
+class VaultAmendmentProposalSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: UUID
+    target_note_id: str
+    base_revision: int
+    change_kind: AmendmentProposalKind
+    state: AmendmentProposalState
+    rationale: str
+    proposed_by: str
+    created_at: datetime
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    decision_note: str | None = None
+    applied_revision: int | None = None
+    removals_acknowledged: bool = False
+
+
+class VaultAmendmentProposalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal: VaultAmendmentProposalSummary
+
+
+class VaultAmendmentQueueResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pending: list[VaultAmendmentProposalSummary]
+    count: int
+
+
+class VaultAmendmentProposalDetail(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal: VaultAmendmentProposalSummary
+    change: VaultAmendmentChange
+    target: "VaultDocumentDetail | None"
+    preview: "VaultAmendmentPreview | None"
+
+
+class VaultRemovedBodyLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_number: int = Field(ge=1)
+    text: str
+
+
+class VaultAmendmentPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resulting_body: str
+    unified_diff: str
+    added_line_count: int = Field(ge=0)
+    removed_lines: list[VaultRemovedBodyLine]
+    removed_line_count: int = Field(ge=0)
+    hunk_count: int = Field(ge=0)
+    requires_removal_acknowledgement: bool
+
+
+class VaultAmendmentDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accepted", "rejected"]
+    decision_note: str | None = Field(default=None, max_length=2_000)
+    acknowledge_removals: bool = False
+
+
+class VaultAmendmentDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proposal: VaultAmendmentProposalSummary
+    outcome: Literal["accepted", "rejected", "stale"]
+    target: "VaultDocumentDetail | None" = None
+
+
 class VaultContributionResponse(BaseModel):
     """Outcome of a governed write.
 
@@ -330,6 +444,13 @@ class VaultDocumentDetail(BaseModel):
     source_url: str | None
     created_at: datetime
     updated_at: datetime
+    content_revision: int = Field(
+        ge=1,
+        description=(
+            "Monotonic content version. Supply this as base_revision when "
+            "proposing an amendment so newer edits cannot be overwritten."
+        ),
+    )
 
 
 class VaultSearchHit(VaultDocumentDetail):
@@ -395,6 +516,7 @@ def document_detail(document: VaultDocument) -> VaultDocumentDetail:
         source_url=document.source_url,
         created_at=document.created_at,
         updated_at=document.updated_at,
+        content_revision=document.content_revision,
     )
 
 
@@ -533,6 +655,57 @@ def review_case_summary(case: VaultReviewCase) -> VaultReviewCaseSummary:
         decided_at=case.decided_at,
         decided_by=case.decided_by,
         decision_note=case.decision_note,
+    )
+
+
+def amendment_proposal_summary(
+    proposal: VaultAmendmentProposal,
+) -> VaultAmendmentProposalSummary:
+    return VaultAmendmentProposalSummary(
+        proposal_id=proposal.id,
+        target_note_id=proposal.target_document_id,
+        base_revision=proposal.target_revision,
+        change_kind=proposal.change_kind,
+        state=proposal.state,
+        rationale=proposal.rationale,
+        proposed_by=proposal.proposed_by,
+        created_at=proposal.created_at,
+        decided_at=proposal.decided_at,
+        decided_by=proposal.decided_by,
+        decision_note=proposal.decision_note,
+        applied_revision=proposal.applied_revision,
+        removals_acknowledged=proposal.removals_acknowledged,
+    )
+
+
+def amendment_proposal_change(
+    proposal: VaultAmendmentProposal,
+) -> VaultAmendmentChange:
+    if proposal.change_kind is AmendmentProposalKind.BODY_DIFF:
+        return VaultBodyDiffChange(kind="body_diff", **proposal.change)
+    return VaultReplacementChange(
+        kind="replacement",
+        replacement=VaultDocumentUpdateRequest.model_validate(proposal.change),
+    )
+
+
+def amendment_preview(summary: BodyChangeSummary | None) -> VaultAmendmentPreview | None:
+    if summary is None:
+        return None
+    removed = [
+        VaultRemovedBodyLine(line_number=item.line_number, text=item.text)
+        for item in summary.removed_lines
+    ]
+    return VaultAmendmentPreview(
+        resulting_body=summary.resulting_body,
+        unified_diff=summary.unified_diff,
+        added_line_count=summary.added_line_count,
+        removed_lines=removed,
+        removed_line_count=len(removed),
+        hunk_count=summary.hunk_count,
+        requires_removal_acknowledgement=(
+            summary.requires_removal_acknowledgement
+        ),
     )
 
 

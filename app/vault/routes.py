@@ -30,6 +30,12 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api_models import (
+    VaultAmendmentDecisionRequest,
+    VaultAmendmentDecisionResponse,
+    VaultAmendmentProposalDetail,
+    VaultAmendmentProposalRequest,
+    VaultAmendmentProposalResponse,
+    VaultAmendmentQueueResponse,
     VaultCompileDeclineRequest,
     VaultCompileDeclineResponse,
     VaultCompilePageRequest,
@@ -48,6 +54,9 @@ from .api_models import (
     VaultSearchHit,
     VaultSearchResponse,
     VaultSimilarNote,
+    amendment_preview,
+    amendment_proposal_change,
+    amendment_proposal_summary,
     canonical_request_digest,
     compile_run_summary,
     compile_work_item,
@@ -57,7 +66,12 @@ from .api_models import (
 from .auth import VaultCredential, VaultScope
 from .constants import resolve_text_search_config
 from .db import get_vault_engine
-from .domain import ReviewState, VaultCompileRun
+from .domain import (
+    AmendmentProposalKind,
+    AmendmentProposalState,
+    ReviewState,
+    VaultCompileRun,
+)
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError, EmbeddingInputTooLong
 from .principal import (
@@ -72,6 +86,12 @@ from .read_policy import READABLE_STATUSES
 from .repository import VaultDocumentRepository
 from .service import (
     REQUEST_DIGEST_VERSION,
+    AmendmentBaseRevisionMismatch,
+    AmendmentDecisionRequest,
+    AmendmentProposalAlreadyDecided,
+    AmendmentProposalNotFound,
+    AmendmentProposalRequest,
+    AmendmentRemovalAcknowledgementRequired,
     CompilePageRequest,
     CompileRunAlreadySettled,
     CompileRunNotFound,
@@ -89,6 +109,7 @@ from .service import (
     UnresolvedSources,
     UpdateRequest,
     UpdateWouldDuplicate,
+    VaultAmendmentService,
     VaultCompileService,
     VaultContributionService,
     VaultDocumentRetireService,
@@ -224,6 +245,12 @@ async def require_write_scope(
     return await _authenticated((VaultScope.WRITE,), credentials)
 
 
+async def require_propose_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    return await _authenticated((VaultScope.PROPOSE,), credentials)
+
+
 async def require_update_scope(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> VaultCredential:
@@ -334,6 +361,13 @@ async def write_quota(
     return credential
 
 
+async def amendment_propose_quota(
+    credential: VaultCredential = Depends(require_propose_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "amendment_propose")
+    return credential
+
+
 @router.post(
     "/contributions",
     response_model=VaultContributionResponse,
@@ -431,6 +465,82 @@ async def contribute(
             for s in outcome.related_pages
         ],
         errors=list(outcome.errors),
+    )
+
+
+def _amendment_service() -> VaultAmendmentService:
+    return VaultAmendmentService(
+        transactions=VaultTransactionService(get_vault_engine()),
+        provider=get_embedding_provider(),
+    )
+
+
+@router.post(
+    "/amendment-proposals",
+    response_model=VaultAmendmentProposalResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Propose a revision-bound change to an existing note",
+)
+async def propose_amendment(
+    body: VaultAmendmentProposalRequest,
+    request: Request,
+    credential: VaultCredential = Depends(amendment_propose_quota),
+) -> VaultAmendmentProposalResponse:
+    request_id = request.headers.get("X-Request-Id") or uuid4().hex
+    replacement = (
+        body.change.replacement
+        if body.change.kind == AmendmentProposalKind.REPLACEMENT.value
+        else None
+    )
+    proposal_request = AmendmentProposalRequest(
+        target_document_id=body.target_note_id,
+        base_revision=body.base_revision,
+        change_kind=AmendmentProposalKind(body.change.kind),
+        rationale=body.rationale,
+        principal_id=credential.principal_id,
+        request_id=request_id,
+        replacement=(
+            UpdateRequest(
+                document_id=body.target_note_id,
+                title=replacement.title,
+                body=replacement.body,
+                principal_id=credential.principal_id,
+                request_id=request_id,
+                summary=replacement.summary,
+                tags=tuple(replacement.tags),
+                aliases=tuple(replacement.aliases),
+                facets=replacement.facets,
+                related_ids=tuple(replacement.related_ids),
+                source_ids=tuple(replacement.source_ids),
+                source_url=(
+                    str(replacement.source_url) if replacement.source_url else None
+                ),
+            )
+            if replacement is not None
+            else None
+        ),
+        body_diff=(
+            body.change.body_diff
+            if body.change.kind == AmendmentProposalKind.BODY_DIFF.value
+            else None
+        ),
+    )
+    try:
+        proposal = await _amendment_service().propose(proposal_request)
+    except DocumentNotFound as exc:
+        raise HTTPException(status_code=404, detail="Note not found") from exc
+    except AmendmentBaseRevisionMismatch as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The note changed; fetch it again before proposing an amendment",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    return VaultAmendmentProposalResponse(
+        proposal=amendment_proposal_summary(proposal)
     )
 
 
@@ -622,6 +732,27 @@ async def review_decide_quota(
     return credential
 
 
+async def amendment_list_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "amendment_list")
+    return credential
+
+
+async def amendment_read_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "amendment_read")
+    return credential
+
+
+async def amendment_decide_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "amendment_decide")
+    return credential
+
+
 def _review_service() -> VaultReviewService:
     return VaultReviewService(VaultTransactionService(get_vault_engine()))
 
@@ -728,6 +859,119 @@ async def decide_review_case(
     return VaultReviewDecisionResponse(
         review_case=review_case_summary(outcome.review_case),
         candidate=outcome.candidate,
+    )
+
+
+@router.get(
+    "/amendment-proposals",
+    response_model=VaultAmendmentQueueResponse,
+    dependencies=[Depends(amendment_list_quota)],
+    summary="List amendment proposals awaiting review",
+)
+async def list_amendment_proposals(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> VaultAmendmentQueueResponse:
+    proposals = await _amendment_service().list_pending(limit)
+    return VaultAmendmentQueueResponse(
+        pending=[amendment_proposal_summary(item) for item in proposals],
+        count=len(proposals),
+    )
+
+
+@router.get(
+    "/amendment-proposals/{proposal_id}",
+    response_model=VaultAmendmentProposalDetail,
+    dependencies=[Depends(amendment_read_quota)],
+    summary="Read one amendment proposal and its current target",
+)
+async def read_amendment_proposal(proposal_id: UUID) -> VaultAmendmentProposalDetail:
+    service = _amendment_service()
+    try:
+        proposal, target = await service.get(proposal_id)
+    except AmendmentProposalNotFound as exc:
+        raise HTTPException(status_code=404, detail="Amendment proposal not found") from exc
+    return VaultAmendmentProposalDetail(
+        proposal=amendment_proposal_summary(proposal),
+        change=amendment_proposal_change(proposal),
+        target=document_detail(target) if target is not None else None,
+        preview=amendment_preview(service.preview(proposal, target)),
+    )
+
+
+@router.post(
+    "/amendment-proposals/{proposal_id}/decision",
+    response_model=VaultAmendmentDecisionResponse,
+    summary="Accept or reject one amendment proposal",
+)
+async def decide_amendment_proposal(
+    proposal_id: UUID,
+    body: VaultAmendmentDecisionRequest,
+    request: Request,
+    credential: VaultCredential = Depends(amendment_decide_quota),
+) -> VaultAmendmentDecisionResponse:
+    try:
+        outcome = await _amendment_service().decide(
+            AmendmentDecisionRequest(
+                proposal_id=proposal_id,
+                state=AmendmentProposalState(body.decision),
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+                decision_note=body.decision_note,
+                acknowledge_removals=body.acknowledge_removals,
+            )
+        )
+    except AmendmentProposalNotFound as exc:
+        raise HTTPException(status_code=404, detail="Amendment proposal not found") from exc
+    except AmendmentProposalAlreadyDecided as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Amendment proposal has already been decided",
+        ) from exc
+    except AmendmentRemovalAcknowledgementRequired as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except UpdateWouldDuplicate as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "similars": [
+                    {"note_id": item.note_id, "title": item.title, "score": item.score}
+                    for item in exc.similars
+                ],
+            },
+        ) from exc
+    except DedupUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Amendment acceptance is unavailable: no embedding provider configured",
+        ) from exc
+    except EmbeddingInputTooLong as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document exceeds the embedding model input limit",
+        ) from exc
+    except EmbeddingError as exc:
+        logger.error(
+            "Vault amendment failed to embed",
+            extra={"error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Amendment acceptance is temporarily unavailable",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    return VaultAmendmentDecisionResponse(
+        proposal=amendment_proposal_summary(outcome.proposal),
+        outcome=outcome.outcome,
+        target=document_detail(outcome.target) if outcome.target is not None else None,
     )
 
 

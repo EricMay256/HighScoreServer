@@ -54,6 +54,7 @@ class VaultScope:
 
     READ = "vault:read"
     WRITE = "vault:write"
+    PROPOSE = "vault:propose"
     UPDATE = "vault:update"
     DELETE = "vault:delete"
     REVIEW = "vault:review"

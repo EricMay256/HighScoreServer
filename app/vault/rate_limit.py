@@ -82,6 +82,9 @@ LIMITS: dict[str, Limit] = {
     "search": Limit(per_minute=30, burst=10),
     "get_note": Limit(per_minute=120, burst=30),
     "contribute": Limit(per_minute=30, burst=20),
+    # Proposals persist untrusted workflow state but do not embed or mutate the
+    # corpus. A distinct bucket matches the distinct OAuth capability.
+    "amendment_propose": Limit(per_minute=30, burst=20),
     # An update costs what a contribution costs -- a dedup query and, when the
     # embedding text changed, an embedding call -- and arrives in the same
     # batches, so it gets the same shape. Its own bucket rather than sharing
@@ -97,6 +100,9 @@ LIMITS: dict[str, Limit] = {
     "review_list": Limit(per_minute=60, burst=20),
     "review_read": Limit(per_minute=60, burst=20),
     "review_decide": Limit(per_minute=10, burst=5),
+    "amendment_list": Limit(per_minute=60, burst=20),
+    "amendment_read": Limit(per_minute=60, burst=20),
+    "amendment_decide": Limit(per_minute=10, burst=5),
     # Compilation is a librarian loop: one plan, a burst of pages, one finish.
     # Planning is deliberately tight -- it opens a run row every time, and a
     # loop that plans without finishing accumulates `running` runs nobody

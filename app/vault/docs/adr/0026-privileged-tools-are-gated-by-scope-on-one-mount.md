@@ -54,7 +54,8 @@ Taking the three purposes in turn:
   tools and cannot name them. That is the same mechanism that already hides
   `vault_retire_note`, and it is the mechanism ADR 0021 calls the injection boundary.
 - **Privilege expansion as an attack vector.** A client cannot widen itself. OAuth's
-  `valid_scopes` caps a self-registering client at `vault:read` and `vault:write` (ADR 0024),
+  `valid_scopes` caps a self-registering client at `vault:read`, `vault:write`, and the inert
+  `vault:propose` capability (ADR 0024 as amended by ADR 0028),
   so `vault:review` is unreachable by request; it arrives only when an operator runs
   `issue_vault_credential grant`. A second mount adds nothing here — the gate is the scope, not
   the URL.

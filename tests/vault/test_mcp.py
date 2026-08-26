@@ -119,6 +119,15 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
             ["vault_search", "vault_get_note", "vault_contribute"],
         ),
         (
+            (VaultScope.READ, VaultScope.PROPOSE),
+            [
+                "vault_search",
+                "vault_get_note",
+                "vault_propose_note_amendment",
+                "vault_propose_note_body_diff",
+            ],
+        ),
+        (
             (VaultScope.READ, VaultScope.WRITE, VaultScope.UPDATE, VaultScope.DELETE),
             [
                 "vault_search",
@@ -139,6 +148,9 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
                 "vault_list_review_cases",
                 "vault_read_review_case",
                 "vault_decide_review_case",
+                "vault_list_amendment_proposals",
+                "vault_read_amendment_proposal",
+                "vault_decide_amendment_proposal",
                 "vault_set_promotion_status",
             ],
         ),
@@ -190,6 +202,7 @@ def test_the_reviewing_shape_cannot_retire_or_overwrite() -> None:
     }
 
     assert "vault_decide_review_case" in visible
+    assert "vault_decide_amendment_proposal" in visible
     assert "vault_retire_note" not in visible
     assert "vault_update_note" not in visible
     assert "vault_contribute" not in visible
@@ -206,6 +219,9 @@ def test_every_review_tool_requires_the_review_scope() -> None:
         "vault_list_review_cases",
         "vault_read_review_case",
         "vault_decide_review_case",
+        "vault_list_amendment_proposals",
+        "vault_read_amendment_proposal",
+        "vault_decide_amendment_proposal",
         "vault_set_promotion_status",
     }
 

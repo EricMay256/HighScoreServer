@@ -216,10 +216,16 @@ Configuration rather than a table, deliberately: there is exactly one, it has no
 lifecycle a schema would model, rotation is `heroku config:set`, and a config
 var's backups circulate less widely than a database's do.
 
+**Rotating it is cheap and safe, so rotate on any doubt.** Generate a new hash
+and set it; that is the whole procedure. Nothing already issued depends on the
+password — it gates future consent approvals only, so live credentials, refresh
+families and MCP sessions all keep working. The cost is one release and one
+re-approval the next time a client authorizes.
+
 Unset is a supported state and means the password identity method is not
 configured for this deployment. It is never treated as "any password works" —
-the login refuses outright, the same way `VAULT_ENABLED` defaulting to false
-serves no vault rather than an unguarded one.
+the password form is not offered. Google login may remain available when its
+three variables are configured.
 
 #### Generating it
 
@@ -235,6 +241,37 @@ prints the password to the terminal; one that takes it as an argument leaves it
 in shell history and in the process table. `getpass` avoids both, and on Windows
 it reads the console directly — which also means the script cannot be driven by
 piping into it, on purpose.
+
+> **PowerShell will happily echo this secret if a command mis-parses. Observed
+> 2026-08-24, with the hash on the clipboard.**
+>
+> `curl` in PowerShell is an alias for `Invoke-WebRequest`, which shares none of
+> curl's flags. A command like `curl -s https://host/path` does not fail
+> cleanly: the flag binds somewhere unintended, `Uri` ends up unbound, and
+> PowerShell **prompts for it** —
+>
+> ```
+> cmdlet Invoke-WebRequest at command pipeline position 1
+> Supply values for the following parameters:
+> Uri:
+> ```
+>
+> A prompt looks like an invitation to paste, and whatever is pasted is
+> **echoed in the clear** and stays in the scrollback. A bcrypt hash pasted
+> there is a hash rather than a password, so it is not directly usable — but it
+> is the credential guarding the consent screen, and it should not be on screen.
+>
+> Two habits avoid it. Use **`curl.exe`**, never bare `curl`, so the flags mean
+> what they say. And **never answer an unexpected parameter prompt** — press
+> `Ctrl+C`, read the command again, and retype it. The prompt means PowerShell
+> did not understand what you typed, so nothing good follows from feeding it a
+> secret.
+>
+> The good news, if it happens: PSReadLine records submitted *command lines*,
+> not parameter-prompt responses, so the value does not reach
+> `ConsoleHost_history.txt`. Verify with
+> `Select-String -Path (Get-PSReadLineOption).HistorySavePath -SimpleMatch '$2b$'`
+> and expect no matches. Clear the scrollback or close the terminal regardless.
 
 #### Setting it
 
@@ -284,22 +321,34 @@ actually reach, because the SDK builds `/authorize` and `/token` from it and a
 mismatch surfaces as a client giving up during discovery rather than as an
 error.
 
-Two variables together make the flow work, and both are needed:
+`VAULT_PUBLIC_URL` enables the authorization server. Configure at least one
+operator identity method; password and Google are independent, and configuring
+both presents both choices on the same consent screen:
 
 | Variable | Required | Effect |
 | -------- | -------- | ------ |
 | `VAULT_PUBLIC_URL` | yes | Publishes discovery metadata and registers `/authorize`, `/token`, `/register`, `/revoke`, `/vault/login`. Absent, none of them exist. |
-| `VAULT_OPERATOR_PASSWORD_HASH` | yes, for the password method | What the login page verifies against. Absent, every login refuses. |
+| `VAULT_OPERATOR_PASSWORD_HASH` | for password login | What the password form verifies. Absent, that form is not offered. |
+| `VAULT_GOOGLE_OIDC_CLIENT_ID` | for Google login | Google web-application client id. All three Google variables must be set together. |
+| `VAULT_GOOGLE_OIDC_CLIENT_SECRET` | for Google login | Server-side Google client secret; never expose or log it. |
+| `VAULT_GOOGLE_OIDC_ALLOWED_EMAILS` | for Google login | Case-insensitive, comma-separated operator email allowlist. |
 | `VAULT_LOGIN_RATE_LIMIT` | no (`10/minute`) | The login POST's own bucket, tighter than the pre-auth guard. |
 | `VAULT_REGISTRATION_RATE_LIMIT` | no (`10/minute`) | `/register`'s own bucket. Registration is public, unauthenticated, and writes a row; one client registers once. Defence in depth, not the storage bound — pruning is that. |
 
-Once both are set, a client registers itself and the flow is:
+Register this exact callback URI in the Google Cloud client:
+
+```
+<VAULT_PUBLIC_URL>/vault/login/google/callback
+```
+
+A client then registers itself and the flow is:
 
 ```
 POST /register              the vendor's backend, server to server
 GET  /authorize             the operator's browser, a real top-level navigation
-  -> 302 /vault/login       consent and password on one screen
-POST /vault/login           bcrypt verify, mint an authorization code
+  -> 302 /vault/login       consent and configured identity choices
+POST /vault/login           bcrypt verify, or
+GET  /vault/login/google    Google OIDC code flow and verified callback
   -> 303 back to the client with code and state
 POST /token                 code + PKCE verifier -> access token + refresh token
 ```
@@ -313,11 +362,19 @@ what `issue_vault_credential list` shows. A name-derived principal collided acro
 separately registered clients that chose the same name, which meant sharing an
 idempotency namespace and a quota; see vault ADR 0024's 2026-08-23 amendment.
 
-**Scopes are capped at `vault:read` and `vault:write`.** A client cannot request
+Google login requests only `openid email`. The callback exchanges the code over
+async HTTPS and validates Google's signature, issuer, audience, expiry, the
+pending authorization's nonce, `email_verified`, and the configured allowlist.
+The durable authorization subject uses Google's stable `sub`, not the email,
+which Google documents may change. Google and password end at the same code
+minting transaction; neither changes the scopes a client may request.
+
+**Scopes are capped at `vault:read`, `vault:write`, and `vault:propose`.** A client cannot request
 more — `vault:update`, `vault:delete` and `vault:review` are unreachable through
 this path by construction, not by an operator declining on a screen. That is a
 security decision: ADR 0021's defence against instructions injected into note
 text is that a destructive tool is absent from the surface that text can name.
+`vault:propose` stores an inert, revision-bound suggestion; it cannot apply it.
 
 **Access tokens live one hour; refresh tokens thirty days.** The client renews
 itself, so the operator authorizes roughly monthly rather than hourly. Each
@@ -337,6 +394,9 @@ sees is a connector asking to be reconnected, and the cause is in the log as
 | Client reports the server does not support OAuth | `VAULT_PUBLIC_URL` unset, so no metadata is published |
 | `/authorize` 302s to a login page that says the request is no longer valid | The nonce expired (5 minutes) or was already used |
 | Correct password rejected every time | `VAULT_OPERATOR_PASSWORD_HASH` unset or mangled — check the log for `not a valid bcrypt hash` |
+| Google choice is absent | One or more Google variables are absent. Partial configuration is refused rather than silently falling back. |
+| Google reports `redirect_uri_mismatch` | Register exactly `<VAULT_PUBLIC_URL>/vault/login/google/callback` in the Google Cloud web client. |
+| Google returns to the generic failure page | The code exchange, ID-token validation, nonce, verified email, or allowlist check failed. The response deliberately does not reveal which; inspect the server log's exception type. |
 | Login returns 429 | The login bucket; wait a minute, or raise `VAULT_LOGIN_RATE_LIMIT` |
 | `/register` returns 429 | The registration bucket; wait a minute, or raise `VAULT_REGISTRATION_RATE_LIMIT`. Re-registering repeatedly is itself unusual — a client registers once. |
 | A typo'd password needs restarting from the client | Deliberate: a submit redeems the nonce whether or not the password was right, so a wrong guess burns that authorization |
@@ -350,6 +410,35 @@ An operator password is chosen by a person, so the work factor is exactly the
 point, and it runs once per authorization rather than once per request. Vault
 ADR 0015 says explicitly not to carry the SHA-256 reasoning across to
 human-chosen passwords; this is where that matters.
+
+### The server tells you when `VAULT_PUBLIC_URL` goes stale
+
+`VAULT_PUBLIC_URL` is configuration rather than something derived per request,
+for three reasons: the OAuth routes are built at application assembly, before
+any request exists; deriving an issuer from the `Host` header would let a forged
+header point `token_endpoint` at somebody else's server; and its absence is the
+feature's off switch.
+
+What configuration cannot do is notice that it has gone stale — after a custom
+domain, a proxy, or a renamed app. A stale value publishes discovery documents
+pointing somewhere wrong, and the symptom surfaces at the *client* as "this
+server does not support OAuth", a long way from the cause.
+
+So the first OAuth request of each process compares the configured origin with
+the one the request arrived on and logs the result once:
+
+```
+INFO  vault oauth public url matches the host requests arrive on
+WARN  vault oauth public url does not match the host requests arrive on;
+      discovery metadata advertises https://… while requests arrive on https://…
+```
+
+The observed value is **only** ever logged. It is never used to build a URL —
+reading `Host` to write a log line is safe in a way that reading it to publish
+an issuer is not. On a warning, the configured value is still what clients are
+sent to, so the fix is to update `VAULT_PUBLIC_URL`, not to trust the header.
+
+A trailing slash is not drift: `main.py` strips it and the check agrees.
 
 ## Migration lineages
 
@@ -390,6 +479,13 @@ heroku pg:psql --app <app> -c   "SELECT name, installed_version FROM pg_availabl
 Vault migrations may enable the database-wide `vector` extension, but they
 never import Markdown, generate embeddings, or read the private
 knowledge-platform repository.
+
+Migration `0016_amendment_proposals` adds `content_revision`, the durable amendment workflow,
+and the `vault:propose` scope vocabulary. Proposal rows are adjudication history rather than
+disposable queue entries. Its downgrade therefore **refuses while any proposal row exists**;
+removing that history must be a separate, deliberate data decision, never an incidental
+rollback step. Production recovery remains a forward application release—do not downgrade
+0016 merely to run an older slug.
 
 ## Pre-deployment verification
 
@@ -476,6 +572,41 @@ SELECT contributed_by, count(*) FROM vault.vault_documents GROUP BY 1 ORDER BY 2
 11. **Revoke the import credential**, and any other write credential that has outlived its
     purpose.
 
+### Repairing reference ids after an earlier re-import
+
+Each service import mints new note ids. An import map proves that an upstream id and the
+minted service id name the same logical note; supplying maps from multiple generations lets
+the repair compose that evidence across a wipe and re-import.
+
+Run the repair against the current database without `--apply` first:
+
+```bash
+python -m scripts.remap_vault_reference_ids --map <current-import-map.json> --map <older-import-map.json>
+```
+
+Unlike `import_vault_wiki`, this dry run contacts the database: read the printed `database :`
+target and inspect every proposed `source_ids` and `related_ids` rewrite. References with no
+live target are preserved and reported. A class containing more than one live id is reported
+as ambiguous and is never guessed. Apply only after that report is understood:
+
+```bash
+python -m scripts.remap_vault_reference_ids --map <current-import-map.json> --map <older-import-map.json> --apply
+```
+
+The apply is idempotent; a second run should propose zero rewrites. Follow it with the wiki
+integrity check and a dry-run export.
+
+For future Stage-A wiki imports, pass the same maps to `import_vault_wiki`:
+
+```bash
+python -m scripts.import_vault_wiki --vault-root <vault> --map <current-import-map.json> --map <older-import-map.json> --apply
+```
+
+That importer resolves every `SourceIDs` value against live note rows before writing a page
+and refuses the entire import if any source is unresolved or ambiguous. Its no-`--apply` dry
+run still parses files only and contacts no database, so it cannot validate the maps or live
+ids.
+
 ### If the import fails partway
 
 **Do not re-wipe.** The importer is idempotent per `(principal, key)`, so re-running it
@@ -502,6 +633,59 @@ command as a single argument:
 ```bash
 heroku run --app <app> "python -m scripts.issue_vault_credential revoke --id <credential-id>"
 ```
+
+### `heroku pg:psql` is broken on this Windows install
+
+It shells out to a bundled `psql` through a path containing a space and fails
+before connecting:
+
+```
+'C:\Program' is not recognized as an internal or external command
+```
+
+Nothing to do with credentials or the database. Go around it with the project's
+own interpreter, which needs no `psql` at all:
+
+```powershell
+$env:DATABASE_URL = (heroku config:get DATABASE_URL --app <app>)
+.\.venv\Scripts\python.exe -c "import os, psycopg; u = os.environ['DATABASE_URL'].replace('postgres://','postgresql://',1); u += ('&' if '?' in u else '?') + 'sslmode=require'; c = psycopg.connect(u); print(c.execute('select version_num from vault.vault_alembic_version').fetchone())"
+Remove-Item Env:DATABASE_URL
+```
+
+This is also the *better* check for "what schema is live", because it resolves
+the URL exactly as the scripts do — see the next entry.
+
+### `alembic current` needs `-c alembic-vault.ini`, or it answers the wrong question
+
+There are two lineages. Without the flag you get the leaderboard one, which
+tops out at `0004_auth_identities` — a plausible-looking answer to a question
+you did not ask:
+
+```bash
+heroku run "python -m alembic -c alembic-vault.ini current" --app <app>
+```
+
+A vault revision reads `00NN_<name>`, currently `0017_oauth_entitlements`.
+If you see `0004_auth_identities`, you checked the leaderboard lineage.
+
+### Which database a script is about to touch
+
+Every script that writes, deletes, or exports now prints its target before
+acting:
+
+```
+database   : ec2-…-1.compute.amazonaws.com:5432/d7abc…
+```
+
+Read that line. `VaultSettings` resolves `VAULT_DATABASE_URL` first and falls
+back to `DATABASE_URL`, `load_environment` fills either from `.env` when the
+process has none, and `$env:` variables die with the terminal — so "which
+database am I talking to" has three possible answers and only this line reports
+which one won.
+
+A `--dry-run` or a missing `--apply` on `import_vault_wiki` **contacts no
+database at all**; it returns before an engine is built. A passing dry run
+therefore says nothing whatsoever about the target.
 
 ### PowerShell has no inline environment prefix
 
@@ -711,13 +895,22 @@ credential into the wrong database is silent.
 | --- | --- |
 | `vault:read` | Search, and fetch by id |
 | `vault:write` | Contribute a new note — **and nothing else** |
+| `vault:propose` | Submit an immutable, revision-bound full replacement or bounded body diff for review; does not edit the note |
 | `vault:update` | Replace an existing note's content |
 | `vault:delete` | Retire a note, **destroying it** (vault ADR 0019) |
-| `vault:review` | List, read, and decide near-duplicate review cases. **The only scope that serves `flagged` content**, so grant it narrowly |
-| `vault:compile`, `vault:export` | Recognised, granted by no route yet |
+| `vault:review` | List, read, and decide near-duplicate cases and amendment proposals. It applies accepted amendments and is **the only scope that serves `flagged` content**, so grant it narrowly |
+| `vault:compile` | Plan, write, and settle wiki compilation runs; operator-granted only |
+| `vault:export` | Recognised for the future export surface; currently granted by no route |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
 ADR 0020.
+
+`vault:propose` and `vault:review` are deliberately separate capability profiles. An ordinary
+agent may author inert proposals but cannot apply them. A reviewer should hold exactly
+`vault:read vault:review`: it can inspect and decide stored proposals but cannot compose a new
+change through `vault:propose`, directly replace through `vault:update`, or retire through
+`vault:delete`. Keep the per-call scope checks and the MCP tool-list filtering; neither replaces
+the other.
 
 **A credential issued before 2026-08-15 holds `vault:write` alone**, so its
 replace and retire calls now return `403`. Migration `0007_write_scope_split`
@@ -791,12 +984,23 @@ bucket. Exceeding one returns `429` with `Retry-After` in whole seconds.
 | `search` | 30/min | 10 |
 | `get_note` | 120/min | 30 |
 | `contribute` | 30/min | 20 |
+| `amendment_propose` | 30/min | 20 |
+| `amendment_list` | 60/min | 20 |
+| `amendment_read` | 60/min | 20 |
+| `amendment_decide` | 10/min | 5 |
 | `update` | 30/min | 20 |
 | `retire` | 10/min | 5 |
+| `review_list` | 60/min | 20 |
+| `review_read` | 60/min | 20 |
+| `review_decide` | 10/min | 5 |
+| `compile_plan` | 6/min | 3 |
+| `compile_write` | 30/min | 20 |
+| `compile_settle` | 10/min | 5 |
 | `snapshot` | 2/hour | 1 |
 
-`retire` is deliberately the tightest bucket: retirement is rare and
-irreversible, and a loop that deletes is worse than a loop that writes.
+`retire`, `review_decide`, and `amendment_decide` have tight decision buckets because they
+destroy, publish, or replace corpus content. `compile_plan` is tighter still in sustained rate
+because every abandoned plan leaves a running workflow row; page writes retain batch headroom.
 
 The **pre-auth guard** is IP-keyed and charged *before* the credential is looked
 up, because verifying a credential is itself a database round trip and the quota
@@ -861,10 +1065,10 @@ the job:
 
 | Who | Scopes | Why |
 | --- | ------ | --- |
-| An ordinary agent or person contributing notes | `vault:read vault:write` | Search, fetch, contribute. The common case |
+| An ordinary agent or person contributing notes | `vault:read vault:write vault:propose` | Search, fetch, contribute, and suggest consolidation without edit authority |
 | A read-only consumer | `vault:read` | Retrieval with no way to write |
 | A corpus import or backfill | `vault:read vault:write vault:update` | Replacement is a separate verb |
-| A reviewer adjudicating flagged notes | `vault:read vault:review` | **Serves `flagged` content**, the least-vetted text in the corpus |
+| A reviewer adjudicating flagged notes or amendments | `vault:read vault:review` | Reads untrusted proposal previews, applies accepted amendments, and **serves `flagged` content**; keep it separate from ordinary agent credentials |
 | Nobody, by default | `vault:delete` | Retirement destroys a note (ADR 0019). Grant per incident, revoke after |
 
 Withholding a scope is a **prompt-injection boundary, not tidiness**. The MCP
@@ -877,19 +1081,90 @@ issuing two looks like ceremony; that is exactly how `vault:write` came to mean
 ### 2. Mint the credential
 
 ```bash
-python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write
+python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose
 ```
 
-Against production, set `DATABASE_URL` explicitly for the command — issuing into
-the wrong database is silent. On a dyno it is already set:
+Against production, select the target database explicitly for the command —
+issuing into the wrong database is silent. On a dyno the deployment's
+`VAULT_DATABASE_URL`/`DATABASE_URL` is already set:
 
 ```bash
-heroku run --app <app> "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write"
+heroku config:get DATABASE_URL --app high-score-server
+```
+
+That command prints the current live database credential; capture it rather
+than displaying it when working in a recorded session. If the vault later uses
+a separate database, retrieve `VAULT_DATABASE_URL` instead.
+
+```bash
+heroku run --app high-score-server "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose"
 ```
 
 Quote the whole remote command. `heroku run` parses the line first and claims
 `-m` and `--scopes` for itself otherwise, reporting `Nonexistent flags` about
 flags that are perfectly valid for your script.
+
+Running on a one-off dyno is preferred for a new static credential: Heroku
+supplies the current database config directly, so no database password is copied
+to the operator's machine. Use a local checkout only when the command exists in
+the checkout but has not yet reached the deployed slug (for example, while
+exercising a newly added credential-management command).
+
+#### Running the credential tool locally against production
+
+Heroku manages the connection string and updates its config var when credentials
+change. It can also change during maintenance/recovery or database promotion, so
+do not preserve a production URL in `.env` or paste one from an earlier session.
+Fetch it immediately before the operation and keep it only in that shell.
+
+The vault prefers `VAULT_DATABASE_URL` when that variable is configured and
+otherwise falls back to `DATABASE_URL`. The following commands preserve that
+precedence. They capture the URL rather than printing it.
+
+PowerShell:
+
+```powershell
+$vaultDatabaseUrl = heroku config:get VAULT_DATABASE_URL --app high-score-server
+if ([string]::IsNullOrWhiteSpace($vaultDatabaseUrl)) {
+    $vaultDatabaseUrl = heroku config:get DATABASE_URL --app high-score-server
+}
+if ([string]::IsNullOrWhiteSpace($vaultDatabaseUrl)) {
+    throw 'Heroku returned no vault database URL.'
+}
+
+$env:VAULT_DATABASE_URL = $vaultDatabaseUrl.Trim()
+try {
+    .\.venv\Scripts\python.exe -m scripts.issue_vault_credential list
+    .\.venv\Scripts\python.exe -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose
+} finally {
+    Remove-Item Env:VAULT_DATABASE_URL -ErrorAction SilentlyContinue
+    $vaultDatabaseUrl = $null
+}
+```
+
+Bash/WSL:
+
+```bash
+vault_database_url="$(heroku config:get VAULT_DATABASE_URL --app high-score-server)"
+if [ -z "$vault_database_url" ]; then
+  vault_database_url="$(heroku config:get DATABASE_URL --app high-score-server)"
+fi
+if [ -z "$vault_database_url" ]; then
+  echo "Heroku returned no vault database URL." >&2
+  exit 1
+fi
+
+VAULT_DATABASE_URL="$vault_database_url" python -m scripts.issue_vault_credential list
+VAULT_DATABASE_URL="$vault_database_url" python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose
+unset vault_database_url
+```
+
+Replace the final `issue` command with `grant-oauth`, `revoke-oauth-scope`, or
+another credential subcommand as needed. Read the script's `database :` line
+before accepting its result; it intentionally prints only the target
+host/database description, never the password. Do not run `heroku config:get`
+uncaptured in a recorded agent session, because its output is the live database
+credential.
 
 **Name it per person or per machine, never per team.** `contributed_by` is
 derived from the principal and never from the request body, so the name becomes
@@ -952,7 +1227,97 @@ a file the agent writes, and never printed.
 
 Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
 `POST /api/v1/vault/contributions`, `PUT /api/v1/vault/notes/{id}`, and
-`DELETE /api/v1/vault/notes/{id}`, all taking `Authorization: Bearer <token>`.
+`DELETE /api/v1/vault/notes/{id}`, plus the amendment workflow below. All take
+`Authorization: Bearer <token>`.
+
+| Method and path | Scope | Purpose |
+| --- | --- | --- |
+| `POST /api/v1/vault/amendment-proposals` | `vault:propose` | Store an inert, revision-bound proposal |
+| `GET /api/v1/vault/amendment-proposals` | `vault:review` | List pending proposals without their change bodies |
+| `GET /api/v1/vault/amendment-proposals/{proposal_id}` | `vault:review` | Read the stored change, current target, and materialized preview |
+| `POST /api/v1/vault/amendment-proposals/{proposal_id}/decision` | `vault:review` | Accept or reject the exact stored change |
+
+An amendment request carries a discriminated `change`. Use
+`{"kind":"body_diff","body_diff":"..."}` for a compact unified diff against the body.
+Hunks may add, edit, or remove lines but must anchor to exact existing text. The service refuses
+patches over 50,000 characters, 20 hunks, 200 changed lines, or the per-note 25%/20-line budget;
+use `{"kind":"replacement","replacement":{...all content fields...}}` for metadata or
+larger changes. Both forms require the note's current `content_revision` as `base_revision`; a
+mismatch returns 409 at proposal time and settles stale at review time.
+
+`replacement` uses the same complete caller-controlled content shape as `PUT /notes/{id}`;
+omitted optional fields are cleared rather than inherited:
+
+```json
+{
+  "kind": "replacement",
+  "replacement": {
+    "title": "Complete title",
+    "body": "Complete body",
+    "summary": null,
+    "tags": [],
+    "aliases": [],
+    "facets": {},
+    "related_ids": [],
+    "source_ids": [],
+    "source_url": null
+  }
+}
+```
+
+Reading a pending proposal returns `preview`: the complete resulting body, canonical unified
+diff, and an explicit list of removed lines with their original line numbers. The preview is
+null when the target is missing or no longer at the base revision. Accepting a proposal whose
+preview reports removals requires `"acknowledge_removals": true`; the settled record preserves
+that acknowledgement in `proposal.removals_acknowledged`.
+
+The complete REST flow, with secrets omitted, is:
+
+```http
+POST /api/v1/vault/amendment-proposals
+Content-Type: application/json
+
+{
+  "target_note_id": "note-id",
+  "base_revision": 3,
+  "change": {
+    "kind": "body_diff",
+    "body_diff": "@@ -4,2 +4,2 @@\n-old guidance\n+corrected guidance\n context"
+  },
+  "rationale": "The old command is no longer valid."
+}
+```
+
+Submission returns a pending proposal id. The reviewer lists the queue, then reads only the
+selected proposal:
+
+```http
+GET /api/v1/vault/amendment-proposals/{proposal_id}
+```
+
+Its `preview` contains `resulting_body`, `unified_diff`, `added_line_count`, `removed_lines`
+with original line numbers, `removed_line_count`, `hunk_count`, and
+`requires_removal_acknowledgement`. `preview` is null if the target is missing or no longer at
+`base_revision`; the service never previews a silent rebase.
+
+After reviewing the complete result and removal summary:
+
+```http
+POST /api/v1/vault/amendment-proposals/{proposal_id}/decision
+Content-Type: application/json
+
+{
+  "decision": "accepted",
+  "decision_note": "Verified against the current tool behavior.",
+  "acknowledge_removals": true
+}
+```
+
+Omit `acknowledge_removals` when rejecting or when the preview reports no removals. Attempting
+to accept a removal without it returns 409 and leaves the proposal pending. If the target
+changes after preview, acceptance returns a settled `stale` outcome and writes no corpus
+content. A successful acceptance reports the new `content_revision` and persists
+`removals_acknowledged`; rejection and staleness do not require an embedding provider.
 
 ### 5. Verify
 
@@ -982,8 +1347,10 @@ claude mcp remove vault
 ```
 
 Then check the tools: the ones that appear should match the scopes granted — a
-`vault:read vault:write` credential shows `vault_search`, `vault_get_note`, and
-`vault_contribute`, and nothing else. **A server added mid-session does not
+`vault:read vault:write vault:propose` credential shows `vault_search`, `vault_get_note`,
+`vault_contribute`, `vault_propose_note_amendment`, and `vault_propose_note_body_diff`, and no
+privileged tools. The body-diff tool handles focused additions, edits, and removals; use the
+full amendment tool for metadata or large changes. **A server added mid-session does not
 appear in that session**; the tool set is fixed at startup, so restart the agent
 before concluding the registration failed.
 
@@ -1002,39 +1369,75 @@ which is how a registration that silently failed becomes visible.
 Rotation is revoke-then-issue; there is no re-key, because the secret was never
 stored.
 
-#### Widening and narrowing without rotating
+#### Changing static credentials without rotating
 
 ```bash
 python -m scripts.issue_vault_credential grant --id <credential-id> --scopes vault:update
 python -m scripts.issue_vault_credential revoke-scope --id <credential-id> --scopes vault:update
 ```
 
-Both change what an existing credential may do and leave its secret alone, so
+These commands change what a static credential may do and leave its secret alone, so
 nothing has to be redistributed — that is the difference from revoke-then-issue,
 and the reason to reach for these instead.
 
 Both print the scope set before and after. Both are additive/subtractive rather
 than a replacement: `grant` never removes a scope the operator did not name, and
 naming a scope already held (or already absent) reports `No change` and writes
-nothing.
+nothing. They deliberately refuse OAuth-minted credential ids: changing one
+rotating row would disappear at refresh while looking permanent to the operator.
 
-**This is the only supported way an OAuth client receives an above-baseline
-scope.** Vault ADR 0024 caps what a client may *request* at `vault:read` and
-`vault:write`, so `vault:update`, `vault:delete` and `vault:review` are
-unreachable through the authorization flow by construction. An operator grants
-them deliberately, to one named credential, with this command. Before it existed
-the documented method was a hand-written `UPDATE` on the `scopes` column, which
-is not something that should become routine against production.
+#### Persistently entitling one OAuth authorization
+
+OAuth caps what a client may request at `vault:read`, `vault:write`, and
+`vault:propose`. Above-baseline authority is granted by an operator to one
+refresh family, never requested by the client:
+
+```bash
+python -m scripts.issue_vault_credential grant-oauth --id <credential-id> --scopes vault:update
+python -m scripts.issue_vault_credential revoke-oauth-scope --id <credential-id> --scopes vault:update
+```
+
+The browser authorization mints the OAuth access credential; do not use the
+static `issue` subcommand for it. When running either entitlement command from a
+local checkout against production, first follow the
+[just-in-time database procedure](#running-the-credential-tool-locally-against-production)
+above. For the current compiler/exporter exercise, use separate OAuth families
+where practical and grant `vault:compile` or `vault:export` only to the family
+performing that role.
+
+The id may name the current credential or an older rotated credential in the
+same family. It is a lookup handle, not the persistence target. The command
+prints the client id, grant family, and entitlement set before and after;
+updates the current access credential and refresh token immediately; and
+records an operator audit event. Every later refresh recomputes the credential
+from the consented baseline plus the current entitlements.
+
+This is intentionally narrower than granting a client registration. A new
+browser authorization creates a new family and inherits no privileged scopes,
+even when it uses the same registration. Revocation of an entitlement narrows
+the live token and future rotations but leaves the OAuth session active.
+
+`vault:review` has an additional separation-of-duties guard: it can be granted
+only to a separately authorized family holding `vault:read` alone. The final
+set is exactly `vault:read vault:review`. Do not widen an ordinary
+read/write/propose agent into a reviewer. Likewise, prefer distinct families
+for importer (`read`, `write`, `update`), compiler (`read`, `compile`), and any
+future exporter (`read`, `export`) rather than accumulating roles on one agent.
+
+Baseline scopes are not legal entitlements, and OAuth cannot request
+`vault:update`, `vault:delete`, `vault:review`, `vault:compile`, or
+`vault:export`. Before these commands existed, widening meant a hand-written
+database update; that is no longer a supported production procedure.
 
 Three refusals worth knowing about:
 
-- **A revoked credential is refused, not widened.** Scopes on a revoked row grant
+- **A revoked static credential is refused, not widened.** Scopes on a revoked row grant
   nothing, and an operator reaching for `grant` there is plausibly hoping it will
   un-revoke the credential. It will not, so the command says so instead of
   succeeding silently. Issue a new credential.
-- **An expired credential is refused** for the same reason. A credential whose
-  expiry is still in the future is fine — every OAuth-minted credential has one,
-  and those are exactly the rows this command exists for.
+- **An expired static credential is refused** for the same reason. OAuth
+  entitlement commands instead require a live refresh token in the family; a
+  dead family must reauthorize and receive a new, deliberately granted role.
 - **An unknown scope name is refused before any write**, with the list of real
   ones. The database CHECK would catch it too, but as an integrity error naming a
   constraint.
@@ -1056,6 +1459,8 @@ revoke needs to know they have not.
 | `429` | Quota, per principal per operation. Buckets are per process, so the real ceiling is the limit times the worker count |
 | `503` on a write | No embedding provider, so the dedup gate cannot run. The write path refuses rather than inserting un-deduplicated content |
 | `409` on a contribution | An idempotency key was reused for different content. Change one or the other; do not loop |
+| A client reports the server does not support OAuth | Discovery is not answering on the URL it was configured with. Check both well-known forms — RFC 9728 derives the metadata path from the resource path, so `…/mcp` and `…/mcp/` are two different documents — and check the logs for the `VAULT_PUBLIC_URL` drift warning |
+| `column … does not exist` from a script | The target database is behind the code. Confirm the vault lineage with `-c alembic-vault.ini`, and read the `database :` line the script prints — a stale `$env:DATABASE_URL`, or none at all, silently falls back to `.env` |
 
 A `flagged` result is **not** an error. It is a settled `200` outcome meaning the
 note was written for review, and retrying it creates a second note that flags
