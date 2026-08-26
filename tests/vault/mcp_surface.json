@@ -136,8 +136,14 @@
       "proposal_id": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Decide an amendment",
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_decide_review_case",
@@ -165,8 +171,14 @@
       "review_case_id": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Decide a review case",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_get_note",
@@ -182,8 +194,14 @@
       "note_id": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Fetch a note",
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_list_amendment_proposals",
@@ -197,8 +215,14 @@
       "limit": "integer"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "List amendment proposals",
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_list_review_cases",
@@ -212,8 +236,14 @@
       "limit": "integer"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "List review cases",
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_propose_note_amendment",
@@ -322,8 +352,14 @@
       "title": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Propose a replacement",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_propose_note_body_diff",
@@ -348,8 +384,14 @@
       "rationale": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Propose a body diff",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_read_amendment_proposal",
@@ -365,8 +407,14 @@
       "proposal_id": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Read an amendment proposal",
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_read_review_case",
@@ -382,8 +430,14 @@
       "review_case_id": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Read a review case",
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_retire_note",
@@ -399,8 +453,14 @@
       "note_id": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Retire a note",
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_search",
@@ -450,8 +510,14 @@
       ]
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Set promotion status",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_update_note",
@@ -554,7 +620,13 @@
       "title": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Replace a note",
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
   }
 ]

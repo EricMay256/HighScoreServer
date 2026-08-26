@@ -14,20 +14,23 @@ until nobody read the diff. What is pinned is the part a client binds to:
 which tools exist, what they require, what they accept, whether they declare
 structured output, and how they are annotated.
 
-**On output schemas.** Every tool here currently reports `object`, and none of
-that is deliberate design -- it falls out of `-> dict[str, Any]`, from which
-`func_metadata` derives a permissive `{"type": "object",
-"additionalProperties": true}`. That is a real declared schema with no
-information in it: it makes the SDK emit `structuredContent` beside the text
-block (see `test_mcp_budget`) while promising a client nothing about what is
-inside. Replacing those annotations with typed models is what turns the
-declaration into a contract, and this snapshot is how that change is reviewed.
+**On output schemas.** Every tool returns a Pydantic model, so every declared
+schema describes its response. That was not free: a `-> dict[str, Any]`
+annotation also produces a schema, but a permissive `{"type": "object",
+"additionalProperties": true}` one -- enough to make the SDK emit
+`structuredContent` beside the text block (see `test_mcp_budget`) while
+promising a client nothing about what is inside. All fourteen were that shape
+until 2026-08-26. `test_no_tool_declares_a_permissive_output_schema` keeps
+them from sliding back, because the slide is silent: the schema stays valid
+and simply stops saying anything.
 
-**On annotations.** All fourteen report `None`. `ToolAnnotations` is where a
-server says whether a tool is read-only, destructive or idempotent, and a
-client may use those hints to decide what to call without confirmation. A
-surface that retires notes and adjudicates review cases should not leave that
-field empty, and this snapshot records that it currently does.
+**On annotations.** Every tool carries `ToolAnnotations`, and they are claims
+a client may act on -- `readOnlyHint` to decide what to run without asking,
+`destructiveHint` to decide what to confirm. They are a hint layer rather than
+a security boundary (that is scope-filtered `list_tools` plus the per-tool
+check, ADR 0021), but a hint that flatters a tool invites a client to skip a
+confirmation the operator wanted. `build_vault_mcp_server`'s docstring records
+the two judgement calls.
 """
 
 import json
@@ -140,6 +143,44 @@ def test_every_registered_tool_has_a_declared_scope() -> None:
     assert registered == set(_TOOL_SCOPES), (
         "every registered tool needs an entry in _TOOL_SCOPES, and every "
         "entry needs a registered tool"
+    )
+
+
+def test_no_tool_declares_a_permissive_output_schema() -> None:
+    """A schema that permits any object is a schema that says nothing.
+
+    `-> dict[str, Any]` produces exactly that, and it is the natural thing to
+    write when adding a tool -- which is why this is a test rather than a
+    convention. It is not caught by anything else: the declaration is valid,
+    the SDK is happy, and clients simply get no contract.
+    """
+
+    permissive = [
+        entry["name"]
+        for entry in current_surface()
+        if entry["output_schema_is_permissive"]
+    ]
+
+    assert permissive == [], (
+        "these tools return `dict[str, Any]` or similar; give them a Pydantic "
+        f"return type so the declared schema describes the response: {permissive}"
+    )
+
+
+def test_every_tool_declares_annotations() -> None:
+    """Absent annotations are not neutral -- they withhold a safety signal.
+
+    A client deciding what to run without confirmation reads `readOnlyHint`,
+    and a surface that can retire notes and adjudicate review cases should
+    answer that question rather than leave it null.
+    """
+
+    unannotated = [
+        entry["name"] for entry in current_surface() if entry["annotations"] is None
+    ]
+
+    assert unannotated == [], (
+        f"every tool needs ToolAnnotations; missing on: {unannotated}"
     )
 
 

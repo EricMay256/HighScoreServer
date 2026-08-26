@@ -466,6 +466,37 @@ def contribution_response(
     )
 
 
+class VaultRetirementResponse(BaseModel):
+    """The settled outcome of retiring one note.
+
+    `retired` is always true: the tool raises rather than returning false, so
+    a caller that got a response got a retirement. It is present because a
+    bare `{note_id}` reads as a lookup rather than an outcome.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    retired: bool = True
+
+
+class VaultPromotionResponse(BaseModel):
+    """Where a note ended up after its promotion status changed.
+
+    `vault_path` is returned because changing promotion can move the document
+    between the export's engine-managed folders (ADR 0023), and `moved` says
+    whether it did -- setting a status to the value it already held is a
+    no-op, not a failure.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    promotion_status: str | None
+    vault_path: str
+    moved: bool
+
+
 class VaultDocumentResponse(BaseModel):
     """Deliberate public subset of a persisted vault document."""
 
