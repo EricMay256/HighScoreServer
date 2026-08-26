@@ -114,9 +114,14 @@ Learned this session, and each one cost a round trip:
   wikilink-to-id bridge inherits that, and it should be settled *before* the first edge points at
   a human note. The available fix is the one Stage A made: assign an `ID` at first import and
   write it into the file.
-- **The exporter's `SeeAlso` rendering is designed and unbuilt** (ADR 0025). It is independent of
-  everything else and needs no decision — an exported `RelatedIDs` is currently a uuid Obsidian
-  cannot follow, so the graph is invisible in the tree a human opens the vault to browse.
+- ~~**The exporter's `SeeAlso` rendering is designed and unbuilt** (ADR 0025).~~ **Built
+  2026-08-26**, along with the import half it turned out to depend on: `import_vault_wiki` had
+  been storing `[[Title]]` strings in `related_ids`, so the export had nothing but names to
+  render. `app/vault/wikilinks.py` is the translation both boundaries use,
+  `scripts/resolve_vault_wikilinks.py` repairs the twenty-one rows already written that way, and
+  ADR 0025 carries a 2026-08-26 amendment, and the shape question it raised is settled by
+  ADR 0030: the write path refuses a value carrying whitespace or a bracket, and still never
+  checks existence.
 
 ---
 

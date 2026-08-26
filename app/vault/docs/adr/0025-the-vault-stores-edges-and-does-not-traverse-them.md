@@ -203,3 +203,88 @@ Whether a typed reverse query is ever wanted — "what depends on this" rather t
 mentions this" — which the import deliberately flattens into `related_ids` while preserving the
 distinction in `frontmatter`. Answering it means reading JSONB rather than an array, and it
 should wait for a caller that needs the type rather than the edge.
+
+## Amendment, 2026-08-26 — the two boundaries are built, and a Wiki Page's `Related` is one of them
+
+The decision above describes both translations in the present tense. Neither
+existed. What the code did instead was worse than not translating, because it
+round-tripped: `scripts/import_vault_wiki` passed each page's `Related`
+frontmatter into `related_ids` verbatim, and `export._wiki_frontmatter` wrote
+`related_ids` back out verbatim, so twenty-one `[[Title]]` strings sat in a
+column that holds ids and looked correct from either end. Nothing objected —
+`related_ids` is deliberately not existence-checked, `remap_vault_reference_ids`
+deliberately excludes non-id values from its dangling-reference report, and the
+exported file matched the imported one byte for byte.
+
+`app/vault/wikilinks.py` is now the one translation both boundaries use.
+`scripts/resolve_vault_wikilinks.py` repairs rows already written the wrong way,
+dry-run first like its sibling.
+
+### `Related` on a Wiki Page is a wikilink key, so it gets the `SeeAlso` treatment under its own name
+
+The decision above names `SeeAlso` and stops, because it was written from the
+Agent Note side. The governance schema settles the wiki side the same way:
+`global.yml` lists `Related` under `known_extra_keys` with `SeeAlso` as its
+canonical equivalent, `SeeAlso` is a universal `list_wikilink`, and `Related` is
+conspicuously **absent from `engine_owned_properties`** — where `RelatedIDs`,
+`SourceIDs`, `CompileRunID` and the rest of the plumbing all appear. So a page's
+`Related` was never an id list. `types.yml` recommends it for the `Wiki Page`
+type, so the export keeps the name and changes the value: an Agent Note carries
+`RelatedIDs` **and** `SeeAlso`, a Wiki Page carries `Related`, and all three are
+projections of the same id column.
+
+### Links are `[[slug]]`, and the title form never worked
+
+`vault_path`'s leaf is the title's slug (ADR 0022's amendment) and Obsidian
+resolves `[[x]]` against a file name, so `[[Operating the Agent Knowledge Vault]]`
+pointed at a file that does not exist — the page is
+`operating-the-agent-knowledge-vault.md`. Every one of the twenty-one stored
+links was an unresolved link in the tree as well as a non-id in the column. The
+repair therefore changes those files once, from the title form to the slug form,
+and that diff is the links starting to work rather than the export churning.
+
+### The drop is only lossless if something else holds the name
+
+The rule above — an unresolvable wikilink is dropped rather than stored — rests
+on "nothing is lost, because the unresolved link is still in `frontmatter`
+exactly as written". That premise was false for exactly the rows that needed it:
+`import_vault_wiki` wrote no `frontmatter` at all. The import now preserves the
+original `Related` list there, and the repair script backfills it before
+rewriting a column, so the premise is made true rather than assumed. `Related`
+and `RelatedIDs` are both assigned keys in the exporter, so the preserved copy is
+evidence in the database and is never re-emitted beside the rendered one.
+
+### Ambiguity is reported, never resolved
+
+A name is not a key. Two documents may legitimately share a title — the dedup
+gate scores meaning, not titles — so a link naming more than one document is
+handed back rather than pointed at whichever row sorted first, which would read
+as a working citation while naming the wrong note. The import refuses on
+ambiguity, matching what it already does with an ambiguous `SourceIDs`; the
+repair script leaves the value alone, reports it, and fixes everything else.
+
+### What this leaves open
+
+**Settled 2026-08-26 by ADR 0030:** the write path now refuses a value carrying
+whitespace or a bracket -- a name rather than an id -- while still never checking
+existence. The question as it stood is kept below, because the distinction it
+draws is the one that had been missing.
+
+Whether the **write path** should check that a `related_ids` value is *shaped*
+like an id, which is a different question from whether it exists and is not
+answered by this ADR either way. Shape and existence are separate: the reason
+edges carry no foreign key is that a contribution may reference a note that is
+archived, flagged, or not yet written, and none of that licenses storing a value
+that is not an id at all. Deciding it needs its own ADR, because a shape rule is
+a wire-contract change on a shipped API — and because the pre-Alembic corpus
+proves the id shape has not been uniform across generations.
+
+### The repair runs before the next export, and the exporter says so
+
+Because the export omits an unresolvable value, running it against un-repaired
+rows empties the `Related` block of all thirteen pages rather than leaving it
+wrong. That is the correct rendering of a column holding names — the fix is the
+ordering, not a tolerance for names in the exporter, which would re-legitimise
+exactly the data this amendment removes. `export._warnings` names every row
+still holding a wikilink, so an operator who reaches for the exporter first gets
+a per-file warning in the report instead of a silent regression in their vault.

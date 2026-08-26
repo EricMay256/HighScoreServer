@@ -218,9 +218,30 @@ be edited when it does.
   ADR 0021's defence applied through `list_tools`. **ADR 0026 reversed the destination this
   invariant used to name:** there is no separate admin MCP, and the REST routes stay. See "The
   MCP adapter" below for the operating rule that carries the rest of it.
-- **`related_ids` / `source_ids` are opaque and unvalidated on purpose.** A contribution may
-  reference a note that is archived, flagged, or not yet written; a foreign key would fail the
-  write for the reason ADR 0002 already rejected for audit events.
+- **`related_ids` / `source_ids` carry no existence check on purpose — and that is not the same
+  as no check.** A contribution may reference a note that is archived, flagged, or not yet
+  written; a foreign key would fail the write for the reason ADR 0002 already rejected for audit
+  events. ADR 0030 draws the line ADR 0025 does not: a value containing whitespace or a bracket
+  is a *name*, not an id that points at nothing, and is refused at the request boundary
+  (`wikilinks.looks_like_a_name`, one statement of the rule, used by `api_models.validate_ids`
+  and reported by `export._warnings`). Deliberately weaker than the real id format — a validator
+  spelling `^[0-9a-f]{32}$` would be correct today and would pin the id format into a shipped
+  wire contract. The accepted residual is a bare slug, which passes. Do not "tighten" this into
+  a format rule without an ADR, and do not move it into a DDL CHECK: the constraint could not
+  have been applied while the bad rows existed, and the repair script has to be able to read
+  what it fixes.
+- **They hold ids, and `wikilinks.py` is where a name becomes one.** ADR 0025: inside the
+  database every edge is an id, translated only at the import and export boundaries — a human
+  writes `[[Some Note]]` and never sees a uuid. Unvalidated does not mean untyped, and the
+  2026-08-26 amendment exists because the two were confused: `import_vault_wiki` stored twenty-one
+  `[[Title]]` strings in `related_ids` and the exporter wrote them back out, so the bad data
+  survived a round trip looking correct. A name resolves by title, alias, or slug; an ambiguous
+  one is reported and never guessed; an unresolvable one is dropped **after** the original list is
+  preserved in `frontmatter`, because that is the premise the ADR's drop rule rests on. On the way
+  out, ids render as `[[slug]]` — `SeeAlso` beside `RelatedIDs` on an Agent Note, `Related` on a
+  Wiki Page (`global.yml` makes both `list_wikilink`, and neither is engine-owned) — and an id the
+  run cannot resolve is omitted, because a broken wikilink is worse than an absent one.
+  `scripts/resolve_vault_wikilinks.py` repairs rows written before that was true.
 - **The embedding text is title + aliases + tags + summary + body, and nothing else.** Timestamps
   and identifiers churn without changing meaning; `Type`/`Status` are excluded because they are
   columns (`doc_type`, `doc_status`) and filtering exactly beats matching fuzzily. `frontmatter`

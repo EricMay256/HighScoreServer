@@ -68,6 +68,13 @@ canonical renderer emits scalars and block sequences only, so a nested mapping
 would need a second serializer and a second thing to keep byte-stable. See
 ``render_facets``.
 
+**Edges are ids in the database and wikilinks in the file.** ADR 0025 makes this
+module one of the two boundaries where the two vocabularies meet: the run builds
+one id-to-slug index before writing anything, a note's ``related_ids`` render as
+``SeeAlso: ["[[slug]]"]`` alongside the engine-owned ``RelatedIDs``, and a wiki
+page's render as its ``Related``. An id the run cannot resolve is omitted, never
+rendered -- a broken wikilink is worse than an absent one. See ``wikilinks.py``.
+
 **``SchemaVersion`` describes the file this module writes, so it comes from the
 constant and not from the row.** ``constants.NOTE_SCHEMA_VERSION`` is the
 frontmatter shape the projector emits, and the governance validator pins it --
@@ -90,6 +97,7 @@ from .constants import NOTE_SCHEMA_VERSION, WIKI_SCHEMA_VERSION
 from .domain import DocumentKind, VaultDocument
 from .repository import VaultDocumentRepository
 from .service import VaultTransactionService
+from .wikilinks import LinkIndex, looks_like_a_name, render_edges
 
 
 # Mirrors the `Agent/` rules in the private folders.yml that carry
@@ -132,11 +140,13 @@ CORPUS_OWNED_PATH_PREFIXES: tuple[str, ...] = (
     "Agent/wiki/",
 )
 
-# Ported from vault_contrib.vault_frontmatter.SCHEMA_ORDER, with four keys the
+# Ported from vault_contrib.vault_frontmatter.SCHEMA_ORDER, with five keys the
 # Stage-A note model has no field for and this one does: `aliases` and `Facets`,
 # universal properties the Metadata Standard lists directly after `tags`;
-# `Summary`, placed after `Title` to match the wiki order below; and
-# `SourceIDs`, which global.yml lists as engine-owned plumbing. All four are
+# `SeeAlso`, a universal `list_wikilink` the standard places after them and
+# before `Title`, carrying `related_ids` in a form Obsidian can follow (ADR
+# 0025); `Summary`, placed after `Title` to match the wiki order below; and
+# `SourceIDs`, which global.yml lists as engine-owned plumbing. All five are
 # omitted when empty, so an ordinary note renders in exactly Stage A's shape.
 NOTE_KEY_ORDER: tuple[str, ...] = (
     "Type",
@@ -146,6 +156,7 @@ NOTE_KEY_ORDER: tuple[str, ...] = (
     "tags",
     "aliases",
     "Facets",
+    "SeeAlso",
     "Title",
     "Summary",
     "ID",
@@ -180,7 +191,7 @@ WIKI_KEY_ORDER: tuple[str, ...] = (
 # Keys rendered as YAML block sequences even when empty, so a list-typed
 # property never renders as a scalar and never disappears.
 LIST_KEYS: frozenset[str] = frozenset(
-    {"tags", "aliases", "Facets", "RelatedIDs", "SourceIDs", "Related"}
+    {"tags", "aliases", "Facets", "SeeAlso", "RelatedIDs", "SourceIDs", "Related"}
 )
 
 _RESERVED = {"true", "false", "yes", "no", "on", "off", "null", "none", "~", ""}
@@ -395,8 +406,21 @@ def _project_origin(
     }
 
 
-def _note_frontmatter(document: VaultDocument) -> dict[str, Any]:
+def _note_frontmatter(document: VaultDocument, links: LinkIndex) -> dict[str, Any]:
     metadata = _common_frontmatter(document)
+    see_also = render_edges(document.related_ids, links)
+    if see_also:
+        # Alongside `RelatedIDs`, never instead of it, and that is not
+        # duplication: the Metadata Standard makes `SeeAlso` a universal
+        # `list_wikilink` for readers while `RelatedIDs` is Agent Note plumbing
+        # for the engine (global.yml's `engine_owned_properties`). Without it an
+        # exported relation is a uuid Obsidian cannot follow, so the graph a
+        # human opens the vault to browse is invisible in both directions.
+        #
+        # Omitted rather than rendered `[]` when nothing resolves, so a corpus
+        # whose notes carry no edges -- which is the corpus today -- keeps
+        # producing byte-identical files. See ADR 0025.
+        metadata["SeeAlso"] = see_also
     metadata.update(
         {
             "ID": document.id,
@@ -424,7 +448,7 @@ def _note_frontmatter(document: VaultDocument) -> dict[str, Any]:
     return metadata
 
 
-def _wiki_frontmatter(document: VaultDocument) -> dict[str, Any]:
+def _wiki_frontmatter(document: VaultDocument, links: LinkIndex) -> dict[str, Any]:
     metadata = _common_frontmatter(document)
     metadata.update(
         {
@@ -441,7 +465,19 @@ def _wiki_frontmatter(document: VaultDocument) -> dict[str, Any]:
                 else None
             ),
             "SchemaVersion": WIKI_SCHEMA_VERSION,
-            "Related": list(document.related_ids),
+            # A Wiki Page's `Related` is a wikilink list, not an id list:
+            # global.yml carries it as a de-facto key whose canonical
+            # equivalent is `SeeAlso`, itself a universal `list_wikilink`, and
+            # it is deliberately absent from `engine_owned_properties`. So the
+            # translation `SeeAlso` performs for a note is the same one this
+            # key needs, under the name the Wiki Page type already recommends.
+            #
+            # Rendered from `related_ids` rather than projected verbatim. Until
+            # 2026-08-26 this column held the Stage-A `Related` strings that
+            # `import_vault_wiki` carried through unresolved, so writing it out
+            # unchanged looked correct and was only ever echoing bad data back.
+            # See ADR 0025's 2026-08-26 amendment.
+            "Related": render_edges(document.related_ids, links),
         }
     )
     # An imported page carries the dates it was really written on. Without
@@ -469,17 +505,47 @@ def _warnings(document: VaultDocument) -> tuple[str, ...]:
         warnings.append("doc_type is NULL, so the note carries no Type")
     if not document.doc_status:
         warnings.append("doc_status is NULL, so the note carries no Status")
+    stored_links = [
+        value for value in document.related_ids if looks_like_a_name(value)
+    ]
+    if stored_links:
+        # Named rather than silently absent, because the failure mode here is a
+        # regression in the human's tree: a name in `related_ids` is not an id,
+        # so it resolves to nothing and is omitted, which empties a
+        # `Related`/`SeeAlso` block that used to have entries. The ordering is
+        # the whole point -- repair the rows, then export -- and an operator who
+        # does it the other way round should be told, not left to notice.
+        #
+        # The write path refuses these since ADR 0030, so a row reaching here
+        # predates that or arrived through a script. The check stays: this is
+        # the layer that can see a row the API never validated.
+        warnings.append(
+            f"related_ids holds {len(stored_links)} name(s) rather than ids, so "
+            "they are not projected; run scripts/resolve_vault_wikilinks.py first"
+        )
     return tuple(warnings)
 
 
-def render_document(document: VaultDocument) -> RenderedDocument:
-    """Render one row as the markdown note it projects to."""
+def render_document(
+    document: VaultDocument,
+    links: LinkIndex | None = None,
+) -> RenderedDocument:
+    """Render one row as the markdown note it projects to.
 
+    ``links`` is the run's id-to-slug index, which is what turns an edge into a
+    link a reader can follow. Omitting it is not an error and does not fail: it
+    means *nothing resolves in this run*, so every wikilink key renders empty or
+    absent, exactly as ADR 0025 requires of an id the export cannot resolve. The
+    export loop always passes one, built from the same consistent snapshot it
+    writes from -- pass it here too whenever the answer matters.
+    """
+
+    links = links if links is not None else LinkIndex(())
     if document.kind is DocumentKind.WIKI:
-        metadata = _wiki_frontmatter(document)
+        metadata = _wiki_frontmatter(document, links)
         order: Sequence[str] = WIKI_KEY_ORDER
     else:
-        metadata = _note_frontmatter(document)
+        metadata = _note_frontmatter(document, links)
         order = NOTE_KEY_ORDER
 
     # Frontmatter the schema does not model, kept so the projection can re-emit
@@ -692,7 +758,8 @@ class VaultExportService:
         """
 
         documents = await self.documents()
-        return tuple(render_document(document) for document in documents)
+        links = LinkIndex.from_documents(documents)
+        return tuple(render_document(document, links) for document in documents)
 
     async def documents(self) -> tuple[VaultDocument, ...]:
         """Every exportable row, ordered by ``vault_path``.
@@ -751,7 +818,11 @@ class VaultExportService:
 
         report = ExportReport()
         documents = await self.documents()
-        rendered = [render_document(document) for document in documents]
+        # Every id-to-slug pair for the run, held before anything is written,
+        # so "does this id resolve" has one answer for the whole run rather
+        # than a different one per file. ADR 0025.
+        links = LinkIndex.from_documents(documents)
+        rendered = [render_document(document, links) for document in documents]
         # The index is generated rather than stored, so it joins the write set
         # here. It must also join `expected` below, or the prune sweep would
         # treat the file it just wrote as an orphan no row accounts for --

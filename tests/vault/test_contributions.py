@@ -1872,3 +1872,76 @@ def test_delete_scope_alone_does_not_grant_contribution(
         _cleanup()
 
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("related_ids", "[[Operating the Agent Knowledge Vault]]"),
+        ("related_ids", "Operating the Agent Knowledge Vault"),
+        ("source_ids", "[[Some Note]]"),
+    ],
+)
+def test_an_edge_naming_a_note_instead_of_identifying_one_is_refused(
+    client: TestClient,
+    write_token: str,
+    provider: StubEmbeddingProvider,
+    field: str,
+    value: str,
+) -> None:
+    """ADR 0030. Shape, and still never existence.
+
+    Twenty-one wikilinks reached production through this field because nothing
+    on the write path distinguished "an id that points at nothing", which is
+    allowed, from "not an id", which is not. The 422 is the whole point: the
+    caller is told, rather than the value being stored and found by whoever next
+    runs the exporter.
+    """
+
+    response = client.post(
+        "/api/v1/vault/contributions",
+        json={
+            "title": "A note with a named edge",
+            "body": "The edge below is a title, not an id.",
+            field: [value],
+            "idempotency_key": f"named-edge-{uuid4().hex}",
+        },
+        headers={"Authorization": f"Bearer {write_token}"},
+    )
+
+    assert response.status_code == 422
+    assert "wikilink" in response.text or "titles" in response.text
+
+
+def test_an_id_that_points_at_nothing_is_still_accepted(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The other half of ADR 0030, and the one it must not break.
+
+    ADR 0025 permits an edge naming a note that is archived, flagged, retired,
+    or not yet written. Shape-checking must not become existence-checking by
+    accident.
+    """
+
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions",
+            json={
+                "title": "A note citing a note nobody wrote",
+                "body": "The edge below is a well-formed id that resolves to nothing.",
+                "related_ids": ["ffffffffffffffffffffffffffffffff"],
+                "idempotency_key": f"dangling-{uuid4().hex}",
+            },
+            headers={"Authorization": f"Bearer {write_token}"},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["status"] == "inserted"
+
+        fetched = client.get(
+            f"/api/v1/vault/notes/{payload['note_id']}",
+            headers={"Authorization": f"Bearer {write_token}"},
+        )
+        assert fetched.json()["related_ids"] == ["ffffffffffffffffffffffffffffffff"]
+    finally:
+        _cleanup()

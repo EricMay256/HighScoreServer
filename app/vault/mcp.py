@@ -498,7 +498,8 @@ def build_vault_mcp_server() -> VaultMCPServer:
                 {"project": ["highscoreserver"]}. For which notes this one
                 *belongs with*, not what it is about -- facets are excluded
                 from matching on purpose.
-            related_ids: Full IDs of related notes. Not existence-checked, so
+            related_ids: Full IDs of related notes -- ids, never titles or
+                [[wikilinks]], which are rejected. Not existence-checked, so
                 verify each one with vault_get_note before sending it.
             source_ids: Full IDs of notes this was derived from.
             source_url: Optional external source.
@@ -629,7 +630,8 @@ def build_vault_mcp_server() -> VaultMCPServer:
             tags: Topic keywords, replacing the existing set.
             aliases: Alternative titles, replacing the existing set.
             facets: Classification, replacing the existing set.
-            related_ids: Related note IDs, replacing the existing set.
+            related_ids: Related note IDs, replacing the existing set. Ids,
+                never titles or [[wikilinks]], which are rejected.
             source_ids: Source note IDs, replacing the existing set.
             source_url: Optional external source.
         """

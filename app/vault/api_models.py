@@ -31,6 +31,7 @@ from .domain import (
     VectorSearchStatus,
 )
 from .facets import normalize_facets
+from .wikilinks import looks_like_a_name
 
 
 class VaultDocumentContentRequest(BaseModel):
@@ -73,7 +74,9 @@ class VaultDocumentContentRequest(BaseModel):
         description=(
             "Ids of notes this one relates to. Not checked for existence: a "
             "contribution may legitimately reference a note that is archived, "
-            "flagged, or not yet written."
+            "flagged, or not yet written. They must still be ids -- a title or "
+            "a [[wikilink]] is rejected, because the graph is stored as ids and "
+            "rendered as links only on export."
         ),
     )
     source_ids: list[str] = Field(
@@ -108,6 +111,18 @@ class VaultDocumentContentRequest(BaseModel):
             raise ValueError("ids must not contain empty values")
         if len(set(ids)) != len(ids):
             raise ValueError("ids must be unique")
+        # Shape, never existence. ADR 0025 keeps an edge unvalidated on purpose
+        # -- a contribution may reference a note that is archived, flagged, or
+        # not yet written -- and ADR 0030 draws the line that decision does not:
+        # a value carrying a bracket or a space is not an id that points at
+        # nothing, it is a name, and `related_ids` holds ids. Twenty-one of them
+        # reached production because nothing said so.
+        named = [value for value in ids if looks_like_a_name(value)]
+        if named:
+            raise ValueError(
+                "ids must be document ids, not titles or wikilinks: "
+                f"{', '.join(repr(value) for value in named[:3])}"
+            )
         return ids
 
     @field_validator("facets")
