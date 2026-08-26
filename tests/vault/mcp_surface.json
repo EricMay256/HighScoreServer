@@ -1,0 +1,546 @@
+[
+  {
+    "name": "vault_contribute",
+    "scope": "vault:write",
+    "quota": "contribute",
+    "required": [
+      "body",
+      "title"
+    ],
+    "properties": [
+      "aliases",
+      "body",
+      "facets",
+      "related_ids",
+      "source_ids",
+      "source_url",
+      "summary",
+      "tags",
+      "title"
+    ],
+    "property_types": {
+      "aliases": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "body": "string",
+      "facets": [
+        {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "related_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_url": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "summary": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "tags": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_decide_amendment_proposal",
+    "scope": "vault:review",
+    "quota": "amendment_decide",
+    "required": [
+      "decision",
+      "proposal_id"
+    ],
+    "properties": [
+      "acknowledge_removals",
+      "decision",
+      "decision_note",
+      "proposal_id"
+    ],
+    "property_types": {
+      "acknowledge_removals": "boolean",
+      "decision": "string",
+      "decision_note": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "proposal_id": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_decide_review_case",
+    "scope": "vault:review",
+    "quota": "review_decide",
+    "required": [
+      "decision",
+      "review_case_id"
+    ],
+    "properties": [
+      "decision",
+      "decision_note",
+      "review_case_id"
+    ],
+    "property_types": {
+      "decision": "string",
+      "decision_note": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "review_case_id": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_get_note",
+    "scope": "vault:read",
+    "quota": "get_note",
+    "required": [
+      "note_id"
+    ],
+    "properties": [
+      "note_id"
+    ],
+    "property_types": {
+      "note_id": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_list_amendment_proposals",
+    "scope": "vault:review",
+    "quota": "amendment_list",
+    "required": [],
+    "properties": [
+      "limit"
+    ],
+    "property_types": {
+      "limit": "integer"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_list_review_cases",
+    "scope": "vault:review",
+    "quota": "review_list",
+    "required": [],
+    "properties": [
+      "limit"
+    ],
+    "property_types": {
+      "limit": "integer"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_propose_note_amendment",
+    "scope": "vault:propose",
+    "quota": "amendment_propose",
+    "required": [
+      "base_revision",
+      "body",
+      "note_id",
+      "rationale",
+      "title"
+    ],
+    "properties": [
+      "aliases",
+      "base_revision",
+      "body",
+      "facets",
+      "note_id",
+      "rationale",
+      "related_ids",
+      "source_ids",
+      "source_url",
+      "summary",
+      "tags",
+      "title"
+    ],
+    "property_types": {
+      "aliases": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "base_revision": "integer",
+      "body": "string",
+      "facets": [
+        {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "note_id": "string",
+      "rationale": "string",
+      "related_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_url": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "summary": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "tags": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_propose_note_body_diff",
+    "scope": "vault:propose",
+    "quota": "amendment_propose",
+    "required": [
+      "base_revision",
+      "body_diff",
+      "note_id",
+      "rationale"
+    ],
+    "properties": [
+      "base_revision",
+      "body_diff",
+      "note_id",
+      "rationale"
+    ],
+    "property_types": {
+      "base_revision": "integer",
+      "body_diff": "string",
+      "note_id": "string",
+      "rationale": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_read_amendment_proposal",
+    "scope": "vault:review",
+    "quota": "amendment_read",
+    "required": [
+      "proposal_id"
+    ],
+    "properties": [
+      "proposal_id"
+    ],
+    "property_types": {
+      "proposal_id": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_read_review_case",
+    "scope": "vault:review",
+    "quota": "review_read",
+    "required": [
+      "review_case_id"
+    ],
+    "properties": [
+      "review_case_id"
+    ],
+    "property_types": {
+      "review_case_id": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_retire_note",
+    "scope": "vault:delete",
+    "quota": "retire",
+    "required": [
+      "note_id"
+    ],
+    "properties": [
+      "note_id"
+    ],
+    "property_types": {
+      "note_id": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_search",
+    "scope": "vault:read",
+    "quota": "search",
+    "required": [
+      "query"
+    ],
+    "properties": [
+      "limit",
+      "query"
+    ],
+    "property_types": {
+      "limit": "integer",
+      "query": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_set_promotion_status",
+    "scope": "vault:review",
+    "quota": "review_decide",
+    "required": [
+      "note_id"
+    ],
+    "properties": [
+      "note_id",
+      "promotion_status"
+    ],
+    "property_types": {
+      "note_id": "string",
+      "promotion_status": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  },
+  {
+    "name": "vault_update_note",
+    "scope": "vault:update",
+    "quota": "update",
+    "required": [
+      "body",
+      "note_id",
+      "title"
+    ],
+    "properties": [
+      "aliases",
+      "body",
+      "facets",
+      "note_id",
+      "related_ids",
+      "source_ids",
+      "source_url",
+      "summary",
+      "tags",
+      "title"
+    ],
+    "property_types": {
+      "aliases": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "body": "string",
+      "facets": [
+        {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "note_id": "string",
+      "related_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_url": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "summary": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "tags": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": true,
+    "annotations": null
+  }
+]

@@ -39,3 +39,19 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0028 | [Amendments are revision-bound proposals, not notes](0028-amendments-are-revision-bound-proposals.md) | Accepted (amended 2026-08-25: bounded general body diffs and removal acknowledgement) |
 | 0029 | [Operator-granted OAuth entitlements belong to the refresh family](0029-oauth-entitlements-belong-to-the-refresh-family.md) | Accepted |
 | 0030 | [An edge value is checked for shape, and still never for existence](0030-edge-values-are-shape-checked-never-existence-checked.md) | Accepted (answers 0025's 2026-08-26 amendment) |
+
+## Reserved numbers
+
+Claimed by work in progress on separate branches, so that two of them do not write the same
+number. This happened on 2026-08-26: 0030 was claimed for metadata-only search on one branch
+and merged as edge-value validation from another, and the loser had to renumber.
+
+A reservation is not a decision. If the work is abandoned, delete the row and let the number
+be reused — an unexplained gap in the lineage is worse than a reused number.
+
+| ADR | Claimed for | Branch |
+| --- | ----------- | ------ |
+| 0031 | Search is a discovery surface; bodies belong to fetch | `ai-claude/knowledge-vault-mcp-efficiency-a38915` |
+| 0032 | A contribution reports its outcome, not its evidence | `ai-claude/knowledge-vault-mcp-efficiency-a38915` |
+| 0033 | An amendment may name an exact span; the server canonicalizes the diff | `ai-claude/knowledge-vault-mcp-efficiency-a38915` |
+| 0034 | Embeddings are document-level; chunking is additive and selective | unstarted |
