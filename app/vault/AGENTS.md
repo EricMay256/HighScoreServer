@@ -460,10 +460,17 @@ be edited when it does.
   full-entropy reasoning does not transfer to a password a person chose — and because this runs
   once per authorization, not once per request. It is offloaded with `asyncio.to_thread`;
   bcrypt releases the GIL while hashing, so that genuinely moves the work rather than yielding.
-- **The operator hash is configuration, not a row.** `VAULT_OPERATOR_PASSWORD_HASH`, because
-  there is one of them, it has no lifecycle a table would model, and a database's backups
-  circulate more widely than a config var. Unset means the password method is not configured
-  and the login **refuses** — never "any password works".
+- **Operator identity methods are independent configuration.**
+  `VAULT_OPERATOR_PASSWORD_HASH` enables the bcrypt password form;
+  `VAULT_GOOGLE_OIDC_CLIENT_ID`, `VAULT_GOOGLE_OIDC_CLIENT_SECRET`, and
+  `VAULT_GOOGLE_OIDC_ALLOWED_EMAILS` together enable Google. Either or both may be present.
+  Partial Google configuration is refused. An unset password never means "any password
+  works"; it removes that form while Google may remain available.
+- **Google authenticates the operator, not the vault client.** Its code flow requests only
+  `openid email`; the callback validates Google's RS256 signature, issuer, audience, expiry,
+  the pending authorization's nonce, verified email, and the allowlist. The authorization
+  code subject stores Google's stable `sub`, never the mutable email. Google and password
+  both end in the same `_redeem_and_mint` transaction and cannot alter the OAuth scope cap.
 - **One failure message, whatever failed.** A wrong password, an expired nonce, a nonce that
   never existed, a bad CSRF token and an unconfigured operator password all render identically,
   which is why `redeem` returns None for every case rather than distinguishing them. A page that

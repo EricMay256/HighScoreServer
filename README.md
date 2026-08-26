@@ -118,6 +118,9 @@ Above-baseline OAuth authority is an operator entitlement on one refresh family,
 survives token rotation without spreading to other sessions or becoming requestable by the
 client; reviewer families must be separately authorized read-only sessions. See
 [vault ADR 0029](app/vault/docs/adr/0029-oauth-entitlements-belong-to-the-refresh-family.md).
+Operator consent can authenticate through an environment-provided bcrypt password hash,
+Google OIDC with a verified-email allowlist, or both; the identity method does not alter the
+client's scope boundary.
 Access is by operator-issued agent credentials, not by player JWTs or the leaderboard API key.
 It uses SQLAlchemy Core (not the ORM) for vault persistence, and keeps all knowledge content
 in PostgreSQL rather than in this public repository.

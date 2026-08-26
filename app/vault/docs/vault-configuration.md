@@ -224,8 +224,8 @@ re-approval the next time a client authorizes.
 
 Unset is a supported state and means the password identity method is not
 configured for this deployment. It is never treated as "any password works" —
-the login refuses outright, the same way `VAULT_ENABLED` defaulting to false
-serves no vault rather than an unguarded one.
+the password form is not offered. Google login may remain available when its
+three variables are configured.
 
 #### Generating it
 
@@ -321,22 +321,34 @@ actually reach, because the SDK builds `/authorize` and `/token` from it and a
 mismatch surfaces as a client giving up during discovery rather than as an
 error.
 
-Two variables together make the flow work, and both are needed:
+`VAULT_PUBLIC_URL` enables the authorization server. Configure at least one
+operator identity method; password and Google are independent, and configuring
+both presents both choices on the same consent screen:
 
 | Variable | Required | Effect |
 | -------- | -------- | ------ |
 | `VAULT_PUBLIC_URL` | yes | Publishes discovery metadata and registers `/authorize`, `/token`, `/register`, `/revoke`, `/vault/login`. Absent, none of them exist. |
-| `VAULT_OPERATOR_PASSWORD_HASH` | yes, for the password method | What the login page verifies against. Absent, every login refuses. |
+| `VAULT_OPERATOR_PASSWORD_HASH` | for password login | What the password form verifies. Absent, that form is not offered. |
+| `VAULT_GOOGLE_OIDC_CLIENT_ID` | for Google login | Google web-application client id. All three Google variables must be set together. |
+| `VAULT_GOOGLE_OIDC_CLIENT_SECRET` | for Google login | Server-side Google client secret; never expose or log it. |
+| `VAULT_GOOGLE_OIDC_ALLOWED_EMAILS` | for Google login | Case-insensitive, comma-separated operator email allowlist. |
 | `VAULT_LOGIN_RATE_LIMIT` | no (`10/minute`) | The login POST's own bucket, tighter than the pre-auth guard. |
 | `VAULT_REGISTRATION_RATE_LIMIT` | no (`10/minute`) | `/register`'s own bucket. Registration is public, unauthenticated, and writes a row; one client registers once. Defence in depth, not the storage bound — pruning is that. |
 
-Once both are set, a client registers itself and the flow is:
+Register this exact callback URI in the Google Cloud client:
+
+```
+<VAULT_PUBLIC_URL>/vault/login/google/callback
+```
+
+A client then registers itself and the flow is:
 
 ```
 POST /register              the vendor's backend, server to server
 GET  /authorize             the operator's browser, a real top-level navigation
-  -> 302 /vault/login       consent and password on one screen
-POST /vault/login           bcrypt verify, mint an authorization code
+  -> 302 /vault/login       consent and configured identity choices
+POST /vault/login           bcrypt verify, or
+GET  /vault/login/google    Google OIDC code flow and verified callback
   -> 303 back to the client with code and state
 POST /token                 code + PKCE verifier -> access token + refresh token
 ```
@@ -349,6 +361,13 @@ the client writes. The readable name is on the credential's `display_name`, whic
 what `issue_vault_credential list` shows. A name-derived principal collided across
 separately registered clients that chose the same name, which meant sharing an
 idempotency namespace and a quota; see vault ADR 0024's 2026-08-23 amendment.
+
+Google login requests only `openid email`. The callback exchanges the code over
+async HTTPS and validates Google's signature, issuer, audience, expiry, the
+pending authorization's nonce, `email_verified`, and the configured allowlist.
+The durable authorization subject uses Google's stable `sub`, not the email,
+which Google documents may change. Google and password end at the same code
+minting transaction; neither changes the scopes a client may request.
 
 **Scopes are capped at `vault:read`, `vault:write`, and `vault:propose`.** A client cannot request
 more — `vault:update`, `vault:delete` and `vault:review` are unreachable through
@@ -375,6 +394,9 @@ sees is a connector asking to be reconnected, and the cause is in the log as
 | Client reports the server does not support OAuth | `VAULT_PUBLIC_URL` unset, so no metadata is published |
 | `/authorize` 302s to a login page that says the request is no longer valid | The nonce expired (5 minutes) or was already used |
 | Correct password rejected every time | `VAULT_OPERATOR_PASSWORD_HASH` unset or mangled — check the log for `not a valid bcrypt hash` |
+| Google choice is absent | One or more Google variables are absent. Partial configuration is refused rather than silently falling back. |
+| Google reports `redirect_uri_mismatch` | Register exactly `<VAULT_PUBLIC_URL>/vault/login/google/callback` in the Google Cloud web client. |
+| Google returns to the generic failure page | The code exchange, ID-token validation, nonce, verified email, or allowlist check failed. The response deliberately does not reveal which; inspect the server log's exception type. |
 | Login returns 429 | The login bucket; wait a minute, or raise `VAULT_LOGIN_RATE_LIMIT` |
 | `/register` returns 429 | The registration bucket; wait a minute, or raise `VAULT_REGISTRATION_RATE_LIMIT`. Re-registering repeatedly is itself unusual — a client registers once. |
 | A typo'd password needs restarting from the client | Deliberate: a submit redeems the nonce whether or not the password was right, so a wrong guess burns that authorization |

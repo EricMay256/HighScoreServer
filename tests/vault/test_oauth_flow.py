@@ -24,8 +24,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
 
+from app.vault import oauth_routes
 from app.vault.auth import VaultScope, parse_token
 from app.vault.constants import OAUTH_BASELINE_SCOPES
+from app.vault.google_oidc import GOOGLE_CALLBACK_PATH, GOOGLE_LOGIN_PATH
 from app.vault.oauth import LOGIN_PATH, PRINCIPAL_PREFIX
 from app.vault.oauth_routes import FAILURE_MESSAGE
 from app.vault.passwords import hash_password
@@ -377,6 +379,133 @@ def test_the_consent_screen_names_the_client_and_its_scopes(
         assert scope in page.text
     assert page.headers["X-Frame-Options"] == "DENY"
     assert page.headers["Cache-Control"] == "no-store"
+
+
+def test_google_and_password_are_independent_operator_login_methods(
+    oauth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "VAULT_GOOGLE_OIDC_CLIENT_ID", "test.apps.googleusercontent.com"
+    )
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_ALLOWED_EMAILS", "operator@example.com")
+    client_id = register(oauth_client)
+    params = authorize(oauth_client, client_id)
+    query = {"req": params["req"][0], "csrf": params["csrf"][0]}
+
+    page = oauth_client.get(LOGIN_PATH, params=query)
+
+    assert 'type="password"' in page.text
+    assert "Authorize with Google" in page.text
+
+    start = oauth_client.get(GOOGLE_LOGIN_PATH, params=query, follow_redirects=False)
+    assert start.status_code == 302
+    google_query = parse_qs(urlparse(start.headers["location"]).query)
+    assert google_query["state"] == [f'{query["req"]}.{query["csrf"]}']
+    assert google_query["nonce"] == [query["req"]]
+
+    observed: dict[str, str] = {}
+
+    async def authenticate_google(
+        code: str,
+        *,
+        redirect_uri: str,
+        expected_nonce: str,
+        settings: object,
+        client: object = None,
+    ) -> str:
+        observed.update(
+            code=code,
+            redirect_uri=redirect_uri,
+            expected_nonce=expected_nonce,
+        )
+        return "operator:google:stable-subject"
+
+    monkeypatch.setattr(
+        oauth_routes, "authenticate_google_code", authenticate_google
+    )
+    callback = oauth_client.get(
+        GOOGLE_CALLBACK_PATH,
+        params={"code": "google-code", "state": google_query["state"][0]},
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 303, callback.text
+    assert observed == {
+        "code": "google-code",
+        "redirect_uri": f"{PUBLIC_URL}{GOOGLE_CALLBACK_PATH}",
+        "expected_nonce": query["req"],
+    }
+    outer_code = parse_qs(urlparse(callback.headers["location"]).query)["code"][0]
+    tokens = exchange(oauth_client, client_id, outer_code)
+    assert tokens["access_token"].startswith("hssv1_")
+
+    transactions, engine = vault_service()
+
+    async def refresh_subject() -> str | None:
+        try:
+            async with transactions.transaction() as connection:
+                result = await connection.execute(
+                    select(vault_oauth_refresh_tokens.c.subject)
+                )
+                return result.scalar_one()
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(refresh_subject()) == "operator:google:stable-subject"
+
+
+def test_google_can_be_configured_without_the_operator_password(
+    oauth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VAULT_OPERATOR_PASSWORD_HASH", raising=False)
+    monkeypatch.setenv(
+        "VAULT_GOOGLE_OIDC_CLIENT_ID", "test.apps.googleusercontent.com"
+    )
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_ALLOWED_EMAILS", "operator@example.com")
+    client_id = register(oauth_client)
+    params = authorize(oauth_client, client_id)
+
+    page = oauth_client.get(
+        LOGIN_PATH, params={"req": params["req"][0], "csrf": params["csrf"][0]}
+    )
+
+    assert "Authorize with Google" in page.text
+    assert 'type="password"' not in page.text
+
+
+def test_a_rejected_google_identity_burns_the_pending_authorization(
+    oauth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "VAULT_GOOGLE_OIDC_CLIENT_ID", "test.apps.googleusercontent.com"
+    )
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("VAULT_GOOGLE_OIDC_ALLOWED_EMAILS", "operator@example.com")
+    client_id = register(oauth_client)
+    params = authorize(oauth_client, client_id)
+    query = {"req": params["req"][0], "csrf": params["csrf"][0]}
+    start = oauth_client.get(GOOGLE_LOGIN_PATH, params=query, follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+
+    async def reject_google(*args: object, **kwargs: object) -> str:
+        raise oauth_routes.GoogleOIDCError
+
+    monkeypatch.setattr(oauth_routes, "authenticate_google_code", reject_google)
+    rejected = oauth_client.get(
+        GOOGLE_CALLBACK_PATH,
+        params={"code": "rejected-code", "state": state},
+        follow_redirects=False,
+    )
+    password_retry = submit_login(oauth_client, params)
+
+    assert rejected.status_code == password_retry.status_code == 400
+    assert rejected.text == password_retry.text
+    assert _minted_scopes() == []
 
 
 def test_a_client_name_carrying_markup_is_escaped(

@@ -13,9 +13,9 @@ Design settled. The 2026-08-22 spike confirmed `/authorize` runs in the operator
 browser, so both identity methods are reachable, and left three constraints recorded under
 "Consequences".
 
-**Implemented 2026-08-21.** Nothing in this ADR is outstanding; enabling it in production is
-a configuration step (`VAULT_PUBLIC_URL` and `VAULT_OPERATOR_PASSWORD_HASH`), documented in
-`docs/vault-configuration.md`.
+**Implemented 2026-08-21; Google path completed 2026-08-25.** Nothing in this ADR is
+outstanding. `VAULT_PUBLIC_URL` enables the server; password and Google operator identity
+methods are independently configured as documented in `docs/vault-configuration.md`.
 
 - Migration `0013_oauth_authorization_server` — `vault_oauth_clients`,
   `vault_oauth_pending_authorizations`, `vault_oauth_authorization_codes`, and
@@ -26,7 +26,8 @@ a configuration step (`VAULT_PUBLIC_URL` and `VAULT_OPERATOR_PASSWORD_HASH`), do
   did not make and now does.
 - Migration `0017_oauth_entitlements` — `vault_oauth_grants`, separating consented baseline
   scopes from persistent operator-granted authority for one refresh family.
-- `app/vault/oauth.py` — the ten-method provider. `app/vault/oauth_routes.py` — the login page
+- `app/vault/oauth.py` — the ten-method provider. `app/vault/google_oidc.py` — Google code
+  exchange and ID-token validation. `app/vault/oauth_routes.py` — the login page
   and route assembly. `app/vault/templating.py` and `app/vault/templates/login.html` — the
   vault's own Jinja2 environment, the first non-documentation asset in the package.
 - `oauth_spike.py` is deleted, its two reusable parts — the route wiring and the slowapi
@@ -430,8 +431,8 @@ its own table" without choosing. It is `VAULT_OPERATOR_PASSWORD_HASH`, because t
 one secret, it has no lifecycle a schema would model, rotation is `heroku config:set` — which
 is also the revocation story — and a database's backups circulate more widely than a config
 var's do. Unset is a supported state meaning the password method is not configured for this
-deployment, and it must never be read as "any password works": the login refuses outright, the
-way `VAULT_ENABLED` defaulting to false serves no vault rather than an unguarded one.
+deployment, and it must never be read as "any password works": the password form is absent
+while an independently configured Google method may remain available.
 
 **The authorization-code table's scope CHECK is now baseline-only.** The original decision
 mirrored `vault_agent_credentials` so a widened credential would not be rejected. ADR 0029

@@ -65,11 +65,14 @@
     font: inherit; border: 1px solid GrayText; border-radius: .4rem;
     background: Field; color: FieldText;
   }
-  button {
+  button, .authorize-button {
     margin-top: 1rem; width: 100%; padding: .65rem 1rem;
     font: inherit; font-weight: 600; border: 0; border-radius: .4rem;
     background: AccentColor; color: AccentColorText; cursor: pointer;
+    box-sizing: border-box; text-align: center;
   }
+  .authorize-button { display: block; text-decoration: none; }
+  .divider { margin: 1rem 0 0; text-align: center; opacity: .7; }
   .error {
     margin: 0 0 1.25rem; padding: .6rem .8rem; border-radius: .4rem;
     border: 1px solid currentColor; opacity: .9;
@@ -125,6 +128,15 @@
     {% endfor %}
   </ul>
 
+  {% if google_login_url %}
+  <a class="authorize-button" href="{{ google_login_url }}">Authorize with Google</a>
+  {% endif %}
+
+  {% if google_login_url and password_configured %}
+  <p class="divider">or</p>
+  {% endif %}
+
+  {% if password_configured %}
   <form method="post" action="{{ login_path }}" autocomplete="off">
     <input type="hidden" name="{{ nonce_param }}" value="{{ nonce }}">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
@@ -133,6 +145,7 @@
            required autofocus autocomplete="current-password">
     <button type="submit">Authorize</button>
   </form>
+  {% endif %}
 
   <footer>
     Approving this issues a credential for that one registration. Revoke it at

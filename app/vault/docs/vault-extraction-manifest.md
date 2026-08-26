@@ -21,7 +21,7 @@ durable than removability comments scattered across modules, which go stale sile
 
 | Owner | Current tests | Extraction action |
 | ---- | ---- | ---- |
-| Vault package | `test_body_diff.py`, `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_credential_scopes.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_governance.py`, `test_hash_operator_password_script.py`, `test_oauth_store.py`, `test_origin.py`, `test_passwords.py`, `test_promotion.py`, `test_prune_oauth.py`, `test_remap_reference_ids.py`, `test_wiki_import.py`, `test_read_policy.py`, `test_repositories.py`, `test_reviews.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
+| Vault package | `test_body_diff.py`, `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_credential_scopes.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_google_oidc.py`, `test_governance.py`, `test_hash_operator_password_script.py`, `test_oauth_store.py`, `test_origin.py`, `test_passwords.py`, `test_promotion.py`, `test_prune_oauth.py`, `test_remap_reference_ids.py`, `test_wiki_import.py`, `test_read_policy.py`, `test_repositories.py`, `test_reviews.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
 | Private composition | `test_amendments.py`, `test_compile.py`, `test_contributions.py`, `test_mcp.py`, `test_oauth_flow.py`, `test_routes.py`, `test_rate_limit.py`, `test_schema_drift.py`, `tests/vault/conftest.py` | Move to the composing application or split package-only cases out. Replace HSS's global `TestClient(app.main.app)` with a standalone vault application factory; provide package-owned migrated Postgres/pgvector and credential fixtures. |
 | HSS host | `test_hss_pool_config.py` | Keep in HSS and move out of `tests/vault/`; it verifies `app.db`, not the extracted package. |
 | Dual-lineage composition | `test_migrations.py`, `migration_helpers.py` | Keep the shared-vs-separate topology cases with the composition owner. Move vault-only upgrade/downgrade, offline-render, and extracted revision-graph cases with the vault lineage. |
@@ -78,7 +78,12 @@ shared state, and neither imports the other — so extraction moves the vault's 
 HSS's alone. It stays in both. The vault repo must declare it; nothing else changes.
 
 `httpx` is shared: the vault's embedding adapter uses it, and HSS uses it for Steam ticket
-validation. It stays in both.
+validation. Google OIDC also uses it for the authorization-code exchange and JWKS fetch. It
+stays in both.
+
+`python-jose` and `cryptography` are shared: HSS verifies leaderboard JWTs with them, while
+`app/vault/google_oidc.py` verifies Google's RS256 ID tokens against its JWKS. They stay in
+both, and the extracted vault declares them directly.
 
 `Jinja2` is shared as of ADR 0024's login page: HSS renders its Jinja2 views from a root
 `templates/` directory and the vault renders its own from `app/vault/templates/` through
