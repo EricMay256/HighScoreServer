@@ -12,6 +12,7 @@
       "body",
       "facets",
       "related_ids",
+      "response_detail",
       "source_ids",
       "source_url",
       "summary",
@@ -56,6 +57,7 @@
           "type": "null"
         }
       ],
+      "response_detail": "string",
       "source_ids": [
         {
           "items": {
@@ -97,8 +99,14 @@
       "title": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Contribute a note",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_decide_amendment_proposal",
@@ -410,8 +418,14 @@
       "query": "string"
     },
     "output_schema_type": "object",
-    "output_schema_is_permissive": true,
-    "annotations": null
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Search the vault",
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
   },
   {
     "name": "vault_set_promotion_status",

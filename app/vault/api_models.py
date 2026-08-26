@@ -10,7 +10,9 @@ separate modules.
 """
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
+from enum import StrEnum
 from hashlib import sha256
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -31,6 +33,8 @@ from .domain import (
     VectorSearchStatus,
 )
 from .facets import normalize_facets
+from .search import SearchResult
+from .snippet import lead_snippet
 from .wikilinks import looks_like_a_name
 
 
@@ -362,12 +366,24 @@ class VaultContributionResponse(BaseModel):
         default=False,
         description="True when this response replays an earlier identical request.",
     )
+    max_similarity: VaultSimilarNote | None = Field(
+        default=None,
+        description=(
+            "The single closest existing NOTE, which is the dedup gate's "
+            "verdict: how near this contribution came to being flagged, and "
+            "what it came near to. Null when the corpus held nothing to score "
+            "against. Always present regardless of `response_detail` -- it is "
+            "the one piece of evidence a contributor acts on."
+        ),
+    )
     similars: list[VaultSimilarNote] = Field(
         default_factory=list,
         description=(
-            "Existing NOTES the candidate scored against. This is what the "
-            "dedup gate judged, so a high score here is what 'flagged' means. "
-            "`note_id` is a document id, resolvable with GET /notes/{id}."
+            "Existing NOTES the candidate scored against, ranks 2..n. Empty "
+            "unless `response_detail=review` was asked for: the contributor "
+            "searched moments ago, and `max_similarity` already carries the "
+            "verdict, so the rest is a list of note ids inviting a fetch "
+            "nobody needed. `note_id` is resolvable with GET /notes/{id}."
         ),
     )
     related_pages: list[VaultSimilarNote] = Field(
@@ -375,14 +391,79 @@ class VaultContributionResponse(BaseModel):
         description=(
             "Compiled WIKI PAGES near this note. CONTEXT, NOT A VERDICT: a "
             "page restates the notes it was built from, so resembling one is "
-            "expected and is never why a contribution is flagged. Useful for "
-            "deciding whether to extend an existing synthesis. Every entry is "
+            "expected and is never why a contribution is flagged. Empty unless "
+            "`response_detail=review` was asked for -- on a write response it "
+            "is scored note ids that had no bearing on the outcome. Useful for "
+            "deciding whether to extend an existing synthesis, which is a "
+            "reviewing question rather than a contributing one. Every entry is "
             "a wiki page by construction -- the query filters on kind -- and "
             "`note_id` carries its document id, the same id space every other "
             "surface uses and resolvable with GET /notes/{id}."
         ),
     )
     errors: list[str] = Field(default_factory=list)
+
+
+class VaultContributionDetail(StrEnum):
+    """How much of the dedup gate's working to return.
+
+    Two callers want different things from one write. A programmatic reviewer
+    building an adjudication surface wants every candidate the gate weighed; an
+    agent that just contributed wants to know what happened. The default
+    therefore differs by transport rather than being one compromise for both --
+    see `contribution_response`.
+    """
+
+    OUTCOME = "outcome"
+    REVIEW = "review"
+
+
+def contribution_response(
+    outcome: Any,
+    *,
+    detail: VaultContributionDetail,
+) -> VaultContributionResponse:
+    """Render a settled write, at the asked-for level of detail.
+
+    Shared by both adapters, like ``search_response`` and for the same reason.
+
+    `max_similarity` survives at every detail level because it is the verdict:
+    it names what the candidate came closest to and how close, which is the
+    fact a contributor acts on. What `review` adds is the gate's *working* --
+    the other four notes it weighed, and the wiki pages near the result, which
+    `app/vault/AGENTS.md` is explicit are context and never a reason anything
+    was flagged.
+
+    At `review` detail `similars` keeps the **whole** list, rank 1 included,
+    so `max_similarity` is purely additive there and no existing caller loses
+    a field. Deduplicating it would have been tidier and would have quietly
+    changed a shipped contract, which is the worse trade.
+
+    The similars are already ordered by score, so the maximum is the first.
+    Recomputing it with `max()` would invite the ordering to drift out from
+    under this function silently.
+    """
+
+    similars = [
+        VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
+        for s in outcome.similars
+    ]
+    pages = [
+        VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
+        for s in outcome.related_pages
+    ]
+    reviewing = detail is VaultContributionDetail.REVIEW
+
+    return VaultContributionResponse(
+        status=outcome.status,
+        note_id=outcome.note_id,
+        message=outcome.message,
+        idempotent_replay=outcome.idempotent_replay,
+        max_similarity=similars[0] if similars else None,
+        similars=similars if reviewing else [],
+        related_pages=pages if reviewing else [],
+        errors=list(outcome.errors),
+    )
 
 
 class VaultDocumentResponse(BaseModel):
@@ -468,10 +549,79 @@ class VaultDocumentDetail(BaseModel):
     )
 
 
-class VaultSearchHit(VaultDocumentDetail):
-    """A document plus why it surfaced for this query."""
+class VaultSearchHit(BaseModel):
+    """One candidate, described well enough to choose between candidates.
 
-    score: float = Field(description="Reciprocal rank fusion score.")
+    Deliberately **not** a `VaultDocumentDetail`. It was one until 2026-08-26,
+    which made search and fetch return the same thing and turned choosing one
+    note out of ten into paying for ten: a ten-hit page cost 58,784 bytes on
+    the wire, most of it bodies the caller discarded. Discovery and retrieval
+    are now separate operations with separate costs -- this names candidates,
+    and `vault_get_note` returns one.
+
+    What a field has to earn to be here is *selection* value: it must help
+    decide which note to open. `body`, `tags`, `aliases`, `facets`,
+    `related_ids`, `source_ids`, `vault_path` and the timestamps were all
+    removed against that test. They are a fetch away, and nine hits out of ten
+    never need them. Adding a field back needs a demonstrated selection need,
+    not a caller who finds it convenient.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    title: str
+    summary: str | None = Field(
+        default=None,
+        description=(
+            "The note's authored precis, when it has one. Prefer this over "
+            "`snippet`: it describes the whole document, where a snippet only "
+            "opens it."
+        ),
+    )
+    snippet: str | None = Field(
+        default=None,
+        description=(
+            "A bounded extract of the note's opening, supplied only when "
+            "`summary` is absent -- read `summary or snippet` and one of them "
+            "will answer. Deliberately NOT a match highlight: a hit found by "
+            "the vector arm shares no vocabulary with the query, so nothing "
+            "in it could be highlighted, and a field meaning one thing for "
+            "lexical hits and another for semantic ones would be worse than "
+            "one meaning the same for both. An ellipsis marks a clipped "
+            "extract."
+        ),
+    )
+    kind: DocumentKind = Field(
+        description=(
+            "`note` or `wiki`. A wiki page restates the notes it was compiled "
+            "from, so prefer a note when one answers the question and open a "
+            "page when the synthesis itself is what you need."
+        ),
+    )
+    doc_status: str | None = Field(
+        default=None,
+        description=(
+            "Status Map value from types.yml, for example 'Evergreen' or "
+            "'Stub'. Useful for judging how much weight a candidate carries."
+        ),
+    )
+    content_revision: int = Field(
+        ge=1,
+        description=(
+            "Monotonic content version at the time of the search. Amending a "
+            "note still requires fetching it first -- this is a staleness "
+            "hint, not a substitute for the fetched value."
+        ),
+    )
+    score: float = Field(
+        description=(
+            "Reciprocal rank fusion score. Orders hits **within this "
+            "response only**. It is derived from positions in this query's "
+            "candidate set, not from a property of the document, so it is not "
+            "comparable across queries and no fixed value means 'relevant'."
+        ),
+    )
     lexical_rank: int | None = Field(
         default=None,
         description="1-based position in the full-text ranking, if it matched.",
@@ -502,6 +652,146 @@ class VaultSearchResponse(BaseModel):
         )
     )
     hits: list[VaultSearchHit]
+    has_more: bool = Field(
+        default=False,
+        description=(
+            "Whether the corpus held further hits below this page. Answered "
+            "by retrieving one more than the requested limit, so it is a fact "
+            "rather than a guess."
+        ),
+    )
+    next_cursor: str | None = Field(
+        default=None,
+        description=(
+            "Reserved, and always null today. Resuming a page needs a total "
+            "order that is stable between calls, and this ranking has none: a "
+            "fused score is computed from positions within one query's "
+            "candidate set, so inserting a document can move every score "
+            "below it, and a document outside the candidate window has no "
+            "score at all. Populating this with an offset would promise "
+            "stability the ranking cannot deliver -- narrow the query instead."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "Whether hits were dropped from this page to keep the response "
+            "inside its byte budget. Distinct from `has_more`, which is about "
+            "the corpus: `truncated` means this response is smaller than the "
+            "limit asked for. Narrow the query or lower the limit."
+        ),
+    )
+
+
+def search_hit(
+    document: VaultDocument,
+    *,
+    score: float,
+    lexical_rank: int | None,
+    vector_rank: int | None,
+) -> VaultSearchHit:
+    """Project a document onto one search candidate.
+
+    The counterpart of ``document_detail`` and shared by both adapters for the
+    same reason: two copies of this projection would let the HTTP and MCP
+    search surfaces drift into disagreeing about what a hit is.
+
+    The snippet is computed only when there is no authored summary. Sending
+    both would spend bytes restating the same thing -- and it would do it
+    exactly where it is least useful, since summary coverage is concentrated
+    in wiki pages (14 of 15) and nearly absent from notes (3 of 70).
+    """
+
+    summary = document.summary
+    return VaultSearchHit(
+        note_id=document.id,
+        title=document.title,
+        summary=summary,
+        snippet=None if summary else lead_snippet(document.body),
+        kind=document.kind,
+        doc_status=document.doc_status,
+        content_revision=document.content_revision,
+        score=score,
+        lexical_rank=lexical_rank,
+        vector_rank=vector_rank,
+    )
+
+
+# The ceiling one search response's structured payload may reach. The wire
+# carries roughly twice this, because the MCP transport also serializes the
+# same object into a compatibility text block -- see `tests/vault/
+# test_mcp_budget.py`, which measures both.
+#
+# 8 KiB is the efficiency assessment's acceptance criterion for ten ordinary
+# hits. It is a *ceiling*, not a target: a normal ten-hit page costs about
+# 5 KiB, so truncation should be something a caller provokes with `limit=50`
+# rather than something they meet by accident.
+SEARCH_STRUCTURED_BUDGET_BYTES = 8 * 1024
+
+
+def search_response(
+    *,
+    query: str,
+    profile_id: str | None,
+    vector_status: VectorSearchStatus,
+    results: Sequence[SearchResult],
+    has_more: bool,
+    budget_bytes: int = SEARCH_STRUCTURED_BUDGET_BYTES,
+) -> VaultSearchResponse:
+    """Assemble one search response, trimmed to fit its byte budget.
+
+    Shared by both adapters rather than written twice, for the reason
+    ``canonical_request_digest`` is: two copies of a response contract drift,
+    and a search that means different things over HTTP and MCP is the kind of
+    difference nobody notices until a client depends on it.
+
+    **Why a budget exists at all.** `limit` accepts up to 50. Fifty hits at
+    the per-hit cost of a summary or snippet is several times what a page of
+    ten costs, and the caller who asked for fifty is rarely the caller who
+    wanted to spend that. Dropping the tail and saying so is better than
+    either silently returning it or refusing the request: the top of a fused
+    ranking is the part that was worth having.
+
+    Trimming from the end is what makes that safe -- fusion has already
+    ordered the hits, so the dropped ones are the lowest-ranked. At least one
+    hit always survives, even one that exceeds the budget alone: a response
+    with no hits would misreport a search that did match something.
+    """
+
+    hits = [
+        search_hit(
+            result.document,
+            score=result.score,
+            lexical_rank=result.lexical_rank,
+            vector_rank=result.vector_rank,
+        )
+        for result in results
+    ]
+
+    def _size(candidates: list[VaultSearchHit]) -> int:
+        return len(
+            json.dumps(
+                [hit.model_dump(mode="json") for hit in candidates],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+
+    truncated = False
+    while len(hits) > 1 and _size(hits) > budget_bytes:
+        hits.pop()
+        truncated = True
+
+    return VaultSearchResponse(
+        query=query,
+        profile_id=profile_id,
+        vector_status=vector_status,
+        hits=hits,
+        # A trimmed page always has more below it, whatever fusion reported.
+        has_more=has_more or truncated,
+        next_cursor=None,
+        truncated=truncated,
+    )
 
 
 def document_detail(document: VaultDocument) -> VaultDocumentDetail:

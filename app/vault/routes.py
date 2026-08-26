@@ -42,6 +42,7 @@ from .api_models import (
     VaultCompilePlanResponse,
     VaultCompileRunSummary,
     VaultCompileSettleRequest,
+    VaultContributionDetail,
     VaultContributionRequest,
     VaultContributionResponse,
     VaultDocumentDetail,
@@ -51,17 +52,17 @@ from .api_models import (
     VaultReviewDecisionRequest,
     VaultReviewDecisionResponse,
     VaultReviewQueueResponse,
-    VaultSearchHit,
     VaultSearchResponse,
-    VaultSimilarNote,
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
     canonical_request_digest,
     compile_run_summary,
     compile_work_item,
+    contribution_response,
     document_detail,
     review_case_summary,
+    search_response,
 )
 from .auth import VaultCredential, VaultScope
 from .constants import resolve_text_search_config
@@ -308,21 +309,14 @@ async def search_vault(
         )
 
     outcome = await _search_service().search(query, limit)
-    return VaultSearchResponse(
+    return search_response(
         # The stripped query is what was actually searched, so it is what the
         # response reports.
         query=query,
         profile_id=outcome.profile_id,
         vector_status=outcome.vector_status,
-        hits=[
-            VaultSearchHit(
-                **document_detail(result.document).model_dump(),
-                score=result.score,
-                lexical_rank=result.lexical_rank,
-                vector_rank=result.vector_rank,
-            )
-            for result in outcome.results
-        ],
+        results=outcome.results,
+        has_more=outcome.has_more,
     )
 
 
@@ -451,21 +445,13 @@ async def contribute(
             detail={"message": outcome.message, "errors": outcome.errors},
         )
 
-    return VaultContributionResponse(
-        status=outcome.status,
-        note_id=outcome.note_id,
-        message=outcome.message,
-        idempotent_replay=outcome.idempotent_replay,
-        similars=[
-            VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
-            for s in outcome.similars
-        ],
-        related_pages=[
-            VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
-            for s in outcome.related_pages
-        ],
-        errors=list(outcome.errors),
-    )
+    # Review detail, where the MCP surface defaults to outcome. The split is
+    # deliberate and is about who is asking: this caller is a program, often
+    # one building an adjudication surface, and its contract already carried
+    # the gate's whole working. `max_similarity` is additive here -- nothing
+    # was taken away. The MCP default is the narrow one because a model that
+    # just wrote a note does not need ten scored note ids inviting a read.
+    return contribution_response(outcome, detail=VaultContributionDetail.REVIEW)
 
 
 def _amendment_service() -> VaultAmendmentService:

@@ -168,6 +168,16 @@ class HybridSearchOutcome:
     # hidden: a silent quality drop is worse than a degraded answer that says
     # so, and a broken provider must not look like a deliberate one.
     vector_status: VectorSearchStatus
+    # Whether fusion ranked anything below the page that was returned. Free to
+    # compute -- fusion already produces the whole ranking and the page is a
+    # slice of it -- so this is an observation rather than an extra query.
+    #
+    # Bounded by the candidate window, and it has to be: each arm fetches
+    # `candidate_depth(limit)` rows, capped at MAX_CANDIDATES. So it means
+    # "fusion ranked more than fitted on this page", not "the corpus contains
+    # more matches". For deciding whether to narrow a query those are the same
+    # answer, which is what it is for.
+    has_more: bool = False
 
 
 class VaultSearchService:
@@ -215,10 +225,16 @@ class VaultSearchService:
                 else []
             )
 
-            fused = reciprocal_rank_fusion(
+            ranked = reciprocal_rank_fusion(
                 document_ids(lexical),
                 document_ids(vector),
-            )[:limit]
+            )
+            # Slice after fusion rather than before it, so the count below is
+            # the real remainder. Hydration is still one page wide -- the
+            # bodies are what a search costs, and nothing off the page is
+            # fetched.
+            fused = ranked[:limit]
+            has_more = len(ranked) > limit
             documents = await self._repository.fetch_documents(
                 connection,
                 [hit.document_id for hit in fused],
@@ -242,6 +258,7 @@ class VaultSearchService:
                 self._provider.profile_id if self._provider is not None else None
             ),
             vector_status=vector_status,
+            has_more=has_more,
         )
 
     async def _embed_query(

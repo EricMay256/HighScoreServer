@@ -62,6 +62,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Tool as MCPTool
+from mcp.types import ToolAnnotations
 from slowapi.errors import RateLimitExceeded
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -70,14 +71,19 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api_models import (
     VaultAmendmentProposalRequest,
+    VaultContributionDetail,
     VaultContributionRequest,
+    VaultContributionResponse,
     VaultDocumentUpdateRequest,
+    VaultSearchResponse,
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
     canonical_request_digest,
+    contribution_response,
     document_detail,
     review_case_summary,
+    search_response,
 )
 from .auth import VaultCredential, VaultScope
 from .constants import resolve_text_search_config
@@ -391,16 +397,38 @@ def build_vault_mcp_server() -> VaultMCPServer:
         ),
     )
 
-    @server.tool(name="vault_search")
-    async def vault_search(query: str, limit: int = 10) -> dict[str, Any]:
-        """Search the vault corpus by meaning and keyword.
+    @server.tool(
+        name="vault_search",
+        annotations=ToolAnnotations(
+            title="Search the vault",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+    async def vault_search(query: str, limit: int = 10) -> VaultSearchResponse:
+        """Find candidate notes by meaning and keyword. Does not return bodies.
 
-        Returns notes ranked by a fusion of vector similarity and full-text
-        search. Check `vector_status`: `used` means semantic matching was
-        applied; `not_configured` means this deployment is lexical-only by
-        choice; `failed` means the embedding provider errored and these results
-        are degraded -- treat a `failed` result set as incomplete rather than
-        as evidence that nothing matches.
+        This is discovery, not retrieval: each hit carries a title and a short
+        preview -- enough to choose -- and `vault_get_note` returns the one you
+        chose. Normally fetch one or two. Prefer a `note` over a `wiki` page
+        unless the synthesis itself is what you need.
+
+        Read `summary or snippet`; whichever is present describes the note. The
+        preview is the note's opening, not a highlight of your query terms, so
+        it will not show you where the match was.
+
+        Check `vector_status`: `used` means semantic matching was applied;
+        `not_configured` means this deployment is lexical-only by choice, so
+        search exact terms rather than concepts; `failed` means the embedding
+        provider errored and these results are degraded -- an empty result set
+        is then unproven, not evidence that nothing matches.
+
+        `score` orders hits within one response and means nothing across
+        responses. `has_more` reports whether lower-ranked hits existed;
+        `truncated` reports that hits were dropped to fit a byte budget, which
+        a large `limit` can provoke.
 
         Args:
             query: What to look for, in natural language.
@@ -421,20 +449,15 @@ def build_vault_mcp_server() -> VaultMCPServer:
             text_search_config=resolve_text_search_config(),
         )
         outcome = await service.search(text, limit)
-        return {
-            "query": text,
-            "profile_id": outcome.profile_id,
-            "vector_status": outcome.vector_status,
-            "hits": [
-                {
-                    **document_detail(result.document).model_dump(mode="json"),
-                    "score": result.score,
-                    "lexical_rank": result.lexical_rank,
-                    "vector_rank": result.vector_rank,
-                }
-                for result in outcome.results
-            ],
-        }
+        # The same builder the HTTP surface calls. Two adapters, one contract:
+        # a second copy here would eventually disagree about what a hit is.
+        return search_response(
+            query=text,
+            profile_id=outcome.profile_id,
+            vector_status=outcome.vector_status,
+            results=outcome.results,
+            has_more=outcome.has_more,
+        )
 
     @server.tool(name="vault_get_note")
     async def vault_get_note(note_id: str) -> dict[str, Any]:
@@ -464,7 +487,23 @@ def build_vault_mcp_server() -> VaultMCPServer:
             raise ToolError("Note not found")
         return document_detail(document).model_dump(mode="json")
 
-    @server.tool(name="vault_contribute")
+    @server.tool(
+        name="vault_contribute",
+        annotations=ToolAnnotations(
+            title="Contribute a note",
+            readOnlyHint=False,
+            # It adds; it never overwrites or removes. Replacing a note is
+            # `vault_update_note` behind a separate scope, and removing one is
+            # `vault_retire_note` behind another (ADR 0020).
+            destructiveHint=False,
+            # True, and load-bearing: the idempotency key is derived from the
+            # content, so re-sending the same contribution replays the first
+            # outcome rather than writing a second note. A client that retries
+            # on a timeout is doing the right thing.
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     async def vault_contribute(
         title: str,
         body: str,
@@ -475,18 +514,24 @@ def build_vault_mcp_server() -> VaultMCPServer:
         related_ids: list[str] | None = None,
         source_ids: list[str] | None = None,
         source_url: str | None = None,
-    ) -> dict[str, Any]:
+        response_detail: str = "outcome",
+    ) -> VaultContributionResponse:
         """Contribute a note through the governed write path.
 
         Search first and read the nearest existing note before calling this.
         The write is deduplicated against the corpus: a near-identical note is
         `flagged` for review rather than added, and `flagged` is a successful
         outcome, not an error to retry -- retrying it creates a second note that
-        flags against the first.
+        flags against the first. `rejected` is settled too. Neither is a
+        transport failure and neither should be resent.
 
         Retries are safe. The idempotency key is derived from the content, so
         re-sending the same contribution replays the original outcome instead of
         writing twice.
+
+        Read `status`, and `max_similarity` for how close the dedup gate came
+        and to what. Report the outcome and the note id; there is nothing here
+        that needs fetching.
 
         Args:
             title: A declarative sentence stating the insight.
@@ -503,9 +548,15 @@ def build_vault_mcp_server() -> VaultMCPServer:
                 verify each one with vault_get_note before sending it.
             source_ids: Full IDs of notes this was derived from.
             source_url: Optional external source.
+            response_detail: "outcome" (default) returns the verdict.
+                "review" adds every note the dedup gate weighed and the wiki
+                pages near the result -- for building a review surface, not
+                for deciding whether your own write succeeded.
         """
 
         credential = await _authorized("vault_contribute")
+        if response_detail not in {detail.value for detail in VaultContributionDetail}:
+            raise ToolError('response_detail must be "outcome" or "review"')
 
         payload = _content_payload(
             title,
@@ -579,26 +630,16 @@ def build_vault_mcp_server() -> VaultMCPServer:
         if outcome.status == "invalid":
             raise ToolError(f"{outcome.message}: {'; '.join(outcome.errors)}")
 
-        return {
-            "status": outcome.status,
-            "note_id": outcome.note_id,
-            "message": outcome.message,
-            "idempotent_replay": outcome.idempotent_replay,
-            # Notes the dedup gate judged. A high score here is what
-            # "flagged" means.
-            "similars": [
-                {"note_id": s.note_id, "title": s.title, "score": s.score}
-                for s in outcome.similars
-            ],
-            # Compiled pages near this note: context, not a verdict. A page
-            # restates the notes it was built from, so resembling one is
-            # expected and never a reason a contribution is flagged.
-            "related_pages": [
-                {"note_id": s.note_id, "title": s.title, "score": s.score}
-                for s in outcome.related_pages
-            ],
-            "errors": list(outcome.errors),
-        }
+        # Outcome detail, where the HTTP surface defaults to review. The
+        # defaults differ because the callers do: a program building an
+        # adjudication surface wants the gate's whole working, while the agent
+        # that just wrote the note searched moments ago and needs to know what
+        # happened. Ten scored note ids in front of a model after a successful
+        # write is an invitation to go and read them.
+        return contribution_response(
+            outcome,
+            detail=VaultContributionDetail(response_detail),
+        )
 
     @server.tool(name="vault_update_note")
     async def vault_update_note(

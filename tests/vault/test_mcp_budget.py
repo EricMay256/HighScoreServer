@@ -40,12 +40,24 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
+from app.vault.api_models import SEARCH_STRUCTURED_BUDGET_BYTES
 from app.vault.auth import VaultScope
 from app.vault.db import create_vault_engine
-from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
-from app.vault.repository import VaultDocumentRepository
+from app.vault.domain import (
+    DocumentEmbedding,
+    DocumentKind,
+    DocumentStatus,
+    NewVaultDocument,
+)
+from app.vault.embedding_text import assemble_embedding_text
+from app.vault.embeddings import EmbeddingInputKind
+from app.vault.repository import (
+    VaultDocumentEmbeddingRepository,
+    VaultDocumentRepository,
+)
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings, vault_enabled
+from app.vault.snippet import SNIPPET_MAX_CHARS
 from app.vault.tables import vault_documents
 from tests.vault.test_contributions import StubEmbeddingProvider, _cleanup
 from tests.vault.test_mcp import _rpc
@@ -62,31 +74,38 @@ pytestmark = pytest.mark.skipif(
 
 # One `vault_search` result, ten hits, counting both wire copies.
 #
-# Measured on this branch at 58,784 bytes: structured 28,277, text 30,507. A
-# hit carries the note's complete body, so the cost is the corpus's mean note
-# length times the page size, doubled by the compatibility text block. The
-# corpus this serves (2026-08-26: 70 notes, mean body 2141 bytes, p90 4023) is
-# what the fixture below is sized from.
+# Measured 10,650 bytes: structured 4,859, text 5,791. Before search became a
+# discovery surface on 2026-08-26 the same page cost 58,784 bytes (structured
+# 28,277, text 30,507) because every hit carried the note's whole body -- an
+# 82% reduction, and the structured copy now sits inside the 8 KiB ceiling
+# `SEARCH_STRUCTURED_BUDGET_BYTES` enforces with room to spare.
 #
-# Both copies already ship, which is worth recording because it is not
-# obvious: a tool annotated `-> dict[str, Any]` looks schema-less but is not.
-# `func_metadata` derives a permissive `{"type": "object",
-# "additionalProperties": true}` from it, and any derived schema is enough to
-# make the SDK attach `structuredContent` beside the text block. Replacing
-# those annotations with typed models therefore sharpens the schema without
-# changing the number of copies -- it is close to free, not a doubling.
+# Both copies ship, which is worth recording because it is not obvious: a tool
+# annotated `-> dict[str, Any]` looks schema-less but is not. `func_metadata`
+# derives a permissive `{"type": "object", "additionalProperties": true}` from
+# it, and any derived schema is enough to make the SDK attach
+# `structuredContent` beside the text block. So compaction is worth twice its
+# apparent size -- it lands on both copies -- and giving a tool a typed return
+# sharpens its schema without adding a copy.
 #
-# The target, once search returns discovery metadata instead of documents, is
-# 8 KiB of *structured* data per the efficiency assessment's acceptance
-# criteria -- so roughly 17 KiB across both copies. This constant is what that
-# work moves.
-SEARCH_WIRE_BUDGET_BYTES = 60 * 1024
+# The ~15% headroom over the measurement is for corpus drift in the fixture,
+# not for growth in the response. A change that needs more than this should
+# move the number deliberately and say why.
+SEARCH_WIRE_BUDGET_BYTES = 12 * 1024
 
-# One `vault_contribute` result. Small by comparison and included so the write
-# path cannot quietly grow: the response carries no note body, only the dedup
-# gate's evidence -- up to five similar notes and five related wiki pages, each
-# a note id, a title and a score.
-CONTRIBUTE_WIRE_BUDGET_BYTES = 4 * 1024
+# One `vault_contribute` result at the MCP default, `response_detail=outcome`.
+#
+# Measured 700 bytes: structured 323, text 377. The same write at
+# `response_detail=review` -- the HTTP default, and what both surfaces
+# returned before 2026-08-26 -- costs 2,241 bytes, so the narrow default saves
+# about 1,540 bytes or roughly 385 tokens per write.
+#
+# Small next to search, and that was never the point. What the default drops
+# is up to five scored note ids the contributor searched for moments ago plus
+# five wiki pages that had no bearing on the outcome: an invitation to fetch
+# something nobody needed, sitting in front of a model that has just finished
+# its task. `max_similarity` stays, because it is the verdict.
+CONTRIBUTE_WIRE_BUDGET_BYTES = 1024
 
 # The page size every budget above is quoted at. Ten is `vault_search`'s
 # default limit, so it is the size a caller gets without asking for one.
@@ -176,6 +195,8 @@ def budget_corpus(configure_test_env: None) -> Any:
     service, engine = _vault_service()
     run_id = uuid4().hex
     documents = VaultDocumentRepository()
+    embeddings = VaultDocumentEmbeddingRepository()
+    stub = StubEmbeddingProvider()
     ids: list[str] = []
 
     async def seed() -> None:
@@ -201,6 +222,30 @@ def budget_corpus(configure_test_env: None) -> Any:
                     ),
                 )
 
+    async def embed() -> None:
+        # Without these the dedup gate has nothing to score against, because
+        # `find_similar` joins through `vault_document_embeddings`. A fixture
+        # of unembedded documents makes `similars` come back empty and every
+        # assertion about the gate's output vacuously true -- which is how the
+        # first version of this module measured a contribution response that
+        # was smaller than any real one.
+        async with service.transaction() as connection:
+            for document_id in ids:
+                document = await documents.get_by_id(connection, document_id)
+                assert document is not None
+                (vector,) = await stub.embed(
+                    [assemble_embedding_text(document)],
+                    EmbeddingInputKind.DOCUMENT,
+                )
+                await embeddings.upsert(
+                    connection,
+                    DocumentEmbedding(
+                        document_id=document_id,
+                        profile_id=stub.profile_id,
+                        vector=vector,
+                    ),
+                )
+
     async def clear() -> None:
         async with service.transaction() as connection:
             await connection.execute(
@@ -209,6 +254,7 @@ def budget_corpus(configure_test_env: None) -> Any:
 
     try:
         asyncio.run(seed())
+        asyncio.run(embed())
         yield ids
     finally:
         asyncio.run(clear())
@@ -296,22 +342,21 @@ def test_a_full_search_page_stays_within_its_wire_budget(
     )
 
 
-def test_a_search_hit_currently_carries_the_whole_note(
+def test_a_search_hit_names_a_candidate_without_shipping_it(
     client: TestClient,
     budget_corpus: list[str],
     stub_provider: StubEmbeddingProvider,
 ) -> None:
-    """Characterization, not endorsement: this is the behaviour being changed.
+    """Discovery and retrieval are different operations with different costs.
 
-    A search hit is today a complete `VaultDocumentDetail` -- the same
-    projection `vault_get_note` returns -- plus three ranking fields. So the
-    discovery call and the retrieval call return the same thing, and paying
-    for ten documents to choose one is not a quirk of some query, it is the
-    contract.
+    Until 2026-08-26 a hit was a whole `VaultDocumentDetail` -- the same
+    projection `vault_get_note` returns -- so choosing one note out of ten
+    meant paying for ten. This asserts the split held: what a hit carries is
+    what a caller needs to *choose*, and everything else is a fetch away.
 
-    Asserted rather than merely described so that making search a metadata
-    surface has to come here and say so. A compaction change that left this
-    passing would not have compacted anything.
+    The excluded list is the interesting half. Each of those fields was
+    removed deliberately, and adding one back should have to argue with this
+    test rather than slip in behind a convenient `**model_dump()`.
     """
 
     credential_id, token = _issue((VaultScope.READ,))
@@ -329,48 +374,95 @@ def test_a_search_hit_currently_carries_the_whole_note(
     finally:
         _drop(credential_id)
 
-    hit = json.loads(payload["result"]["content"][0]["text"])["hits"][0]
+    result = json.loads(payload["result"]["content"][0]["text"])
+    hit = result["hits"][0]
 
-    # The fields a caller needs to *choose* a note.
-    assert {"note_id", "title", "score"} <= set(hit)
+    assert set(hit) == {
+        "note_id",
+        "title",
+        "summary",
+        "snippet",
+        "kind",
+        "doc_status",
+        "content_revision",
+        "score",
+        "lexical_rank",
+        "vector_rank",
+    }
 
-    # The fields that make choosing cost as much as fetching. Each one is
-    # removed by the metadata-only search change; this list is its checklist.
-    assert hit["body"], "a hit carries the note's full body"
-    for field in (
-        "tags",
-        "aliases",
-        "facets",
-        "related_ids",
-        "source_ids",
-        "vault_path",
-        "doc_type",
-        "status",
-        "created_at",
-        "updated_at",
-    ):
-        assert field in hit, f"a hit still carries {field}"
+    # The fixture notes carry no authored summary, which is the ordinary case
+    # for a note (3 of 70 in the live corpus), so the preview is derived.
+    assert hit["summary"] is None
+    assert hit["snippet"]
+    assert len(hit["snippet"]) <= SNIPPET_MAX_CHARS
 
-    # And the fields a compact hit will need but does not have yet.
-    assert "snippet" not in hit
-    assert "has_more" not in json.loads(
-        payload["result"]["content"][0]["text"]
-    )
+    # Pagination is answered, and answered honestly: twelve notes were seeded
+    # and ten requested.
+    assert result["has_more"] is True
+    assert result["truncated"] is False
+    # Reserved, and null until a ranking exists that can be resumed.
+    assert result["next_cursor"] is None
 
 
-def test_a_contribution_outcome_currently_carries_the_dedup_evidence(
+def test_a_large_limit_is_trimmed_to_the_byte_budget_and_says_so(
     client: TestClient,
     budget_corpus: list[str],
     stub_provider: StubEmbeddingProvider,
 ) -> None:
-    """Characterization: `similars` and `related_pages` ship by default.
+    """`limit=50` is the caller provoking the budget, not meeting it by chance.
 
-    Both are small -- a note id, a title and a score apiece -- so this is not
-    where the tokens are. It is recorded because the fields invite a follow-up
-    the caller does not need: the contributor already searched, and
-    `related_pages` is documented in `app/vault/AGENTS.md` as context that is
-    never the reason a contribution was flagged. The outcome-only default
-    keeps the single closest note and drops the rest.
+    The tail is what gets dropped, because fusion already ordered the hits and
+    the top of the ranking is the part worth having. `truncated` distinguishes
+    this from `has_more`: one says the response was cut, the other says the
+    corpus had more.
+    """
+
+    credential_id, token = _issue((VaultScope.READ,))
+    try:
+        payload = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "vault_search",
+                "arguments": {"query": "decorator dependency guard ordering",
+                              "limit": 50},
+            },
+        )
+    finally:
+        _drop(credential_id)
+
+    result = json.loads(payload["result"]["content"][0]["text"])
+    structured, _text = _wire_sizes(payload)
+
+    # Twelve notes are seeded, so a 50-limit search cannot be trimmed by the
+    # budget here -- the corpus is smaller than the budget. What must hold is
+    # that the two flags stay consistent with each other and with the page.
+    assert len(result["hits"]) <= 50
+    if result["truncated"]:
+        assert result["has_more"] is True
+    assert structured <= SEARCH_STRUCTURED_BUDGET_BYTES, (
+        f"structured payload {structured}B exceeds the "
+        f"{SEARCH_STRUCTURED_BUDGET_BYTES}B ceiling the trimmer enforces"
+    )
+
+
+def test_a_contribution_outcome_reports_the_verdict_not_the_working(
+    client: TestClient,
+    budget_corpus: list[str],
+    stub_provider: StubEmbeddingProvider,
+) -> None:
+    """Over MCP the default is the verdict; the gate's working is opt-in.
+
+    `max_similarity` stays at every detail level because it is what a
+    contributor acts on -- how near the write came to being flagged, and to
+    what. What the default drops is the rest of the gate's working: four more
+    scored notes the contributor searched for moments ago, and wiki pages that
+    `app/vault/AGENTS.md` is explicit are context and never a reason anything
+    was flagged.
+
+    Small in bytes, and that is not the point. Scored note ids in front of a
+    model after a successful write are an invitation to go and read them.
     """
 
     credential_id, token = _issue((VaultScope.READ, VaultScope.WRITE))
@@ -382,27 +474,60 @@ def test_a_contribution_outcome_currently_carries_the_dedup_evidence(
             {
                 "name": "vault_contribute",
                 "arguments": {
-                    "title": "A characterization note recording today's outcome shape",
+                    "title": "A characterization note recording the outcome shape",
                     "body": _realistic_body(98),
                 },
             },
         )
     finally:
-        # The write path really wrote. Sweeping by principal is what
-        # test_contributions does and for the reason its comment gives: a
-        # stray active document perturbs the dedup query and the lexical arm
-        # for every later test. Leaving these behind broke seven search tests
-        # before this call existed.
         _cleanup()
         _drop(credential_id)
 
     outcome = json.loads(payload["result"]["content"][0]["text"])
 
-    assert outcome["status"] in {"inserted", "flagged", "rejected", "invalid"}
-    assert "similars" in outcome
-    assert "related_pages" in outcome
-    assert "max_similarity" not in outcome
-    assert "response_detail" not in outcome
+    assert outcome["status"] in {"inserted", "flagged", "rejected"}
+    assert outcome["similars"] == []
+    assert outcome["related_pages"] == []
+    # Present as a key whether or not the corpus had anything to score against.
+    assert "max_similarity" in outcome
+
+
+def test_review_detail_restores_the_full_dedup_evidence(
+    client: TestClient,
+    budget_corpus: list[str],
+    stub_provider: StubEmbeddingProvider,
+) -> None:
+    """The opt-in path is what an adjudication surface asks for.
+
+    `similars` keeps the whole ranking here, rank 1 included, so
+    `max_similarity` is additive rather than a field moved out of the list.
+    Deduplicating would have been tidier and would have quietly changed the
+    shape the HTTP surface has always returned.
+    """
+
+    credential_id, token = _issue((VaultScope.READ, VaultScope.WRITE))
+    try:
+        payload = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "vault_contribute",
+                "arguments": {
+                    "title": "A note contributed at review detail",
+                    "body": _realistic_body(97),
+                    "response_detail": "review",
+                },
+            },
+        )
+    finally:
+        _cleanup()
+        _drop(credential_id)
+
+    outcome = json.loads(payload["result"]["content"][0]["text"])
+
+    assert outcome["similars"], "review detail returns the gate's working"
+    assert outcome["max_similarity"] == outcome["similars"][0]
 
 
 def test_a_contribution_outcome_stays_within_its_wire_budget(

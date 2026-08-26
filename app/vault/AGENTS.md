@@ -308,6 +308,34 @@ be edited when it does.
   Log the exception *type* instead. `tests/vault/test_search.py` asserts this.
 - Search must pass the text search configuration as a bound parameter —
   `websearch_to_tsquery(:config, :query)` — never the database default, never interpolation.
+- **Search names candidates; it does not return documents** (ADR 0031). A hit carries
+  `note_id`, `title`, `summary`, `snippet`, `kind`, `doc_status`, `content_revision` and the
+  three ranking fields — and nothing else. `body`, `tags`, `aliases`, `facets`, `related_ids`,
+  `source_ids`, `vault_path`, `doc_type`, `status` and the timestamps were removed on
+  2026-08-26, when a ten-hit page cost 58,784 bytes on the wire and the same page now costs
+  10,650. The test a field must pass to be added back is *selection* value — does it help
+  decide which note to open — not smallness and not convenience. Do not reintroduce one behind
+  a `**document_detail(...).model_dump()`; that is exactly how the old shape arose.
+  - Both adapters build the response through `api_models.search_response`, for the reason they
+    share `canonical_request_digest`. Do not assemble a hit in an adapter.
+  - `snippet` is a **lead extract, not a match highlight**, and is supplied only when `summary`
+    is absent — read `summary or snippet`. It cannot be a highlight: a vector-only hit shares
+    no vocabulary with the query, so `ts_headline` would have nothing to mark and would fall
+    back to the opening words anyway. The 320-character bound was measured against the corpus,
+    not chosen; `snippet.py` carries the distribution it came from.
+  - `next_cursor` is reserved and always null, and must stay that way until a resumable
+    ranking exists. RRF scores are positions within one query's candidate set, so an insert
+    can move every score beneath it and a document outside the window has no score at all. A
+    cursor here would be an offset promising stability it cannot deliver.
+  - `has_more` is bounded by the candidate window, not the corpus. `truncated` is a different
+    fact: the response was trimmed from the tail to fit `SEARCH_STRUCTURED_BUDGET_BYTES`.
+- **`tests/vault/test_mcp_budget.py` is a ratchet, and the numbers in it are measurements.**
+  Lowering a budget is a deliverable; raising one needs a reason in the commit message. It
+  counts *both* wire copies deliberately: a tool annotated `-> dict[str, Any]` looks
+  schema-less but is not — `func_metadata` derives a permissive object schema from it, which
+  is enough to make the SDK ship `structuredContent` beside the compatibility text block. So
+  every byte saved is saved twice, and typing a tool's return sharpens its schema without
+  adding a copy.
 - **Search returns `active` only; fetch-by-ID also resolves `archived`, never `flagged`** (ADR
   0008). `routes.READABLE_STATUSES` is the single statement of that rule. Archived content is retired
   but legitimate, so a `related_ids`/`source_ids` reference still resolves; `flagged` means the
