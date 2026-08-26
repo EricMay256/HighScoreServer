@@ -1084,16 +1084,87 @@ issuing two looks like ceremony; that is exactly how `vault:write` came to mean
 python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose
 ```
 
-Against production, set `DATABASE_URL` explicitly for the command — issuing into
-the wrong database is silent. On a dyno it is already set:
+Against production, select the target database explicitly for the command —
+issuing into the wrong database is silent. On a dyno the deployment's
+`VAULT_DATABASE_URL`/`DATABASE_URL` is already set:
 
 ```bash
-heroku run --app <app> "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose"
+heroku config:get DATABASE_URL --app high-score-server
+```
+
+That command prints the current live database credential; capture it rather
+than displaying it when working in a recorded session. If the vault later uses
+a separate database, retrieve `VAULT_DATABASE_URL` instead.
+
+```bash
+heroku run --app high-score-server "python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose"
 ```
 
 Quote the whole remote command. `heroku run` parses the line first and claims
 `-m` and `--scopes` for itself otherwise, reporting `Nonexistent flags` about
 flags that are perfectly valid for your script.
+
+Running on a one-off dyno is preferred for a new static credential: Heroku
+supplies the current database config directly, so no database password is copied
+to the operator's machine. Use a local checkout only when the command exists in
+the checkout but has not yet reached the deployed slug (for example, while
+exercising a newly added credential-management command).
+
+#### Running the credential tool locally against production
+
+Heroku manages the connection string and updates its config var when credentials
+change. It can also change during maintenance/recovery or database promotion, so
+do not preserve a production URL in `.env` or paste one from an earlier session.
+Fetch it immediately before the operation and keep it only in that shell.
+
+The vault prefers `VAULT_DATABASE_URL` when that variable is configured and
+otherwise falls back to `DATABASE_URL`. The following commands preserve that
+precedence. They capture the URL rather than printing it.
+
+PowerShell:
+
+```powershell
+$vaultDatabaseUrl = heroku config:get VAULT_DATABASE_URL --app high-score-server
+if ([string]::IsNullOrWhiteSpace($vaultDatabaseUrl)) {
+    $vaultDatabaseUrl = heroku config:get DATABASE_URL --app high-score-server
+}
+if ([string]::IsNullOrWhiteSpace($vaultDatabaseUrl)) {
+    throw 'Heroku returned no vault database URL.'
+}
+
+$env:VAULT_DATABASE_URL = $vaultDatabaseUrl.Trim()
+try {
+    .\.venv\Scripts\python.exe -m scripts.issue_vault_credential list
+    .\.venv\Scripts\python.exe -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose
+} finally {
+    Remove-Item Env:VAULT_DATABASE_URL -ErrorAction SilentlyContinue
+    $vaultDatabaseUrl = $null
+}
+```
+
+Bash/WSL:
+
+```bash
+vault_database_url="$(heroku config:get VAULT_DATABASE_URL --app high-score-server)"
+if [ -z "$vault_database_url" ]; then
+  vault_database_url="$(heroku config:get DATABASE_URL --app high-score-server)"
+fi
+if [ -z "$vault_database_url" ]; then
+  echo "Heroku returned no vault database URL." >&2
+  exit 1
+fi
+
+VAULT_DATABASE_URL="$vault_database_url" python -m scripts.issue_vault_credential list
+VAULT_DATABASE_URL="$vault_database_url" python -m scripts.issue_vault_credential issue --name alice-laptop --scopes vault:read vault:write vault:propose
+unset vault_database_url
+```
+
+Replace the final `issue` command with `grant-oauth`, `revoke-oauth-scope`, or
+another credential subcommand as needed. Read the script's `database :` line
+before accepting its result; it intentionally prints only the target
+host/database description, never the password. Do not run `heroku config:get`
+uncaptured in a recorded agent session, because its output is the live database
+credential.
 
 **Name it per person or per machine, never per team.** `contributed_by` is
 derived from the principal and never from the request body, so the name becomes
@@ -1325,6 +1396,14 @@ refresh family, never requested by the client:
 python -m scripts.issue_vault_credential grant-oauth --id <credential-id> --scopes vault:update
 python -m scripts.issue_vault_credential revoke-oauth-scope --id <credential-id> --scopes vault:update
 ```
+
+The browser authorization mints the OAuth access credential; do not use the
+static `issue` subcommand for it. When running either entitlement command from a
+local checkout against production, first follow the
+[just-in-time database procedure](#running-the-credential-tool-locally-against-production)
+above. For the current compiler/exporter exercise, use separate OAuth families
+where practical and grant `vault:compile` or `vault:export` only to the family
+performing that role.
 
 The id may name the current credential or an older rotated credential in the
 same family. It is a lookup handle, not the persistence target. The command
