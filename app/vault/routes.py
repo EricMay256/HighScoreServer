@@ -53,6 +53,8 @@ from .api_models import (
     VaultReviewDecisionResponse,
     VaultReviewQueueResponse,
     VaultSearchResponse,
+    VaultSetSummaryRequest,
+    VaultSetSummaryResponse,
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
@@ -107,6 +109,10 @@ from .service import (
     ReviewCaseAlreadyDecided,
     ReviewCaseNotFound,
     ReviewDecisionRequest,
+    SetSummaryRequest,
+    SummaryAlreadyPresent,
+    SummaryRejected,
+    SummaryWindowClosed,
     UnresolvedSources,
     UpdateRequest,
     UpdateWouldDuplicate,
@@ -114,6 +120,7 @@ from .service import (
     VaultCompileService,
     VaultContributionService,
     VaultDocumentRetireService,
+    VaultDocumentSummaryService,
     VaultDocumentUpdateService,
     VaultReviewService,
     VaultSearchService,
@@ -451,7 +458,14 @@ async def contribute(
     # the gate's whole working. `max_similarity` is additive here -- nothing
     # was taken away. The MCP default is the narrow one because a model that
     # just wrote a note does not need ten scored note ids inviting a read.
-    return contribution_response(outcome, detail=VaultContributionDetail.REVIEW)
+    return contribution_response(
+        outcome,
+        detail=VaultContributionDetail.REVIEW,
+        summary_supplied=body.summary is not None,
+        # Unconditional: this handler runs under `vault:write`, which is the
+        # scope the carveout runs under too, so the caller can act on it.
+        summary_operation="POST /notes/{id}/summary",
+    )
 
 
 def _amendment_service() -> VaultAmendmentService:
@@ -633,6 +647,124 @@ async def update_vault_document(
         note_id=outcome.note_id,
         message=outcome.message,
         re_embedded=outcome.re_embedded,
+    )
+
+
+async def set_summary_quota(
+    credential: VaultCredential = Depends(require_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "set_summary")
+    return credential
+
+
+@router.post(
+    "/notes/{note_id}/summary",
+    response_model=VaultSetSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Supply a summary a contribution omitted",
+)
+async def set_vault_document_summary(
+    body: VaultSetSummaryRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(set_summary_quota),
+) -> VaultSetSummaryResponse:
+    """Fill in an absent summary on the caller's own recent note (ADR 0035).
+
+    Under `vault:write` rather than `vault:update`, which is the whole point:
+    the contributor that omitted a summary can supply one without holding
+    replacement authority over the corpus. It is a sub-resource rather than a
+    PATCH on the note for the same reason -- a partial update of `/notes/{id}`
+    would imply the other fields are reachable here, and they are not.
+
+    Refuses three ways, each distinct in the status it returns: 404 when the
+    note is not the caller's own (or does not exist -- see the service on why
+    those are one answer), 409 when it already has a summary or the grace
+    period has closed, and 409 again when the resulting note would duplicate a
+    different one.
+    """
+
+    service = VaultDocumentSummaryService(
+        transactions=VaultTransactionService(get_vault_engine()),
+        provider=get_embedding_provider(),
+    )
+
+    try:
+        outcome = await service.set_summary(
+            SetSummaryRequest(
+                document_id=note_id,
+                summary=body.summary,
+                principal_id=credential.principal_id,
+                # From the credential, never the body. Same claim and same
+                # reasoning as the contribution path's.
+                contributed_by=f"agent:{credential.principal_id}",
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except DocumentNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Note not found",
+        ) from exc
+    except SummaryAlreadyPresent as exc:
+        # 409 rather than 422: the request is well-formed and the caller is
+        # entitled to make it; the resource is simply not in a state that
+        # accepts it. Same reading as the update path's collision.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except SummaryWindowClosed as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "grace_seconds": exc.grace_seconds,
+            },
+        ) from exc
+    except UpdateWouldDuplicate as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "similars": [
+                    {"note_id": s.note_id, "title": s.title, "score": s.score}
+                    for s in exc.similars
+                ],
+            },
+        ) from exc
+    except SummaryRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": "Summary failed validation", "errors": [str(exc)]},
+        ) from exc
+    except DedupUnavailable as exc:
+        logger.error("Refusing a vault summary: no embedding provider")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Setting a summary is unavailable: no embedding provider configured",
+        ) from exc
+    except EmbeddingInputTooLong as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document exceeds the embedding model input limit",
+        ) from exc
+    except EmbeddingError as exc:
+        # Type only, never the message: an embedding exception can carry the
+        # note body.
+        logger.error(
+            "Vault summary failed to embed",
+            extra={"error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Setting a summary is temporarily unavailable",
+        ) from exc
+
+    return VaultSetSummaryResponse(
+        note_id=outcome.note_id,
+        message=outcome.message,
+        content_revision=outcome.content_revision,
     )
 
 

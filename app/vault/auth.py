@@ -46,6 +46,15 @@ class VaultScope:
     and deletion as well, which made "may add a note" and "may destroy one" the
     same grant — and the importer, the only long-lived credential, held it.
 
+    ``WRITE`` also covers ADR 0035's summary carveout, which is the one place a
+    second route shares a verb. The test that permits it is not "the route is
+    small": it is that the route grants no capability the verb did not already
+    carry. A contributor can put any summary it likes on its own note at
+    contribute time, so the carveout adds a later *moment* to do that and not a
+    new power — a `vault:summarize` could never be usefully withheld from a
+    contributor, nor usefully granted without one. Anything that can reach a
+    field its holder could not already have written needs its own verb.
+
     ``DELETE`` rather than ``RETIRE`` even though the route, the service and the
     quota bucket all say retire. ADR 0019's point is that retiring *is* deletion
     with no archived row left behind, and the audience for a scope name is an

@@ -41,6 +41,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0030 | [An edge value is checked for shape, and still never for existence](0030-edge-values-are-shape-checked-never-existence-checked.md) | Accepted (answers 0025's 2026-08-26 amendment) |
 | 0031 | [Search names candidates; fetch returns documents](0031-search-is-a-discovery-surface.md) | Accepted (amends 0006, which ordered results without saying what one is) |
 | 0032 | [A contribution reports its verdict; the gate's working is opt-in](0032-a-contribution-reports-its-outcome.md) | Accepted (refines 0016) |
+| 0035 | [A contributor may describe its own recent note](0035-a-contributor-may-describe-its-own-recent-note.md) | Accepted (amends 0028; refines 0032) |
 
 ## Reserved numbers
 

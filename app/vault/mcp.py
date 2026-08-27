@@ -87,6 +87,8 @@ from .api_models import (
     VaultReviewDecisionResponse,
     VaultReviewQueueResponse,
     VaultSearchResponse,
+    VaultSetSummaryRequest,
+    VaultSetSummaryResponse,
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
@@ -135,11 +137,16 @@ from .service import (
     ReviewCaseAlreadyDecided,
     ReviewCaseNotFound,
     ReviewDecisionRequest,
+    SetSummaryRequest,
+    SummaryAlreadyPresent,
+    SummaryRejected,
+    SummaryWindowClosed,
     UpdateRequest,
     UpdateWouldDuplicate,
     VaultAmendmentService,
     VaultContributionService,
     VaultDocumentRetireService,
+    VaultDocumentSummaryService,
     VaultDocumentUpdateService,
     VaultPromotionService,
     VaultReviewService,
@@ -168,6 +175,13 @@ _TOOL_SCOPES: dict[str, tuple[str, str]] = {
     "vault_search": (VaultScope.READ, "search"),
     "vault_get_note": (VaultScope.READ, "get_note"),
     "vault_contribute": (VaultScope.WRITE, "contribute"),
+    # The ADR 0035 carveout. Not UPDATE: it cannot reach any field but
+    # `summary`, so it carries none of the replacement authority that scope
+    # means. WRITE rather than a verb of its own because it grants nothing
+    # WRITE did not already carry -- a contributor could have written this
+    # summary at contribute time, so the carveout adds a later moment and not
+    # a new power. `VaultScope` records the test that permits the sharing.
+    "vault_set_summary": (VaultScope.WRITE, "set_summary"),
     "vault_propose_note_amendment": (VaultScope.PROPOSE, "amendment_propose"),
     "vault_propose_note_body_diff": (VaultScope.PROPOSE, "amendment_propose"),
     "vault_update_note": (VaultScope.UPDATE, "update"),
@@ -392,7 +406,7 @@ def _content_payload(
 
 
 def build_vault_mcp_server() -> VaultMCPServer:
-    """Register the fourteen tools over the existing services.
+    """Register the fifteen tools over the existing services.
 
     **Every tool carries `ToolAnnotations`, and they are claims rather than
     decoration.** A client may use `readOnlyHint` to decide what to run without
@@ -402,7 +416,7 @@ def build_vault_mcp_server() -> VaultMCPServer:
     per-tool check (ADR 0021) -- but a wrong hint invites a client to skip a
     confirmation the operator wanted.
 
-    Two of the fourteen are judgement calls worth recording:
+    Three of the fifteen are judgement calls worth recording:
 
     - `vault_decide_amendment_proposal` is marked **destructive** even though
       it reads as an adjudication. Accepting a proposal applies it, and a
@@ -412,6 +426,11 @@ def build_vault_mcp_server() -> VaultMCPServer:
     - `vault_set_promotion_status` is marked **idempotent**: setting a status
       to the value it already holds leaves the same state. `vault_retire_note`
       is not, because the second call finds nothing to retire and says so.
+    - `vault_set_summary` is marked **non-destructive** and **not idempotent**,
+      which looks contradictory and is not. It cannot destroy anything because
+      it only ever moves `summary` from absent to present (ADR 0035); it is not
+      idempotent because the second identical call is *refused* for that same
+      reason, rather than replaying the first the way `vault_contribute` does.
 
     `vault_contribute` is idempotent for a reason specific to this server: its
     key is derived from content (`derive_idempotency_key`), so a retry replays
@@ -593,10 +612,22 @@ def build_vault_mcp_server() -> VaultMCPServer:
         and to what. Report the outcome and the note id; there is nothing here
         that needs fetching.
 
+        If `summary_advice` comes back, act on it before moving on: it means
+        the note landed without a summary, and it names the call that supplies
+        one while that is still cheap.
+
         Args:
             title: A declarative sentence stating the insight.
             body: The note in Markdown.
-            summary: Optional one-line precis; contributes to matching.
+            summary: A few sentences stating what the note establishes.
+                Optional, and worth writing every time: it joins the
+                note's embedding text and becomes its preview in search
+                results, so it is a retrieval signal and not a display
+                field. Summarize the whole note rather than its opening
+                -- search falls back to the opening paragraph by itself,
+                so restating that adds nothing. Omitting it is allowed
+                and the response will tell you how to supply one after
+                the fact.
             tags: Topic keywords. For what the note is *about*.
             aliases: Alternative titles someone might search for.
             facets: Classification as {name: [values]}, e.g.
@@ -699,6 +730,143 @@ def build_vault_mcp_server() -> VaultMCPServer:
         return contribution_response(
             outcome,
             detail=VaultContributionDetail(response_detail),
+            summary_supplied=model.summary is not None,
+            # Unconditional: reaching this line means the session holds
+            # `vault:write`, which is the scope the carveout runs under, so
+            # the tool being named is one this session can actually see and
+            # call.
+            summary_operation="vault_set_summary",
+        )
+
+    @server.tool(
+        name="vault_set_summary",
+        annotations=ToolAnnotations(
+            title="Add a missing summary",
+            readOnlyHint=False,
+            # It can only move `summary` from absent to present. There is no
+            # argument here that reaches the body, the title or the tags, and
+            # a note that already has a summary is refused rather than
+            # overwritten -- so nothing existing can be lost through this tool.
+            destructiveHint=False,
+            # False, and worth stating. A second identical call does not replay
+            # the first like `vault_contribute` does: it is refused, because
+            # the summary is now present. Retrying on a timeout is safe in the
+            # sense that nothing is written twice, but the retry reports an
+            # error rather than the original success.
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+    async def vault_set_summary(
+        note_id: str,
+        summary: str,
+    ) -> VaultSetSummaryResponse:
+        """Add the summary a note was contributed without.
+
+        Call this straight after `vault_contribute` reports `summary_advice`.
+        A summary joins the note's embedding text and becomes its preview in
+        search results, so a note without one is measurably harder for anyone
+        to find later -- this is a retrieval field, not a display field.
+
+        **Not a general edit.** It fills in an absent summary and does nothing
+        else. Three conditions, all refused rather than worked around:
+
+        - the note must be one you contributed;
+        - it must not already have a summary;
+        - it must have been contributed within the last 15 minutes.
+
+        Outside those, changing a note is `vault_propose_note_amendment`, which
+        goes to a human review queue. Do not reach for that merely to add a
+        summary to an older note -- an absent summary on a note nobody is
+        editing is not worth a reviewer's time.
+
+        The write is deduplicated like any other, so it can be refused if the
+        summary would make the note collide with a different one; nothing is
+        written in that case. Write a precis of what *this* note concludes and
+        that will not happen.
+
+        Args:
+            note_id: Full ID of the note to describe, as returned by
+                vault_contribute.
+            summary: A few sentences stating what the note establishes.
+                Summarize the whole note, not its opening -- search already
+                falls back to the opening paragraph on its own, so an
+                extract of it adds nothing.
+        """
+
+        credential = await _authorized("vault_set_summary")
+
+        try:
+            model = VaultSetSummaryRequest.model_validate({"summary": summary})
+        except ValueError as exc:
+            raise ToolError(f"Invalid summary: {exc}") from exc
+
+        service = VaultDocumentSummaryService(
+            transactions=VaultTransactionService(get_vault_engine()),
+            provider=get_embedding_provider(),
+        )
+
+        try:
+            outcome = await service.set_summary(
+                SetSummaryRequest(
+                    document_id=note_id,
+                    summary=model.summary,
+                    principal_id=credential.principal_id,
+                    # Derived from the credential exactly as the contribution
+                    # path derives it, because it is the same claim: this
+                    # principal wrote that note. Taking it from a tool argument
+                    # would let one principal describe another's work.
+                    contributed_by=f"agent:{credential.principal_id}",
+                    request_id=uuid4().hex,
+                )
+            )
+        except DocumentNotFound as exc:
+            raise ToolError(
+                "No note of yours with that id. This tool only describes notes "
+                "you contributed."
+            ) from exc
+        except SummaryAlreadyPresent as exc:
+            raise ToolError(
+                "That note already has a summary. Changing an existing one is "
+                "vault_propose_note_amendment."
+            ) from exc
+        except SummaryWindowClosed as exc:
+            raise ToolError(
+                f"{exc} Summaries can be added for "
+                f"{exc.grace_seconds // 60} minutes after a note is "
+                "contributed; this one is older."
+            ) from exc
+        except SummaryRejected as exc:
+            raise ToolError(f"Summary failed validation: {exc}") from exc
+        except UpdateWouldDuplicate as exc:
+            collisions = ", ".join(f"{s.note_id} ({s.score:.3f})" for s in exc.similars)
+            raise ToolError(
+                f"This summary would make the note duplicate: {collisions}. "
+                "Nothing was written."
+            ) from exc
+        except DedupUnavailable as exc:
+            logger.error("Refusing a vault summary: no embedding provider")
+            raise ToolError(
+                "Setting a summary is unavailable: no embedding provider "
+                "configured"
+            ) from exc
+        except EmbeddingInputTooLong as exc:
+            raise ToolError(
+                "Note exceeds the embedding model input limit; shorten it"
+            ) from exc
+        except EmbeddingError as exc:
+            # Type only, never the message: an embedding exception can carry
+            # the note body.
+            logger.error(
+                "Vault summary failed to embed",
+                extra={"error_type": type(exc).__name__},
+            )
+            raise ToolError("Setting a summary is temporarily unavailable") from exc
+
+        return VaultSetSummaryResponse(
+            note_id=outcome.note_id,
+            message=outcome.message,
+            content_revision=outcome.content_revision,
         )
 
     @server.tool(

@@ -520,6 +520,32 @@
     }
   },
   {
+    "name": "vault_set_summary",
+    "scope": "vault:write",
+    "quota": "set_summary",
+    "required": [
+      "note_id",
+      "summary"
+    ],
+    "properties": [
+      "note_id",
+      "summary"
+    ],
+    "property_types": {
+      "note_id": "string",
+      "summary": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Add a missing summary",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
+  },
+  {
     "name": "vault_update_note",
     "scope": "vault:update",
     "quota": "update",

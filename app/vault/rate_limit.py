@@ -90,6 +90,11 @@ LIMITS: dict[str, Limit] = {
     # batches, so it gets the same shape. Its own bucket rather than sharing
     # contribute's, so a backfill cannot starve new contributions.
     "update": Limit(per_minute=30, burst=20),
+    # Filling in an omitted summary costs an embedding call and a dedup query,
+    # so it is priced like the update it is a narrow slice of. Its own bucket
+    # because it is the *repair* for a contribution: sharing contribute's would
+    # mean a batch of notes could exhaust the allowance that describes them.
+    "set_summary": Limit(per_minute=30, burst=20),
     # Retirement is rare and irreversible, so it gets a deliberately tight
     # bucket: a loop that deletes is worse than a loop that writes.
     "retire": Limit(per_minute=10, burst=5),
