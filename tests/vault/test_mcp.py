@@ -114,9 +114,18 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
             (VaultScope.READ,),
             ["vault_search", "vault_get_note"],
         ),
+        # `vault_set_summary` rides on WRITE (ADR 0035), and its absence from
+        # the update-scoped row below is the assertion that matters: the
+        # carveout is not a slice of `vault:update`, so nothing here can drift
+        # into requiring replacement authority to describe your own note.
         (
             (VaultScope.READ, VaultScope.WRITE),
-            ["vault_search", "vault_get_note", "vault_contribute"],
+            [
+                "vault_search",
+                "vault_get_note",
+                "vault_contribute",
+                "vault_set_summary",
+            ],
         ),
         (
             (VaultScope.READ, VaultScope.PROPOSE),
@@ -133,6 +142,7 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
                 "vault_search",
                 "vault_get_note",
                 "vault_contribute",
+                "vault_set_summary",
                 "vault_update_note",
                 "vault_retire_note",
             ],

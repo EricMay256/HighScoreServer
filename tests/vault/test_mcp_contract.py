@@ -1,6 +1,6 @@
 """The MCP surface as a reviewed artifact, not an emergent one.
 
-Fourteen tools, each with an input schema derived from a Python signature and
+Fifteen tools, each with an input schema derived from a Python signature and
 an output schema derived from a return annotation. Both are generated, which
 makes them easy to change by accident: renaming a parameter, giving a default,
 or widening a return type all edit the published contract without touching
@@ -19,7 +19,8 @@ schema describes its response. That was not free: a `-> dict[str, Any]`
 annotation also produces a schema, but a permissive `{"type": "object",
 "additionalProperties": true}` one -- enough to make the SDK emit
 `structuredContent` beside the text block (see `test_mcp_budget`) while
-promising a client nothing about what is inside. All fourteen were that shape
+promising a client nothing about what is inside. All fourteen then-existing
+tools were that shape
 until 2026-08-26. `test_no_tool_declares_a_permissive_output_schema` keeps
 them from sliding back, because the slide is silent: the schema stays valid
 and simply stops saying anything.

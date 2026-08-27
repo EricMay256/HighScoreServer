@@ -33,6 +33,23 @@ MAX_FACET_VALUE_LENGTH = 128
 NOTE_SCHEMA_VERSION = 2
 WIKI_SCHEMA_VERSION = 1
 
+# How long after contributing a note its own author may still supply the
+# `summary` it omitted, without holding `vault:update`. See ADR 0035.
+#
+# The window is the security boundary, so it is worth saying what it buys.
+# `summary` joins the embedding text and the search preview, so a crafted one
+# is a retrieval-poisoning vector: it can make an unrelated note surface for a
+# targeted query. Bounding the carveout in time means the principal amending
+# the note is the one that just wrote it, in the same working context, rather
+# than one that has since read hostile instructions out of the corpus.
+#
+# Fifteen minutes covers the shape the gap actually has -- contribute a few
+# notes, then tidy up at the end of a task -- while staying far short of a
+# session. Not configurable: a deployment that widened it would be relaxing an
+# authorization boundary through an environment variable, which is the mistake
+# PENDING_AUTHORIZATION_TTL_SECONDS is kept out of configuration to avoid.
+SUMMARY_GRACE_PERIOD_SECONDS = 900
+
 # The advisory lock serializing OAuth client deletion against the start of an
 # authorization. Here rather than beside the operations because two modules need
 # it -- `oauth.authorize` and `VaultOAuthClientRepository.delete_stale` -- and a

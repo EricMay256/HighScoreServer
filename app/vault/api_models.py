@@ -20,6 +20,7 @@ from uuid import UUID
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
 
 from .body_diff import MAX_BODY_DIFF_CHARS, BodyChangeSummary
+from .constants import SUMMARY_GRACE_PERIOD_SECONDS
 from .domain import (
     AmendmentProposalKind,
     AmendmentProposalState,
@@ -204,6 +205,74 @@ class VaultDocumentUpdateRequest(VaultDocumentContentRequest):
     """
 
 
+class VaultSetSummaryRequest(BaseModel):
+    """Supply the ``summary`` a contribution omitted (ADR 0035).
+
+    One field, and that is the whole contract. This is not a narrow update: it
+    is a distinct operation that can only ever move ``summary`` from absent to
+    present, on a note the caller contributed, inside the grace period. Every
+    other content field is unreachable from here by construction rather than by
+    validation, which is what lets it sit under ``vault:write`` while a general
+    replacement stays behind ``vault:update``.
+
+    The bound matches ``VaultDocumentContentRequest.summary`` because it is the
+    same column; a value accepted at contribute time must be accepted here, or
+    the carveout would refuse to repair exactly what it exists to repair.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(
+        min_length=1,
+        max_length=2_000,
+        description=(
+            "Short precis of the whole note. Joins the embedding text and "
+            "search_vector at weight B and becomes the note's search preview, "
+            "so it is a retrieval signal rather than a display field. Write "
+            "what the note concludes, not what it is filed under."
+        ),
+    )
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, summary: str) -> str:
+        """Reject a blank summary, and store the stripped value.
+
+        ``min_length`` alone would admit whitespace, and whitespace is the one
+        input this operation must not accept: it writes a non-null column, so
+        it would close the carveout permanently -- the note can never be
+        described again through this route -- while contributing nothing to
+        either the embedding text or the preview. A refusal the caller can act
+        on is strictly better than a write it cannot undo.
+
+        Scoped to this model deliberately. ``VaultDocumentContentRequest``
+        accepts a blank summary today, and tightening a shipped write path is a
+        separate decision from how a new one behaves.
+        """
+
+        stripped = summary.strip()
+        if not stripped:
+            raise ValueError("summary must not be blank")
+        return stripped
+
+
+class VaultSetSummaryResponse(BaseModel):
+    """The settled outcome of filling in an absent summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    message: str
+    content_revision: int = Field(
+        description=(
+            "The note's content revision after the write. It moves because a "
+            "summary is caller-supplied content, so an amendment proposal "
+            "composed against the previous revision goes stale rather than "
+            "silently applying over the new summary (ADR 0028)."
+        ),
+    )
+
+
 class VaultSimilarNote(BaseModel):
     """An existing note the deduper surfaced, as reported to a contributor."""
 
@@ -376,6 +445,15 @@ class VaultContributionResponse(BaseModel):
             "the one piece of evidence a contributor acts on."
         ),
     )
+    summary_advice: str | None = Field(
+        default=None,
+        description=(
+            "Present only when a note landed without a summary. An instruction "
+            "rather than a complaint: it names the call that supplies one and "
+            "the window that call stays open for. Null when a summary was "
+            "given, and null when nothing was written."
+        ),
+    )
     similars: list[VaultSimilarNote] = Field(
         default_factory=list,
         description=(
@@ -418,10 +496,56 @@ class VaultContributionDetail(StrEnum):
     REVIEW = "review"
 
 
+def _summary_advice(
+    outcome: Any,
+    *,
+    supplied: bool,
+    operation: str | None,
+) -> str | None:
+    """What to tell a contributor that omitted the summary. ADR 0035.
+
+    Only on ``inserted``, and the exclusions are the interesting part. A
+    ``flagged`` note is written but withheld from the read surface pending
+    adjudication -- ``READABLE_STATUSES`` is active and archived -- so the
+    carveout would 404 on it, and advice naming a call that cannot succeed is
+    worse than no advice. ``rejected`` and ``invalid`` wrote nothing at all. A
+    replay is left alone for a different reason: it reports what an earlier
+    request did, and repeating advice the caller has already acted on would
+    read as though it had not.
+
+    ``operation`` is the caller's own name for the follow-up, supplied by the
+    adapter, because one builder serves a tool surface and an HTTP surface that
+    do not share a vocabulary. The *rule* stays here so the two cannot drift
+    about when a contributor gets told.
+    """
+
+    if supplied or operation is None:
+        return None
+    if outcome.status != "inserted" or outcome.note_id is None:
+        return None
+    if outcome.idempotent_replay:
+        return None
+
+    # Deliberately terse, and the terseness is measured. This fires on almost
+    # every contribution today -- 3 notes in 70 carry a summary -- and every
+    # byte here is paid twice, in `structuredContent` and in the text block.
+    # A first draft explaining *why* a summary matters cost 740 bytes and put
+    # the write response 53% over the budget `test_mcp_budget` pins. The
+    # reasoning belongs in the `vault_set_summary` description, which the model
+    # reads once when it decides to call the tool, rather than in a response it
+    # receives every time. What has to be here is the instruction: the verb,
+    # the operation, and the deadline. The note id is not repeated because
+    # `note_id` is already a field of this response.
+    minutes = SUMMARY_GRACE_PERIOD_SECONDS // 60
+    return f"No summary. Add one with {operation} within {minutes} minutes."
+
+
 def contribution_response(
     outcome: Any,
     *,
     detail: VaultContributionDetail,
+    summary_supplied: bool = True,
+    summary_operation: str | None = None,
 ) -> VaultContributionResponse:
     """Render a settled write, at the asked-for level of detail.
 
@@ -460,6 +584,9 @@ def contribution_response(
         message=outcome.message,
         idempotent_replay=outcome.idempotent_replay,
         max_similarity=similars[0] if similars else None,
+        summary_advice=_summary_advice(
+            outcome, supplied=summary_supplied, operation=summary_operation
+        ),
         similars=similars if reviewing else [],
         related_pages=pages if reviewing else [],
         errors=list(outcome.errors),

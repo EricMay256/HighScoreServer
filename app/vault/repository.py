@@ -269,6 +269,65 @@ class VaultDocumentRepository:
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
 
+    async def set_summary(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        summary: str,
+        contributed_by: str,
+        not_before: datetime,
+    ) -> VaultDocument | None:
+        """Fill in an absent ``summary`` on one note, under ADR 0035's carveout.
+
+        Every precondition is in the predicate rather than checked by the
+        caller, and that is the point: this runs under a scope that does *not*
+        carry general update authority, so the conditions are what stand in for
+        it. A caller that checked first and updated second would have a window
+        between the two, and the whole operation is defined by a window.
+
+        The four conditions each answer a different objection:
+
+        - ``kind = 'note'``. A wiki page is compiled under ``vault:compile``,
+          and its summary is the compiler's output. Same reasoning as
+          ``decline_notes``: the caller is not trusted with the kind.
+        - ``summary IS NULL``. Makes the operation monotonic -- it can supply a
+          precis where none exists and can never rewrite one. That is what
+          keeps it safe under a write-level scope: a note cannot be
+          contributed innocuously and later misrepresented.
+        - ``contributed_by``. The author, and authorization-grade because ADR
+          0016 takes it from the credential and never from a request body.
+        - ``created_at >= not_before``. The grace period.
+
+        Returns None when nothing matched, which the service renders as the
+        specific refusal after re-reading the row. Deliberately does not say
+        *which* condition failed: one predicate that either matches or does
+        not is a great deal easier to reason about than four that can
+        disagree.
+
+        ``content_revision`` moves because this is caller-supplied content, so
+        an amendment proposal composed against the old revision must go stale
+        rather than silently apply over the new summary (ADR 0028).
+        """
+
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            .where(vault_documents.c.summary.is_(None))
+            .where(vault_documents.c.contributed_by == contributed_by)
+            .where(vault_documents.c.created_at >= not_before)
+            .values(
+                summary=summary,
+                updated_at=func.now(),
+                content_revision=vault_documents.c.content_revision + 1,
+            )
+            .returning(*self._domain_columns)
+        )
+        result = await connection.execute(statement)
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
     async def set_status(
         self,
         connection: AsyncConnection,

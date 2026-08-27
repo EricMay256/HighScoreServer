@@ -386,6 +386,15 @@ be edited when it does.
   grant, and do not gate a new write route on an existing scope because adding one looks like
   ceremony — that is exactly how `vault:write` came to mean "may destroy any note". A quota is
   not an authorization boundary: `retire`'s tight bucket bounds how fast, not whether.
+- **The one sanctioned exception, and the test that bounds it.** `vault:write` gates two
+  routes: contribute, and ADR 0035's `set_summary`. That is allowed because the second grants
+  no capability the first did not already carry — a contributor could have written that summary
+  at contribute time, so the carveout adds a later *moment*, not a new power. A
+  `vault:summarize` could be neither usefully withheld from a contributor nor usefully granted
+  without one, and a scope that cannot be granted or withheld is a second name rather than a
+  boundary. **A route may share a verb only when it can reach nothing its holder could not
+  already have written.** Small is not the test; reachability is. A route touching the body,
+  the title, or another principal's note needs its own verb however narrow it looks.
 - The scope is `vault:delete` even though the route, service and quota bucket all say *retire*.
   The internal vocabulary describes the operation; the permission name warns the operator
   granting it, and "retire" reads as reversible when ADR 0019 makes it not.
