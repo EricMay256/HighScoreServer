@@ -41,18 +41,23 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0030 | [An edge value is checked for shape, and still never for existence](0030-edge-values-are-shape-checked-never-existence-checked.md) | Accepted (answers 0025's 2026-08-26 amendment) |
 | 0031 | [Search names candidates; fetch returns documents](0031-search-is-a-discovery-surface.md) | Accepted (amends 0006, which ordered results without saying what one is) |
 | 0032 | [A contribution reports its verdict; the gate's working is opt-in](0032-a-contribution-reports-its-outcome.md) | Accepted (refines 0016) |
+| 0033 | [An amendment may name a span; the server writes the diff](0033-an-amendment-may-name-a-span.md) | Accepted (adds a third authoring form to 0028) |
 | 0034 | [Embeddings are document-level, and chunking is deferred against a measured trigger](0034-embeddings-are-document-level-and-chunking-is-deferred.md) | Accepted |
 | 0035 | [A contributor may describe its own recent note](0035-a-contributor-may-describe-its-own-recent-note.md) | Accepted (amends 0028; refines 0032) |
 
 ## Reserved numbers
 
-Claimed by work in progress on separate branches, so that two of them do not write the same
-number. This happened on 2026-08-26: 0030 was claimed for metadata-only search on one branch
-and merged as edge-value validation from another, and the loser had to renumber.
+**Claim a number here before writing an ADR on a branch.** On 2026-08-26 four branches ran in
+parallel against this lineage; 0030 was claimed for metadata-only search on one and merged as
+edge-value validation from another, and the loser renumbered. The three that followed the
+convention (0033, 0034, 0035) landed without collision, and the only merge conflicts were
+adjacent rows in the table above.
 
-A reservation is not a decision. If the work is abandoned, delete the row and let the number
-be reused — an unexplained gap in the lineage is worse than a reused number.
+A reservation is not a decision. If the work is abandoned, delete the row and let the number be
+reused — an unexplained gap in the lineage is worse than a reused number.
+
+The table is empty because nothing is currently in flight. That is a state, not an invitation to
+remove the section.
 
 | ADR | Claimed for | Branch |
 | --- | ----------- | ------ |
-| 0033 | An amendment may name an exact span; the server canonicalizes the diff | `ai-claude/knowledge-vault-mcp-efficiency-a38915` |

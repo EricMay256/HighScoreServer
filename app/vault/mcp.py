@@ -138,6 +138,7 @@ from .service import (
     ReviewCaseNotFound,
     ReviewDecisionRequest,
     SetSummaryRequest,
+    SpanEdit,
     SummaryAlreadyPresent,
     SummaryRejected,
     SummaryWindowClosed,
@@ -184,6 +185,11 @@ _TOOL_SCOPES: dict[str, tuple[str, str]] = {
     "vault_set_summary": (VaultScope.WRITE, "set_summary"),
     "vault_propose_note_amendment": (VaultScope.PROPOSE, "amendment_propose"),
     "vault_propose_note_body_diff": (VaultScope.PROPOSE, "amendment_propose"),
+    # Same scope and the same quota bucket as the two proposal tools above:
+    # it is a third way to author the same artifact, not a new authority,
+    # and a separate bucket would let one principal spend its allowance
+    # twice by changing authoring form.
+    "vault_propose_note_span_edit": (VaultScope.PROPOSE, "amendment_propose"),
     "vault_update_note": (VaultScope.UPDATE, "update"),
     "vault_retire_note": (VaultScope.DELETE, "retire"),
     # Privileged, and on this mount rather than a second one (ADR 0026):
@@ -1158,6 +1164,95 @@ def build_vault_mcp_server() -> VaultMCPServer:
             ) from exc
         except ValueError as exc:
             raise ToolError(f"Invalid body-diff proposal: {exc}") from exc
+
+        return VaultAmendmentProposalResponse(
+            proposal=amendment_proposal_summary(proposal),
+        )
+
+    @server.tool(
+        name="vault_propose_note_span_edit",
+        annotations=ToolAnnotations(
+            title="Propose a span replacement",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+    async def vault_propose_note_span_edit(
+        note_id: str,
+        base_revision: int,
+        expected_text: str,
+        replacement_text: str,
+        rationale: str,
+        occurrence: int | None = None,
+    ) -> VaultAmendmentProposalResponse:
+        """Propose a body change by naming the old text, not by writing a patch.
+
+        Prefer this over `vault_propose_note_body_diff` unless you already have
+        a diff. Quote `expected_text` exactly as it appears in the note --
+        whitespace included, copied from `vault_get_note` -- and give the text
+        that should replace it. The server locates the span and writes the
+        unified diff, so there is no hunk arithmetic to get wrong. The stored
+        proposal is an ordinary body diff and is reviewed as one.
+
+        Fetch the note first and use its `content_revision` as `base_revision`.
+
+        The span must identify exactly one place. If the text appears more than
+        once the call is refused rather than guessed at: either extend
+        `expected_text` until it is unique, or pass `occurrence` to say which
+        match you mean. A span that matches nothing is also refused -- re-fetch
+        and copy it again rather than adjusting it by eye.
+
+        Args:
+            note_id: The note's full ID.
+            base_revision: The note's `content_revision` when you read it.
+            expected_text: The exact existing text to replace, verbatim.
+            replacement_text: What to put in its place. Empty removes the span,
+                which counts as a removal at review time.
+            rationale: Why this change is right, for the reviewer.
+            occurrence: Which match to edit, 1-based, when the text is not
+                unique. Omit it to require uniqueness.
+        """
+
+        credential = await _authorized("vault_propose_note_span_edit")
+        if occurrence is not None and occurrence < 1:
+            raise ToolError("occurrence is 1-based; pass 1 for the first match")
+        if not expected_text:
+            raise ToolError("expected_text must not be empty")
+        if not rationale.strip():
+            raise ToolError("rationale must contain non-whitespace text")
+
+        service = VaultAmendmentService(
+            VaultTransactionService(get_vault_engine()),
+            get_embedding_provider(),
+        )
+        try:
+            proposal = await service.propose(
+                AmendmentProposalRequest(
+                    target_document_id=note_id,
+                    base_revision=base_revision,
+                    # Settled by the service once the span is resolved against
+                    # the loaded body; a span is never a stored kind.
+                    change_kind=AmendmentProposalKind.BODY_DIFF,
+                    span=SpanEdit(
+                        expected_text=expected_text,
+                        replacement_text=replacement_text,
+                        occurrence=occurrence,
+                    ),
+                    rationale=rationale,
+                    principal_id=credential.principal_id,
+                    request_id=uuid4().hex,
+                )
+            )
+        except DocumentNotFound as exc:
+            raise ToolError("Note not found") from exc
+        except AmendmentBaseRevisionMismatch as exc:
+            raise ToolError(
+                "The note changed; fetch it again before proposing an edit"
+            ) from exc
+        except ValueError as exc:
+            raise ToolError(f"Invalid span edit: {exc}") from exc
 
         return VaultAmendmentProposalResponse(
             proposal=amendment_proposal_summary(proposal),

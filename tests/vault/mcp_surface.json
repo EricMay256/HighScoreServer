@@ -394,6 +394,50 @@
     }
   },
   {
+    "name": "vault_propose_note_span_edit",
+    "scope": "vault:propose",
+    "quota": "amendment_propose",
+    "required": [
+      "base_revision",
+      "expected_text",
+      "note_id",
+      "rationale",
+      "replacement_text"
+    ],
+    "properties": [
+      "base_revision",
+      "expected_text",
+      "note_id",
+      "occurrence",
+      "rationale",
+      "replacement_text"
+    ],
+    "property_types": {
+      "base_revision": "integer",
+      "expected_text": "string",
+      "note_id": "string",
+      "occurrence": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "rationale": "string",
+      "replacement_text": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": false,
+    "annotations": {
+      "title": "Propose a span replacement",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
+  },
+  {
     "name": "vault_read_amendment_proposal",
     "scope": "vault:review",
     "quota": "amendment_read",

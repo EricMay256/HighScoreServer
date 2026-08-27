@@ -127,6 +127,10 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
                 "vault_set_summary",
             ],
         ),
+        # All three authoring forms ride on PROPOSE. `vault_propose_note_span_edit`
+        # is a way to write the same body diff without hand-computing hunks
+        # (ADR 0033), so it grants nothing the other two did not -- and it must
+        # not appear in the rows below that lack PROPOSE.
         (
             (VaultScope.READ, VaultScope.PROPOSE),
             [
@@ -134,6 +138,7 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
                 "vault_get_note",
                 "vault_propose_note_amendment",
                 "vault_propose_note_body_diff",
+                "vault_propose_note_span_edit",
             ],
         ),
         (

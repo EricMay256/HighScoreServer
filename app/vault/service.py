@@ -14,6 +14,7 @@ from .body_diff import (
     BodyChangeSummary,
     BodyDiffError,
     apply_body_unified_diff,
+    span_edit_to_unified_diff,
     summarize_body_change,
 )
 from .constants import (
@@ -1387,6 +1388,24 @@ class AmendmentRemovalAcknowledgementRequired(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class SpanEdit:
+    """An exact old span and what to put in its place.
+
+    The alternative authoring form for a body change. It never reaches
+    storage: `propose` converts it to the canonical unified diff before
+    anything is written, so the proposal table needs no new kind and a
+    reviewer reads the same artifact either way. See ADR 0033.
+    """
+
+    expected_text: str
+    replacement_text: str
+    # None means "this span must be unique", which is the safe reading of a
+    # caller who has not thought about duplicates. An integer is that caller
+    # saying they have.
+    occurrence: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AmendmentProposalRequest:
     target_document_id: str
     base_revision: int
@@ -1396,6 +1415,11 @@ class AmendmentProposalRequest:
     request_id: str
     replacement: UpdateRequest | None = None
     body_diff: str | None = None
+    # Resolved to `body_diff` against the loaded target inside `propose`, and
+    # never persisted. Carried on the request rather than converted in the
+    # adapter because the conversion needs the note's current body, which only
+    # the service is allowed to read.
+    span: SpanEdit | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1461,7 +1485,12 @@ class VaultAmendmentService:
                 raise AmendmentBaseRevisionMismatch(request.target_document_id)
 
             try:
-                update_request = self._request_update(request, target)
+                # Inside the guard on purpose: a span that matches nothing or
+                # matches twice raises SpanEditError, which is a BodyDiffError,
+                # and reaches the caller as the same client error a malformed
+                # patch would.
+                resolved = self._materialize_span(request, target)
+                update_request = self._request_update(resolved, target)
                 candidate = VaultDocumentUpdateService._build_candidate(
                     target, update_request
                 )
@@ -1474,7 +1503,7 @@ class VaultAmendmentService:
             if not rationale:
                 raise ValueError("rationale must contain non-whitespace text")
 
-            change = self._change_payload(request)
+            change = self._change_payload(resolved)
             proposal = await proposals.insert_pending(
                 connection,
                 target_document_id=target.id,
@@ -1767,6 +1796,36 @@ class VaultAmendmentService:
             "source_ids": list(request.source_ids),
             "source_url": request.source_url,
         }
+
+    @staticmethod
+    def _materialize_span(
+        request: AmendmentProposalRequest,
+        target: VaultDocument,
+    ) -> AmendmentProposalRequest:
+        """Turn a span edit into the diff that will be stored, or pass through.
+
+        Runs after the base-revision check and under the same advisory lock,
+        which is what makes the span meaningful: it is resolved against the
+        exact body the caller claimed to be editing, so a concurrent write
+        cannot move the text out from under it between check and conversion.
+        """
+
+        if request.span is None:
+            return request
+        if request.body_diff is not None or request.replacement is not None:
+            raise ValueError("a span edit carries neither body_diff nor replacement")
+
+        return replace(
+            request,
+            change_kind=AmendmentProposalKind.BODY_DIFF,
+            body_diff=span_edit_to_unified_diff(
+                target.body,
+                expected_text=request.span.expected_text,
+                replacement_text=request.span.replacement_text,
+                occurrence=request.span.occurrence,
+            ),
+            span=None,
+        )
 
     @classmethod
     def _change_payload(cls, request: AmendmentProposalRequest) -> dict[str, object]:

@@ -212,6 +212,24 @@ be edited when it does.
   credential still holds no `vault:update`: it may select an existing proposal but cannot
   compose arbitrary content. `content_revision` moves on `replace_content` only, not review,
   promotion, compile decline, or other lifecycle changes.
+- **A span edit is a third authoring form, not a third stored kind** (ADR 0033).
+  `vault_propose_note_span_edit` takes `expected_text`/`replacement_text`/`occurrence`;
+  `VaultAmendmentService._materialize_span` converts it to a `body_diff` inside `propose`,
+  under the same advisory lock and after the base-revision check, and the `SpanEdit` never
+  reaches storage. Keep it that way: because storage is unchanged, the compact-diff policy,
+  the removal acknowledgement, the review surface and `apply_body_unified_diff` all apply
+  without being restated, and a reviewer reads one artifact however it was authored.
+  `tests/vault/test_span_edit.py` asserts the round trip — what
+  `span_edit_to_unified_diff` renders must apply through the strict applier — and that
+  assertion is what stops the span form becoming a weaker patch format in disguise.
+  - **Do not relax the diff grammar to make patches easier.** Optional or server-repaired
+    hunk counts were proposed and rejected: counts are what makes a mangled patch detectable,
+    and deriving them would let a corrupted request appear to mean something its author did
+    not intend. The span form exists so that the arithmetic never has to be authored, which
+    is the same goal reached without weakening anything.
+  - `occurrence=None` means *this span must be unique*, not *take the first match*. Do not
+    "helpfully" default it to 1; that collapses two different requests and silently edits the
+    wrong paragraph for a caller who had not considered duplicates.
 - **The review surface is REST *and* MCP, and the MCP half is scope-gated.** Reading a case
   serves `flagged` content, the least-vetted text in the corpus, and deciding publishes or
   destroys a note — so the tools exist only for a credential holding `vault:review`, which is
