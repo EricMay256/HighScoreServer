@@ -41,6 +41,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0030 | [An edge value is checked for shape, and still never for existence](0030-edge-values-are-shape-checked-never-existence-checked.md) | Accepted (answers 0025's 2026-08-26 amendment) |
 | 0031 | [Search names candidates; fetch returns documents](0031-search-is-a-discovery-surface.md) | Accepted (amends 0006, which ordered results without saying what one is) |
 | 0032 | [A contribution reports its verdict; the gate's working is opt-in](0032-a-contribution-reports-its-outcome.md) | Accepted (refines 0016) |
+| 0034 | [Embeddings are document-level, and chunking is deferred against a measured trigger](0034-embeddings-are-document-level-and-chunking-is-deferred.md) | Accepted |
 
 ## Reserved numbers
 
@@ -54,4 +55,3 @@ be reused — an unexplained gap in the lineage is worse than a reused number.
 | ADR | Claimed for | Branch |
 | --- | ----------- | ------ |
 | 0033 | An amendment may name an exact span; the server canonicalizes the diff | `ai-claude/knowledge-vault-mcp-efficiency-a38915` |
-| 0034 | Embeddings are document-level; chunking is additive and selective | unstarted |
