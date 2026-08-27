@@ -319,10 +319,18 @@ be edited when it does.
   - Both adapters build the response through `api_models.search_response`, for the reason they
     share `canonical_request_digest`. Do not assemble a hit in an adapter.
   - `snippet` is a **lead extract, not a match highlight**, and is supplied only when `summary`
-    is absent — read `summary or snippet`. It cannot be a highlight: a vector-only hit shares
-    no vocabulary with the query, so `ts_headline` would have nothing to mark and would fall
-    back to the opening words anyway. The 320-character bound was measured against the corpus,
-    not chosen; `snippet.py` carries the distribution it came from.
+    is absent — read `summary or snippet`. A vector-only hit shares no vocabulary with the
+    query, so nothing could mark it; and for hits the lexical arm *did* find, ADR 0007's
+    disjunction rewrite lets one incidental shared word anchor a `ts_headline` fragment
+    somewhere useless, which measured worse than the lead extract. The 320-character bound was
+    measured against the corpus, not chosen; `snippet.py` carries the distribution it came
+    from.
+  - **A `ts_headline` arm is not "call `ts_headline`", and two plausible shortcuts do not
+    work.** Passing it only the terms the lexical arm matched is a *no-op* — an absent term
+    contributes nothing to it already. Routing by retrieval arm does not help either, because
+    the bad case matched lexically. It needs a document-frequency cut so weak terms cannot
+    anchor, and that cut is derived state that goes stale and is not trustworthy at this
+    corpus size. ADR 0031 records the measurements and the gate for revisiting.
   - `next_cursor` is reserved and always null, and must stay that way until a resumable
     ranking exists. RRF scores are positions within one query's candidate set, so an insert
     can move every score beneath it and a document outside the window has no score at all. A

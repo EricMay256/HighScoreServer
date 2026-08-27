@@ -131,3 +131,60 @@ That is deliberate: the cost being fixed is application-to-model, not database-t
 and `ts_headline` would trade a local socket read for a per-row re-parse of the document text
 in Postgres plus a coupling to the text-search configuration. Revisit if the corpus grows
 enough for hydration to matter, or if lexical highlighting proves worth having on its own.
+
+### What a `ts_headline` arm would actually require
+
+Amended 2026-08-26, after measuring the options rather than reasoning about them. An earlier
+draft of this section said the fix was to pass `ts_headline` "only the terms the lexical arm
+scored on". **That is a no-op**, and the correction is worth recording because it is an easy
+mistake to make twice: a term absent from a document contributes nothing to `ts_headline`
+already, so restricting the query to the matched subset is the same query from its point of
+view. Measured against one note, `'stop' | 'retri' | 'creat' | 'duplic' | 'note'` and `'retri'`
+produce byte-identical fragments.
+
+The real distortion is which matched term is allowed to *anchor* the fragment. ADR 0007
+rewrites the tsquery's conjunctions to disjunctions, which is right for ranking — `ts_rank_cd`
+and RRF then decide how much a shared word is worth — but `ts_headline` has no ranking to fall
+back on and weighs every lexeme equally. So a note that shares one incidental word with a long
+question gets a fragment centred on that word:
+
+> turns a network timeout into a second write, because the server cannot tell the **[retry]**
+> from a fresh submission.
+
+against the lead extract's "An idempotency digest must depend on the request alone." Dropping
+the weak term and passing `'idempot' | 'duplic'` anchors it correctly, which identifies the
+lever: an information cut, not a match filter.
+
+**The two halves of that design are not separable, which is the finding.** Routing by
+retrieval arm — headline the hits with a `lexical_rank`, lead-extract the rest — looks like the
+cheap half, because the ranks are already computed. It does not help: the note above *matched*
+lexically, so the routing rule sends it to `ts_headline` and it comes back worse than what is
+shipped today. Any headline arm needs the weak-term cut from the start or it regresses exactly
+the queries this corpus receives.
+
+### Why the weak-term cut is not being built
+
+`ts_stat` supplies document frequency, and on the live corpus (75 active notes, 2,324 distinct
+lexemes) **113 lexemes appear in more than 20% of documents** — `one(49)`, `run(47)`,
+`two(44)`, `read(39)`, `check(38)`, `write(35)`, `path(33)`. Those are the anchors to drop. It
+is buildable. It is not worth building yet:
+
+- **The stop-list is derived state that goes stale.** It has to be recomputed as the corpus
+  grows or it silently drifts, which is a new maintenance surface in exchange for a display
+  field.
+- **75 documents is too few for the statistic to mean what it claims.** `path(33)` is frequent
+  in *this* corpus, but a note genuinely about path handling is precisely the one a path query
+  should highlight. At this size the measurement describes the corpus's topic distribution
+  rather than term informativeness.
+- **It would duplicate a judgement the ranker already makes correctly.** `ts_rank_cd` weights
+  rare terms above common ones; a hand-rolled cut is a second, cruder copy of that, for
+  display only.
+- **The fallback is measurably good.** The lead extract produces a preview for 85 of 85
+  documents, median 213 characters, and these notes are written thesis-first — so the opening
+  sentence is close to an authored summary nobody had to author. The comparison above is one
+  where the lead extract simply *wins*.
+
+The gate for revisiting: evidence that lexically-found hits are being previewed badly. That is
+measurable without shipping anything — generate both a headline and a lead extract for the same
+hits and count how often the headline is better. Build the arm only if it wins often enough to
+pay for the stop-list.

@@ -9,27 +9,46 @@ wiki pages.** So for the note corpus the snippet is not a supplement to
 title, and it has to be good enough to choose on.
 
 **This is a lead extract, not a match highlight, and the distinction is the
-design.** Postgres can highlight a lexical match with `ts_headline`, and that
-was considered. It cannot help the case that matters most here: a hit found
-only by the vector arm shares no vocabulary with the query by construction —
-"how do I stop a retry creating a duplicate" reaching a note titled "An
-idempotency digest must depend on the request alone" — so there is nothing to
-highlight and `ts_headline` falls back to the document's opening words
-anyway. Neither approach can explain a semantic match. Promising "why did this
-match?" in the schema would therefore be a promise the vector arm cannot keep,
-and a snippet that means one thing for lexical hits and another for vector
-hits is worse than one that means the same thing for both.
+design.** Postgres can highlight a lexical match with `ts_headline`, and it was
+measured rather than dismissed. Two findings sent the design here.
+
+A hit found only by the vector arm shares no vocabulary with the query by
+construction, so there is nothing to highlight and `ts_headline` returns the
+document's opening words regardless. Nothing can explain a semantic match.
+Promising "why did this match?" in the schema would be a promise the vector arm
+cannot keep, and a field meaning one thing for lexical hits and another for
+semantic ones is worse than one meaning the same for both.
+
+The second finding is the one that decided it, because it applies to hits the
+lexical arm *did* find. ADR 0007 rewrites the tsquery's conjunctions to
+disjunctions — right for ranking, since `ts_rank_cd` and RRF then weigh how
+much each shared word is worth — but `ts_headline` has no ranking to defer to
+and treats every lexeme alike. So a note sharing one incidental word with a
+long question gets a fragment anchored on that word. Asking "how do I stop a
+retry from creating a duplicate note" of a note about idempotency returns
+
+    ...the server cannot tell the [retry] from a fresh submission.
+
+where this function returns "An idempotency digest must depend on the request
+alone." The lead extract simply wins, and it wins on the case a highlight was
+supposed to be good at.
 
 What a lead extract *can* promise is the note's own claim, which is the better
-selection signal regardless of which arm found it. These notes are written
-thesis-first — the title is a declarative sentence and the opening paragraph
-states the mechanism — so the first paragraph is close to an authored summary
-that nobody had to author.
+selection signal whichever arm found it. These notes are written thesis-first —
+the title is a declarative sentence and the opening paragraph states the
+mechanism — so the first paragraph is close to an authored summary that nobody
+had to author.
+
+A `ts_headline` arm remains possible and is not merely "call `ts_headline`":
+it needs a document-frequency cut so weak terms cannot anchor a fragment, and
+routing by retrieval arm does not substitute for that cut — the example above
+matched lexically. ADR 0031 records the measurements and the gate for
+revisiting.
 
 Kept as its own module rather than folded into the response projection because
 it is pure text handling with awkward edges (fences, headings, block quotes)
-that deserve direct tests, and because a future `ts_headline` arm for lexical
-hits would replace this one function rather than a slice of `api_models`.
+that deserve direct tests, and because such an arm would replace this one
+function rather than a slice of `api_models`.
 """
 
 import re
