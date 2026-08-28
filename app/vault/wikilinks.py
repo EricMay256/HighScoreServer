@@ -239,6 +239,12 @@ def resolve_edges(
     running a repair has asked for precisely that -- and the lookup still never
     guesses, so an ambiguous title is reported rather than picked.
 
+    A name-shaped value that strips to nothing -- ``[``, ``[]``, whitespace --
+    names no document in the only sense that matters and is dropped like any
+    other unresolvable name. It has to be *something* here rather than a
+    passthrough: ``looks_like_a_name`` is what makes the exporter warn, so a
+    value that warns and is then left alone is a warning that never clears.
+
     Order is preserved. Duplicates are not: two names resolving to one document
     would leave the same edge twice, which is meaningless as a relation and
     would fail ``VaultContentRequest``'s uniqueness rule the next time anything
@@ -262,17 +268,26 @@ def resolve_edges(
     minted: set[str] = set()
 
     def name_of(value: str) -> str | None:
-        """The name this value denotes, by either spelling, or None for an id."""
+        """The name this value denotes.
+
+        Three answers, and the empty one is not the same as no answer: ``None``
+        is a value this run does not touch, and ``""`` is one that is shaped
+        like a name and names *nothing* -- a lone bracket, ``[]``, whitespace.
+        Collapsing those two is how such a value used to survive a repair: it
+        tripped ``looks_like_a_name`` so the exporter warned about it forever,
+        and then passed through here untouched so the repair had nothing to do.
+        """
 
         target = parse_wikilink(value)
         if target is not None:
             return target
         if resolve_names and looks_like_a_name(value):
-            return _bare_name(value) or None
+            return _bare_name(value)
         return None
 
     # Every value this run will not rewrite, so a resolution landing on one of
     # them is recognised as a duplicate whether it resolves before or after.
+    # A value that names nothing is not in here: it is leaving the list.
     passthrough = {value for value in values if name_of(value) is None}
 
     for value in values:
@@ -281,6 +296,13 @@ def resolve_edges(
         name = name_of(value)
         if name is None:
             out.append(value)
+            continue
+        if not name:
+            # Nothing to look up. Dropped rather than reported, because there is
+            # no judgement for a human to make about `[` -- and dropping goes
+            # through the same preserve-then-rewrite path as any other name, so
+            # the original list is still evidence before this leaves it.
+            dropped.append(value)
             continue
         candidates = index.candidates(name)
         if len(candidates) == 1:

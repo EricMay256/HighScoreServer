@@ -204,6 +204,39 @@ def test_an_id_that_arrives_twice_is_left_alone() -> None:
     assert not resolution.changed
 
 
+def test_a_name_shaped_value_that_names_nothing_is_dropped() -> None:
+    """`looks_like_a_name` is what makes the exporter warn, so anything it
+    flags has to be something the repair can actually finish.
+
+    A lone bracket or a run of whitespace strips to no name at all. Passing it
+    through leaves a warning that never clears no matter how often the repair
+    is run, which is the failure the repair exists to end.
+    """
+
+    for junk in ("[", "]", "[]", "[[]]", "   ", "[[   ]]"):
+        assert looks_like_a_name(junk), junk
+
+        resolution = resolve_edges([junk], _index(), resolve_names=True)
+
+        assert resolution.values == (), junk
+        assert resolution.dropped == (junk,), junk
+        # Dropping is a rewrite, so the row reaches the planner and the
+        # original list is preserved before the value leaves it.
+        assert resolution.changed, junk
+
+
+def test_a_value_that_names_nothing_is_still_left_alone_at_the_write_boundary() -> None:
+    """Without `resolve_names` nothing is rewritten -- the caller refuses on
+    `malformed` instead, which is what the import path does."""
+
+    for junk in ("[", "[]", "   "):
+        resolution = resolve_edges([junk], _index())
+
+        assert resolution.values == (junk,), junk
+        assert resolution.malformed == (junk,), junk
+        assert not resolution.changed, junk
+
+
 def test_order_is_preserved() -> None:
     resolution = resolve_edges([OTHER, "[[semantic-dedup]]", "[[The .env one]]"], _index())
 
