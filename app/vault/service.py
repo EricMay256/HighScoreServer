@@ -18,6 +18,7 @@ from .body_diff import (
     summarize_body_change,
 )
 from .constants import (
+    CORPUS_LOCK_KEY,
     NOTE_SCHEMA_VERSION,
     SUMMARY_GRACE_PERIOD_SECONDS,
     WIKI_SCHEMA_VERSION,
@@ -354,7 +355,10 @@ class DedupUnavailable(Exception):
 # Serializing governed writes is acceptable at this corpus size and is exactly
 # what makes the dedup decision meaningful. The constant is arbitrary but must
 # never change: it is the lock's identity.
-_CONTRIBUTION_LOCK_KEY = 0x5641554C5401
+# Defined in `constants` now that an operator script takes it too -- the
+# backfill's writes have to serialize with these. Same reasoning as
+# OAUTH_CLIENT_LOCK_KEY: a lock two modules disagree about is not a lock.
+_CONTRIBUTION_LOCK_KEY = CORPUS_LOCK_KEY
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +384,39 @@ class ContributionRequest:
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     source_url: str | None = None
+
+
+async def _summary_still_repairable(
+connection: AsyncConnection,
+    *,
+    document_id: str | None,
+    contributed_by: str,
+) -> bool:
+    """Whether ``vault_set_summary`` would succeed on this note right now.
+
+    The same conditions its predicate applies, asked ahead of time so a
+    replay can decide whether to repeat the advice. Read-only and best
+    effort: a false positive costs one refused follow-up call, where the
+    false negative it replaces cost a lost-response caller any knowledge
+    that its note has no summary at all.
+    """
+
+    if document_id is None:
+        return False
+    note = await VaultDocumentRepository().get_by_id(
+        connection,
+        document_id,
+        statuses=READABLE_STATUSES,
+        readable_only=True,
+    )
+    if note is None or note.kind is not DocumentKind.NOTE:
+        return False
+    if note.summary is not None or note.contributed_by != contributed_by:
+        return False
+    not_before = datetime.now(UTC) - timedelta(
+        seconds=SUMMARY_GRACE_PERIOD_SECONDS
+    )
+    return note.created_at >= not_before
 
 
 class VaultContributionService:
@@ -631,7 +668,13 @@ class VaultContributionService:
             note_id=prior.document_id,
             message=stored.get("message", "idempotent replay"),
             idempotent_replay=True,
+            summary_repairable=await _summary_still_repairable(
+                connection,
+                document_id=prior.document_id,
+                contributed_by=request.contributed_by,
+            ),
         )
+
 
     async def _settle(
         self,
@@ -1109,6 +1152,17 @@ class SummaryRejected(Exception):
     """The note would fail governance validation with this summary."""
 
 
+class SummaryStale(Exception):
+    """The note's content changed while this summary was being embedded.
+
+    Retryable, and the distinction from ``SummaryAlreadyPresent`` matters: that
+    one is settled and a retry would be wrong, this one succeeds on a second
+    attempt against the new revision. It exists because the embedding call
+    happens outside the corpus lock, so a vector computed from the snapshot can
+    arrive describing content that has since moved.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class SetSummaryRequest:
     """Supply the ``summary`` a contribution omitted.
@@ -1300,16 +1354,22 @@ class VaultDocumentSummaryService:
                 summary=request.summary,
                 contributed_by=request.contributed_by,
                 not_before=not_before,
+                expected_revision=existing.content_revision,
             )
             if updated is None:
-                # The predicate is the authority, and it has just disagreed
-                # with a check that passed moments ago. Under the corpus lock
-                # the only writer that can have got between them is another
-                # ``set_summary`` for this note, so the summary is now present
-                # -- which is the answer this caller needs either way.
-                raise SummaryAlreadyPresent(
-                    f"{request.document_id} gained a summary while this "
-                    "request was in flight"
+                # The predicate is the authority and it has just disagreed with
+                # a check that passed moments ago. Re-read under the lock to say
+                # which condition moved, because they need different answers: a
+                # summary that arrived is settled, and content that changed is
+                # retryable. Guessing "already present" was wrong -- ordinary
+                # updates and accepted amendments take this same lock, so any of
+                # them could have been the writer in between.
+                await self._refuse_stale_summary(
+                    connection,
+                    documents,
+                    request=request,
+                    not_before=not_before,
+                    expected_revision=existing.content_revision,
                 )
 
             await embeddings.upsert(
@@ -1336,6 +1396,61 @@ class VaultDocumentSummaryService:
             note_id=request.document_id,
             message="summary set and note re-embedded",
             content_revision=updated.content_revision,
+        )
+
+    async def _refuse_stale_summary(
+        self,
+        connection: AsyncConnection,
+        documents: VaultDocumentRepository,
+        *,
+        request: SetSummaryRequest,
+        not_before: datetime,
+        expected_revision: int,
+    ) -> None:
+        """Say which precondition moved, having re-read the row under the lock.
+
+        Always raises. The order matters: the conditions are checked from the
+        most settled to the most retryable, so a note that both gained a summary
+        and moved on reports the summary -- retrying that would be pointless
+        where retrying a revision change is not.
+        """
+
+        current = await documents.get_by_id(
+            connection,
+            request.document_id,
+            statuses=READABLE_STATUSES,
+            readable_only=True,
+        )
+        if (
+            current is None
+            or current.kind is not DocumentKind.NOTE
+            or current.contributed_by != request.contributed_by
+        ):
+            raise DocumentNotFound(request.document_id)
+        if current.summary is not None:
+            raise SummaryAlreadyPresent(
+                f"{request.document_id} gained a summary while this "
+                "request was in flight"
+            )
+        if current.created_at < not_before:
+            raise SummaryWindowClosed(
+                f"{request.document_id} was contributed more than "
+                f"{self._grace_seconds // 60} minutes ago; propose an "
+                "amendment instead",
+                self._grace_seconds,
+            )
+        if current.content_revision != expected_revision:
+            raise SummaryStale(
+                f"{request.document_id} changed while this summary was being "
+                f"embedded (revision {expected_revision} -> "
+                f"{current.content_revision}); retry against the current text"
+            )
+        # No condition explains the miss, which means the predicate and this
+        # re-read disagree about the same row -- report it rather than invent a
+        # reason, and do not write the vector either way.
+        raise SummaryStale(
+            f"{request.document_id} did not accept the summary and no "
+            "precondition explains it; retry"
         )
 
     @staticmethod

@@ -449,3 +449,165 @@ def test_the_round_trip_works_over_mcp_too(
         assert _row(outcome["note_id"])["summary"] == SUMMARY
     finally:
         _cleanup()
+
+
+def test_content_changing_mid_flight_refuses_rather_than_indexing_stale_text(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The race that used to write a vector describing text the note no longer had.
+
+    The embedding happens outside the corpus lock, against a snapshot read
+    before it. An ordinary update taking the same lock can commit in between --
+    so holding the lock says nothing about what happened before it was
+    acquired. Writing anyway left `embedded_text_sha256` agreeing with the
+    vector and disagreeing with the row, which nothing detects later, because
+    the digest is a hash of the text that was embedded rather than of the note.
+
+    Made deterministic by bumping `content_revision` in the database after the
+    request has read its snapshot, which is exactly the interleaving.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    try:
+        note_id = _contribute(client, write_token)
+        before = _row(note_id)
+
+        # The concurrent writer, landed in the one window that matters: after
+        # the request read its snapshot and before it takes the lock. The
+        # embedding call is that window, which is why it is the hook.
+        service, _engine = vault_service()
+        original_embed = provider.embed
+
+        async def embed_then_let_someone_else_win(texts, kind):
+            await _bump_revision(service, note_id)
+            return await original_embed(texts, kind)
+
+        provider.embed = embed_then_let_someone_else_win
+        try:
+            response = client.post(
+                _summary_url(note_id), json={"summary": SUMMARY}, headers=headers
+            )
+        finally:
+            provider.embed = original_embed
+
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        assert detail["retryable"] is True
+
+        after = _row(note_id)
+        # Nothing was written: no summary, and the vector still describes the
+        # text it was computed from.
+        assert after["summary"] is None
+        assert after["embedded_text_sha256"] == before["embedded_text_sha256"]
+    finally:
+        _cleanup()
+
+
+async def _bump_revision(service, note_id: str) -> None:
+    async with service.transaction() as connection:
+        await connection.execute(
+            update(vault_documents)
+            .where(vault_documents.c.id == note_id)
+            .values(
+                body="A different body entirely, committed by someone else.",
+                content_revision=vault_documents.c.content_revision + 1,
+            )
+        )
+
+
+def test_a_blank_summary_is_the_same_as_no_summary(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """Otherwise the note is undescribed and unrepairable at the same time.
+
+    A whitespace-only summary used to be stored verbatim: non-null, so it
+    suppressed the advice, refused `vault_set_summary` (which requires the
+    column to be null), and was skipped by the backfill for the same reason.
+    Nothing could notice it and nothing could fix it.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    try:
+        response = client.post(
+            "/api/v1/vault/contributions",
+            json=_payload(summary="   "),
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # Told to supply one, exactly as an omitted summary would be.
+        assert body["summary_advice"] is not None
+
+        stored = _row(body["note_id"])
+        assert stored["summary"] is None
+
+        # And the repair route is open, which is the point.
+        repair = client.post(
+            _summary_url(body["note_id"]),
+            json={"summary": SUMMARY},
+            headers=headers,
+        )
+        assert repair.status_code == 200, repair.text
+    finally:
+        _cleanup()
+
+
+def test_a_replayed_contribution_still_advertises_an_open_repair(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The lost-response retry, which is the only case that matters here.
+
+    A caller whose first response never arrived sees only the replay. Silence
+    on the replay meant it never learned the note has no summary or that the
+    window is running -- justified by an assumption ("the caller already acted
+    on the first response") that a retry is precisely the evidence against.
+    """
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    try:
+        payload = _payload()
+        first = client.post(
+            "/api/v1/vault/contributions", json=payload, headers=headers
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["summary_advice"] is not None
+
+        replay = client.post(
+            "/api/v1/vault/contributions", json=payload, headers=headers
+        )
+
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["idempotent_replay"] is True
+        assert replay.json()["summary_advice"] is not None
+    finally:
+        _cleanup()
+
+
+def test_a_replay_stops_advertising_the_repair_once_it_is_done(
+    client: TestClient, write_token: str, provider: StubEmbeddingProvider
+) -> None:
+    """The other half: advice tracks whether the repair is still possible, so
+    it has to stop once the summary is there."""
+
+    headers = {"Authorization": f"Bearer {write_token}"}
+    try:
+        payload = _payload()
+        first = client.post(
+            "/api/v1/vault/contributions", json=payload, headers=headers
+        )
+        note_id = first.json()["note_id"]
+
+        repaired = client.post(
+            _summary_url(note_id), json={"summary": SUMMARY}, headers=headers
+        )
+        assert repaired.status_code == 200, repaired.text
+
+        replay = client.post(
+            "/api/v1/vault/contributions", json=payload, headers=headers
+        )
+
+        assert replay.json()["idempotent_replay"] is True
+        assert replay.json()["summary_advice"] is None
+    finally:
+        _cleanup()

@@ -71,6 +71,7 @@ def _note(document_id: str = "note-1", **overrides) -> Undescribed:
         "tags": ("testing",),
         "aliases": (),
         "contributed_by": "agent:test",
+        "content_revision": 1,
     }
     return Undescribed(**{**base, **overrides})
 
@@ -250,6 +251,111 @@ def test_dry_run_then_apply_writes_the_summary_and_its_vector_together(
         assert stub.texts == before, "a re-run must not re-embed a settled note"
     finally:
         connection.rollback()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM vault.vault_document_embeddings WHERE document_id = %s",
+                (note_id,),
+            )
+            cursor.execute(
+                "DELETE FROM vault.vault_documents WHERE id = %s", (note_id,)
+            )
+        connection.commit()
+        connection.close()
+
+
+def test_a_note_edited_after_embedding_is_skipped_not_indexed_stale(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The backfill's half of the same race as the carveout's.
+
+    The apply reloads a snapshot, embeds it outside any transaction, then
+    writes. A content update committing in that window used to be overwritten
+    at the summary column while the vector still described the older title and
+    body -- and `embedded_text_sha256` would agree with the vector, so nothing
+    afterwards could tell.
+
+    The provider is the hook, because embedding *is* the window.
+    """
+
+    test_url = os.environ["TEST_DATABASE_URL"]
+    monkeypatch.setenv("VAULT_DATABASE_URL", test_url)
+    monkeypatch.setenv("VAULT_EMBEDDING_API_KEY", "test-key")
+
+    note_id = f"test-backfill-race-{uuid4().hex[:8]}"
+    summary = "Establishes that a stale snapshot is refused rather than written."
+
+    connection = psycopg.connect(test_url)
+
+    class RacingProvider(StubProvider):
+        async def embed(self, texts, kind):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE vault.vault_documents
+                    SET body = %s, content_revision = content_revision + 1
+                    WHERE id = %s
+                    """,
+                    ("Someone else rewrote this body entirely.", note_id),
+                )
+            connection.commit()
+            return await super().embed(texts, kind)
+
+    stub = RacingProvider()
+    monkeypatch.setattr(
+        "scripts.backfill_vault_summaries.create_embedding_provider",
+        lambda settings: stub,
+    )
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO vault.vault_documents
+                    (id, kind, doc_type, vault_path, status, doc_status,
+                     title, body, tags, aliases, source_ids, related_ids,
+                     contributed_by, schema_version)
+                VALUES
+                    (%s, 'note', 'Agent Note', %s, 'active', 'Active',
+                     %s, %s, %s, '{}', '{}', '{}', 'agent:test', 2)
+                """,
+                (
+                    note_id,
+                    f"Agent/notes/{note_id}.md",
+                    "A note that changes under the backfill",
+                    "A body long enough to satisfy the governance minimum.",
+                    ["testing"],
+                ),
+            )
+        connection.commit()
+
+        work = tmp_path / "work.json"
+        work.write_text(
+            json.dumps({"notes": [{"id": note_id, "summary": summary}]}),
+            encoding="utf-8",
+        )
+
+        # Nonzero: work was planned and deliberately not done, which an
+        # operator has to be able to notice without reading the output.
+        assert asyncio.run(run(None, work, apply=True)) == 1
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT d.summary, e.embedded_text_sha256
+                FROM vault.vault_documents d
+                LEFT JOIN vault.vault_document_embeddings e
+                    ON e.document_id = d.id AND e.profile_id = %s
+                WHERE d.id = %s
+                """,
+                (PROFILE_ID, note_id),
+            )
+            stored_summary, digest = cursor.fetchone()
+
+        # Nothing was written, so the other writer's body stands alone and no
+        # vector claims to describe it.
+        assert stored_summary is None
+        assert digest is None
+    finally:
         with connection.cursor() as cursor:
             cursor.execute(
                 "DELETE FROM vault.vault_document_embeddings WHERE document_id = %s",

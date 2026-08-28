@@ -142,6 +142,7 @@ from .service import (
     SpanEdit,
     SummaryAlreadyPresent,
     SummaryRejected,
+    SummaryStale,
     SummaryWindowClosed,
     UpdateRequest,
     UpdateWouldDuplicate,
@@ -853,6 +854,12 @@ def build_vault_mcp_server() -> VaultMCPServer:
                 f"{exc} Summaries can be added for "
                 f"{exc.grace_seconds // 60} minutes after a note is "
                 "contributed; this one is older."
+            ) from exc
+        except SummaryStale as exc:
+            raise ToolError(
+                f"{exc} The note was edited while this summary was being "
+                "prepared, so writing it would have paired the note with an "
+                "index of its old text. Call this again."
             ) from exc
         except SummaryRejected as exc:
             raise ToolError(f"Summary failed validation: {exc}") from exc

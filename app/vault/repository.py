@@ -277,6 +277,7 @@ class VaultDocumentRepository:
         summary: str,
         contributed_by: str,
         not_before: datetime,
+        expected_revision: int,
     ) -> VaultDocument | None:
         """Fill in an absent ``summary`` on one note, under ADR 0035's carveout.
 
@@ -286,7 +287,7 @@ class VaultDocumentRepository:
         it. A caller that checked first and updated second would have a window
         between the two, and the whole operation is defined by a window.
 
-        The four conditions each answer a different objection:
+        The five conditions each answer a different objection:
 
         - ``kind = 'note'``. A wiki page is compiled under ``vault:compile``,
           and its summary is the compiler's output. Same reasoning as
@@ -298,6 +299,16 @@ class VaultDocumentRepository:
         - ``contributed_by``. The author, and authorization-grade because ADR
           0016 takes it from the credential and never from a request body.
         - ``created_at >= not_before``. The grace period.
+        - ``content_revision = expected_revision``. The row is still the one the
+          caller's vector was computed from. The embedding happens outside the
+          lock, against a snapshot read before it; an ordinary update or an
+          accepted amendment can commit in between, and both take the same
+          corpus lock, so "the lock is held" says nothing about what happened
+          before it was acquired. Without this the summary lands on the new
+          content while the stored vector and ``embedded_text_sha256`` describe
+          the old -- a disagreement no later repair can detect, because the
+          digest agrees with the text that was embedded rather than with the
+          row.
 
         Returns None when nothing matched, which the service renders as the
         specific refusal after re-reading the row. Deliberately does not say
@@ -317,6 +328,7 @@ class VaultDocumentRepository:
             .where(vault_documents.c.summary.is_(None))
             .where(vault_documents.c.contributed_by == contributed_by)
             .where(vault_documents.c.created_at >= not_before)
+            .where(vault_documents.c.content_revision == expected_revision)
             .values(
                 summary=summary,
                 updated_at=func.now(),

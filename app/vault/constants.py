@@ -50,19 +50,29 @@ WIKI_SCHEMA_VERSION = 1
 # PENDING_AUTHORIZATION_TTL_SECONDS is kept out of configuration to avoid.
 SUMMARY_GRACE_PERIOD_SECONDS = 900
 
-# The longest search query either adapter accepts, after stripping.
+# The longest search query either adapter accepts, applied to the raw string.
 #
 # Here rather than beside one adapter because both have to agree: a bound HTTP
 # enforces and MCP does not is not a bound, it is a bound with a way around it.
-# The query is echoed in the response, so an unbounded one is also a way past
-# the response byte budget that no amount of trimming hits can close.
+# Applied before stripping on both sides, so whitespace counts as length -- one
+# adapter bounding the raw string and the other the stripped one let a padded
+# query through exactly one of them. The query is echoed in the response, so an
+# unbounded one is also a way past the response byte budget that no amount of
+# trimming hits can close.
 SEARCH_QUERY_MAX_CHARS = 500
+
+# The advisory lock serializing every governed write against the corpus: the
+# contribution gate, updates, amendments, compilation, retirement, the summary
+# carveout, and the operator backfill. Here rather than beside the service
+# because a script needs it too, and a lock two modules disagree about is not a
+# lock. Arbitrary but permanent: the value *is* the lock's identity.
+CORPUS_LOCK_KEY = 0x5641554C5401
 
 # The advisory lock serializing OAuth client deletion against the start of an
 # authorization. Here rather than beside the operations because two modules need
 # it -- `oauth.authorize` and `VaultOAuthClientRepository.delete_stale` -- and a
 # lock two callers disagree about is not a lock. Arbitrary but permanent: the
-# value *is* the lock's identity, exactly as _CONTRIBUTION_LOCK_KEY is.
+# value *is* the lock's identity, exactly as CORPUS_LOCK_KEY is.
 OAUTH_CLIENT_LOCK_KEY = 0x5641554C5402
 
 # The default per-request embedding timeout, in seconds.

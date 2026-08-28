@@ -91,6 +91,30 @@ class VaultDocumentContentRequest(BaseModel):
     )
     source_url: AnyUrl | None = None
 
+    @field_validator("summary")
+    @classmethod
+    def normalize_summary(cls, summary: str | None) -> str | None:
+        """One rule for what an absent summary is, shared by every write path.
+
+        A blank or whitespace-only summary is stored as ``None`` rather than
+        kept verbatim. Keeping it produced a note that was non-null and
+        meaningless: it suppressed `summary_advice` because the adapters test
+        `summary is not None`, it could not be repaired by `vault_set_summary`
+        because that carveout requires the column to be null, and the backfill
+        skipped it for the same reason. The note was permanently undescribed
+        with nothing able to notice.
+
+        Normalizing rather than rejecting because `summary=""` means the same
+        thing the caller would have said by omitting the field, and refusing it
+        would break a caller for stating it a different way. Real summaries are
+        stripped, since trailing whitespace is not content.
+        """
+
+        if summary is None:
+            return None
+        stripped = summary.strip()
+        return stripped or None
+
     @field_validator("tags")
     @classmethod
     def validate_tags(cls, tags: list[str]) -> list[str]:
@@ -508,10 +532,16 @@ def _summary_advice(
     ``flagged`` note is written but withheld from the read surface pending
     adjudication -- ``READABLE_STATUSES`` is active and archived -- so the
     carveout would 404 on it, and advice naming a call that cannot succeed is
-    worse than no advice. ``rejected`` and ``invalid`` wrote nothing at all. A
-    replay is left alone for a different reason: it reports what an earlier
-    request did, and repeating advice the caller has already acted on would
-    read as though it had not.
+    worse than no advice. ``rejected`` and ``invalid`` wrote nothing at all.
+
+    A replay is answered from the note's *current* state rather than from the
+    fact of being a replay. Suppressing it outright assumed the caller had
+    already seen the first response, which is exactly what a caller retrying a
+    lost one has not: the replay is then its only observed response, and it
+    would never learn the note is undescribed or that the window is running.
+    ``summary_repairable`` is the service's answer to "would
+    ``vault_set_summary`` still succeed on this note", so the advice appears
+    while the repair is possible and stops once it is not.
 
     ``operation`` is the caller's own name for the follow-up, supplied by the
     adapter, because one builder serves a tool surface and an HTTP surface that
@@ -523,7 +553,9 @@ def _summary_advice(
         return None
     if outcome.status != "inserted" or outcome.note_id is None:
         return None
-    if outcome.idempotent_replay:
+    if outcome.idempotent_replay and not getattr(
+        outcome, "summary_repairable", False
+    ):
         return None
 
     # Deliberately terse, and the terseness is measured. This fires on almost

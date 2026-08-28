@@ -78,9 +78,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import func, select, update
+from sqlalchemy import text as text_sql
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.env import load_environment
+from app.vault.constants import CORPUS_LOCK_KEY
 from app.vault.db import create_vault_engine, describe_database
 from app.vault.domain import DocumentKind, DocumentStatus
 from app.vault.embedding_runtime import create_embedding_provider
@@ -113,6 +115,10 @@ class Undescribed:
     tags: tuple[str, ...]
     aliases: tuple[str, ...]
     contributed_by: str
+    # The revision this snapshot was read at. The vector is computed from the
+    # fields above, outside any transaction, so this is what proves at write
+    # time that they are still the note's fields.
+    content_revision: int
 
 
 @dataclass(frozen=True)
@@ -147,6 +153,7 @@ async def load_undescribed(engine: AsyncEngine) -> list[Undescribed]:
             vault_documents.c.tags,
             vault_documents.c.aliases,
             vault_documents.c.contributed_by,
+            vault_documents.c.content_revision,
         )
         .where(vault_documents.c.kind == DocumentKind.NOTE.value)
         .where(vault_documents.c.status == DocumentStatus.ACTIVE.value)
@@ -164,6 +171,7 @@ async def load_undescribed(engine: AsyncEngine) -> list[Undescribed]:
                 tags=tuple(row["tags"] or ()),
                 aliases=tuple(row["aliases"] or ()),
                 contributed_by=row["contributed_by"],
+                content_revision=row["content_revision"],
             )
             for row in result.mappings()
         ]
@@ -335,28 +343,58 @@ async def write(
     engine: AsyncEngine,
     embedded: list[tuple[Authored, tuple[float, ...], bytes]],
     profile_id: str,
-) -> list[str]:
-    """Write every summary and its vector in one transaction. Returns ids written.
+) -> tuple[list[str], list[Undescribed]]:
+    """Write every summary and its vector in one transaction.
+
+    Returns the ids written and the snapshots that went stale.
 
     One transaction for the whole run, not one per note: a partial backfill is
     harder to reason about than either outcome, and the run is small enough
     that holding it costs nothing. Every embedding call has already happened by
     the time this opens, so no provider latency is held inside the transaction.
 
-    `summary IS NULL` is repeated in the predicate even though the plan already
-    filtered on it. The plan was read before the embedding calls, and
-    `vault_set_summary` may have landed on the same note in between -- an
-    agent's own precis is the better one, and the predicate is what lets this
-    lose that race gracefully instead of overwriting it.
+    Every condition the plan selected on is repeated in the predicate, because
+    the plan was read before the embedding calls and anything may have
+    committed in between:
+
+    - `summary IS NULL` -- `vault_set_summary` may have landed on the same note.
+      An agent's own precis is the better one, and this is what loses that race
+      gracefully instead of overwriting it.
+    - `content_revision` -- the note's title, body or tags may have changed.
+      The vector was computed from the snapshot, so writing it against newer
+      content would pair the note with an index of text it no longer contains,
+      and the stored digest would agree with the vector rather than with the
+      row, leaving nothing able to detect it.
+    - `kind` and `status` -- the note may have been retired or archived since
+      the plan, and neither is worth a summary.
+
+    A row failing any of them is skipped and reported, not written. The
+    operator reruns; a rerun re-reads and re-embeds whatever it skipped.
+
+    The corpus advisory lock is held for the writes so this operator path
+    serializes with the service's writers like every other one. The lock is not
+    sufficient on its own -- the embedding happened before it was acquired,
+    which is exactly what the revision check covers.
     """
 
     written: list[str] = []
+    stale: list[Undescribed] = []
     async with engine.begin() as connection:
+        await connection.execute(
+            text_sql("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": CORPUS_LOCK_KEY},
+        )
         for item, vector, digest in embedded:
             result = await connection.execute(
                 update(vault_documents)
                 .where(vault_documents.c.id == item.note.document_id)
                 .where(vault_documents.c.summary.is_(None))
+                .where(
+                    vault_documents.c.content_revision
+                    == item.note.content_revision
+                )
+                .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+                .where(vault_documents.c.status == DocumentStatus.ACTIVE.value)
                 .values(
                     summary=item.summary,
                     updated_at=func.now(),
@@ -365,6 +403,7 @@ async def write(
                 .returning(vault_documents.c.id)
             )
             if result.scalar_one_or_none() is None:
+                stale.append(item.note)
                 continue
 
             # Update-then-insert rather than an upsert helper, because this
@@ -393,7 +432,7 @@ async def write(
                     )
                 )
             written.append(item.note.document_id)
-    return written
+    return written, stale
 
 
 def _report_plan(
@@ -492,11 +531,27 @@ async def run(
         # profile produced these vectors, and the provider is what produced
         # them. The two agree today; using the one that cannot disagree is
         # what keeps a future adapter that resolves its own profile honest.
-        written = await write(engine, embedded, provider_profile_id)
+        written, stale = await write(engine, embedded, provider_profile_id)
         print(f"wrote {len(written)} summar{'y' if len(written) == 1 else 'ies'}.")
         skipped = len(work) - len(written)
         if skipped:
-            print(f"{skipped} were summarized by someone else first, and were left alone.")
+            print(f"{skipped} were not written, and were left exactly as they are.")
+        if stale:
+            # Named individually because a rerun is the fix and the operator has
+            # to know there is one to do. The row is not damaged -- nothing was
+            # written to it -- but its authored summary is still only in the
+            # work file.
+            print(
+                f"\n{len(stale)} changed after this run embedded them, so writing "
+                "would have paired the note with an index of its old text:"
+            )
+            for note in stale:
+                print(f"  {note.vault_path}")
+            print(
+                "\nRe-run --from with the same work file: the plan re-reads and "
+                "re-embeds whatever was skipped."
+            )
+            return 1
         return 0
     finally:
         await engine.dispose()

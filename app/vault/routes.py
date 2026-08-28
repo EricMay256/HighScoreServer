@@ -112,6 +112,7 @@ from .service import (
     SetSummaryRequest,
     SummaryAlreadyPresent,
     SummaryRejected,
+    SummaryStale,
     SummaryWindowClosed,
     UnresolvedSources,
     UpdateRequest,
@@ -736,6 +737,14 @@ async def set_vault_document_summary(
                     for s in exc.similars
                 ],
             },
+        ) from exc
+    except SummaryStale as exc:
+        # 409 like the others, but this one is worth retrying: the note moved
+        # while the summary was being embedded, and a second attempt embeds
+        # against the current text.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": str(exc), "retryable": True},
         ) from exc
     except SummaryRejected as exc:
         raise HTTPException(
