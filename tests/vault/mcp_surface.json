@@ -100,6 +100,141 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "VaultSimilarNote": {
+          "additionalProperties": false,
+          "properties": {
+            "note_id": {
+              "type": "string"
+            },
+            "score": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "note_id",
+            "title",
+            "score"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "idempotent_replay": {
+          "type": "boolean"
+        },
+        "max_similarity": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "note_id": {
+                  "type": "string"
+                },
+                "score": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "note_id",
+                "title",
+                "score"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "note_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "related_pages": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "note_id": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "note_id",
+              "title",
+              "score"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "similars": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "note_id": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "note_id",
+              "title",
+              "score"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "inserted",
+            "flagged",
+            "rejected",
+            "invalid"
+          ],
+          "type": "string"
+        },
+        "summary_advice": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "note_id",
+        "message"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Contribute a note",
       "read_only_hint": false,
@@ -137,6 +272,518 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "AmendmentProposalKind": {
+          "enum": [
+            "replacement",
+            "body_diff"
+          ],
+          "type": "string"
+        },
+        "AmendmentProposalState": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "DocumentKind": {
+          "enum": [
+            "note",
+            "wiki"
+          ],
+          "type": "string"
+        },
+        "DocumentStatus": {
+          "enum": [
+            "active",
+            "flagged",
+            "archived"
+          ],
+          "type": "string"
+        },
+        "VaultAmendmentProposalSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "VaultDocumentDetail": {
+          "additionalProperties": false,
+          "properties": {
+            "aliases": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "body": {
+              "type": "string"
+            },
+            "content_revision": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "doc_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "doc_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "facets": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            "kind": {
+              "enum": [
+                "note",
+                "wiki"
+              ],
+              "type": "string"
+            },
+            "note_id": {
+              "type": "string"
+            },
+            "related_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "active",
+                "flagged",
+                "archived"
+              ],
+              "type": "string"
+            },
+            "summary": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "vault_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note_id",
+            "kind",
+            "status",
+            "vault_path",
+            "title",
+            "summary",
+            "body",
+            "tags",
+            "related_ids",
+            "source_ids",
+            "source_url",
+            "created_at",
+            "updated_at",
+            "content_revision"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "proposal": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "aliases": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "content_revision": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "created_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "doc_status": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "doc_type": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "facets": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "enum": [
+                    "note",
+                    "wiki"
+                  ],
+                  "type": "string"
+                },
+                "note_id": {
+                  "type": "string"
+                },
+                "related_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "source_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "source_url": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "enum": [
+                    "active",
+                    "flagged",
+                    "archived"
+                  ],
+                  "type": "string"
+                },
+                "summary": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "updated_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "vault_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "note_id",
+                "kind",
+                "status",
+                "vault_path",
+                "title",
+                "summary",
+                "body",
+                "tags",
+                "related_ids",
+                "source_ids",
+                "source_url",
+                "created_at",
+                "updated_at",
+                "content_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "proposal",
+        "outcome"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Decide an amendment",
       "read_only_hint": false,
@@ -172,10 +819,250 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "VaultReviewCaseSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "review_case_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "similar": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "note_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "score": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_case_id",
+            "candidate_note_id",
+            "state",
+            "reason",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "VaultSimilarEvidence": {
+          "additionalProperties": true,
+          "properties": {
+            "note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "score": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "candidate": {
+          "enum": [
+            "published",
+            "deleted",
+            "absent"
+          ],
+          "type": "string"
+        },
+        "review_case": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "review_case_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "similar": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "note_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "score": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_case_id",
+            "candidate_note_id",
+            "state",
+            "reason",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "review_case",
+        "candidate"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Decide a review case",
       "read_only_hint": false,
-      "destructive_hint": false,
+      "destructive_hint": true,
       "idempotent_hint": false,
       "open_world_hint": false
     }
@@ -195,6 +1082,154 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "DocumentKind": {
+          "enum": [
+            "note",
+            "wiki"
+          ],
+          "type": "string"
+        },
+        "DocumentStatus": {
+          "enum": [
+            "active",
+            "flagged",
+            "archived"
+          ],
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "body": {
+          "type": "string"
+        },
+        "content_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "doc_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "doc_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "facets": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "kind": {
+          "enum": [
+            "note",
+            "wiki"
+          ],
+          "type": "string"
+        },
+        "note_id": {
+          "type": "string"
+        },
+        "related_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "active",
+            "flagged",
+            "archived"
+          ],
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "vault_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "note_id",
+        "kind",
+        "status",
+        "vault_path",
+        "title",
+        "summary",
+        "body",
+        "tags",
+        "related_ids",
+        "source_ids",
+        "source_url",
+        "created_at",
+        "updated_at",
+        "content_revision"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Fetch a note",
       "read_only_hint": true,
@@ -216,6 +1251,232 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "AmendmentProposalKind": {
+          "enum": [
+            "replacement",
+            "body_diff"
+          ],
+          "type": "string"
+        },
+        "AmendmentProposalState": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "VaultAmendmentProposalSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "pending": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "applied_revision": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "base_revision": {
+                "type": "integer"
+              },
+              "change_kind": {
+                "enum": [
+                  "replacement",
+                  "body_diff"
+                ],
+                "type": "string"
+              },
+              "created_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "decided_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "decided_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "decision_note": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "proposal_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "proposed_by": {
+                "type": "string"
+              },
+              "rationale": {
+                "type": "string"
+              },
+              "removals_acknowledged": {
+                "type": "boolean"
+              },
+              "state": {
+                "enum": [
+                  "pending",
+                  "accepted",
+                  "rejected",
+                  "stale"
+                ],
+                "type": "string"
+              },
+              "target_note_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "proposal_id",
+              "target_note_id",
+              "base_revision",
+              "change_kind",
+              "state",
+              "rationale",
+              "proposed_by",
+              "created_at"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "pending",
+        "count"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "List amendment proposals",
       "read_only_hint": true,
@@ -237,6 +1498,244 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "VaultReviewCaseSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "review_case_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "similar": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "note_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "score": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_case_id",
+            "candidate_note_id",
+            "state",
+            "reason",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "VaultSimilarEvidence": {
+          "additionalProperties": true,
+          "properties": {
+            "note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "score": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "pending": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "candidate_note_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "created_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "decided_at": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "decided_by": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "decision_note": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "review_case_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "similar": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "note_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "score": {
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "review_case_id",
+              "candidate_note_id",
+              "state",
+              "reason",
+              "created_at"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "pending",
+        "count"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "List review cases",
       "read_only_hint": true,
@@ -353,6 +1852,225 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "AmendmentProposalKind": {
+          "enum": [
+            "replacement",
+            "body_diff"
+          ],
+          "type": "string"
+        },
+        "AmendmentProposalState": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "VaultAmendmentProposalSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "proposal": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "proposal"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Propose a replacement",
       "read_only_hint": false,
@@ -385,6 +2103,225 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "AmendmentProposalKind": {
+          "enum": [
+            "replacement",
+            "body_diff"
+          ],
+          "type": "string"
+        },
+        "AmendmentProposalState": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "VaultAmendmentProposalSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "proposal": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "proposal"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Propose a body diff",
       "read_only_hint": false,
@@ -429,6 +2366,225 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "AmendmentProposalKind": {
+          "enum": [
+            "replacement",
+            "body_diff"
+          ],
+          "type": "string"
+        },
+        "AmendmentProposalState": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "VaultAmendmentProposalSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "proposal": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "proposal"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Propose a span replacement",
       "read_only_hint": false,
@@ -452,6 +2608,950 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "AmendmentProposalKind": {
+          "enum": [
+            "replacement",
+            "body_diff"
+          ],
+          "type": "string"
+        },
+        "AmendmentProposalState": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "DocumentKind": {
+          "enum": [
+            "note",
+            "wiki"
+          ],
+          "type": "string"
+        },
+        "DocumentStatus": {
+          "enum": [
+            "active",
+            "flagged",
+            "archived"
+          ],
+          "type": "string"
+        },
+        "VaultAmendmentPreview": {
+          "additionalProperties": false,
+          "properties": {
+            "added_line_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hunk_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "removed_line_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "removed_lines": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "line_number": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "line_number",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "requires_removal_acknowledgement": {
+              "type": "boolean"
+            },
+            "resulting_body": {
+              "type": "string"
+            },
+            "unified_diff": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "resulting_body",
+            "unified_diff",
+            "added_line_count",
+            "removed_lines",
+            "removed_line_count",
+            "hunk_count",
+            "requires_removal_acknowledgement"
+          ],
+          "type": "object"
+        },
+        "VaultAmendmentProposalSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "VaultBodyDiffChange": {
+          "additionalProperties": false,
+          "properties": {
+            "body_diff": {
+              "maxLength": 50000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "const": "body_diff",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "body_diff"
+          ],
+          "type": "object"
+        },
+        "VaultDocumentDetail": {
+          "additionalProperties": false,
+          "properties": {
+            "aliases": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "body": {
+              "type": "string"
+            },
+            "content_revision": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "doc_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "doc_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "facets": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            "kind": {
+              "enum": [
+                "note",
+                "wiki"
+              ],
+              "type": "string"
+            },
+            "note_id": {
+              "type": "string"
+            },
+            "related_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "active",
+                "flagged",
+                "archived"
+              ],
+              "type": "string"
+            },
+            "summary": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "vault_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note_id",
+            "kind",
+            "status",
+            "vault_path",
+            "title",
+            "summary",
+            "body",
+            "tags",
+            "related_ids",
+            "source_ids",
+            "source_url",
+            "created_at",
+            "updated_at",
+            "content_revision"
+          ],
+          "type": "object"
+        },
+        "VaultDocumentUpdateRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "aliases": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "body": {
+              "maxLength": 100000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "facets": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            "related_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "source_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "source_url": {
+              "anyOf": [
+                {
+                  "format": "uri",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "summary": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": "array"
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "type": "object"
+        },
+        "VaultRemovedBodyLine": {
+          "additionalProperties": false,
+          "properties": {
+            "line_number": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "line_number",
+            "text"
+          ],
+          "type": "object"
+        },
+        "VaultReplacementChange": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "replacement",
+              "type": "string"
+            },
+            "replacement": {
+              "additionalProperties": false,
+              "properties": {
+                "aliases": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 20,
+                  "type": "array"
+                },
+                "body": {
+                  "maxLength": 100000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "facets": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                "related_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                },
+                "source_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                },
+                "source_url": {
+                  "anyOf": [
+                    {
+                      "format": "uri",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "summary": {
+                  "anyOf": [
+                    {
+                      "maxLength": 2000,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "title",
+                "body"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "replacement"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "change": {
+          "discriminator": {
+            "mapping": {
+              "body_diff": "#/$defs/VaultBodyDiffChange",
+              "replacement": "#/$defs/VaultReplacementChange"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "replacement",
+                  "type": "string"
+                },
+                "replacement": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "aliases": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 20,
+                      "type": "array"
+                    },
+                    "body": {
+                      "maxLength": 100000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "facets": {
+                      "additionalProperties": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "type": "object"
+                    },
+                    "related_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "source_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    "source_url": {
+                      "anyOf": [
+                        {
+                          "format": "uri",
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "summary": {
+                      "anyOf": [
+                        {
+                          "maxLength": 2000,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "tags": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "title",
+                    "body"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "kind",
+                "replacement"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "body_diff": {
+                  "maxLength": 50000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "body_diff",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "body_diff"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "preview": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "added_line_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "hunk_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "removed_line_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "removed_lines": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "line_number": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "text": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "line_number",
+                      "text"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "requires_removal_acknowledgement": {
+                  "type": "boolean"
+                },
+                "resulting_body": {
+                  "type": "string"
+                },
+                "unified_diff": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "resulting_body",
+                "unified_diff",
+                "added_line_count",
+                "removed_lines",
+                "removed_line_count",
+                "hunk_count",
+                "requires_removal_acknowledgement"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposal": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "aliases": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "content_revision": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "created_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "doc_status": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "doc_type": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "facets": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "enum": [
+                    "note",
+                    "wiki"
+                  ],
+                  "type": "string"
+                },
+                "note_id": {
+                  "type": "string"
+                },
+                "related_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "source_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "source_url": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "enum": [
+                    "active",
+                    "flagged",
+                    "archived"
+                  ],
+                  "type": "string"
+                },
+                "summary": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "updated_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "vault_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "note_id",
+                "kind",
+                "status",
+                "vault_path",
+                "title",
+                "summary",
+                "body",
+                "tags",
+                "related_ids",
+                "source_ids",
+                "source_url",
+                "created_at",
+                "updated_at",
+                "content_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "proposal",
+        "change",
+        "target",
+        "preview"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Read an amendment proposal",
       "read_only_hint": true,
@@ -475,6 +3575,522 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "DocumentKind": {
+          "enum": [
+            "note",
+            "wiki"
+          ],
+          "type": "string"
+        },
+        "DocumentStatus": {
+          "enum": [
+            "active",
+            "flagged",
+            "archived"
+          ],
+          "type": "string"
+        },
+        "VaultDocumentDetail": {
+          "additionalProperties": false,
+          "properties": {
+            "aliases": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "body": {
+              "type": "string"
+            },
+            "content_revision": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "doc_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "doc_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "facets": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            "kind": {
+              "enum": [
+                "note",
+                "wiki"
+              ],
+              "type": "string"
+            },
+            "note_id": {
+              "type": "string"
+            },
+            "related_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source_url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "active",
+                "flagged",
+                "archived"
+              ],
+              "type": "string"
+            },
+            "summary": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "vault_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note_id",
+            "kind",
+            "status",
+            "vault_path",
+            "title",
+            "summary",
+            "body",
+            "tags",
+            "related_ids",
+            "source_ids",
+            "source_url",
+            "created_at",
+            "updated_at",
+            "content_revision"
+          ],
+          "type": "object"
+        },
+        "VaultReviewCaseSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "review_case_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "similar": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "note_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "score": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_case_id",
+            "candidate_note_id",
+            "state",
+            "reason",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "VaultSimilarEvidence": {
+          "additionalProperties": true,
+          "properties": {
+            "note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "score": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "candidate": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "aliases": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "content_revision": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "created_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "doc_status": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "doc_type": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "facets": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "enum": [
+                    "note",
+                    "wiki"
+                  ],
+                  "type": "string"
+                },
+                "note_id": {
+                  "type": "string"
+                },
+                "related_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "source_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "source_url": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "enum": [
+                    "active",
+                    "flagged",
+                    "archived"
+                  ],
+                  "type": "string"
+                },
+                "summary": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "tags": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "updated_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "vault_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "note_id",
+                "kind",
+                "status",
+                "vault_path",
+                "title",
+                "summary",
+                "body",
+                "tags",
+                "related_ids",
+                "source_ids",
+                "source_url",
+                "created_at",
+                "updated_at",
+                "content_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "review_case": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_note_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "review_case_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "similar": {
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "note_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "score": {
+                    "anyOf": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "review_case_id",
+            "candidate_note_id",
+            "state",
+            "reason",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "review_case",
+        "candidate"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Read a review case",
       "read_only_hint": true,
@@ -498,6 +4114,21 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "additionalProperties": false,
+      "properties": {
+        "note_id": {
+          "type": "string"
+        },
+        "retired": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "note_id"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Retire a note",
       "read_only_hint": false,
@@ -523,6 +4154,234 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "DocumentKind": {
+          "enum": [
+            "note",
+            "wiki"
+          ],
+          "type": "string"
+        },
+        "VaultSearchHit": {
+          "additionalProperties": false,
+          "properties": {
+            "content_revision": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "doc_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "enum": [
+                "note",
+                "wiki"
+              ],
+              "type": "string"
+            },
+            "lexical_rank": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "note_id": {
+              "type": "string"
+            },
+            "score": {
+              "type": "number"
+            },
+            "snippet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "summary": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "vector_rank": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "note_id",
+            "title",
+            "kind",
+            "content_revision",
+            "score"
+          ],
+          "type": "object"
+        },
+        "VectorSearchStatus": {
+          "enum": [
+            "used",
+            "not_configured",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "has_more": {
+          "type": "boolean"
+        },
+        "hits": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content_revision": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "doc_status": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "note",
+                  "wiki"
+                ],
+                "type": "string"
+              },
+              "lexical_rank": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "note_id": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              },
+              "snippet": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "summary": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "vector_rank": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "note_id",
+              "title",
+              "kind",
+              "content_revision",
+              "score"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "profile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "vector_status": {
+          "enum": [
+            "used",
+            "not_configured",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "vector_status",
+        "hits"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Search the vault",
       "read_only_hint": true,
@@ -555,6 +4414,37 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "additionalProperties": false,
+      "properties": {
+        "moved": {
+          "type": "boolean"
+        },
+        "note_id": {
+          "type": "string"
+        },
+        "promotion_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vault_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "note_id",
+        "promotion_status",
+        "vault_path",
+        "moved"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Set promotion status",
       "read_only_hint": false,
@@ -581,6 +4471,26 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "additionalProperties": false,
+      "properties": {
+        "content_revision": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "note_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "note_id",
+        "message",
+        "content_revision"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Add a missing summary",
       "read_only_hint": false,
@@ -691,6 +4601,71 @@
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "VaultSimilarNote": {
+          "additionalProperties": false,
+          "properties": {
+            "note_id": {
+              "type": "string"
+            },
+            "score": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "note_id",
+            "title",
+            "score"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "note_id": {
+          "type": "string"
+        },
+        "re_embedded": {
+          "type": "boolean"
+        },
+        "similars": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "note_id": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "note_id",
+              "title",
+              "score"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "note_id",
+        "message",
+        "re_embedded"
+      ],
+      "type": "object"
+    },
     "annotations": {
       "title": "Replace a note",
       "read_only_hint": false,

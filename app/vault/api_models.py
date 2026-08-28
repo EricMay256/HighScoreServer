@@ -423,7 +423,7 @@ class VaultContributionResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: str = Field(
+    status: Literal["inserted", "flagged", "rejected", "invalid"] = Field(
         description=(
             "inserted | flagged | rejected | invalid. 'flagged' means the note "
             "was written and queued for adjudication, not that it failed."
@@ -741,8 +741,12 @@ class VaultSearchHit(BaseModel):
         default=None,
         description=(
             "A bounded extract of the note's opening, supplied only when "
-            "`summary` is absent -- read `summary or snippet` and one of them "
-            "will answer. Deliberately NOT a match highlight: a hit found by "
+            "`summary` is absent. Read `summary or snippet` -- but a note "
+            "whose body is entirely headings, code or a table has no prose to "
+            "extract, so a hit may carry neither and the title is then the "
+            "only description. A blank string rather than null would read as "
+            "a preview that was computed and came back empty. "
+            "Deliberately NOT a match highlight: a hit found by "
             "the vector arm shares no vocabulary with the query, so nothing "
             "in it could be highlighted, and a field meaning one thing for "
             "lexical hits and another for semantic ones would be worse than "
@@ -813,9 +817,11 @@ class VaultSearchResponse(BaseModel):
     has_more: bool = Field(
         default=False,
         description=(
-            "Whether the corpus held further hits below this page. Answered "
-            "by retrieving one more than the requested limit, so it is a fact "
-            "rather than a guess."
+            "Whether fusion ranked further hits below this page, within the "
+            "candidate window each arm retrieves. Not corpus exhaustion: "
+            "`false` means nothing more was ranked here, not that nothing "
+            "else in the corpus matches. For deciding whether to narrow a "
+            "query those are the same answer."
         ),
     )
     next_cursor: str | None = Field(
@@ -914,6 +920,13 @@ def search_response(
     ordered the hits, so the dropped ones are the lowest-ranked. At least one
     hit always survives, even one that exceeds the budget alone: a response
     with no hits would misreport a search that did match something.
+
+    **A best-effort page budget, not an unconditional ceiling.** That surviving
+    hit is a deliberate exception and it can exceed the budget by itself, so a
+    caller sizing a buffer from this constant is sizing it from the usual case.
+    What the budget does guarantee is that nothing is dropped silently: a
+    response over it always carries ``truncated=true``, and the measurement is
+    of the whole response rather than of its hits.
     """
 
     hits = [
@@ -926,30 +939,45 @@ def search_response(
         for result in results
     ]
 
-    def _size(candidates: list[VaultSearchHit]) -> int:
+    def _assemble(
+        candidates: list[VaultSearchHit], *, truncated: bool
+    ) -> VaultSearchResponse:
+        return VaultSearchResponse(
+            query=query,
+            profile_id=profile_id,
+            vector_status=vector_status,
+            hits=candidates,
+            # A trimmed page always has more below it, whatever fusion reported.
+            has_more=has_more or truncated,
+            next_cursor=None,
+            truncated=truncated,
+        )
+
+    def _size(candidate: VaultSearchResponse) -> int:
+        """The whole response, because the whole response is what is sent.
+
+        Measuring only `hits` left the envelope unbudgeted, and the envelope is
+        not small: `query` is echoed back at up to
+        ``SEARCH_QUERY_MAX_CHARS`` and `profile_id` is unbounded model naming.
+        Ten hits at accepted field sizes cleared the hit budget and still
+        exceeded the ceiling once those were added, reporting
+        ``truncated=false`` while doing it.
+        """
+
         return len(
             json.dumps(
-                [hit.model_dump(mode="json") for hit in candidates],
+                candidate.model_dump(mode="json"),
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
         )
 
     truncated = False
-    while len(hits) > 1 and _size(hits) > budget_bytes:
+    while len(hits) > 1 and _size(_assemble(hits, truncated=truncated)) > budget_bytes:
         hits.pop()
         truncated = True
 
-    return VaultSearchResponse(
-        query=query,
-        profile_id=profile_id,
-        vector_status=vector_status,
-        hits=hits,
-        # A trimmed page always has more below it, whatever fusion reported.
-        has_more=has_more or truncated,
-        next_cursor=None,
-        truncated=truncated,
-    )
+    return _assemble(hits, truncated=truncated)
 
 
 def document_detail(document: VaultDocument) -> VaultDocumentDetail:

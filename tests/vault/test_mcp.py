@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from app.vault.auth import VaultScope
+from app.vault.constants import SEARCH_QUERY_MAX_CHARS
 from app.vault.mcp import _TOOL_SCOPES, derive_idempotency_key
 from app.vault.settings import vault_enabled
 from tests.vault.test_routes import _drop, _issue
@@ -463,3 +464,65 @@ def test_setting_promotion_status_over_mcp_moves_the_note(
     assert body["vault_path"] == (
         "Agent/Promotion Candidates/worth-a-human-reading.md"
     )
+
+
+def test_both_adapters_accept_exactly_the_same_query_lengths(
+    client: TestClient,
+) -> None:
+    """A bound one adapter enforces and the other does not is not a bound.
+
+    MCP checked only whitespace, so a query HTTP refused with 422 went through
+    here -- to the embedding and lexical paths, and back out in the echoed
+    `query`, which walks past the response byte budget however hard the hits
+    are trimmed.
+    """
+
+    credential_id, token = _issue((VaultScope.READ,))
+    try:
+        for length, accepted in ((SEARCH_QUERY_MAX_CHARS, True),
+                                 (SEARCH_QUERY_MAX_CHARS + 1, False)):
+            query = "q" * length
+
+            payload = _rpc(
+                client,
+                token,
+                "tools/call",
+                {"name": "vault_search", "arguments": {"query": query, "limit": 1}},
+            )
+            mcp_refused = payload["result"].get("isError", False)
+
+            http = client.get(
+                "/api/v1/vault/search",
+                params={"q": query, "limit": 1},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            http_refused = http.status_code == 422
+
+            assert mcp_refused is not accepted, f"MCP disagreed at {length}"
+            assert http_refused is not accepted, f"HTTP disagreed at {length}"
+    finally:
+        _drop(credential_id)
+
+
+def test_surrounding_whitespace_does_not_smuggle_a_query_past_the_bound(
+    client: TestClient,
+) -> None:
+    """The bound is applied after stripping, so padding cannot buy length."""
+
+    credential_id, token = _issue((VaultScope.READ,))
+    try:
+        payload = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": "vault_search",
+                "arguments": {
+                    "query": "  " + "q" * SEARCH_QUERY_MAX_CHARS + "  ",
+                    "limit": 1,
+                },
+            },
+        )
+        assert not payload["result"].get("isError", False)
+    finally:
+        _drop(credential_id)

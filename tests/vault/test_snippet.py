@@ -120,3 +120,22 @@ def test_internal_whitespace_is_collapsed() -> None:
     body = "A claim\nwrapped   across\nseveral\nlines.\n"
 
     assert lead_snippet(body) == "A claim wrapped across several lines."
+
+
+def test_a_hit_may_carry_neither_summary_nor_snippet() -> None:
+    """The contract the schema used to overpromise.
+
+    `lead_snippet` declines a body with no prose, and the write path accepts
+    such a body, so a note that is entirely a table or a code listing and has
+    no authored summary produces a hit with both fields null. The schema said
+    "one of them will answer"; it now says the title may be all there is, and
+    this pins the case that made the old wording false.
+    """
+
+    for body in (
+        "```python\nx = 1\n```",
+        "# Title\n\n## Section",
+        "| a | b |\n| --- | --- |\n| 1 | 2 |",
+        "    indented = 'code'",
+    ):
+        assert lead_snippet(body) is None, body

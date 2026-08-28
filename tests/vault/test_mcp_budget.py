@@ -33,6 +33,7 @@ change; raising one needs a reason in the commit message.
 import asyncio
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -40,14 +41,21 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
-from app.vault.api_models import SEARCH_STRUCTURED_BUDGET_BYTES
+from app.vault.api_models import (
+    SEARCH_STRUCTURED_BUDGET_BYTES,
+    VaultSearchResponse,
+    search_response,
+)
 from app.vault.auth import VaultScope
+from app.vault.constants import SEARCH_QUERY_MAX_CHARS
 from app.vault.db import create_vault_engine
 from app.vault.domain import (
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    VaultDocument,
+    VectorSearchStatus,
 )
 from app.vault.embedding_text import assemble_embedding_text
 from app.vault.embeddings import EmbeddingInputKind
@@ -55,6 +63,7 @@ from app.vault.repository import (
     VaultDocumentEmbeddingRepository,
     VaultDocumentRepository,
 )
+from app.vault.search import SearchResult
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings, vault_enabled
 from app.vault.snippet import SNIPPET_MAX_CHARS
@@ -567,3 +576,114 @@ def test_a_contribution_outcome_stays_within_its_wire_budget(
     assert total <= CONTRIBUTE_WIRE_BUDGET_BYTES, _describe(
         "vault_contribute", structured, text, CONTRIBUTE_WIRE_BUDGET_BYTES
     )
+
+
+# --- Stage 1B: the budget bounds the response, not only its hits ---
+
+
+def _sized_document(document_id: str, *, title: str, summary: str) -> VaultDocument:
+    """One document at field sizes the write path accepts."""
+
+    now = datetime(2026, 8, 28, tzinfo=UTC)
+    return VaultDocument(
+        id=document_id,
+        kind=DocumentKind.NOTE.value,
+        status=DocumentStatus.ACTIVE.value,
+        vault_path=f"Agent/notes/{document_id}.md",
+        title=title,
+        body="Body.",
+        contributed_by="agent:test",
+        provenance={},
+        schema_version=1,
+        created_at=now,
+        updated_at=now,
+        content_revision=1,
+        doc_type="Note",
+        doc_status="Current",
+        promotion_status=None,
+        summary=summary,
+        tags=[],
+        aliases=[],
+        frontmatter={},
+        facets={},
+        origin={},
+        source_sha256=None,
+        related_ids=[],
+        source_ids=[],
+        source_url=None,
+        compile_run_id=None,
+        compiled_by=None,
+        compiled_at=None,
+    )
+
+
+def _response_bytes(response: VaultSearchResponse) -> int:
+    return len(
+        json.dumps(
+            response.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def test_the_budget_bounds_the_whole_response_not_only_its_hits() -> None:
+    """The envelope is sent too, so the envelope has to be measured.
+
+    Ten hits at sizes the write path accepts, with the longest accepted query
+    and a long profile id, cleared the hit-list budget and still exceeded the
+    ceiling once the envelope was added -- reporting `truncated=false` while
+    doing it. Boundary values rather than absurd ones: 300 is the accepted
+    title length and SEARCH_QUERY_MAX_CHARS the accepted query length.
+    """
+
+    results = [
+        SearchResult(
+            document=_sized_document(
+                f"{index:032x}", title="T" * 300, summary="S" * 275
+            ),
+            score=0.5,
+            lexical_rank=index + 1,
+            vector_rank=index + 1,
+        )
+        for index in range(10)
+    ]
+
+    response = search_response(
+        query="q" * SEARCH_QUERY_MAX_CHARS,
+        profile_id="p" * 128,
+        vector_status=VectorSearchStatus.USED,
+        results=results,
+        has_more=False,
+    )
+
+    assert _response_bytes(response) <= SEARCH_STRUCTURED_BUDGET_BYTES
+    assert response.truncated
+    # A trimmed page always has more below it, whatever fusion reported.
+    assert response.has_more
+
+
+def test_a_single_hit_over_budget_survives_because_a_page_of_none_would_lie() -> None:
+    """The documented exception, and why the budget is best-effort.
+
+    A response with no hits would misreport a search that did match something,
+    so the last hit stays even when it alone exceeds the ceiling.
+    """
+
+    huge = SearchResult(
+        document=_sized_document("f" * 32, title="T" * 300, summary="S" * 2_000),
+        score=0.9,
+        lexical_rank=1,
+        vector_rank=1,
+    )
+
+    response = search_response(
+        query="q" * SEARCH_QUERY_MAX_CHARS,
+        profile_id="p" * 128,
+        vector_status=VectorSearchStatus.USED,
+        results=[huge],
+        has_more=False,
+    )
+
+    assert len(response.hits) == 1
+    assert not response.truncated

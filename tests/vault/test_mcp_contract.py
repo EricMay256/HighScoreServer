@@ -58,13 +58,63 @@ REGENERATE = (
 )
 
 
+_PROSE_KEYS = frozenset({"description", "title", "examples", "example", "default"})
+
+
+def _bindable_schema(
+    schema: Any, root: Any, *, seen: frozenset[str] = frozenset()
+) -> Any:
+    """One JSON Schema with its prose removed and its `$ref`s followed.
+
+    The sibling input map pins property names and leaves their schemas alone,
+    on the grounds that a description inside a property is prose by another
+    route. That reasoning is about *prose*, and it was applied to outputs as
+    though it were about structure -- so an output field could be renamed,
+    retyped, or made optional and the snapshot still matched, which is most of
+    what a generated client binds to.
+
+    `$ref`s are resolved rather than recorded, because `#/$defs/Foo` pins the
+    name of a nested model and not its shape; a field added to `Foo` has to
+    move the snapshot. `seen` breaks the cycle a self-referencing model would
+    otherwise create, and records the cycle rather than hiding it.
+    """
+
+    if isinstance(schema, list):
+        return [_bindable_schema(item, root, seen=seen) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        if reference in seen:
+            return {"$recursive": reference}
+        target = root
+        for step in reference.lstrip("#/").split("/"):
+            if not isinstance(target, dict):
+                return {"$unresolved": reference}
+            target = target.get(step, {})
+        return _bindable_schema(target, root, seen=seen | {reference})
+
+    return {
+        key: _bindable_schema(value, root, seen=seen)
+        for key, value in sorted(schema.items())
+        if key not in _PROSE_KEYS
+    }
+
+
 def _tool_surface(tool: Any) -> dict[str, Any]:
     """The bindable part of one tool, with prose left out.
 
-    Property *names* are pinned but their schemas are not: a description or an
-    example inside a property is prose by another route, and pinning it would
-    reintroduce exactly the churn this snapshot avoids. A type change to a
-    property is caught by the sibling type map rather than by the whole blob.
+    Inputs and outputs are pinned to different depths, on purpose. An input
+    property's *name* and top-level type are recorded but its schema is not:
+    a description or an example inside it is prose by another route, and
+    pinning it would reintroduce the churn this snapshot avoids.
+
+    An output is pinned in full through `output_shape`, because there is no
+    equivalent escape hatch on that side -- a client generated from this schema
+    binds to every field name, type, requiredness and enum in it, and until
+    2026-08-28 the snapshot recorded only that the output was `"object"`. A
+    field could be renamed or retyped without moving the golden.
     """
 
     parameters = tool.parameters or {}
@@ -89,6 +139,7 @@ def _tool_surface(tool: Any) -> dict[str, Any]:
             and output.get("additionalProperties") is True
             and "properties" not in output
         ),
+        "output_shape": _bindable_schema(output, output),
         "annotations": (
             None
             if annotations is None
@@ -183,6 +234,44 @@ def test_every_tool_declares_annotations() -> None:
     assert unannotated == [], (
         f"every tool needs ToolAnnotations; missing on: {unannotated}"
     )
+
+
+def test_a_tool_that_can_destroy_is_annotated_as_destructive() -> None:
+    """The hints that take judgement, asserted by name.
+
+    `destructiveHint` describes what a tool *may* do, not what one call does.
+    `vault_decide_review_case` reads as safe by that standard until you notice
+    its 'rejected' path deletes the candidate -- which is how it shipped
+    annotated non-destructive while `vault_decide_amendment_proposal`, whose
+    accept path overwrites, was annotated correctly. Asserting only that
+    annotations exist cannot catch a wrong one.
+    """
+
+    destructive = {
+        "vault_update_note": "replaces the body",
+        "vault_retire_note": "deletes the note",
+        "vault_decide_review_case": "'rejected' deletes the candidate",
+        "vault_decide_amendment_proposal": "'accepted' overwrites the target",
+    }
+    surface = {entry["name"]: entry for entry in current_surface()}
+
+    for name, why in destructive.items():
+        annotations = surface[name]["annotations"]
+        assert annotations["destructive_hint"] is True, f"{name}: {why}"
+        assert annotations["read_only_hint"] is False, name
+
+
+def test_a_read_only_tool_is_not_annotated_destructive() -> None:
+    """The other half, so the assertion above cannot be satisfied by marking
+    everything destructive -- which would make the hint useless in the other
+    direction."""
+
+    surface = {entry["name"]: entry for entry in current_surface()}
+
+    for name in ("vault_search", "vault_get_note", "vault_list_review_cases"):
+        annotations = surface[name]["annotations"]
+        assert annotations["read_only_hint"] is True, name
+        assert annotations["destructive_hint"] is False, name
 
 
 if __name__ == "__main__":

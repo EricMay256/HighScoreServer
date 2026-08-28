@@ -94,9 +94,11 @@ and a document outside the candidate window has no score at all. A cursor here w
 offset in disguise, promising a stability the ranking cannot deliver.
 
 `truncated` reports that hits were dropped to fit a byte budget — distinct from `has_more`,
-which is about the corpus. The response is trimmed from the tail, because fusion has already
+which is about the ranking. The response is trimmed from the tail, because fusion has already
 ordered the hits and the lowest-ranked are the ones worth losing. At least one hit always
-survives.
+survives, which makes the budget best-effort rather than a hard ceiling: the surviving hit may
+exceed it alone. The measurement is of the whole response, envelope included, because the
+echoed `query` and `profile_id` are part of what is sent.
 
 ### One builder, both adapters
 

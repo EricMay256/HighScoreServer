@@ -99,7 +99,7 @@ from .api_models import (
     search_response,
 )
 from .auth import VaultCredential, VaultScope
-from .constants import resolve_text_search_config
+from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
 from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
@@ -491,9 +491,10 @@ def build_vault_mcp_server() -> VaultMCPServer:
         chose. Normally fetch one or two. Prefer a `note` over a `wiki` page
         unless the synthesis itself is what you need.
 
-        Read `summary or snippet`; whichever is present describes the note. The
-        preview is the note's opening, not a highlight of your query terms, so
-        it will not show you where the match was.
+        Read `summary or snippet`; whichever is present describes the note. A
+        note that is all headings, code or a table has neither, and its title
+        is then all you get. The preview is the note's opening, not a highlight
+        of your query terms, so it will not show you where the match was.
 
         Check `vector_status`: `used` means semantic matching was applied;
         `not_configured` means this deployment is lexical-only by choice, so
@@ -502,7 +503,8 @@ def build_vault_mcp_server() -> VaultMCPServer:
         is then unproven, not evidence that nothing matches.
 
         `score` orders hits within one response and means nothing across
-        responses. `has_more` reports whether lower-ranked hits existed;
+        responses. `has_more` reports whether fusion ranked more hits within
+        the candidate window -- not that the corpus is exhausted;
         `truncated` reports that hits were dropped to fit a byte budget, which
         a large `limit` can provoke.
 
@@ -516,6 +518,15 @@ def build_vault_mcp_server() -> VaultMCPServer:
         text = query.strip()
         if not text:
             raise ToolError("Search query must contain non-whitespace characters")
+        # The same bound HTTP declares, applied after stripping so the two
+        # adapters accept exactly the same set of queries. Checked here as well
+        # as advertised in the schema: an annotation a client may ignore is not
+        # a bound, and the query is echoed in the response, so an unbounded one
+        # walks past the byte budget however hard the hits are trimmed.
+        if len(text) > SEARCH_QUERY_MAX_CHARS:
+            raise ToolError(
+                f"Search query must be at most {SEARCH_QUERY_MAX_CHARS} characters"
+            )
         if not 1 <= limit <= 50:
             raise ToolError("limit must be between 1 and 50")
 
@@ -1400,7 +1411,10 @@ def build_vault_mcp_server() -> VaultMCPServer:
         annotations=ToolAnnotations(
             title="Decide a review case",
             readOnlyHint=False,
-            destructiveHint=False,
+            # 'rejected' deletes the candidate note. The hint describes what
+            # the tool *may* do, not what a given call happens to do, which is
+            # the standard vault_decide_amendment_proposal is already held to.
+            destructiveHint=True,
             idempotentHint=False,
             openWorldHint=False,
         ),

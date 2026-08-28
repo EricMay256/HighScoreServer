@@ -67,7 +67,7 @@ from .api_models import (
     search_response,
 )
 from .auth import VaultCredential, VaultScope
-from .constants import resolve_text_search_config
+from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
 from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
@@ -300,7 +300,11 @@ def _search_service() -> VaultSearchService:
     summary="Hybrid lexical and vector search over the vault corpus",
 )
 async def search_vault(
-    q: str = Query(min_length=1, max_length=500, description="Search query."),
+    q: str = Query(
+        min_length=1,
+        max_length=SEARCH_QUERY_MAX_CHARS,
+        description="Search query.",
+    ),
     limit: int = Query(default=10, ge=1, le=50),
 ) -> VaultSearchResponse:
     # min_length alone admits an all-whitespace query, which the embedding port

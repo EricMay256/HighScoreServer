@@ -50,6 +50,14 @@ WIKI_SCHEMA_VERSION = 1
 # PENDING_AUTHORIZATION_TTL_SECONDS is kept out of configuration to avoid.
 SUMMARY_GRACE_PERIOD_SECONDS = 900
 
+# The longest search query either adapter accepts, after stripping.
+#
+# Here rather than beside one adapter because both have to agree: a bound HTTP
+# enforces and MCP does not is not a bound, it is a bound with a way around it.
+# The query is echoed in the response, so an unbounded one is also a way past
+# the response byte budget that no amount of trimming hits can close.
+SEARCH_QUERY_MAX_CHARS = 500
+
 # The advisory lock serializing OAuth client deletion against the start of an
 # authorization. Here rather than beside the operations because two modules need
 # it -- `oauth.authorize` and `VaultOAuthClientRepository.delete_stale` -- and a
