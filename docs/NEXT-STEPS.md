@@ -1,18 +1,48 @@
 # Next steps
 
-Current as of 2026-08-24. A short, ordered list — the *why now* and the blocking
+Current as of 2026-08-28. A short, ordered list — the *why now* and the blocking
 relationships, not the detail. `HANDOFF-VAULT-IMPLEMENTATION.md` holds the context
 this list assumes — inherited state, the conventions that bite, what is unsettled.
 `HANDOFF.md` holds the full task list and session history; `HANDOFF-METADATA.md`
 holds the metadata-model decision brief. This file exists so none of them has to be
 read to know what to pick up.
 
-**State:** merged. `main` and `dev` are level at the PR #16 merge; the vault work
-described below is all shipped and deployed (release v68). Suite green (855 full).
+**State: `dev` is 13 commits ahead of `main` and not yet merged.** That gap is the
+MCP efficiency work — ADRs 0031, 0032, 0033 plus the edge-value validation in 0030,
+the document-level embedding decision in 0034, and the summary carve-out in 0035.
+Suite green (1,045 full). No Alembic revision in the range, on either lineage, so
+the release phase is a no-op and the deploy is code-only.
 
-**Production is current.** Vault lineage `0015_note_compile_declined`, 70 notes and
-14 wiki pages, four compile runs, no note declined yet, one live credential. The
-migrations landed in v67 and the wiki import ran against production the same day.
+**The one behaviour change to expect on deploy** is that `GET /api/v1/vault/search`
+stops returning note bodies. A hit carries a title, a preview and ranking; the body
+is a `vault_get_note` away (ADR 0031). No consumer outside this repository was
+found — `scripts/vault_load_probe.py`, the docs and the tests are the callers — but
+it is a breaking change to a published shape and worth naming in the PR.
+
+**Production is current.** Vault lineage `0017_oauth_entitlements`, **94 documents**
+— 80 notes and 14 wiki pages — all `active`, none flagged. Contribution has moved to
+per-session OAuth credentials: four distinct `agent:oauth-*` principals have written
+notes in the last three days, which is ADR 0024's per-principal attribution working
+rather than a single shared `claude-1`.
+
+**Two corpus repairs ran against production on 2026-08-28**, both idempotent and
+both already verified as no-ops on a second pass:
+
+- `scripts/resolve_vault_wikilinks.py --apply` — 21 Obsidian link *titles* that had
+  been sitting in `related_ids`, a column that holds ids, across 13 wiki rows. 0
+  dropped, 0 ambiguous, every original list preserved in `frontmatter`. They had
+  round-tripped unnoticed for as long as the importer and exporter both passed them
+  through verbatim (ADR 0030).
+- A full re-export of `Agent/` into the knowledge-platform repository. The committed
+  tree had been projecting an older service database, so every note's `ID`
+  disagreed with the row it stands for.
+
+**Summary coverage is the open corpus-quality gap**: 13 of 80 notes carry one,
+against 14 of 14 wiki pages. It is not a display field — it joins the embedding text
+and is what search returns as a hit's preview (ADR 0031) — so an unsummarized note is
+measurably harder to find. Intake is fixed and the fix is holding: 14 of the last 15
+notes have one, and the only gap is a single agent on 2026-08-21. What remains is
+the back-catalogue.
 
 **One deferred behaviour is now live and worth expecting.** `0015` stopped compile
 planning reading the frontier; it reads per-note declines instead, and nothing is
@@ -22,12 +52,26 @@ what the frontier had been suppressing, including anything the flagged-then-appr
 bug had stranded permanently. Nothing holds `vault:compile` today, so no plan runs
 until an operator issues a credential for it.
 
-**ADRs 0023 through 0027 are Accepted and implemented.** The six items below are
-kept as a record of what was done and why, rather than as work to pick up; what is
-genuinely open is under "Deferred, unchanged" at the end, plus the operator choices
-in item 5's closing note.
+**ADRs 0023 through 0035 are Accepted and implemented.** The six numbered items
+below are kept as a record of what was done and why, rather than as work to pick up.
+**What is actually open is under "Open, in rough priority order" at the end**, plus
+the standing items under "Deferred, unchanged" and the operator choices in item 5's
+closing note.
+
+**What 0028–0035 added, since the six items below predate them.** Amendments became
+revision-bound proposals (0028) and gained a third authoring form that needs no hunk
+arithmetic (0033). OAuth entitlements moved to the refresh family (0029). Edge values
+are shape-checked and still never existence-checked (0030). Search became a discovery
+surface (0031) and contributions report a verdict rather than the dedup gate's whole
+working (0032). Embeddings were confirmed document-level in code, with chunking
+deferred against a measured trigger (0034). A contributor may set a summary on its own
+recent note without opening a reviewed amendment (0035).
 
 ---
+
+# What was done, and why
+
+The six items below are closed. They are kept because the reasoning is the part worth having later, not the tick.
 
 ## 1. Merge `dev` into `main` — **done**
 
@@ -209,14 +253,49 @@ human-layer import.** `folders.yml` governs `ai_write` and has no per-credential
 **`superseded` is a reserved review state** with no decision path that sets it.
 Leave it that way until there is a case that needs it and a reason to write down.
 
-**The knowledge-vault skill's compile loop is its last Stage-A writer, and it is
-now unblocked.** Note contribution moved to the service; wiki compilation could not
-until item 5 landed, and item 5 has landed. Retiring `compile plan`/`write`/`finish`
-in the knowledge-platform engine is what makes ADR 0022's one-writer-per-tree true
-of `Agent/wiki/`. It lives in the other repository, so it is not this list's to
-tick.
+**The knowledge-vault skill's compile loop is retired — done, 2026-08-24.** It was
+the last Stage-A writer of `Agent/wiki/`, and removing it is what made ADR 0022's
+one-writer-per-tree actually true there. `python -m vault_contrib.cli compile ...`
+no longer exists; compilation runs through the service's routes behind
+`vault:compile`. The change lives in the knowledge-platform repository.
 
 **Batch fetch by id is planned and deferred** (ADR 0025). `GET /notes?ids=a,b,c`
 removes the round trip per hop without letting the vault walk the graph, and
 without the quota multiplier a `neighbours` endpoint would introduce. Build it
 when a caller needs it.
+
+---
+
+## Open, in rough priority order
+
+**1. Merge `dev` into `main`.** 13 commits, 47 files, no migration. `main` is an
+ancestor of `dev`, so it is a fast-forward. See the state note at the top for the one
+behaviour change to call out.
+
+**2. Backfill note summaries.** 67 of 80 production notes lack one. This is the
+largest remaining retrieval-quality gap, and it is a re-embed rather than a text edit:
+`summary` joins the embedding text, so changing it invalidates
+`embedded_text_sha256`. `scripts/backfill_vault_summaries.py` in the knowledge-platform
+engine plans the work; an agent writes the prose.
+
+**3. Decide whether the four largest notes want splitting.** Four notes contributed on
+2026-08-28 run 10.7k–15.4k characters against a corpus mean of 2.1k; the largest exceeds
+every compiled wiki page. That is legal — nothing caps a body below 100k — but it is
+exactly the population ADR 0034's eligibility policy was written to watch, and it
+arrived the day after chunking was deferred. `scripts/measure_chunk_eligibility.py` now
+has real subjects. The question is editorial before it is technical: whether each is one
+insight or several.
+
+**4. Gated on measurement, not on anyone's time.** Each of these has a written trigger
+and should stay closed until it fires:
+
+- Chunk-level retrieval — ADR 0034's evaluation gate.
+- A `ts_headline` arm for search previews — ADR 0031 records why the two obvious
+  shortcuts do not work, and what a real one would cost.
+- Batched multi-query search — only if traces still show repeated-search overhead.
+
+**5. The exporter and the governance linter disagree on frontmatter key order.** Every
+fresh export presents as ~25 files of fixable drift, and knowledge-platform's pre-commit
+hook blocks on it until `lint --fix` runs. Format-only, no value changes, but it is a
+manual step on every export and it spans both repositories. Either teach the exporter
+the linter's order, or have the export script run the fixer itself.

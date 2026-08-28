@@ -1,8 +1,81 @@
 # Knowledge Vault Skill and MCP Efficiency Assessment
 
-**Status:** Implementation handoff  
+**Status:** Implemented 2026-08-26 to 2026-08-28. See "What was built" below.  
 **Date:** 2026-08-26  
 **Audience:** Coding agent maintaining the Knowledge Vault skill and hosted MCP server
+
+---
+
+## What was built
+
+Added 2026-08-28, after the work. The assessment below is unchanged; this section
+says what came of it, so a reader does not have to infer the state from a document
+that was written before any of it existed.
+
+### Measured outcome
+
+A ten-hit search fell from **58,784 bytes to 10,650** on the wire — 82% — with the
+structured copy at 4,859 bytes against the 8 KiB acceptance ceiling. A contribution
+outcome fell from 2,241 to 700. The eight-search workflow that prompted this would now
+cost roughly 19k tokens rather than 118k.
+
+`tests/vault/test_mcp_budget.py` measures both figures against a corpus-sized fixture
+and fails when they regress. Lowering a budget there is a deliverable; raising one
+needs a reason in the commit message.
+
+### Adopted
+
+| Recommendation | Where |
+| --- | --- |
+| Metadata-only search, separate fetch | ADR 0031 |
+| Bounded preview, `summary or snippet` | ADR 0031, `app/vault/snippet.py` |
+| Explicit `has_more` / `truncated` / reserved `next_cursor` | ADR 0031 |
+| Outcome-only contribution, review detail opt-in | ADR 0032 |
+| Output schemas on every structured tool | all 16 tools, pinned by `tests/vault/test_mcp_contract.py` |
+| Tool annotations and least-privilege surfaces | all 16 tools; the scope boundary is ADR 0021 |
+| Concise server instructions, invariant first | 793 bytes, decisive guidance inside the first 512 |
+| Structured exact-span edit | ADR 0033, plus `scripts/validate_body_diff.py` |
+| Compact `SKILL.md` plus references | knowledge-platform: 337 → 187 line core, five references |
+| Embedding provenance confirmed before chunking | ADR 0034 |
+
+### Rejected, and why the rejection matters
+
+**Optional or server-repaired hunk counts.** Counts are what makes a mangled patch
+detectable — the corpus's own `a-patch-file-crlf-mangled-in-transit-fails-every-hunk`.
+Deriving them would let a corrupted request appear to mean something its author did not
+intend, on a path whose purpose is that changes are reviewable. ADR 0033 reaches the
+same goal by never asking for the arithmetic instead of by weakening the check.
+
+**Removing the duplicate text copy.** Kept, per the MCP specification. Worth recording
+what measurement showed: a tool annotated `-> dict[str, Any]` reads as schema-less and
+is not — `func_metadata` derives a permissive object schema, which is enough to make
+the SDK attach `structuredContent`. **Every tool already shipped both copies.** So
+typing the returns cost nothing, and compaction was worth twice its apparent size.
+
+### Corrected
+
+Two claims in the assessment did not survive contact with measurement:
+
+- **The `ts_headline` refinement.** Passing it "only the terms the lexical arm scored
+  on" is a **no-op** — an absent term contributes nothing to `ts_headline` already.
+  The real lever is a document-frequency cut, and routing by retrieval arm does not
+  substitute for it, because the demonstrating case matched lexically. ADR 0031
+  carries the measurements and the gate.
+- **The chunking premise.** The assessment inferred document-level embeddings from
+  behaviour and asked for confirmation in code. Confirmed, and stronger than inferred:
+  `(document_id, profile_id)` is a primary key, so chunking is not neglected, it is
+  forbidden by the schema until a migration says otherwise (ADR 0034).
+
+### Deferred against a written trigger
+
+Chunk-level retrieval (ADR 0034's evaluation gate), a `ts_headline` arm (ADR 0031),
+and batched multi-query search. Each stays closed until its trigger fires;
+`docs/NEXT-STEPS.md` tracks them.
+
+### Still open
+
+Summary backfill — 67 of 80 production notes lack one. Intake is fixed and holding
+(14 of the last 15 notes have a summary), so this is back-catalogue work.
 
 ## Executive decision
 
