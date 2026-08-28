@@ -18,6 +18,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+import scripts.resolve_vault_wikilinks as resolve_script
 from app.vault.wikilinks import LinkIndex, LinkTarget
 from scripts.resolve_vault_wikilinks import plan, run
 
@@ -93,6 +94,82 @@ def test_an_existing_frontmatter_copy_is_not_overwritten() -> None:
     assert change.resolution.values == ("target-id",)
     assert change.preserve_key is None
     assert change.frontmatter is None
+
+
+def test_a_bare_title_is_repaired_the_same_as_a_wikilink() -> None:
+    """The values `export._warnings` names, which this could not previously fix.
+
+    A plain title, a stray single bracket and a padded name are all the same
+    corruption as a stored `[[Title]]`. The exporter warns about each and names
+    this script as the repair, so each has to actually be repairable here.
+    """
+
+    for stored in (
+        "Operating the Agent Knowledge Vault",
+        "[Operating the Agent Knowledge Vault]",
+        "  Operating the Agent Knowledge Vault  ",
+    ):
+        row = _Row("page", "wiki", "Agent/wiki/page.md", [stored])
+
+        [change] = plan([row], _index())
+
+        assert change.resolution.values == ("target-id",), stored
+        assert change.resolution.malformed == (stored,), stored
+        # Still preserved before rewriting, exactly as a wikilink would be.
+        assert change.frontmatter == {"Related": [stored]}, stored
+
+
+def test_a_bare_title_naming_nothing_is_still_dropped_not_kept_as_an_id() -> None:
+    row = _Row("page", "wiki", "Agent/wiki/page.md", ["Nobody Wrote This"])
+
+    [change] = plan([row], _index())
+
+    assert change.resolution.values == ()
+    assert change.resolution.dropped == ("Nobody Wrote This",)
+
+
+def test_a_differing_frontmatter_copy_refuses_the_row_when_a_link_would_drop() -> None:
+    """The gap in "older evidence wins".
+
+    The existing copy is evidence of a *different* list, so it does not stand in
+    for the one about to lose a link. Preserving it and dropping anyway would
+    leave the dropped name nowhere, which is the one thing the preserve step
+    exists to prevent.
+    """
+
+    row = _Row(
+        "page",
+        "wiki",
+        "Agent/wiki/page.md",
+        ["[[Nobody Wrote This]]"],
+        frontmatter={"Related": ["[[Something Older]]"]},
+    )
+
+    [change] = plan([row], _index())
+
+    assert change.conflict is not None
+    assert "Related" in change.conflict
+    # Nothing is written to a refused row, so the preserve step stays off too.
+    assert change.preserve_key is None
+    assert change.frontmatter is None
+
+
+def test_a_differing_frontmatter_copy_is_fine_when_nothing_drops() -> None:
+    """The boundary: a rewrite that only resolves loses nothing, so the older
+    evidence can stay untouched and the row is still repaired."""
+
+    row = _Row(
+        "page",
+        "wiki",
+        "Agent/wiki/page.md",
+        ["[[operating]]"],
+        frontmatter={"Related": ["[[Something Older]]"]},
+    )
+
+    [change] = plan([row], _index())
+
+    assert change.conflict is None
+    assert change.resolution.values == ("target-id",)
 
 
 def test_an_ambiguous_row_is_reported_even_though_nothing_is_rewritten() -> None:
@@ -194,6 +271,113 @@ def test_dry_run_then_apply_resolves_the_exact_database_column(
                 (citing,),
             )
             assert cursor.fetchone() == ([target],)
+    finally:
+        connection.rollback()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM vault.vault_documents WHERE id IN (%s, %s)",
+                (citing, target),
+            )
+            cursor.execute(
+                "DELETE FROM vault.vault_compile_runs WHERE id = %s",
+                (compile_run,),
+            )
+        connection.commit()
+        connection.close()
+
+
+def test_apply_refuses_a_row_a_governed_update_changed_under_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lost update this script used to perform.
+
+    It reads at READ COMMITTED and holds no corpus lock, so a governed update
+    can commit between the plan and the write. The write names the values it
+    planned from, so the row is skipped rather than reverted -- and because the
+    repair is idempotent, skipping costs a rerun and reverting would cost the
+    other writer's edit.
+    """
+
+    test_url = os.environ["TEST_DATABASE_URL"]
+    monkeypatch.setenv("VAULT_DATABASE_URL", test_url)
+    citing = "test-race-citing"
+    target = "test-race-target"
+    compile_run = uuid4()
+    committed_by_someone_else = ["deliberately-not-the-planned-value"]
+
+    connection = psycopg.connect(test_url)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO vault.vault_compile_runs
+                    (id, compiler_principal_id, state, completed_at)
+                VALUES (%s, 'agent:test', 'succeeded', now())
+                """,
+                (compile_run,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO vault.vault_documents
+                    (id, kind, doc_type, vault_path, status, doc_status,
+                     title, body, source_ids, related_ids, contributed_by,
+                     schema_version, compile_run_id, compiled_by, compiled_at)
+                VALUES
+                    (%s, 'wiki', 'Wiki Page', %s, 'active', 'Current',
+                     %s, 'Body', '{}', '{}', 'agent:test', 1,
+                     %s, 'agent:test', now()),
+                    (%s, 'wiki', 'Wiki Page', %s, 'active', 'Current',
+                     'Citing page', 'Body', '{}', %s, 'agent:test', 1,
+                     %s, 'agent:test', now())
+                """,
+                (
+                    target,
+                    "Agent/wiki/test-race-target.md",
+                    "Operating the Raced Vault",
+                    compile_run,
+                    citing,
+                    "Agent/wiki/test-race-citing.md",
+                    ["[[Operating the Raced Vault]]"],
+                    compile_run,
+                ),
+            )
+        connection.commit()
+
+        # The race, made deterministic: commit a competing update in the window
+        # between the plan and the writes it drives.
+        real_plan = resolve_script.plan
+
+        def plan_then_let_someone_else_win(rows, index):
+            changes = real_plan(rows, index)
+            racer = psycopg.connect(test_url)
+            try:
+                with racer.cursor() as cursor:
+                    cursor.execute(
+                        "UPDATE vault.vault_documents SET related_ids = %s "
+                        "WHERE id = %s",
+                        (committed_by_someone_else, citing),
+                    )
+                racer.commit()
+            finally:
+                racer.close()
+            return changes
+
+        monkeypatch.setattr(
+            resolve_script, "plan", plan_then_let_someone_else_win
+        )
+
+        assert asyncio.run(run(apply=True)) == 1
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT related_ids, frontmatter FROM vault.vault_documents "
+                "WHERE id = %s",
+                (citing,),
+            )
+            related_ids, frontmatter = cursor.fetchone()
+        # The other writer's edit stands, and nothing was preserved over it.
+        assert related_ids == committed_by_someone_else
+        assert frontmatter == {}
     finally:
         connection.rollback()
         with connection.cursor() as cursor:

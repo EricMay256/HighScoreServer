@@ -340,12 +340,20 @@ def plan_pages(
 
     planned: list[PlannedPage] = []
     ambiguous: list[str] = []
+    malformed: list[str] = []
     for page in pages:
         resolution = resolve_edges(_as_list(page.metadata.get("Related")), index)
         ambiguous.extend(
             f"{page.path.name}: {link} -> {', '.join(candidates)}"
             for link, candidates in resolution.ambiguous
         )
+        # A bare title, a single bracket, a padded name. `resolve_edges` leaves
+        # these alone at this boundary rather than guessing, so importing one
+        # would store a title in `related_ids` where an id belongs -- which is
+        # exactly the corruption `resolve_vault_wikilinks` exists to undo, and
+        # exactly what the API's own validators refuse. Refuse it here too,
+        # before embedding cost is spent, rather than writing it and warning.
+        malformed.extend(f"{page.path.name}: {value}" for value in resolution.malformed)
         planned.append(
             PlannedPage(
                 file=page,
@@ -358,6 +366,13 @@ def plan_pages(
     if ambiguous:
         raise ReferenceResolutionError(
             "ambiguous Related wikilinks: " + "; ".join(ambiguous)
+        )
+    if malformed:
+        raise ReferenceResolutionError(
+            "Related values that name a document but are not [[wikilinks]]: "
+            + "; ".join(malformed)
+            + ". Write them as [[Title]], or run scripts.resolve_vault_wikilinks "
+            "over rows already stored this way."
         )
     return planned
 

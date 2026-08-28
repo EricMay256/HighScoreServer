@@ -173,6 +173,37 @@ def test_two_names_for_one_document_do_not_leave_the_edge_twice() -> None:
     assert len(resolution.resolved) == 2
 
 
+def test_a_link_resolving_to_an_id_already_in_the_list_does_not_duplicate_it() -> None:
+    """The mixed representation a half-repaired row carries.
+
+    Order must not matter: whichever of the two comes first, the plain id keeps
+    its position and the resolved link folds into it. Leaving both would write a
+    row the API's uniqueness rule then refuses to update.
+    """
+
+    for values in (
+        [PAGE, "[[semantic-dedup]]"],
+        ["[[semantic-dedup]]", PAGE],
+    ):
+        resolution = resolve_edges(values, _index())
+
+        assert resolution.values == (PAGE,), values
+        assert resolution.changed
+
+
+def test_an_id_that_arrives_twice_is_left_alone() -> None:
+    """Tidying an edge list that arrived duplicated is not this function's job.
+
+    The boundary of the rule above: resolution collapses what resolution
+    created, and nothing else.
+    """
+
+    resolution = resolve_edges([PAGE, PAGE], _index())
+
+    assert resolution.values == (PAGE, PAGE)
+    assert not resolution.changed
+
+
 def test_order_is_preserved() -> None:
     resolution = resolve_edges([OTHER, "[[semantic-dedup]]", "[[The .env one]]"], _index())
 

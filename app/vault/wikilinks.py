@@ -182,9 +182,9 @@ class LinkIndex:
 class EdgeResolution:
     """What one stored edge list became, and what that cost.
 
-    ``values`` is the column as it should be written. The other three fields
-    exist so a caller can report rather than only act: dropping an edge silently
-    destroys the only evidence the note was ever cited, which is the mistake
+    ``values`` is the column as it should be written. The other fields exist so a
+    caller can report rather than only act: dropping an edge silently destroys
+    the only evidence the note was ever cited, which is the mistake
     ``remap_vault_reference_ids`` is careful not to make either.
     """
 
@@ -196,17 +196,48 @@ class EdgeResolution:
     # (wikilink, candidate ids) for each name denoting more than one document.
     # Left in `values` exactly as they were: this module does not guess.
     ambiguous: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Values `looks_like_a_name` recognises that are not `[[wikilinks]]` -- a
+    # bare title, a single bracket, a padded name. A *classification*, not an
+    # outcome: what was then done with each depends on `resolve_names`, and the
+    # outcome is in `resolved`, `dropped` or `ambiguous` like any other name.
+    malformed: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
         return bool(self.resolved or self.dropped)
 
 
-def resolve_edges(values: Sequence[str], index: LinkIndex) -> EdgeResolution:
+def _bare_name(value: str) -> str:
+    """A name-shaped value with its padding and stray brackets removed."""
+
+    return value.strip().strip("[]").strip()
+
+
+def resolve_edges(
+    values: Sequence[str],
+    index: LinkIndex,
+    *,
+    resolve_names: bool = False,
+) -> EdgeResolution:
     """Turn any wikilinks in a stored edge list into the ids they name.
 
     Values that are already ids pass through untouched and in place, so a second
     run over a repaired column writes nothing.
+
+    A value that ``looks_like_a_name`` but is not a wikilink -- a bare title, a
+    single bracket, a padded name -- is **never** treated as an id. It is
+    reported in ``malformed`` whatever else happens to it, because the one
+    outcome this function must not produce is a title stored where an id
+    belongs, silently, which is how these rows were written in the first place.
+
+    ``resolve_names`` decides what is then done with it, and the two callers
+    want different answers. Left False, the malformed value passes through
+    untouched and the caller refuses it: that is the write boundary, where
+    widening what counts as an edge would put format knowledge into a contract
+    ADR 0030 deliberately kept it out of. Set True by the repair script, the
+    name is stripped and looked up exactly like a wikilink, because an operator
+    running a repair has asked for precisely that -- and the lookup still never
+    guesses, so an ambiguous title is reported rather than picked.
 
     Order is preserved. Duplicates are not: two names resolving to one document
     would leave the same edge twice, which is meaningless as a relation and
@@ -214,16 +245,40 @@ def resolve_edges(values: Sequence[str], index: LinkIndex) -> EdgeResolution:
     updated the note through the API. Only duplicates *resolution created* are
     collapsed -- a value that arrives twice unchanged stays twice, because
     tidying an edge list is not this function's job.
+
+    Resolution creates a duplicate in two ways, and both are collapsed: a second
+    wikilink naming a document a first one already named, and a wikilink naming
+    a document whose id is *also* present in the list as a plain id. The second
+    is the mixed representation a half-repaired row carries, and it does not
+    depend on which of the two comes first -- the plain id keeps its position
+    and the resolved link folds into it.
     """
 
     out: list[str] = []
     resolved: list[tuple[str, str]] = []
     dropped: list[str] = []
     ambiguous: list[tuple[str, tuple[str, ...]]] = []
+    malformed: list[str] = []
     minted: set[str] = set()
 
+    def name_of(value: str) -> str | None:
+        """The name this value denotes, by either spelling, or None for an id."""
+
+        target = parse_wikilink(value)
+        if target is not None:
+            return target
+        if resolve_names and looks_like_a_name(value):
+            return _bare_name(value) or None
+        return None
+
+    # Every value this run will not rewrite, so a resolution landing on one of
+    # them is recognised as a duplicate whether it resolves before or after.
+    passthrough = {value for value in values if name_of(value) is None}
+
     for value in values:
-        name = parse_wikilink(value)
+        if parse_wikilink(value) is None and looks_like_a_name(value):
+            malformed.append(value)
+        name = name_of(value)
         if name is None:
             out.append(value)
             continue
@@ -231,7 +286,7 @@ def resolve_edges(values: Sequence[str], index: LinkIndex) -> EdgeResolution:
         if len(candidates) == 1:
             document_id = candidates[0]
             resolved.append((value, document_id))
-            if document_id in minted:
+            if document_id in minted or document_id in passthrough:
                 continue
             minted.add(document_id)
             out.append(document_id)
@@ -246,6 +301,7 @@ def resolve_edges(values: Sequence[str], index: LinkIndex) -> EdgeResolution:
         resolved=tuple(resolved),
         dropped=tuple(dropped),
         ambiguous=tuple(ambiguous),
+        malformed=tuple(malformed),
     )
 
 
