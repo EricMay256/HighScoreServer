@@ -841,8 +841,9 @@ class VaultSearchResponse(BaseModel):
         description=(
             "Whether hits were dropped from this page to keep the response "
             "inside its byte budget. Distinct from `has_more`, which is about "
-            "the corpus: `truncated` means this response is smaller than the "
-            "limit asked for. Narrow the query or lower the limit."
+            "additional results ranked within the candidate window: "
+            "`truncated` means this response is smaller than the limit asked "
+            "for. Narrow the query or lower the limit."
         ),
     )
 
@@ -881,15 +882,21 @@ def search_hit(
     )
 
 
-# The ceiling one search response's structured payload may reach. The wire
+# The byte budget one search response's structured payload is trimmed to. The
+# wire
 # carries roughly twice this, because the MCP transport also serializes the
 # same object into a compatibility text block -- see `tests/vault/
 # test_mcp_budget.py`, which measures both.
 #
 # 8 KiB is the efficiency assessment's acceptance criterion for ten ordinary
-# hits. It is a *ceiling*, not a target: a normal ten-hit page costs about
+# hits. It is a budget, not a target: a normal ten-hit page costs about
 # 5 KiB, so truncation should be something a caller provokes with `limit=50`
 # rather than something they meet by accident.
+#
+# Not an unconditional ceiling. A single hit is never dropped, so a one-hit
+# response may exceed this and reports `truncated=false` -- correctly, since
+# nothing was dropped. Sizing a buffer from this constant is sizing it for
+# the multi-hit case.
 SEARCH_STRUCTURED_BUDGET_BYTES = 8 * 1024
 
 
@@ -921,12 +928,13 @@ def search_response(
     hit always survives, even one that exceeds the budget alone: a response
     with no hits would misreport a search that did match something.
 
-    **A best-effort page budget, not an unconditional ceiling.** That surviving
-    hit is a deliberate exception and it can exceed the budget by itself, so a
-    caller sizing a buffer from this constant is sizing it from the usual case.
-    What the budget does guarantee is that nothing is dropped silently: a
-    response over it always carries ``truncated=true``, and the measurement is
-    of the whole response rather than of its hits.
+    **A best-effort page budget, not an unconditional ceiling.** Precisely: a
+    response of two or more hits is trimmed until it fits, and reports
+    ``truncated=true`` exactly when hits were dropped. A response of one hit is
+    never trimmed, so it may exceed the budget and still report
+    ``truncated=false`` -- which is honest, because nothing was dropped. The
+    measurement is of the whole response, envelope included, rather than of its
+    hits alone.
     """
 
     hits = [

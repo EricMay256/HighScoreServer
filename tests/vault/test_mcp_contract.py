@@ -40,6 +40,7 @@ from typing import Any
 
 import pytest
 
+from app.vault.constants import SEARCH_QUERY_MAX_CHARS
 from app.vault.mcp import _TOOL_SCOPES, build_vault_mcp_server
 from app.vault.settings import vault_enabled
 
@@ -259,6 +260,23 @@ def test_a_tool_that_can_destroy_is_annotated_as_destructive() -> None:
         annotations = surface[name]["annotations"]
         assert annotations["destructive_hint"] is True, f"{name}: {why}"
         assert annotations["read_only_hint"] is False, name
+
+
+def test_the_search_query_bound_is_published_in_the_input_schema() -> None:
+    """A bound only enforced at runtime is one a generated client cannot see.
+
+    The input side of this snapshot is pinned shallowly on purpose, so a
+    constraint that clients actually bind to is asserted by name instead.
+    """
+
+    server = build_vault_mcp_server()
+    tool = next(
+        t for t in server._tool_manager.list_tools() if t.name == "vault_search"
+    )
+
+    assert tool.parameters["properties"]["query"]["maxLength"] == (
+        SEARCH_QUERY_MAX_CHARS
+    )
 
 
 def test_a_read_only_tool_is_not_annotated_destructive() -> None:

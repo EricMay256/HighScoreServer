@@ -55,7 +55,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from hashlib import sha256
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from mcp.server import MCPServer
@@ -63,6 +63,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from slowapi.errors import RateLimitExceeded
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -483,7 +484,10 @@ def build_vault_mcp_server() -> VaultMCPServer:
             openWorldHint=False,
         ),
     )
-    async def vault_search(query: str, limit: int = 10) -> VaultSearchResponse:
+    async def vault_search(
+        query: Annotated[str, Field(max_length=SEARCH_QUERY_MAX_CHARS)],
+        limit: int = 10,
+    ) -> VaultSearchResponse:
         """Find candidate notes by meaning and keyword. Does not return bodies.
 
         This is discovery, not retrieval: each hit carries a title and a short
@@ -515,18 +519,15 @@ def build_vault_mcp_server() -> VaultMCPServer:
 
         await _authorized("vault_search")
 
+        # The length bound is declared on the parameter rather than checked
+        # here, so it reaches the generated input schema as `maxLength` and a
+        # client can discover it. It applies to the raw string, exactly as
+        # HTTP's `max_length` does -- bounding one adapter before stripping and
+        # the other after would let a padded query through one and not the
+        # other, which is the parity this constant exists to hold.
         text = query.strip()
         if not text:
             raise ToolError("Search query must contain non-whitespace characters")
-        # The same bound HTTP declares, applied after stripping so the two
-        # adapters accept exactly the same set of queries. Checked here as well
-        # as advertised in the schema: an annotation a client may ignore is not
-        # a bound, and the query is echoed in the response, so an unbounded one
-        # walks past the byte budget however hard the hits are trimmed.
-        if len(text) > SEARCH_QUERY_MAX_CHARS:
-            raise ToolError(
-                f"Search query must be at most {SEARCH_QUERY_MAX_CHARS} characters"
-            )
         if not 1 <= limit <= 50:
             raise ToolError("limit must be between 1 and 50")
 

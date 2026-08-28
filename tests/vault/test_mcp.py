@@ -504,25 +504,37 @@ def test_both_adapters_accept_exactly_the_same_query_lengths(
         _drop(credential_id)
 
 
-def test_surrounding_whitespace_does_not_smuggle_a_query_past_the_bound(
-    client: TestClient,
-) -> None:
-    """The bound is applied after stripping, so padding cannot buy length."""
+def test_both_adapters_treat_a_padded_query_the_same_way(client: TestClient) -> None:
+    """Padding counts toward the bound on both sides, or neither is a bound.
+
+    The bound applies to the raw string, so whitespace is length like any other
+    character. Bounding one adapter before stripping and the other after is
+    what let a padded 504-character query through MCP while HTTP refused it --
+    parity claimed by a test that only exercised one transport.
+    """
 
     credential_id, token = _issue((VaultScope.READ,))
     try:
-        payload = _rpc(
-            client,
-            token,
-            "tools/call",
-            {
-                "name": "vault_search",
-                "arguments": {
-                    "query": "  " + "q" * SEARCH_QUERY_MAX_CHARS + "  ",
-                    "limit": 1,
-                },
-            },
-        )
-        assert not payload["result"].get("isError", False)
+        for raw, accepted in (
+            ("  " + "q" * (SEARCH_QUERY_MAX_CHARS - 4) + "  ", True),
+            ("  " + "q" * SEARCH_QUERY_MAX_CHARS + "  ", False),
+        ):
+            payload = _rpc(
+                client,
+                token,
+                "tools/call",
+                {"name": "vault_search", "arguments": {"query": raw, "limit": 1}},
+            )
+            mcp_refused = payload["result"].get("isError", False)
+
+            http = client.get(
+                "/api/v1/vault/search",
+                params={"q": raw, "limit": 1},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            http_refused = http.status_code == 422
+
+            assert mcp_refused is not accepted, f"MCP disagreed at {len(raw)}"
+            assert http_refused is not accepted, f"HTTP disagreed at {len(raw)}"
     finally:
         _drop(credential_id)
