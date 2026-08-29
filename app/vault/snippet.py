@@ -80,6 +80,13 @@ SNIPPET_MAX_CHARS = 320
 # only question here is which paragraphs to skip.
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 
+# A *closing* fence carries nothing but the markers. An opening one may carry an
+# info string (```python), which is why the two cannot share a pattern: matching
+# a prefix meant a content line beginning with backticks -- ```not-a-close, or
+# any prose that opens with a fence-length run -- ended the block, and the code
+# under it became the preview.
+_FENCE_CLOSE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
+
 # Setext underlines ("Title" over "=====") would otherwise read as a paragraph
 # of punctuation.
 _SETEXT = re.compile(r"^\s{0,3}(=+|-+)\s*$")
@@ -120,6 +127,45 @@ def _is_prose(block: str) -> bool:
     return True
 
 
+# A delimiter run must be whole on both sides. Matching part of a longer run
+# let `x ~~ y ~~ z` consume one tilde from each pair and come back as
+# `x ~ y ~ z` -- text that was never written, from a construct that was never
+# emphasis. The same applied to `x ** y ** z`.
+_ASTERISK = re.compile(r"(?<!\*)(\*{1,3})(?!\*)(\S(?:.*?\S)?)(?<!\*)\1(?!\*)")
+_TILDE = re.compile(r"(?<!~)(~{1,2})(?!~)(\S(?:.*?\S)?)(?<!~)\1(?!~)")
+# Underscores additionally have to sit at a word boundary, so `snake_case` is
+# never a candidate in the first place.
+_UNDERSCORE = re.compile(
+    r"(?<![A-Za-z0-9_])(_{1,3})(\S(?:.*?\S)?)\1(?![A-Za-z0-9_])"
+)
+
+
+def _keep_identifiers(match: re.Match[str]) -> str:
+    """Strip underscore emphasis unless the whole token reads as a symbol.
+
+    `__init__`, `__aexit__` and `__all__` sit at word boundaries with balanced
+    delimiters, so every structural rule says emphasis and CommonMark would
+    agree -- it renders `__init__` as bold `init`. This corpus is about Python
+    and Postgres, where those are names, and a preview claiming a note is about
+    `init` describes a symbol that does not exist. So the structural answer is
+    deliberately overridden by what the content looks like:
+
+    - a doubled delimiter around a token with no whitespace is an identifier
+      (`__init__`), not bold;
+    - a single delimiter around a token that itself contains an underscore is
+      an identifier (`_private_thing_`), not italics.
+
+    Everything else -- `_emphasis_`, `_a whole phrase_` -- is emphasis and is
+    flattened, so the ordinary case still reads as prose.
+    """
+
+    delimiter, content = match.group(1), match.group(2)
+    spaced = any(character.isspace() for character in content)
+    if not spaced and (len(delimiter) > 1 or "_" in content):
+        return match.group(0)
+    return content
+
+
 def _strip_markdown_noise(text: str) -> str:
     """Flatten the markup a one-line preview cannot render.
 
@@ -137,19 +183,19 @@ def _strip_markdown_noise(text: str) -> str:
     # Inline code, keeping its contents exactly. First, so a backticked
     # identifier is settled before the emphasis rules can look inside it.
     text = re.sub(r"`+([^`]+)`+", r"\1", text)
-    # Emphasis and strikethrough, as *pairs* rather than as characters.
+    # Emphasis and strikethrough, as *pairs* rather than as characters, and
+    # only where the whole construct is unmistakably emphasis.
     #
     # A blanket `[`*_~]` deletion turned `TEST_DATABASE_URL` into
     # `TESTDATABASEURL` and `jsonb_path_ops` into `jsonbpathops`. In a corpus
     # of engineering notes an identifier is one of the strongest selection
-    # signals a preview carries, and a mangled one is worse than none: it
-    # names a symbol that does not exist. Requiring a closing delimiter, and
-    # requiring `_` emphasis to sit at a word boundary, leaves snake_case
-    # alone -- an underscore inside a word is not emphasis in any Markdown
-    # dialect, which is why CommonMark has the same rule.
-    text = re.sub(r"(\*{1,3})(\S(?:.*?\S)?)\1", r"\2", text)
-    text = re.sub(r"(?<![A-Za-z0-9_])(_{1,3})(\S(?:.*?\S)?)\1(?![A-Za-z0-9_])", r"\2", text)
-    text = re.sub(r"(~{1,2})(\S(?:.*?\S)?)\1", r"\2", text)
+    # signals a preview carries, and a mangled one is worse than none: it names
+    # a symbol that does not exist. The standing rule is therefore to keep
+    # ambiguous punctuation rather than risk changing an identifier -- a stray
+    # asterisk in a preview is noise, a wrong symbol is a lie.
+    text = _ASTERISK.sub(r"\2", text)
+    text = _UNDERSCORE.sub(_keep_identifiers, text)
+    text = _TILDE.sub(r"\2", text)
     # Leading list bullets and quote markers on the first line only.
     return re.sub(r"^\s{0,3}([-+*]|\d+\.|>)\s+", "", text)
 
@@ -185,7 +231,7 @@ def _blocks_outside_fences(body: str) -> list[str]:
             fence = opening.group(1)
             continue
         if fence is not None:
-            closing = _FENCE.match(line)
+            closing = _FENCE_CLOSE.match(line)
             if closing is not None:
                 marker = closing.group(1)
                 if marker[0] == fence[0] and len(marker) >= len(fence):

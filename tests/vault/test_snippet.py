@@ -236,3 +236,73 @@ def test_prose_before_a_fence_is_still_preferred() -> None:
 )
 def test_markdown_cleanup_keeps_literal_identifiers(raw: str, expected: str) -> None:
     assert _strip_markdown_noise(raw) == expected
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_a_content_line_starting_with_a_fence_does_not_close_the_block(
+    fence: str,
+) -> None:
+    """A closing fence carries nothing but its markers.
+
+    An opening fence may carry an info string, so matching a prefix for both
+    meant a line of *content* beginning with backticks ended the block, and the
+    code under it became the preview -- the same leak the fence tracking was
+    added to stop, through the other side.
+    """
+
+    body = (
+        f"{fence}python\n"
+        f"{fence}not-a-close\n"
+        "SECRET_CODE\n"
+        f"{fence}\n"
+        "\n"
+        "Actual claim."
+    )
+
+    assert lead_snippet(body) == "Actual claim."
+
+
+def test_a_closing_fence_may_be_indented_or_trail_whitespace() -> None:
+    """The allowances that were already there, kept while tightening the rest."""
+
+    assert lead_snippet("```\ncode\n   ```\n\nActual claim.") == "Actual claim."
+    assert lead_snippet("```\ncode\n```   \n\nActual claim.") == "Actual claim."
+
+
+@pytest.mark.parametrize(
+    "identifier", ["__init__", "__aexit__", "__enter__", "__all__"]
+)
+def test_dunder_identifiers_survive_the_emphasis_rules(identifier: str) -> None:
+    """Structurally these are emphasis, and CommonMark renders `__init__` as
+    bold `init`. This corpus is about Python and Postgres, where they are
+    names, and a preview naming `init` describes a symbol that does not exist.
+    """
+
+    assert _strip_markdown_noise(f"{identifier} is the hook") == (
+        f"{identifier} is the hook"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # A delimiter run has to be whole on both sides. Consuming one marker
+        # from each pair produced text nobody wrote.
+        ("x ~~ y ~~ z", "x ~~ y ~~ z"),
+        ("x ** y ** z", "x ** y ** z"),
+        # An identifier-shaped token keeps its underscores.
+        ("_private_thing_", "_private_thing_"),
+        # Ordinary emphasis still flattens, which is the point of the rule.
+        ("_emphasis_ matters", "emphasis matters"),
+        ("_a whole phrase_ here", "a whole phrase here"),
+        ("**bold**", "bold"),
+        ("***triple***", "triple"),
+        ("~~struck~~", "struck"),
+        # Inline code wins first, so a backticked dunder comes out exact.
+        ("`__init__`", "__init__"),
+    ],
+)
+def test_emphasis_is_removed_only_when_it_is_unmistakably_emphasis(
+    raw: str, expected: str
+) -> None:
+    assert _strip_markdown_noise(raw) == expected
