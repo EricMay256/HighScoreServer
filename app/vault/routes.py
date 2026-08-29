@@ -549,10 +549,7 @@ async def propose_amendment(
                 source_url=(
                     str(body.change.source_url) if body.change.source_url else None
                 ),
-                # Over HTTP a null and an omission are the same on the wire, so
-                # clearing the url is not expressible here; the MCP tool has an
-                # explicit flag for it. Stated rather than silently unsupported.
-                clear_source_url=False,
+                clear_source_url=body.change.clear_source_url,
             )
             if body.change.kind == AmendmentProposalKind.METADATA.value
             else None

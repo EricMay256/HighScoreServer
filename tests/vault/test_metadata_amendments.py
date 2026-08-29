@@ -11,8 +11,13 @@ the ones proving the title, body, tags, and aliases are unreachable through it.
 """
 
 import pytest
+from pydantic import ValidationError
 
-from app.vault.api_models import VaultMetadataChange, amendment_proposal_change
+from app.vault.api_models import (
+    VaultMetadataChange,
+    VaultMetadataUpdateRequest,
+    amendment_proposal_change,
+)
 from app.vault.domain import AmendmentProposalKind
 from app.vault.service import MetadataChange, VaultAmendmentService
 
@@ -241,3 +246,69 @@ def test_both_scopes_get_a_metadata_path_and_neither_can_reach_content() -> None
         assert {"title", "body", "tags", "aliases", "summary"} & properties == set()
         assert {"related_ids", "source_ids", "facets"} <= properties
         assert "base_revision" in properties, name
+
+
+# --- PR 19 review: validation, sparsity, providerless acceptance ------------
+
+
+@pytest.mark.parametrize(
+    ("case", "kwargs"),
+    [
+        ("duplicate ids", {"related_ids": ["a" * 32, "a" * 32]}),
+        ("blank id", {"related_ids": ["   "]}),
+        ("wikilink", {"related_ids": ["[[A title]]"]}),
+        ("title", {"related_ids": ["A note about shells"]}),
+        ("oversized", {"related_ids": ["x" * 32] * 51}),
+        ("invalid url", {"source_url": "not a url"}),
+    ],
+)
+def test_metadata_models_enforce_the_same_edge_rules_as_contribution(
+    case: str, kwargs: dict
+) -> None:
+    """A second edge-writing surface needs the same validator, not a similar one.
+
+    The metadata kind shipped without reusing `validate_edge_ids`, so both new
+    models accepted duplicates and `[[wikilinks]]` in `related_ids` -- the exact
+    corruption ADR 0030 forbids and `resolve_vault_wikilinks` exists to repair,
+    reintroduced on a brand-new path. Do not relax a case here to make a caller
+    work; the caller is sending something the graph cannot hold.
+    """
+
+    with pytest.raises(ValidationError):
+        VaultMetadataChange(kind="metadata", **kwargs)
+    with pytest.raises(ValidationError):
+        VaultMetadataUpdateRequest(base_revision=1, **kwargs)
+
+
+def test_a_rendered_proposal_shows_only_the_fields_it_changes() -> None:
+    """The review artifact is the point of this kind.
+
+    Serializing the whole model rendered a one-field change as four keys, three
+    of them null -- so an untouched `source_url` looked exactly like a request
+    to clear one, and a reviewer was back to diffing a document.
+    """
+
+    class _Sparse:
+        change_kind = AmendmentProposalKind.METADATA
+        change = {"related_ids": ["a" * 32]}
+
+    rendered = amendment_proposal_change(_Sparse()).model_dump()
+
+    assert rendered == {"kind": "metadata", "related_ids": ["a" * 32]}
+    assert "source_url" not in rendered, (
+        "An unset field was rendered. A reviewer cannot then tell 'unchanged' "
+        "from 'clear this', which is the distinction the kind exists to make "
+        "legible."
+    )
+
+
+def test_a_cleared_source_url_renders_as_an_explicit_null() -> None:
+    """The other half: clearing must still be visible, not merely absent."""
+
+    class _Cleared:
+        change_kind = AmendmentProposalKind.METADATA
+        change = {"source_url": None}
+
+    rendered = amendment_proposal_change(_Cleared()).model_dump()
+
+    assert rendered == {"kind": "metadata", "source_url": None}

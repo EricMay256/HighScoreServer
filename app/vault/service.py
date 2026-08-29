@@ -1899,6 +1899,27 @@ class VaultAmendmentService:
                 "acceptance removes existing lines; set acknowledge_removals=true "
                 "after reviewing the removal summary"
             )
+        # A metadata acceptance needs no provider and must not embed.
+        #
+        # Every field that kind can carry is excluded from the embedding text,
+        # so the note's stored vector still describes it and it cannot have
+        # become a duplicate of anything -- there is nothing for the gate to
+        # decide. Falling through to the shared path made ADR 0036's promise
+        # false in two ordinary states: a deployment with no provider refused
+        # the write with 503, and a note that happened to have no embedding row
+        # got one written from this change, which is precisely the "cannot
+        # affect retrieval" claim failing.
+        if proposal.change_kind is AmendmentProposalKind.METADATA:
+            errors = validate(candidate) + validate_facets(candidate.facets)
+            if errors:
+                raise ValueError("; ".join(errors))
+            return await self._settle_metadata_acceptance(
+                request,
+                proposal=proposal,
+                target=target,
+                candidate=candidate,
+            )
+
         if self._provider is None:
             raise DedupUnavailable(
                 "No embedding provider is configured; refusing to write without dedup"
@@ -1998,6 +2019,85 @@ class VaultAmendmentService:
                     body_summary.requires_removal_acknowledgement
                     and request.acknowledge_removals
                 ),
+            )
+            if decided is None:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+            await self._audit_decision(connection, request, "accepted")
+            return AmendmentDecisionOutcome(decided, "accepted", updated)
+
+    async def _settle_metadata_acceptance(
+        self,
+        request: AmendmentDecisionRequest,
+        *,
+        proposal: VaultAmendmentProposal,
+        target: VaultDocument,
+        candidate: NewVaultDocument,
+    ) -> AmendmentDecisionOutcome:
+        """Apply an accepted metadata proposal without touching the index.
+
+        The same sequence the ordinary acceptance runs -- lock, re-read, verify
+        the revision, write under a CAS, settle the proposal, audit -- with the
+        embedding, vector upsert, similarity search, and dedup decision left
+        out rather than made conditional. They are absent because nothing this
+        kind carries reaches `assemble_embedding_text`, so there is no vector
+        to refresh and no duplicate that could have been created.
+
+        Consequences worth stating: this path works with no embedding provider
+        configured, and it leaves a note that has no embedding row exactly as
+        it found it. Both were failures before -- 503 in the first case, an
+        unrelated vector written in the second.
+        """
+
+        proposals = VaultAmendmentProposalRepository()
+        documents = VaultDocumentRepository()
+
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            current_proposal = await proposals.get(connection, request.proposal_id)
+            if current_proposal is None:
+                raise AmendmentProposalNotFound(str(request.proposal_id))
+            if current_proposal.state is not AmendmentProposalState.PENDING:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+
+            current = await documents.get_by_id(connection, target.id)
+            if (
+                current is None
+                or current.content_revision != current_proposal.target_revision
+            ):
+                decided = await proposals.decide(
+                    connection,
+                    request.proposal_id,
+                    state=AmendmentProposalState.STALE,
+                    decided_by=f"agent:{request.principal_id}",
+                    decision_note=request.decision_note,
+                )
+                if decided is None:
+                    raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+                await self._audit_decision(connection, request, "stale")
+                return AmendmentDecisionOutcome(decided, "stale", current)
+
+            updated = await documents.replace_content(
+                connection,
+                current.id,
+                candidate,
+                expected_revision=current_proposal.target_revision,
+            )
+            if updated is None:
+                raise AmendmentBaseRevisionMismatch(current.id)
+
+            decided = await proposals.decide(
+                connection,
+                request.proposal_id,
+                state=AmendmentProposalState.ACCEPTED,
+                decided_by=f"agent:{request.principal_id}",
+                decision_note=request.decision_note,
+                applied_revision=updated.content_revision,
+                # A metadata change removes no body lines, so there is nothing
+                # for a reviewer to acknowledge.
+                removals_acknowledged=False,
             )
             if decided is None:
                 raise AmendmentProposalAlreadyDecided(str(request.proposal_id))

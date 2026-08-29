@@ -17,7 +17,14 @@ from hashlib import sha256
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AnyUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+)
 
 from .body_diff import MAX_BODY_DIFF_CHARS, BodyChangeSummary
 from .constants import SUMMARY_GRACE_PERIOD_SECONDS
@@ -47,6 +54,36 @@ from .wikilinks import looks_like_a_name
 MAX_BODY_CHARS = 100_000
 MAX_RATIONALE_CHARS = 2_000
 MAX_DOCUMENT_ID_CHARS = 256
+
+
+def validate_edge_ids(ids: list[str]) -> list[str]:
+    """The rule every edge list obeys, wherever it enters the system.
+
+    Module-level rather than a method because more than one model writes edges
+    now. The metadata change kind shipped without this and accepted duplicates
+    and `[[wikilinks]]` -- reintroducing, on a brand-new path, exactly the
+    corruption ADR 0030 was written to stop and that
+    `scripts/resolve_vault_wikilinks` exists to repair. A second edge-writing
+    surface needs the same validator, not a similar one.
+    """
+
+    if any(not value.strip() for value in ids):
+        raise ValueError("ids must not contain empty values")
+    if len(set(ids)) != len(ids):
+        raise ValueError("ids must be unique")
+    # Shape, never existence. ADR 0025 keeps an edge unvalidated on purpose
+    # -- a contribution may reference a note that is archived, flagged, or
+    # not yet written -- and ADR 0030 draws the line that decision does not:
+    # a value carrying a bracket or a space is not an id that points at
+    # nothing, it is a name, and `related_ids` holds ids. Twenty-one of them
+    # reached production because nothing said so.
+    named = [value for value in ids if looks_like_a_name(value)]
+    if named:
+        raise ValueError(
+            "ids must be document ids, not titles or wikilinks: "
+            f"{', '.join(repr(value) for value in named[:3])}"
+        )
+    return ids
 
 
 class VaultDocumentContentRequest(BaseModel):
@@ -150,23 +187,7 @@ class VaultDocumentContentRequest(BaseModel):
     @field_validator("related_ids", "source_ids")
     @classmethod
     def validate_ids(cls, ids: list[str]) -> list[str]:
-        if any(not value.strip() for value in ids):
-            raise ValueError("ids must not contain empty values")
-        if len(set(ids)) != len(ids):
-            raise ValueError("ids must be unique")
-        # Shape, never existence. ADR 0025 keeps an edge unvalidated on purpose
-        # -- a contribution may reference a note that is archived, flagged, or
-        # not yet written -- and ADR 0030 draws the line that decision does not:
-        # a value carrying a bracket or a space is not an id that points at
-        # nothing, it is a name, and `related_ids` holds ids. Twenty-one of them
-        # reached production because nothing said so.
-        named = [value for value in ids if looks_like_a_name(value)]
-        if named:
-            raise ValueError(
-                "ids must be document ids, not titles or wikilinks: "
-                f"{', '.join(repr(value) for value in named[:3])}"
-            )
-        return ids
+        return validate_edge_ids(ids)
 
     @field_validator("facets")
     @classmethod
@@ -381,6 +402,27 @@ class VaultMetadataUpdateRequest(BaseModel):
     source_url: AnyUrl | None = None
     clear_source_url: bool = False
 
+    @field_validator("related_ids", "source_ids")
+    @classmethod
+    def validate_ids(cls, ids: list[str] | None) -> list[str] | None:
+        return None if ids is None else validate_edge_ids(ids)
+
+    @field_validator("facets")
+    @classmethod
+    def validate_facet_shape(
+        cls, facets: dict[str, list[str]] | None
+    ) -> dict[str, list[str]] | None:
+        if facets is None:
+            return None
+        for name, values in facets.items():
+            if not isinstance(values, list):
+                raise ValueError(
+                    f"facet {name!r} must be a list of strings, not a bare value"
+                )
+            if any(not str(value).strip() for value in values):
+                raise ValueError(f"facet {name!r} must not contain empty values")
+        return normalize_facets(facets)
+
 
 class VaultMetadataChange(BaseModel):
     """Edges and classification only, with each field optional.
@@ -402,6 +444,53 @@ class VaultMetadataChange(BaseModel):
     source_ids: list[str] | None = Field(default=None, max_length=50)
     facets: dict[str, list[str]] | None = None
     source_url: AnyUrl | None = None
+    # Present here as well as on the applied request, because a REST proposer
+    # could otherwise express every metadata change except removing a URL. A
+    # null `source_url` over JSON is indistinguishable from an omitted one at
+    # the transport, so the intent needs its own field rather than being
+    # inferred.
+    clear_source_url: bool = False
+
+    @field_validator("related_ids", "source_ids")
+    @classmethod
+    def validate_ids(cls, ids: list[str] | None) -> list[str] | None:
+        return None if ids is None else validate_edge_ids(ids)
+
+    @field_validator("facets")
+    @classmethod
+    def validate_facet_shape(
+        cls, facets: dict[str, list[str]] | None
+    ) -> dict[str, list[str]] | None:
+        if facets is None:
+            return None
+        for name, values in facets.items():
+            if not isinstance(values, list):
+                raise ValueError(
+                    f"facet {name!r} must be a list of strings, not a bare value"
+                )
+            if any(not str(value).strip() for value in values):
+                raise ValueError(f"facet {name!r} must not contain empty values")
+        return normalize_facets(facets)
+
+    @model_serializer(mode="wrap")
+    def _only_what_the_proposal_changes(self, handler):  # type: ignore[no-untyped-def]
+        """Render the fields the proposer set, and no others.
+
+        Serializing the whole model turned a sparse change into four keys, three
+        of them `null` by default -- so a reviewer could not tell an untouched
+        `source_url` from a request to clear one, and the artifact this kind
+        exists to make readable read as a document with differences in it.
+
+        `kind` is always kept: it is the discriminator the union is decoded by,
+        so dropping it would make the rendered change undecodable.
+        """
+
+        rendered = handler(self)
+        return {
+            key: value
+            for key, value in rendered.items()
+            if key == "kind" or key in self.model_fields_set
+        }
 
 
 VaultAmendmentChange = Annotated[
