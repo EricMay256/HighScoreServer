@@ -97,7 +97,11 @@ class VaultDocumentContentRequest(BaseModel):
     source_ids: list[str] = Field(
         default_factory=list,
         max_length=50,
-        description="Ids of notes this one was derived from.",
+        description=(
+            "Ids of notes this one was derived from. Same rule as "
+            "`related_ids` and enforced by the same validator: not checked for "
+            "existence, but a title or a [[wikilink]] is rejected."
+        ),
     )
     source_url: AnyUrl | None = None
 
