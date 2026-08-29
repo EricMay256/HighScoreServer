@@ -206,24 +206,62 @@ def report(outcomes: list[CaseOutcome], show_misses: bool) -> int:
             "read as an improvement."
         )
 
-    statuses = {outcome.vector_status for outcome in outcomes}
-    print(f"\nvector_status: {', '.join(sorted(statuses))}")
-    mixed = len(statuses) > 1
-    if mixed:
+    if invalid:
         print(
-            "  MIXED -- some cases ran hybrid and some fell back to lexical, "
-            "so an\n  average over them is neither baseline. A transient "
-            "provider failure\n  changes what part of a run measured."
-        )
-
-    if invalid or mixed:
-        print(
-            "\nAggregates suppressed. Fix the labels or re-run against a "
-            "single retrieval mode."
+            "\nAggregates suppressed. Every selected case has to resolve "
+            "before any\nnumber here means anything."
         )
         _report_provisional(outcomes)
+        _report_misses(outcomes, show_misses)
         return 1
 
+    by_status: dict[str, list[CaseOutcome]] = defaultdict(list)
+    for outcome in outcomes:
+        by_status[outcome.vector_status].append(outcome)
+
+    print(f"\nvector_status: {', '.join(sorted(by_status))}")
+
+    if len(by_status) == 1:
+        _print_table(outcomes, total_label="ALL")
+        _report_provisional(outcomes)
+        _report_misses(outcomes, show_misses)
+        return 0
+
+    # Mixed. Each mode gets its own table and there is no combined row,
+    # because there is no question a combined row answers: `used` is hybrid,
+    # `not_configured` is a deployment that is lexical by choice, and `failed`
+    # is a hybrid run that degraded. Pooling the last two as "lexical" would
+    # be its own error -- one is a baseline, the other is an accident.
+    print(
+        "  MIXED -- reported per mode, with no combined figure. A transient "
+        "provider\n  failure changes what part of a run measured, and an "
+        "average across modes\n  is not a baseline for any of them."
+    )
+    for status in sorted(by_status):
+        subset = by_status[status]
+        print(f"\n--- {status} ({len(subset)} case(s)) {_MODE_NOTE.get(status, '')}")
+        _print_table(subset, total_label=status)
+
+    print(
+        "\nExit code is nonzero: the run did not measure one thing. The "
+        "per-mode\nnumbers above are usable on their own terms; there is no "
+        "total to quote."
+    )
+    _report_provisional(outcomes)
+    _report_misses(outcomes, show_misses)
+    return 1
+
+
+# What a status means for the numbers under it, so a table cannot be read as a
+# baseline it is not.
+_MODE_NOTE = {
+    "used": "-- hybrid",
+    "not_configured": "-- lexical baseline, no provider configured",
+    "failed": "-- DEGRADED: provider errored, not a lexical baseline",
+}
+
+
+def _print_table(outcomes: list[CaseOutcome], *, total_label: str) -> None:
     by_category: dict[str, list[CaseOutcome]] = defaultdict(list)
     for outcome in outcomes:
         by_category[outcome.case.category].append(outcome)
@@ -232,31 +270,20 @@ def report(outcomes: list[CaseOutcome], show_misses: bool) -> int:
     print(f"\n{'category':<18} {'n':>3}  {header}    MRR")
     for category in sorted(by_category):
         subset = by_category[category]
-        recalls = [
-            _format(_mean([r for r in (o.recall_at(d) for o in subset) if r is not None]))
-            for d in RECALL_DEPTHS
-        ]
-        mrr = _mean(
-            [r for r in (o.reciprocal_rank for o in subset) if r is not None]
-        )
-        print(
-            f"{category:<18} {len(subset):>3}  {'  '.join(recalls)}  {_format(mrr)}"
-        )
+        _print_row(category, subset)
+    _print_row(total_label, outcomes)
 
-    overall_recall = [
-        _format(_mean([r for r in (o.recall_at(d) for o in outcomes) if r is not None]))
+
+def _print_row(label: str, subset: list[CaseOutcome]) -> None:
+    recalls = [
+        _format(_mean([r for r in (o.recall_at(d) for o in subset) if r is not None]))
         for d in RECALL_DEPTHS
     ]
-    overall_mrr = _mean(
-        [r for r in (o.reciprocal_rank for o in outcomes) if r is not None]
-    )
-    print(
-        f"{'ALL':<18} {len(outcomes):>3}  {'  '.join(overall_recall)}  "
-        f"{_format(overall_mrr)}"
-    )
+    mrr = _mean([r for r in (o.reciprocal_rank for o in subset) if r is not None])
+    print(f"{label:<18} {len(subset):>3}  {'  '.join(recalls)}  {_format(mrr)}")
 
-    _report_provisional(outcomes)
 
+def _report_misses(outcomes: list[CaseOutcome], show_misses: bool) -> None:
     misses = [o for o in outcomes if o.reciprocal_rank == 0.0]
     if misses:
         print(f"\n{len(misses)} case(s) returned no relevant document at all:")
@@ -272,7 +299,6 @@ def report(outcomes: list[CaseOutcome], show_misses: bool) -> int:
                 for title in outcome.returned_titles[:5]:
                     print(f"      got   : {title}")
     print()
-    return 0
 
 
 def _report_provisional(outcomes: list[CaseOutcome]) -> None:

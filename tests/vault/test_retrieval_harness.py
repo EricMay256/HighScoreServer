@@ -104,24 +104,54 @@ def test_an_invalid_run_suppresses_its_aggregates_and_exits_nonzero(
     assert "MRR" not in output
 
 
-def test_a_mixed_status_run_is_neither_baseline(
+def test_a_mixed_status_run_reports_each_mode_and_no_total(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A transient provider failure changes what half a run measured.
 
-    Averaging a hybrid case with one that fell back to lexical produces a
-    number that is not a hybrid baseline and not a lexical one.
+    Averaging a hybrid case with one that degraded to lexical produces a number
+    that is neither baseline, so there is no combined row -- but the per-mode
+    numbers are real and are worth keeping rather than discarding a whole run
+    over two failures.
     """
 
     exit_code = report(
-        [_outcome(vector_status="used"), _outcome(vector_status="failed")],
+        [
+            _outcome(vector_status="used"),
+            _outcome(vector_status="failed", relevant_paths=("b.md",),
+                     returned_paths=("x.md", "b.md")),
+        ],
         show_misses=False,
     )
 
     output = capsys.readouterr().out
     assert exit_code == 1
     assert "MIXED" in output
-    assert "MRR" not in output
+    # Each mode gets its own table, labelled for what it is.
+    assert "--- used" in output
+    assert "--- failed" in output
+    assert "DEGRADED" in output
+    # And no combined figure, because none of them would answer anything.
+    assert "ALL" not in output
+
+
+def test_a_degraded_mode_is_not_labelled_a_lexical_baseline(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`not_configured` is a deployment that is lexical by choice; `failed` is a
+    hybrid run that broke. Pooling them as "lexical" would be its own error."""
+
+    report(
+        [
+            _outcome(vector_status="not_configured"),
+            _outcome(vector_status="failed"),
+        ],
+        show_misses=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "lexical baseline" in output
+    assert "DEGRADED" in output
 
 
 @pytest.mark.parametrize("status", ["used", "not_configured"])
