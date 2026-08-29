@@ -210,3 +210,9 @@ class ContributionOutcome:
     related_pages: list[ScoredCandidate] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     idempotent_replay: bool = False
+    # Whether `vault_set_summary` would still succeed on this note right now:
+    # no summary, owned by this principal, readable, inside the grace window.
+    # Only computed on a replay, where the outcome alone cannot answer it --
+    # see `_summary_advice`. False elsewhere because the ordinary path already
+    # knows from `supplied`.
+    summary_repairable: bool = False

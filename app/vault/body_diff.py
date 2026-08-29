@@ -210,3 +210,165 @@ def summarize_body_change(original: str, updated: str) -> BodyChangeSummary:
         removed_lines=tuple(removed),
         hunk_count=hunks,
     )
+
+
+class SpanEditError(BodyDiffError):
+    """The named span does not identify exactly one place in the body.
+
+    A subclass of ``BodyDiffError`` so every caller that already renders a
+    malformed diff as a client error renders this the same way. It is a
+    distinct type because the *remedy* differs: a bad diff is re-authored,
+    while an ambiguous span is re-pointed with ``occurrence``.
+    """
+
+
+def apply_span_edit(
+    original: str,
+    *,
+    expected_text: str,
+    replacement_text: str,
+    occurrence: int | None = None,
+) -> str:
+    """Replace one exactly-matched span, or refuse to guess which one.
+
+    The alternative to authoring a unified diff. Hunk arithmetic is the part
+    of a patch a model gets wrong -- line numbers and counts it cannot verify
+    without holding the whole file -- and it is also the part that carries no
+    intent. Naming the old text and the new text states the intent exactly and
+    lets the server compute the arithmetic, which it can do correctly by
+    construction.
+
+    **This does not relax the diff contract; it feeds it.** The caller's span
+    is converted to a canonical unified diff and then applied through
+    ``apply_body_unified_diff`` like any other, so the compact-diff policy,
+    the removal-acknowledgement rule and the context checks all still apply.
+    Nothing here reinterprets a malformed patch -- a malformed patch never
+    arrives.
+
+    ``occurrence`` is deliberately ``None`` rather than ``1`` by default.
+    Defaulting to the first match would make "the span I meant" and "the first
+    span that happens to match" the same request, and the caller could not
+    express the difference. ``None`` means *this text must be unique*, which
+    is the safe reading of a caller who has not thought about duplicates; an
+    explicit integer is the caller saying they have.
+
+    Raises ``SpanEditError`` when the span is absent, ambiguous, or out of
+    range, and ``BodyDiffError`` when the edit would change nothing.
+    """
+
+    if not expected_text:
+        raise SpanEditError("expected_text must not be empty")
+
+    # The body is the stored one and decides the line-ending convention; the
+    # caller's span is normalized to match rather than the other way round.
+    # `apply_body_unified_diff` refuses a body with mixed endings, so a body
+    # that reaches here is uniform and one normalization is enough.
+    body = original.replace("\r\n", "\n")
+    needle = expected_text.replace("\r\n", "\n")
+    replacement = replacement_text.replace("\r\n", "\n")
+
+    # CRLF is normalized above because the stored body decides the convention.
+    # A carriage return that survives that is a *lone* one, and it is not
+    # representable: the diff is built with `splitlines`, which treats a bare
+    # \r as a line boundary, so the stored patch would apply "x\ny" for a
+    # requested "x\ry" -- a proposal that silently describes different text
+    # from the one the caller asked for.
+    for label, value in (("expected_text", needle), ("replacement_text", replacement)):
+        if "\r" in value:
+            raise SpanEditError(
+                f"{label} contains a carriage return that is not part of a "
+                "CRLF line ending. The stored diff cannot represent it. Use "
+                "\\n line endings."
+            )
+
+    if needle == replacement:
+        raise BodyDiffError("expected_text and replacement_text are identical")
+
+    # Every offset the span begins at, **including overlapping ones**, and the
+    # same list answers both "is this ambiguous" and "which one did you mean".
+    #
+    # Two different overlap policies used to be in play here: `str.count`
+    # counts non-overlapping occurrences, while stepping with
+    # `index(needle, previous + 1)` finds overlapping ones. For "aa" in "aaa"
+    # that meant the count said 1 and the ambiguity check passed, so the edit
+    # landed on the first of two candidate spans without asking -- the one
+    # thing ADR 0033 says this must never do. Overlapping is the safer reading
+    # of "every place this span begins": it can only ever refuse more.
+    offsets: list[int] = []
+    search_from = 0
+    while (found := body.find(needle, search_from)) != -1:
+        offsets.append(found)
+        search_from = found + 1
+
+    count = len(offsets)
+    if count == 0:
+        raise SpanEditError(
+            "expected_text does not appear in the note body; fetch the note "
+            "again and copy the span exactly, whitespace included"
+        )
+
+    if occurrence is None:
+        if count > 1:
+            raise SpanEditError(
+                f"expected_text appears {count} times; pass occurrence to say "
+                "which one, or extend the span until it is unique"
+            )
+        index = offsets[0]
+    else:
+        if not 1 <= occurrence <= count:
+            raise SpanEditError(
+                f"occurrence {occurrence} is out of range; expected_text "
+                f"appears {count} time{'s' if count != 1 else ''}"
+            )
+        index = offsets[occurrence - 1]
+
+    return body[:index] + replacement + body[index + len(needle) :]
+
+
+def span_edit_to_unified_diff(
+    original: str,
+    *,
+    expected_text: str,
+    replacement_text: str,
+    occurrence: int | None = None,
+) -> str:
+    """Render a span edit as the canonical diff that will be stored and reviewed.
+
+    Storage stays a body diff, which is the point: a reviewer reads the same
+    artifact whichever way it was authored, the proposal table needs no new
+    kind, and no migration is involved. The span is a transport convenience
+    that ends at this function.
+    """
+
+    body = original.replace("\r\n", "\n")
+    updated = apply_span_edit(
+        original,
+        expected_text=expected_text,
+        replacement_text=replacement_text,
+        occurrence=occurrence,
+    )
+
+    # The diff grammar has no `\ No newline at end of file` marker, and the
+    # applier keeps the original body's trailing-newline state, so an edit that
+    # adds or removes the final newline cannot be carried by the artifact that
+    # gets stored. Refused here rather than accepted and quietly dropped.
+    if body.endswith("\n") != updated.endswith("\n"):
+        raise SpanEditError(
+            "this edit changes whether the body ends with a newline, which the "
+            "stored diff cannot represent. Propose it as a replacement instead."
+        )
+
+    diff = summarize_body_change(body, updated).unified_diff
+
+    # The invariant the whole feature rests on: what is stored has to apply to
+    # exactly the text that was asked for. Everything above refuses a known
+    # unrepresentable input; this catches the ones nobody has thought of yet,
+    # by round-tripping the artifact before it is persisted rather than
+    # discovering the difference at review time when the patch is applied.
+    applied = apply_body_unified_diff(body, diff)
+    if applied.body != updated:
+        raise SpanEditError(
+            "the diff generated for this span does not reproduce the requested "
+            "text, so it was not stored. Propose the change as a replacement."
+        )
+    return diff

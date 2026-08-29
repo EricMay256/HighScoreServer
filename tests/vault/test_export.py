@@ -42,6 +42,7 @@ from app.vault.repository import VaultDocumentRepository
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings
 from app.vault.tables import vault_documents
+from app.vault.wikilinks import LinkIndex
 
 
 CREATED_AT = datetime(2026, 8, 12, 21, 6, 40, tzinfo=UTC)
@@ -183,6 +184,147 @@ def test_populated_optional_keys_land_in_governance_order() -> None:
         "ClientRunID",
         "SchemaVersion",
     ]
+
+
+
+def test_a_note_with_edges_carries_see_also_alongside_related_ids() -> None:
+    """ADR 0025's export boundary: ids for the engine, wikilinks for the reader.
+
+    Not duplication -- the Metadata Standard makes `SeeAlso` a universal
+    `list_wikilink` and `RelatedIDs` Agent Note plumbing. Without the wikilink
+    half, an exported relation is a uuid Obsidian cannot follow, so the graph a
+    human opens the vault to browse is invisible in both directions.
+    """
+
+    target = make_document(
+        id="9711ac5985974fcdbfe0c33aa071d390",
+        vault_path="Agent/notes/two-loaders-two-answers.md",
+        title="Two loaders, two answers",
+    )
+    citing = make_document(related_ids=(target.id,))
+    links = LinkIndex.from_documents([target, citing])
+
+    rendered = render_document(citing, links)
+
+    assert "\nRelatedIDs:\n  - 9711ac5985974fcdbfe0c33aa071d390\n" in rendered.content
+    assert (
+        '\nSeeAlso:\n  - "[[two-loaders-two-answers]]"\n' in rendered.content
+    )
+
+
+def test_see_also_lands_in_the_metadata_standard_position() -> None:
+    """After the universal properties and before `Title`, where global.yml puts it."""
+
+    citing = make_document(related_ids=("target",))
+    links = LinkIndex.from_documents(
+        [make_document(id="target", vault_path="Agent/notes/target.md", title="Target")]
+    )
+
+    frontmatter = render_document(citing, links).content.split("---\n")[1]
+    keys = [
+        line.split(":", 1)[0]
+        for line in frontmatter.splitlines()
+        if line and not line.startswith(" ")
+    ]
+
+    assert keys[keys.index("tags") + 1 : keys.index("Title")] == ["SeeAlso"]
+
+
+def test_a_note_with_no_edges_renders_no_see_also_key_at_all() -> None:
+    """Omitted, not ``[]``.
+
+    The corpus's 61 notes carry no edges, so an unconditional key would rewrite
+    every one of their files for a line that says nothing.
+    """
+
+    assert "SeeAlso" not in render_document(make_document()).content
+
+
+def test_a_wiki_pages_related_renders_as_wikilinks_not_ids() -> None:
+    """`Related` is a `list_wikilink` in global.yml, not engine-owned plumbing.
+
+    Until 2026-08-26 this column held the Stage-A `[[Title]]` strings that
+    `import_vault_wiki` never resolved, so projecting it verbatim looked correct
+    while echoing bad data back into the tree.
+    """
+
+    source = make_document(
+        id="9711ac5985974fcdbfe0c33aa071d390",
+        vault_path="Agent/wiki/operating-the-agent-knowledge-vault.md",
+        kind=DocumentKind.WIKI,
+        title="Operating the Agent Knowledge Vault",
+    )
+    page = make_document(
+        kind=DocumentKind.WIKI,
+        vault_path="Agent/wiki/idempotency.md",
+        related_ids=(source.id,),
+    )
+
+    rendered = render_document(page, LinkIndex.from_documents([source, page]))
+
+    assert (
+        '\nRelated:\n  - "[[operating-the-agent-knowledge-vault]]"\n'
+        in rendered.content
+    )
+    assert source.id not in rendered.content
+
+
+def test_an_edge_the_run_cannot_resolve_is_omitted_from_the_file() -> None:
+    """A dangling edge is legal (ADR 0025); a broken wikilink is not."""
+
+    citing = make_document(related_ids=("an-id-nothing-answers-to",))
+
+    rendered = render_document(citing, LinkIndex.from_documents([citing]))
+
+    assert "SeeAlso" not in rendered.content
+    # The id itself survives in the column, and therefore in `RelatedIDs`.
+    assert "\nRelatedIDs:\n  - an-id-nothing-answers-to\n" in rendered.content
+
+
+def test_a_row_still_holding_a_wikilink_is_reported_not_silently_emptied() -> None:
+    """The ordering hazard: repair the rows, then export.
+
+    A wikilink in `related_ids` is not an id, so it resolves to nothing and is
+    omitted -- which quietly empties a `Related` block that used to have
+    entries. An operator who exports before running the repair should be told.
+    """
+
+    page = make_document(
+        kind=DocumentKind.WIKI,
+        vault_path="Agent/wiki/idempotency.md",
+        related_ids=("[[Operating the Agent Knowledge Vault]]",),
+    )
+
+    rendered = render_document(page, LinkIndex.from_documents([page]))
+
+    assert "Related: []" in rendered.content
+    assert any("resolve_vault_wikilinks" in warning for warning in rendered.warnings)
+
+
+def test_the_export_loop_resolves_edges_across_the_whole_run(tmp_path: Path) -> None:
+    """The index is the run's, not the file's.
+
+    A per-document lookup would resolve an edge only when the target happened to
+    have been rendered already, which is an ordering dependency wearing a
+    correctness bug's clothes.
+    """
+
+    target = make_document(
+        id="9711ac5985974fcdbfe0c33aa071d390",
+        vault_path="Agent/notes/zzz-last-in-path-order.md",
+        title="Last in path order",
+    )
+    citing = make_document(
+        vault_path="Agent/notes/aaa-first-in-path-order.md",
+        related_ids=(target.id,),
+    )
+
+    export_to(tmp_path, (citing, target), apply=True)
+
+    written = (tmp_path / "Agent" / "notes" / "aaa-first-in-path-order.md").read_text(
+        encoding="utf-8"
+    )
+    assert "[[zzz-last-in-path-order]]" in written
 
 
 def test_unmodelled_frontmatter_is_re_emitted_but_never_shadows_a_column() -> None:

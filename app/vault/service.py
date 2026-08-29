@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import text as text_sql
@@ -14,9 +14,15 @@ from .body_diff import (
     BodyChangeSummary,
     BodyDiffError,
     apply_body_unified_diff,
+    span_edit_to_unified_diff,
     summarize_body_change,
 )
-from .constants import NOTE_SCHEMA_VERSION, WIKI_SCHEMA_VERSION
+from .constants import (
+    CORPUS_LOCK_KEY,
+    NOTE_SCHEMA_VERSION,
+    SUMMARY_GRACE_PERIOD_SECONDS,
+    WIKI_SCHEMA_VERSION,
+)
 from .db import VaultPoolObserver, acquire_vault_connection
 from .domain import (
     AmendmentProposalKind,
@@ -168,6 +174,16 @@ class HybridSearchOutcome:
     # hidden: a silent quality drop is worse than a degraded answer that says
     # so, and a broken provider must not look like a deliberate one.
     vector_status: VectorSearchStatus
+    # Whether fusion ranked anything below the page that was returned. Free to
+    # compute -- fusion already produces the whole ranking and the page is a
+    # slice of it -- so this is an observation rather than an extra query.
+    #
+    # Bounded by the candidate window, and it has to be: each arm fetches
+    # `candidate_depth(limit)` rows, capped at MAX_CANDIDATES. So it means
+    # "fusion ranked more than fitted on this page", not "the corpus contains
+    # more matches". For deciding whether to narrow a query those are the same
+    # answer, which is what it is for.
+    has_more: bool = False
 
 
 class VaultSearchService:
@@ -215,10 +231,16 @@ class VaultSearchService:
                 else []
             )
 
-            fused = reciprocal_rank_fusion(
+            ranked = reciprocal_rank_fusion(
                 document_ids(lexical),
                 document_ids(vector),
-            )[:limit]
+            )
+            # Slice after fusion rather than before it, so the count below is
+            # the real remainder. Hydration is still one page wide -- the
+            # bodies are what a search costs, and nothing off the page is
+            # fetched.
+            fused = ranked[:limit]
+            has_more = len(ranked) > limit
             documents = await self._repository.fetch_documents(
                 connection,
                 [hit.document_id for hit in fused],
@@ -242,6 +264,7 @@ class VaultSearchService:
                 self._provider.profile_id if self._provider is not None else None
             ),
             vector_status=vector_status,
+            has_more=has_more,
         )
 
     async def _embed_query(
@@ -332,7 +355,10 @@ class DedupUnavailable(Exception):
 # Serializing governed writes is acceptable at this corpus size and is exactly
 # what makes the dedup decision meaningful. The constant is arbitrary but must
 # never change: it is the lock's identity.
-_CONTRIBUTION_LOCK_KEY = 0x5641554C5401
+# Defined in `constants` now that an operator script takes it too -- the
+# backfill's writes have to serialize with these. Same reasoning as
+# OAUTH_CLIENT_LOCK_KEY: a lock two modules disagree about is not a lock.
+_CONTRIBUTION_LOCK_KEY = CORPUS_LOCK_KEY
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,6 +384,39 @@ class ContributionRequest:
     related_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     source_url: str | None = None
+
+
+async def _summary_still_repairable(
+connection: AsyncConnection,
+    *,
+    document_id: str | None,
+    contributed_by: str,
+) -> bool:
+    """Whether ``vault_set_summary`` would succeed on this note right now.
+
+    The same conditions its predicate applies, asked ahead of time so a
+    replay can decide whether to repeat the advice. Read-only and best
+    effort: a false positive costs one refused follow-up call, where the
+    false negative it replaces cost a lost-response caller any knowledge
+    that its note has no summary at all.
+    """
+
+    if document_id is None:
+        return False
+    note = await VaultDocumentRepository().get_by_id(
+        connection,
+        document_id,
+        statuses=READABLE_STATUSES,
+        readable_only=True,
+    )
+    if note is None or note.kind is not DocumentKind.NOTE:
+        return False
+    if note.summary is not None or note.contributed_by != contributed_by:
+        return False
+    not_before = datetime.now(UTC) - timedelta(
+        seconds=SUMMARY_GRACE_PERIOD_SECONDS
+    )
+    return note.created_at >= not_before
 
 
 class VaultContributionService:
@@ -609,7 +668,13 @@ class VaultContributionService:
             note_id=prior.document_id,
             message=stored.get("message", "idempotent replay"),
             idempotent_replay=True,
+            summary_repairable=await _summary_still_repairable(
+                connection,
+                document_id=prior.document_id,
+                contributed_by=request.contributed_by,
+            ),
         )
+
 
     async def _settle(
         self,
@@ -1060,6 +1125,367 @@ class VaultDocumentUpdateService:
         )
 
 
+
+class SummaryAlreadyPresent(Exception):
+    """The note already carries a summary, so the carveout does not apply.
+
+    Distinct from a refusal to authorize: the caller may well be the author,
+    inside the window, and simply asking for something this operation cannot
+    do. ADR 0035 makes the carveout monotonic on purpose, and rewriting an
+    existing precis is what ``vault:update`` and the proposal workflow are for.
+    """
+
+
+class SummaryWindowClosed(Exception):
+    """The note is the caller's own, but was contributed too long ago.
+
+    Carries the window so the caller is told the rule rather than left to infer
+    it from a bare refusal.
+    """
+
+    def __init__(self, message: str, grace_seconds: int) -> None:
+        super().__init__(message)
+        self.grace_seconds = grace_seconds
+
+
+class SummaryRejected(Exception):
+    """The note would fail governance validation with this summary."""
+
+
+class SummaryStale(Exception):
+    """The note's content changed while this summary was being embedded.
+
+    Retryable, and the distinction from ``SummaryAlreadyPresent`` matters: that
+    one is settled and a retry would be wrong, this one succeeds on a second
+    attempt against the new revision. It exists because the embedding call
+    happens outside the corpus lock, so a vector computed from the snapshot can
+    arrive describing content that has since moved.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class SetSummaryRequest:
+    """Supply the ``summary`` a contribution omitted.
+
+    ``contributed_by`` is the caller's stored identity rather than a free
+    field: each adapter derives it from the credential exactly as the
+    contribution path does, so it is never caller-supplied at either one.
+    Passing it in rather than deriving it here keeps the service
+    transport-neutral, which is the same reason ``principal_id`` arrives this
+    way.
+    """
+
+    document_id: str
+    summary: str
+    principal_id: str
+    contributed_by: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SetSummaryOutcome:
+    """What a settled carveout write did."""
+
+    note_id: str
+    message: str
+    content_revision: int
+
+
+class VaultDocumentSummaryService:
+    """Fill in an absent ``summary`` on the caller's own recent note (ADR 0035).
+
+    This exists because of a measured gap and a scope boundary that made the
+    gap self-perpetuating. ``summary`` joins the embedding text and is the
+    search preview, so an absent one costs retrieval quality -- and yet the
+    agent that omitted it could not fix it, because the general update path is
+    ``vault:update``, which ADR 0024 deliberately keeps off the OAuth baseline.
+    Its only recourse was an amendment proposal: a full-replacement,
+    revision-bound workflow record needing a second credential to adjudicate,
+    in order to add one field to a note it wrote thirty seconds earlier.
+
+    So the carveout is narrow enough to sit under ``vault:write``, and narrow
+    in three independent ways rather than one:
+
+    - **One field.** Not a replacement wearing a smaller name. The body, the
+      title and the tags are unreachable here, which is what stops a note being
+      contributed innocuously and then rewritten once it is in the corpus.
+    - **Only where the field is empty.** The operation is monotonic, so it can
+      never misrepresent a note that already describes itself.
+    - **Only inside the grace period, on the caller's own note.** The window is
+      the part doing security work: an embedded, previewed field is a
+      retrieval-poisoning vector, and bounding it in time means the principal
+      amending the note is the one that just wrote it, rather than one that has
+      since read hostile instructions out of the corpus.
+
+    **The dedup gate still runs.** Changing the summary changes the embedding
+    text, and ``VaultDocumentUpdateService`` is explicit that a surface
+    skipping the gate would be the easy way around it. A carveout is not an
+    exemption from the vault's one invariant; it is a narrower door through the
+    same wall. Like an update and unlike a contribution, a collision *refuses*
+    rather than flagging: the note is already active and readable, and taking
+    it out of the read surface as a side effect of describing it would leave
+    the caller worse off than if it had never called.
+    """
+
+    def __init__(
+        self,
+        transactions: VaultTransactionService,
+        provider: EmbeddingProvider | None,
+        policy: Policy = DEFAULT_POLICY,
+        similar_limit: int = 5,
+        grace_seconds: int = SUMMARY_GRACE_PERIOD_SECONDS,
+    ) -> None:
+        self._transactions = transactions
+        self._provider = provider
+        self._policy = policy
+        self._similar_limit = similar_limit
+        self._grace_seconds = grace_seconds
+
+    async def set_summary(self, request: SetSummaryRequest) -> SetSummaryOutcome:
+        documents = VaultDocumentRepository()
+        embeddings = VaultDocumentEmbeddingRepository()
+        search = VaultSearchRepository()
+
+        if self._provider is None:
+            raise DedupUnavailable(
+                "No embedding provider is configured; refusing to write without dedup"
+            )
+
+        # One clock for the whole call, computed before the read and reused for
+        # the conditional write. Reading the time again at the write would let
+        # a request that passed the window check fail the identical check a few
+        # milliseconds later, which is a race nobody can act on.
+        not_before = datetime.now(UTC) - timedelta(seconds=self._grace_seconds)
+
+        # Load outside the lock, as the contribution and update paths do: an
+        # embedding call for a note this caller may not touch is wasted, and
+        # the refusals below are all decidable from the row.
+        async with self._transactions.transaction() as connection:
+            existing = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=READABLE_STATUSES,
+                readable_only=True,
+            )
+
+        # Three different misses collapse into one 404, deliberately. "No such
+        # note", "not yours" and "not a note" all mean the same thing to this
+        # operation -- it does not address that document -- and separating them
+        # would let a caller enumerate authorship across the corpus, which is
+        # the disclosure ADR 0014 closes on the read surface and ADR 0016
+        # closes on the dedup query.
+        if (
+            existing is None
+            or existing.kind is not DocumentKind.NOTE
+            or existing.contributed_by != request.contributed_by
+        ):
+            raise DocumentNotFound(request.document_id)
+
+        # These two disclose nothing new: the caller has just proved it wrote
+        # this note, so it is owed the reason.
+        if existing.summary is not None:
+            raise SummaryAlreadyPresent(
+                f"{request.document_id} already has a summary; this operation "
+                "only fills in an absent one"
+            )
+        if existing.created_at < not_before:
+            raise SummaryWindowClosed(
+                f"{request.document_id} was contributed more than "
+                f"{self._grace_seconds // 60} minutes ago; propose an "
+                "amendment instead",
+                self._grace_seconds,
+            )
+
+        candidate = self._build_candidate(existing, request.summary)
+
+        # ``validate`` only, not ``validate_facets``. The facets are the stored
+        # ones and this caller cannot change them, so failing here on data it
+        # has no way to fix would refuse a legitimate write for someone else's
+        # mistake. The document-level gate still runs, because the row is about
+        # to carry content the caller supplied.
+        errors = validate(candidate)
+        if errors:
+            raise SummaryRejected("; ".join(errors))
+
+        # Unconditional, unlike the update path's. The summary moved from
+        # absent to present, so the embedding text moved by construction and
+        # the ``embedded_text_sha256`` comparison could only ever agree.
+        embedding_text = assemble_embedding_text(candidate)
+        text_digest = embedding_text_digest(embedding_text)
+        vector = await embed_one(
+            self._provider, embedding_text, EmbeddingInputKind.DOCUMENT
+        )
+
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+
+            similars = await search.find_similar(
+                connection,
+                embedding=vector,
+                profile_id=self._provider.profile_id,
+                limit=self._similar_limit,
+                exclude_document_id=request.document_id,
+            )
+            match decide(candidate, similars, self._policy):
+                case Insert():
+                    pass
+                case Flag(reason=reason, similars=sims):
+                    raise UpdateWouldDuplicate(f"summary refused: {reason}", sims)
+                case Reject(reason=reason, conflicting_id=conflicting):
+                    raise UpdateWouldDuplicate(
+                        f"summary refused: {reason} (conflicts with {conflicting})",
+                        similars,
+                    )
+                case Link():
+                    raise NotImplementedError(
+                        "Link requires link_at, disabled under the current policy"
+                    )
+                case Merge():
+                    raise NotImplementedError(
+                        "Merge requires a real merge strategy; deferred by ADR 0004"
+                    )
+
+            updated = await documents.set_summary(
+                connection,
+                request.document_id,
+                summary=request.summary,
+                contributed_by=request.contributed_by,
+                not_before=not_before,
+                expected_revision=existing.content_revision,
+            )
+            if updated is None:
+                # The predicate is the authority and it has just disagreed with
+                # a check that passed moments ago. Re-read under the lock to say
+                # which condition moved, because they need different answers: a
+                # summary that arrived is settled, and content that changed is
+                # retryable. Guessing "already present" was wrong -- ordinary
+                # updates and accepted amendments take this same lock, so any of
+                # them could have been the writer in between.
+                await self._refuse_stale_summary(
+                    connection,
+                    documents,
+                    request=request,
+                    not_before=not_before,
+                    expected_revision=existing.content_revision,
+                )
+
+            await embeddings.upsert(
+                connection,
+                DocumentEmbedding(
+                    document_id=request.document_id,
+                    profile_id=self._provider.profile_id,
+                    vector=vector,
+                    text_sha256=text_digest,
+                ),
+            )
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.set_summary",
+                outcome="summary_set",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=request.document_id,
+            )
+
+        return SetSummaryOutcome(
+            note_id=request.document_id,
+            message="summary set and note re-embedded",
+            content_revision=updated.content_revision,
+        )
+
+    async def _refuse_stale_summary(
+        self,
+        connection: AsyncConnection,
+        documents: VaultDocumentRepository,
+        *,
+        request: SetSummaryRequest,
+        not_before: datetime,
+        expected_revision: int,
+    ) -> None:
+        """Say which precondition moved, having re-read the row under the lock.
+
+        Always raises. The order matters: the conditions are checked from the
+        most settled to the most retryable, so a note that both gained a summary
+        and moved on reports the summary -- retrying that would be pointless
+        where retrying a revision change is not.
+        """
+
+        current = await documents.get_by_id(
+            connection,
+            request.document_id,
+            statuses=READABLE_STATUSES,
+            readable_only=True,
+        )
+        if (
+            current is None
+            or current.kind is not DocumentKind.NOTE
+            or current.contributed_by != request.contributed_by
+        ):
+            raise DocumentNotFound(request.document_id)
+        if current.summary is not None:
+            raise SummaryAlreadyPresent(
+                f"{request.document_id} gained a summary while this "
+                "request was in flight"
+            )
+        if current.created_at < not_before:
+            raise SummaryWindowClosed(
+                f"{request.document_id} was contributed more than "
+                f"{self._grace_seconds // 60} minutes ago; propose an "
+                "amendment instead",
+                self._grace_seconds,
+            )
+        if current.content_revision != expected_revision:
+            raise SummaryStale(
+                f"{request.document_id} changed while this summary was being "
+                f"embedded (revision {expected_revision} -> "
+                f"{current.content_revision}); retry against the current text"
+            )
+        # No condition explains the miss, which means the predicate and this
+        # re-read disagree about the same row -- report it rather than invent a
+        # reason, and do not write the vector either way.
+        raise SummaryStale(
+            f"{request.document_id} did not accept the summary and no "
+            "precondition explains it; retry"
+        )
+
+    @staticmethod
+    def _build_candidate(existing: VaultDocument, summary: str) -> NewVaultDocument:
+        """The row as it would be with the summary filled in.
+
+        Every field but ``summary`` comes from the stored row, which is what
+        makes this a one-field write rather than a replacement: there is no
+        request field that could reach the body or the title even by mistake.
+        Built as a ``NewVaultDocument`` for the same reason the update path
+        does it -- so the candidate satisfies exactly the ``validate`` and
+        ``assemble_embedding_text`` every other write path runs.
+        """
+
+        return NewVaultDocument(
+            id=existing.id,
+            kind=existing.kind,
+            doc_type=existing.doc_type,
+            vault_path=existing.vault_path,
+            status=existing.status,
+            doc_status=existing.doc_status,
+            title=existing.title,
+            summary=summary,
+            body=existing.body,
+            tags=existing.tags,
+            aliases=existing.aliases,
+            facets=existing.facets,
+            related_ids=existing.related_ids,
+            source_ids=existing.source_ids,
+            contributed_by=existing.contributed_by,
+            source_url=existing.source_url,
+            provenance=existing.provenance,
+        )
+
+
 class AmendmentProposalNotFound(Exception):
     """No amendment proposal carries that id."""
 
@@ -1077,6 +1503,24 @@ class AmendmentRemovalAcknowledgementRequired(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class SpanEdit:
+    """An exact old span and what to put in its place.
+
+    The alternative authoring form for a body change. It never reaches
+    storage: `propose` converts it to the canonical unified diff before
+    anything is written, so the proposal table needs no new kind and a
+    reviewer reads the same artifact either way. See ADR 0033.
+    """
+
+    expected_text: str
+    replacement_text: str
+    # None means "this span must be unique", which is the safe reading of a
+    # caller who has not thought about duplicates. An integer is that caller
+    # saying they have.
+    occurrence: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AmendmentProposalRequest:
     target_document_id: str
     base_revision: int
@@ -1086,6 +1530,11 @@ class AmendmentProposalRequest:
     request_id: str
     replacement: UpdateRequest | None = None
     body_diff: str | None = None
+    # Resolved to `body_diff` against the loaded target inside `propose`, and
+    # never persisted. Carried on the request rather than converted in the
+    # adapter because the conversion needs the note's current body, which only
+    # the service is allowed to read.
+    span: SpanEdit | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1151,7 +1600,12 @@ class VaultAmendmentService:
                 raise AmendmentBaseRevisionMismatch(request.target_document_id)
 
             try:
-                update_request = self._request_update(request, target)
+                # Inside the guard on purpose: a span that matches nothing or
+                # matches twice raises SpanEditError, which is a BodyDiffError,
+                # and reaches the caller as the same client error a malformed
+                # patch would.
+                resolved = self._materialize_span(request, target)
+                update_request = self._request_update(resolved, target)
                 candidate = VaultDocumentUpdateService._build_candidate(
                     target, update_request
                 )
@@ -1164,12 +1618,18 @@ class VaultAmendmentService:
             if not rationale:
                 raise ValueError("rationale must contain non-whitespace text")
 
-            change = self._change_payload(request)
+            change = self._change_payload(resolved)
             proposal = await proposals.insert_pending(
                 connection,
                 target_document_id=target.id,
                 target_revision=target.content_revision,
-                change_kind=request.change_kind,
+                # `resolved`, not `request`: a span edit is materialized into a
+                # body diff above, so the pre-resolution kind would label a
+                # body-diff payload as whatever the caller sent. The MCP
+                # adapter happens to send BODY_DIFF, which is why this was
+                # invisible -- but the stored shape must not depend on an
+                # adapter getting a redundant field right.
+                change_kind=resolved.change_kind,
                 change=change,
                 rationale=rationale,
                 proposed_by=f"agent:{request.principal_id}",
@@ -1457,6 +1917,46 @@ class VaultAmendmentService:
             "source_ids": list(request.source_ids),
             "source_url": request.source_url,
         }
+
+    @staticmethod
+    def _materialize_span(
+        request: AmendmentProposalRequest,
+        target: VaultDocument,
+    ) -> AmendmentProposalRequest:
+        """Turn a span edit into the diff that will be stored, or pass through.
+
+        Runs after the base-revision check and under the same advisory lock,
+        which is what makes the span meaningful: it is resolved against the
+        exact body the caller claimed to be editing, so a concurrent write
+        cannot move the text out from under it between check and conversion.
+        """
+
+        if request.span is None:
+            return request
+        if request.body_diff is not None or request.replacement is not None:
+            raise ValueError("a span edit carries neither body_diff nor replacement")
+        # The kind a span resolves to is BODY_DIFF and nothing else, so a
+        # request arriving with a contradictory one is a caller that disagrees
+        # with this function about what it is building. Refuse rather than
+        # quietly overwrite it: the stored payload and its label have to be
+        # decided in the same place.
+        if request.change_kind is not AmendmentProposalKind.BODY_DIFF:
+            raise ValueError(
+                "a span edit resolves to a body diff; change_kind "
+                f"{request.change_kind.value!r} contradicts the span"
+            )
+
+        return replace(
+            request,
+            change_kind=AmendmentProposalKind.BODY_DIFF,
+            body_diff=span_edit_to_unified_diff(
+                target.body,
+                expected_text=request.span.expected_text,
+                replacement_text=request.span.replacement_text,
+                occurrence=request.span.occurrence,
+            ),
+            span=None,
+        )
 
     @classmethod
     def _change_payload(cls, request: AmendmentProposalRequest) -> dict[str, object]:

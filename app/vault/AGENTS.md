@@ -212,15 +212,54 @@ be edited when it does.
   credential still holds no `vault:update`: it may select an existing proposal but cannot
   compose arbitrary content. `content_revision` moves on `replace_content` only, not review,
   promotion, compile decline, or other lifecycle changes.
+- **A span edit is a third authoring form, not a third stored kind** (ADR 0033).
+  `vault_propose_note_span_edit` takes `expected_text`/`replacement_text`/`occurrence`;
+  `VaultAmendmentService._materialize_span` converts it to a `body_diff` inside `propose`,
+  under the same advisory lock and after the base-revision check, and the `SpanEdit` never
+  reaches storage. Keep it that way: because storage is unchanged, the compact-diff policy,
+  the removal acknowledgement, the review surface and `apply_body_unified_diff` all apply
+  without being restated, and a reviewer reads one artifact however it was authored.
+  `tests/vault/test_span_edit.py` asserts the round trip — what
+  `span_edit_to_unified_diff` renders must apply through the strict applier — and that
+  assertion is what stops the span form becoming a weaker patch format in disguise.
+  - **Do not relax the diff grammar to make patches easier.** Optional or server-repaired
+    hunk counts were proposed and rejected: counts are what makes a mangled patch detectable,
+    and deriving them would let a corrupted request appear to mean something its author did
+    not intend. The span form exists so that the arithmetic never has to be authored, which
+    is the same goal reached without weakening anything.
+  - `occurrence=None` means *this span must be unique*, not *take the first match*. Do not
+    "helpfully" default it to 1; that collapses two different requests and silently edits the
+    wrong paragraph for a caller who had not considered duplicates.
 - **The review surface is REST *and* MCP, and the MCP half is scope-gated.** Reading a case
   serves `flagged` content, the least-vetted text in the corpus, and deciding publishes or
   destroys a note — so the tools exist only for a credential holding `vault:review`, which is
   ADR 0021's defence applied through `list_tools`. **ADR 0026 reversed the destination this
   invariant used to name:** there is no separate admin MCP, and the REST routes stay. See "The
   MCP adapter" below for the operating rule that carries the rest of it.
-- **`related_ids` / `source_ids` are opaque and unvalidated on purpose.** A contribution may
-  reference a note that is archived, flagged, or not yet written; a foreign key would fail the
-  write for the reason ADR 0002 already rejected for audit events.
+- **`related_ids` / `source_ids` carry no existence check on purpose — and that is not the same
+  as no check.** A contribution may reference a note that is archived, flagged, or not yet
+  written; a foreign key would fail the write for the reason ADR 0002 already rejected for audit
+  events. ADR 0030 draws the line ADR 0025 does not: a value containing whitespace or a bracket
+  is a *name*, not an id that points at nothing, and is refused at the request boundary
+  (`wikilinks.looks_like_a_name`, one statement of the rule, used by `api_models.validate_ids`
+  and reported by `export._warnings`). Deliberately weaker than the real id format — a validator
+  spelling `^[0-9a-f]{32}$` would be correct today and would pin the id format into a shipped
+  wire contract. The accepted residual is a bare slug, which passes. Do not "tighten" this into
+  a format rule without an ADR, and do not move it into a DDL CHECK: the constraint could not
+  have been applied while the bad rows existed, and the repair script has to be able to read
+  what it fixes.
+- **They hold ids, and `wikilinks.py` is where a name becomes one.** ADR 0025: inside the
+  database every edge is an id, translated only at the import and export boundaries — a human
+  writes `[[Some Note]]` and never sees a uuid. Unvalidated does not mean untyped, and the
+  2026-08-26 amendment exists because the two were confused: `import_vault_wiki` stored twenty-one
+  `[[Title]]` strings in `related_ids` and the exporter wrote them back out, so the bad data
+  survived a round trip looking correct. A name resolves by title, alias, or slug; an ambiguous
+  one is reported and never guessed; an unresolvable one is dropped **after** the original list is
+  preserved in `frontmatter`, because that is the premise the ADR's drop rule rests on. On the way
+  out, ids render as `[[slug]]` — `SeeAlso` beside `RelatedIDs` on an Agent Note, `Related` on a
+  Wiki Page (`global.yml` makes both `list_wikilink`, and neither is engine-owned) — and an id the
+  run cannot resolve is omitted, because a broken wikilink is worse than an absent one.
+  `scripts/resolve_vault_wikilinks.py` repairs rows written before that was true.
 - **The embedding text is title + aliases + tags + summary + body, and nothing else.** Timestamps
   and identifiers churn without changing meaning; `Type`/`Status` are excluded because they are
   columns (`doc_type`, `doc_status`) and filtering exactly beats matching fuzzily. `frontmatter`
@@ -287,6 +326,42 @@ be edited when it does.
   Log the exception *type* instead. `tests/vault/test_search.py` asserts this.
 - Search must pass the text search configuration as a bound parameter —
   `websearch_to_tsquery(:config, :query)` — never the database default, never interpolation.
+- **Search names candidates; it does not return documents** (ADR 0031). A hit carries
+  `note_id`, `title`, `summary`, `snippet`, `kind`, `doc_status`, `content_revision` and the
+  three ranking fields — and nothing else. `body`, `tags`, `aliases`, `facets`, `related_ids`,
+  `source_ids`, `vault_path`, `doc_type`, `status` and the timestamps were removed on
+  2026-08-26, when a ten-hit page cost 58,784 bytes on the wire and the same page now costs
+  10,650. The test a field must pass to be added back is *selection* value — does it help
+  decide which note to open — not smallness and not convenience. Do not reintroduce one behind
+  a `**document_detail(...).model_dump()`; that is exactly how the old shape arose.
+  - Both adapters build the response through `api_models.search_response`, for the reason they
+    share `canonical_request_digest`. Do not assemble a hit in an adapter.
+  - `snippet` is a **lead extract, not a match highlight**, and is supplied only when `summary`
+    is absent — read `summary or snippet`. A vector-only hit shares no vocabulary with the
+    query, so nothing could mark it; and for hits the lexical arm *did* find, ADR 0007's
+    disjunction rewrite lets one incidental shared word anchor a `ts_headline` fragment
+    somewhere useless, which measured worse than the lead extract. The 320-character bound was
+    measured against the corpus, not chosen; `snippet.py` carries the distribution it came
+    from.
+  - **A `ts_headline` arm is not "call `ts_headline`", and two plausible shortcuts do not
+    work.** Passing it only the terms the lexical arm matched is a *no-op* — an absent term
+    contributes nothing to it already. Routing by retrieval arm does not help either, because
+    the bad case matched lexically. It needs a document-frequency cut so weak terms cannot
+    anchor, and that cut is derived state that goes stale and is not trustworthy at this
+    corpus size. ADR 0031 records the measurements and the gate for revisiting.
+  - `next_cursor` is reserved and always null, and must stay that way until a resumable
+    ranking exists. RRF scores are positions within one query's candidate set, so an insert
+    can move every score beneath it and a document outside the window has no score at all. A
+    cursor here would be an offset promising stability it cannot deliver.
+  - `has_more` is bounded by the candidate window, not the corpus. `truncated` is a different
+    fact: the response was trimmed from the tail to fit `SEARCH_STRUCTURED_BUDGET_BYTES`.
+- **`tests/vault/test_mcp_budget.py` is a ratchet, and the numbers in it are measurements.**
+  Lowering a budget is a deliverable; raising one needs a reason in the commit message. It
+  counts *both* wire copies deliberately: a tool annotated `-> dict[str, Any]` looks
+  schema-less but is not — `func_metadata` derives a permissive object schema from it, which
+  is enough to make the SDK ship `structuredContent` beside the compatibility text block. So
+  every byte saved is saved twice, and typing a tool's return sharpens its schema without
+  adding a copy.
 - **Search returns `active` only; fetch-by-ID also resolves `archived`, never `flagged`** (ADR
   0008). `routes.READABLE_STATUSES` is the single statement of that rule. Archived content is retired
   but legitimate, so a `related_ids`/`source_ids` reference still resolves; `flagged` means the
@@ -329,6 +404,15 @@ be edited when it does.
   grant, and do not gate a new write route on an existing scope because adding one looks like
   ceremony — that is exactly how `vault:write` came to mean "may destroy any note". A quota is
   not an authorization boundary: `retire`'s tight bucket bounds how fast, not whether.
+- **The one sanctioned exception, and the test that bounds it.** `vault:write` gates two
+  routes: contribute, and ADR 0035's `set_summary`. That is allowed because the second grants
+  no capability the first did not already carry — a contributor could have written that summary
+  at contribute time, so the carveout adds a later *moment*, not a new power. A
+  `vault:summarize` could be neither usefully withheld from a contributor nor usefully granted
+  without one, and a scope that cannot be granted or withheld is a second name rather than a
+  boundary. **A route may share a verb only when it can reach nothing its holder could not
+  already have written.** Small is not the test; reachability is. A route touching the body,
+  the title, or another principal's note needs its own verb however narrow it looks.
 - The scope is `vault:delete` even though the route, service and quota bucket all say *retire*.
   The internal vocabulary describes the operation; the permission name warns the operator
   granting it, and "retire" reads as reversible when ADR 0019 makes it not.

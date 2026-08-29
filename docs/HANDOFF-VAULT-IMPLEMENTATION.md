@@ -23,13 +23,33 @@ only on someone building it.
 
 ## The state you are inheriting
 
-**Production is healthy and current.** Vault lineage `0011_review_candidate_optional`, 70
-documents, all `active`, none flagged, none unembedded, every path a title slug. Two live
-credentials: `importer` (which should be revoked — NEXT-STEPS item 4) and `claude-1`.
+> **This file was written 2026-08-22 and describes the state at that moment.** The
+> paragraphs immediately below have been refreshed; **everything after "Read these before
+> touching anything" is as written then** and has not been re-verified. Treat it as
+> reasoning that was true, not as current fact — `docs/NEXT-STEPS.md` is the file that
+> stays current.
 
-**`dev` is pushed and 21 commits ahead of `main`.** That gap is NEXT-STEPS item 1 and it is not
-bookkeeping: someone went looking for the MCP setup instructions this session and could not
-find them, because they were on `dev` and GitHub shows `main`.
+**Production is healthy and current** (checked 2026-08-28). Vault lineage
+`0017_oauth_entitlements`, **94 documents** — 80 notes and 14 wiki pages — all `active`,
+none flagged, none unembedded, every path a title slug. The `importer` credential was
+revoked (NEXT-STEPS item 4). Contribution now runs on per-session OAuth credentials rather
+than the shared `claude-1`: four distinct `agent:oauth-*` principals wrote notes in the
+three days to 2026-08-28.
+
+**`dev` is pushed and 13 commits ahead of `main`.** The gap is smaller than it was because
+PRs #14 and #16 landed, but the reason it matters is unchanged and was learned the hard
+way: someone went looking for the MCP setup instructions and could not find them, because
+they were on `dev` and GitHub shows `main`.
+
+**Two things in this file are now wrong and are worth naming rather than silently
+fixing**, because the reasoning around them is still useful:
+
+- The wiki graph is no longer name-based. 21 Obsidian link *titles* were sitting in
+  `related_ids`, a column that holds ids; `scripts/resolve_vault_wikilinks.py` resolved
+  them against production on 2026-08-28 and both boundaries now translate (ADR 0030).
+- Search no longer returns note bodies. A hit is a title, a preview and ranking
+  (ADR 0031), so any passage below describing what search hands back is describing the
+  old shape.
 
 Landed and deployed:
 
@@ -114,9 +134,14 @@ Learned this session, and each one cost a round trip:
   wikilink-to-id bridge inherits that, and it should be settled *before* the first edge points at
   a human note. The available fix is the one Stage A made: assign an `ID` at first import and
   write it into the file.
-- **The exporter's `SeeAlso` rendering is designed and unbuilt** (ADR 0025). It is independent of
-  everything else and needs no decision — an exported `RelatedIDs` is currently a uuid Obsidian
-  cannot follow, so the graph is invisible in the tree a human opens the vault to browse.
+- ~~**The exporter's `SeeAlso` rendering is designed and unbuilt** (ADR 0025).~~ **Built
+  2026-08-26**, along with the import half it turned out to depend on: `import_vault_wiki` had
+  been storing `[[Title]]` strings in `related_ids`, so the export had nothing but names to
+  render. `app/vault/wikilinks.py` is the translation both boundaries use,
+  `scripts/resolve_vault_wikilinks.py` repairs the twenty-one rows already written that way, and
+  ADR 0025 carries a 2026-08-26 amendment, and the shape question it raised is settled by
+  ADR 0030: the write path refuses a value carrying whitespace or a bracket, and still never
+  checks existence.
 
 ---
 

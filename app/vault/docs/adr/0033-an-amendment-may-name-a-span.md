@@ -1,0 +1,114 @@
+# 33. An amendment may name a span; the server writes the diff
+
+Date: 2026-08-26
+
+## Status
+
+Accepted 2026-08-26.
+
+Adds a third authoring form to ADR 0028's amendment proposals. Changes nothing about how
+proposals are stored, reviewed, or decided, and relaxes nothing in the diff contract.
+
+## Context
+
+Proposing a body change meant authoring a unified diff. That grammar has two halves, and they
+are not equally hard.
+
+The **intent** half — which text to remove, which to put in its place — is what the author
+actually knows. The **arithmetic** half — `@@ -12,7 +12,9 @@`, hunk line counts, exact context
+lines — is bookkeeping about the file, derivable from the intent and the current body, and it
+carries no information the author supplied.
+
+An agent gets the arithmetic wrong. It cannot verify a line number without holding the whole
+file in view, and the counts must agree with lines it is generating as it writes them. The
+efficiency assessment that prompted this work recorded a malformed diff as one of its observed
+failures, and proposed making hunk counts optional or repairing malformed patches server-side.
+
+**That proposal was rejected, and the rejection matters more than the feature.** Hunk counts
+are part of the grammar and are what makes corruption detectable — a patch mangled in transit
+fails its counts, which is the corpus's own note
+`a-patch-file-crlf-mangled-in-transit-fails-every-hunk`. Silently deriving or correcting them
+would make a malformed request appear to mean something its author did not intend, on a write
+path whose whole purpose is that changes are reviewable.
+
+The right answer is not a weaker diff. It is to stop asking for arithmetic that the server can
+compute correctly by construction.
+
+## Decision
+
+**A proposal may name an exact span instead of a patch. The server locates it and materializes
+the canonical unified diff.**
+
+`vault_propose_note_span_edit` takes `expected_text`, `replacement_text`, an optional
+`occurrence`, and the same `base_revision` and `rationale` every amendment takes.
+
+### The span never reaches storage
+
+`SpanEdit` is resolved to a `body_diff` inside `VaultAmendmentService.propose`, before anything
+is written. There is no third `AmendmentProposalKind`, no new column, and no migration.
+
+That is the load-bearing decision. Because storage is unchanged:
+
+- a reviewer reads the same artifact whichever way it was authored;
+- the compact-diff policy — hunk ceiling, changed-line ceiling, changed-ratio — applies without
+  being restated;
+- the removal-acknowledgement rule from ADR 0028's amendment still fires, so a span edit cannot
+  become a way to delete content without a reviewer acknowledging it;
+- `apply_body_unified_diff` remains the single applier, and its context checking still runs
+  against the produced diff.
+
+`tests/vault/test_span_edit.py` asserts the round trip directly: what
+`span_edit_to_unified_diff` renders must apply through the strict applier. If that broke, span
+edits would be a second, weaker patch format wearing the first one's clothes.
+
+### Resolution happens under the lock, after the revision check
+
+`propose` already takes a corpus-wide advisory lock and rejects a stale `base_revision`. The
+span is resolved after both, against the exact body the caller claimed to be editing, so a
+concurrent write cannot move the text out from under it between check and conversion.
+
+Staleness outranks the span: a caller working from an older revision is told the note changed
+rather than having their text matched against a body they have not read.
+
+### Ambiguity is refused, never guessed
+
+`occurrence` defaults to `None`, which means *this span must be unique* — not *take the first
+match*. Those are different requests and a caller must be able to express the difference.
+Defaulting to `1` would collapse them and would silently edit the wrong paragraph for a caller
+who had not considered duplicates.
+
+A span matching nothing is refused with an instruction to re-fetch and copy it exactly. There
+is no fuzzy matching and no whitespace tolerance: a span that nearly matches is a span the
+author has misremembered, and the fix is to look again, not to have the server pick something
+close.
+
+### Line endings normalize toward the stored body
+
+The body decides the convention; the caller's span is normalized to it. A span copied through a
+Windows client arrives CRLF-mangled and would otherwise fail to match a body it is
+character-for-character identical to — the same class of failure the corpus note above records.
+
+## Consequences
+
+A model proposing a body change writes no patch syntax. `tests/vault/test_span_edit_tool.py`
+sends only `expected_text` and `replacement_text` and asserts that a well-formed unified diff
+with correct hunk arithmetic reaches storage.
+
+`vault_propose_note_body_diff` stays, unchanged and just as strict. A caller that already has a
+diff — from `git diff`, or generated by tooling — should keep sending it. The span form is for
+callers who would otherwise be *computing* a diff, which is the case that was failing.
+
+`scripts/validate_body_diff.py` lets such a caller check a patch before sending it, by importing
+`apply_body_unified_diff` rather than reimplementing the grammar. A second copy would eventually
+disagree with the first, and the failure mode — blessing a patch the server rejects — is worse
+than having no script.
+
+The surface grows to sixteen tools, and `vault_propose_note_span_edit` shares `vault:propose`
+and the `amendment_propose` quota bucket with the other two. It is a third way to author one
+artifact, not a new authority, and a separate bucket would let one principal spend its
+allowance twice by changing authoring form.
+
+The cost, stated plainly: three tools now produce amendment proposals, and a caller has to
+choose. The tool description carries that choice — prefer the span form unless you already hold
+a diff — but a surface with two overlapping affordances is harder to learn than one, and this is
+the trade taken to avoid weakening the diff contract.

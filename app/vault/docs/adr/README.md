@@ -33,8 +33,31 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0022 | [Two trees, one writer each: humans author markdown, agents author through the service](0022-two-trees-one-writer-each.md) | Accepted (amended 2026-08-20: `vault_path`'s leaf name is the title slug) |
 | 0023 | [Candidacy is a field, and the export projects it into a folder](0023-the-export-projects-only-the-engine-managed-folders.md) | Accepted |
 | 0024 | [The vault runs its own authorization server, and an OAuth token is a credential row](0024-oauth-tokens-are-credentials-minted-at-authorization.md) | Accepted |
-| 0025 | [The vault stores edges and does not traverse them](0025-the-vault-stores-edges-and-does-not-traverse-them.md) | Accepted |
+| 0025 | [The vault stores edges and does not traverse them](0025-the-vault-stores-edges-and-does-not-traverse-them.md) | Accepted (amended 2026-08-26: both boundaries built; a Wiki Page's `Related` is one) |
 | 0026 | [Privileged tools live on the one mount, gated by the credential's scopes](0026-privileged-tools-are-gated-by-scope-on-one-mount.md) | Accepted (reverses the separate admin MCP that 0019 and 0023 assumed) |
 | 0027 | [The service plans a compile run; the agent writes it](0027-the-service-plans-a-compile-run-and-the-agent-writes-it.md) | Accepted (amends 0016's "no dedup, no write" for wiki pages) |
 | 0028 | [Amendments are revision-bound proposals, not notes](0028-amendments-are-revision-bound-proposals.md) | Accepted (amended 2026-08-25: bounded general body diffs and removal acknowledgement) |
 | 0029 | [Operator-granted OAuth entitlements belong to the refresh family](0029-oauth-entitlements-belong-to-the-refresh-family.md) | Accepted |
+| 0030 | [An edge value is checked for shape, and still never for existence](0030-edge-values-are-shape-checked-never-existence-checked.md) | Accepted (answers 0025's 2026-08-26 amendment) |
+| 0031 | [Search names candidates; fetch returns documents](0031-search-is-a-discovery-surface.md) | Accepted (amends 0006, which ordered results without saying what one is) |
+| 0032 | [A contribution reports its verdict; the gate's working is opt-in](0032-a-contribution-reports-its-outcome.md) | Accepted (refines 0016) |
+| 0033 | [An amendment may name a span; the server writes the diff](0033-an-amendment-may-name-a-span.md) | Accepted (adds a third authoring form to 0028) |
+| 0034 | [Embeddings are document-level, and chunking is deferred against a measured trigger](0034-embeddings-are-document-level-and-chunking-is-deferred.md) | Accepted |
+| 0035 | [A contributor may describe its own recent note](0035-a-contributor-may-describe-its-own-recent-note.md) | Accepted (amends 0028; refines 0032) |
+
+## Reserved numbers
+
+**Claim a number here before writing an ADR on a branch.** On 2026-08-26 four branches ran in
+parallel against this lineage; 0030 was claimed for metadata-only search on one and merged as
+edge-value validation from another, and the loser renumbered. The three that followed the
+convention (0033, 0034, 0035) landed without collision, and the only merge conflicts were
+adjacent rows in the table above.
+
+A reservation is not a decision. If the work is abandoned, delete the row and let the number be
+reused — an unexplained gap in the lineage is worse than a reused number.
+
+The table is empty because nothing is currently in flight. That is a state, not an invitation to
+remove the section.
+
+| ADR | Claimed for | Branch |
+| --- | ----------- | ------ |

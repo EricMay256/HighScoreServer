@@ -1466,6 +1466,218 @@ A `flagged` result is **not** an error. It is a settled `200` outcome meaning th
 note was written for review, and retrying it creates a second note that flags
 against the first.
 
+## Shipping a change to clients
+
+Two things reach an agent: the **MCP surface** and the **skill**. They live in
+different repositories and are released independently, so there are two separate
+problems here — getting a change *out* to clients, and keeping the two sides
+*describing each other accurately*. The first is asymmetric. The second is not:
+either repository can be the one that moved first.
+
+**The MCP surface is pulled from the deployment; the skill is pushed onto disks.**
+Server instructions, tool names, tool descriptions, and argument schemas are
+fetched from `/api/v1/vault/mcp/` by every client that connects, so a deploy
+changes them everywhere at once. A skill is inert Markdown sitting in
+`~/.claude/skills/` on each client's machine; nothing fetches it, and nothing in
+it can fetch itself.
+
+That asymmetry is the whole of what follows, and it has one design consequence
+worth stating before the steps: **guidance that changes belongs on the server
+side — but in a tool description, not in the server instructions.** The two are
+not interchangeable, and the difference is a context budget rather than a matter
+of taste; see "What each channel costs" below. Keep the skill to what a tool
+cannot say about itself — which tool to reach for first, the order, the editorial
+bar, and the one-writer rule of ADR 0022 — because that is the part that rarely
+changes and the part no tool description can carry.
+
+### When the MCP server changes
+
+1. Change `app/vault/mcp.py`. A new tool needs an entry in `_TOOL_SCOPES`.
+   `list_tools` filters on that map, so a tool missing from it is invisible to
+   every credential rather than open to all of them — the failure mode is a tool
+   nobody can see, not a tool everybody can call.
+2. A new *scope* is a new boundary, not a new name for an old one: it needs an
+   ADR, and it needs to be both grantable and withholdable to be worth having
+   (ADRs 0020, 0021, 0026).
+3. `pytest tests/vault/test_mcp.py tests/vault/test_credential_scopes.py`.
+4. Deploy. The MCP app is mounted into the host application, so it ships with the
+   host and there is no separate process to restart.
+5. **There is nothing to re-register.** Clients hold a URL and an `Authorization`
+   header, and a code change alters neither.
+
+When each client sees it:
+
+| Client state | What it takes |
+| --- | --- |
+| Starts a new session after the deploy | Nothing. Tool names and server instructions load at session start |
+| Session already open across the deploy | `/mcp`, then **Reconnect** on `vault`. The tool set is built once in `build_vault_mcp_server()` at process start, so nothing emits a `tools/list_changed` notification for the client to act on |
+| A tool was renamed or removed | Reconnect, and expect the open session to fail on the old name until then. Claude Code may also load tool *names* for a known remote server from a discovery cache rather than connecting at startup, so a rename can read as stale for a session |
+| REST caller (`VAULT_API_TOKEN`) | Whatever its own code does. REST paths are not discovered, so a renamed endpoint is an ordinary breaking change for it |
+
+Prefer adding a tool to renaming one. A rename is a breaking change delivered
+without a version negotiation, to clients you cannot enumerate.
+
+Two changes **do** require operator action per client, and neither is a
+re-registration:
+
+- **A new tool behind a new scope.** Existing credentials do not hold it, so the
+  tool is correctly invisible until someone grants it. Static credentials take
+  `issue_vault_credential grant --id … --scopes …`, which leaves the secret alone
+  so nothing has to be redistributed; OAuth families take `grant-oauth`. See
+  "Rotate, revoke, and change scopes" above.
+- **A URL or host change.** Re-register (`claude mcp remove vault`, then the
+  `claude mcp add` line above) and set `VAULT_PUBLIC_URL`, or OAuth discovery
+  answers on the wrong document.
+
+### When the skill changes
+
+The skill is **not owned by this repository.** Its source of truth is the private
+knowledge-platform repository:
+
+```text
+engine/.claude/skills/knowledge-vault/
+```
+
+and `engine/scripts/sync_skill.py` fans it out to the managed copies
+(`engine/.agents/skills/`, `~/.claude/skills/`, `~/.codex/skills/`,
+`~/.agents/skills/`). The steps:
+
+1. Edit the source of truth, never a managed copy — a copy is overwritten on the
+   next sync, silently.
+2. `python scripts/sync_skill.py`, then `python scripts/sync_skill.py --check`.
+3. Verify on one client: `python tools/kv.py doctor` prints `mode` and
+   `mode_reason`. Claude Code watches the skill directories, so an edit to
+   `SKILL.md` text lands in an already-open session without a restart.
+4. **Then tell every other client's owner to do the same.**
+
+Step 4 is where distribution stops being automatic. `sync_skill.py` covers *one
+machine*; every other client is a separate copy of a directory tree with no
+version marker, no manifest, and nothing that reports its own revision.
+
+### The two repositories can disagree, in either direction
+
+Distribution and agreement are different problems, and only the first one favours
+the server. The skill's text names tools, scopes, response fields, and outcome
+statuses that **this** repository defines, while the tool descriptions and server
+instructions restate an editorial contract that **knowledge-platform** owns. Each
+side is prose about the other, and nothing enforces that the two agree: no shared
+release, no shared CI, no version negotiation, and no runtime check.
+
+So either side can lead, and both directions have happened:
+
+- **HSS ahead.** A tool is added, renamed, or given a new scope here, and the
+  skill still describes the old surface. The agent reads instructions for a tool
+  that is not in its list.
+- **The skill ahead.** The skill is written against a branch of this repository
+  that has not merged, and instructs an agent to call something no deployment
+  serves.
+
+The second is the easier one to miss, because everything about it looks correct
+in the repository where the work was done.
+
+There is **no automated check for this today.** What would constitute one is a
+snapshot of the MCP surface — tool names and their scopes — committed here and
+asserted in CI, so that changing the surface fails a test that names the skill as
+the thing to update. That converts a silent disagreement into a build failure,
+which is the only place either repository will notice it.
+
+Until that exists, the operating rule is that a change to the tool surface on
+either side is not finished until the other side has been read. The concrete
+version: after editing `_TOOL_SCOPES`, read `SKILL.md`; before editing `SKILL.md`,
+read `_TOOL_SCOPES` on `main` rather than on the branch you are working in.
+
+### No, a skill cannot update itself
+
+A skill is Markdown read from disk. Nothing in it executes on a schedule and
+nothing in it fetches. Claude Code's live change detection watches those
+directories, so an edit appears mid-session — but only an edit somebody already
+made locally. There is no pull.
+
+Three channels do carry an update, in the order worth reaching for them.
+
+**1. Move the guidance into the MCP server.** Server instructions and tool
+descriptions are re-fetched from the deployment by every client, so changing them
+is the only fleet-wide push this project actually controls. It costs a deploy and
+nothing else. Two limits are real and worth respecting. A tool description is
+authoritative about that tool and is always in front of the agent, but it cannot
+warn against a path the agent reaches with `Write` and `Edit` — which is exactly
+why the one-writer rule lives in the skill and not in a tool. And the two server
+surfaces have very different budgets:
+
+#### What each channel costs
+
+| Channel | Size today | When a client pays for it |
+| --- | --- | --- |
+| Server `instructions` | ~500 chars (~125 tokens) | Session start, in **every** session with the vault registered — including every session that never touches it. Resident for the whole session |
+| Tool descriptions | ~7,300 chars across 14 tools | Deferred under tool search until the agent reaches for a tool, then resident. Also scope-filtered, so a read-only credential ever only materializes `vault_search` and `vault_get_note` — about 830 chars |
+| `SKILL.md` body | ~10,000 chars | Only on invoke, then resident |
+| `references/*.md` | ~13,300 chars | Only when the body sends the agent there |
+
+**The cost is not repetition, it is unconditionality.** Repeated turns inside one
+session re-read a cached prefix, so the marginal cost of the instructions on turn
+40 is a fraction of the sticker price, and a deploy that changes them costs one
+fresh cache write per client on its next session. What actually adds up is
+sessions times unconditional bytes — and because the registration above uses
+`--scope user`, *every* session on that machine pays for `instructions`, vault
+work or not.
+
+So `instructions` stays routing-only: what this is, when to reach for it, and the
+one thing an agent must not do. It is the only channel that reaches an agent
+which has not touched a tool yet, which is precisely why it has to stay small.
+Volatile per-tool detail — parameter semantics, failure modes, what a `flagged`
+result means — belongs in the tool descriptions, which are deferred and
+scope-filtered and therefore nearly as cheap as the skill. The one thing tool
+descriptions cannot amortize is guidance spanning all 14 tools: that has to be
+repeated per tool or pushed up into `instructions`, and if it is large enough
+that neither is acceptable, it belongs in the skill and is subject to everything
+below.
+
+**2. Ship the skill as a plugin from a marketplace.** A git repository holding a
+`.claude-plugin/marketplace.json` and a `skills/knowledge-vault/` directory is a
+distribution channel with an updater already attached; a private repository
+works. Clients run:
+
+```bash
+claude plugin marketplace add <owner>/<repo>
+```
+
+```bash
+claude plugin install knowledge-vault@<marketplace-name>
+```
+
+Claude Code then refreshes marketplaces and installed plugins in the background
+shortly after session start and prompts for `/reload-plugins`, or the new version
+loads on the next launch. Three details decide whether that actually works:
+
+- Auto-update is **off by default for third-party marketplaces**. Each client
+  turns it on under `/plugin` → **Marketplaces**, or an administrator sets
+  `"autoUpdate": true` on the `extraKnownMarketplaces` entry in managed settings.
+- A client receives an update only when the `version` in `plugin.json` is bumped.
+  The skill as it stands carries no version field at all.
+- Plugin skills are namespaced — `/knowledge-vault:<skill>` rather than
+  `/knowledge-vault` — so anything that names the skill by its bare name has to
+  be reconciled.
+
+The cost is that the skill acquires a manifest, a version, and a release step it
+does not have today, and its source of truth moves from a directory copy to a
+published repository. That is a real change to how knowledge-platform ships,
+which is why this is documented rather than done.
+
+**3. Serving the skill for download from HSS looks appealing and is not.** A
+`GET /api/v1/vault/skill.zip` still ends with a human unzipping a directory, so
+it buys no automation over `sync_skill.py`; it adds an endpoint to scope and
+secure; and it puts a knowledge-platform artifact inside the HSS deployment,
+across the boundary `app/vault/AGENTS.md` exists to hold. The plugin marketplace
+is the same idea with the updater already built.
+
+There is a cheap half-measure if disagreement becomes a real problem before a
+marketplace exists: have each side carry a contract revision — the skill in its
+frontmatter, the server in its instructions — so an agent holding two different
+numbers can *say which two*. It updates nothing and it does not decide which side
+is right, which is the point: whichever repository moved first, the mismatch
+becomes something an agent reports instead of something it acts on. Not
+implemented.
+
 ## Saturation
 
 An exhausted vault pool — every connection checked out, `pool_timeout` elapsed —

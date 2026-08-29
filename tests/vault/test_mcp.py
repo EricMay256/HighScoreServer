@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from app.vault.auth import VaultScope
+from app.vault.constants import SEARCH_QUERY_MAX_CHARS
 from app.vault.mcp import _TOOL_SCOPES, derive_idempotency_key
 from app.vault.settings import vault_enabled
 from tests.vault.test_routes import _drop, _issue
@@ -114,10 +115,23 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
             (VaultScope.READ,),
             ["vault_search", "vault_get_note"],
         ),
+        # `vault_set_summary` rides on WRITE (ADR 0035), and its absence from
+        # the update-scoped row below is the assertion that matters: the
+        # carveout is not a slice of `vault:update`, so nothing here can drift
+        # into requiring replacement authority to describe your own note.
         (
             (VaultScope.READ, VaultScope.WRITE),
-            ["vault_search", "vault_get_note", "vault_contribute"],
+            [
+                "vault_search",
+                "vault_get_note",
+                "vault_contribute",
+                "vault_set_summary",
+            ],
         ),
+        # All three authoring forms ride on PROPOSE. `vault_propose_note_span_edit`
+        # is a way to write the same body diff without hand-computing hunks
+        # (ADR 0033), so it grants nothing the other two did not -- and it must
+        # not appear in the rows below that lack PROPOSE.
         (
             (VaultScope.READ, VaultScope.PROPOSE),
             [
@@ -125,6 +139,7 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
                 "vault_get_note",
                 "vault_propose_note_amendment",
                 "vault_propose_note_body_diff",
+                "vault_propose_note_span_edit",
             ],
         ),
         (
@@ -133,6 +148,7 @@ def test_bare_path_redirects_to_the_transport_endpoint(client: TestClient) -> No
                 "vault_search",
                 "vault_get_note",
                 "vault_contribute",
+                "vault_set_summary",
                 "vault_update_note",
                 "vault_retire_note",
             ],
@@ -448,3 +464,77 @@ def test_setting_promotion_status_over_mcp_moves_the_note(
     assert body["vault_path"] == (
         "Agent/Promotion Candidates/worth-a-human-reading.md"
     )
+
+
+def test_both_adapters_accept_exactly_the_same_query_lengths(
+    client: TestClient,
+) -> None:
+    """A bound one adapter enforces and the other does not is not a bound.
+
+    MCP checked only whitespace, so a query HTTP refused with 422 went through
+    here -- to the embedding and lexical paths, and back out in the echoed
+    `query`, which walks past the response byte budget however hard the hits
+    are trimmed.
+    """
+
+    credential_id, token = _issue((VaultScope.READ,))
+    try:
+        for length, accepted in ((SEARCH_QUERY_MAX_CHARS, True),
+                                 (SEARCH_QUERY_MAX_CHARS + 1, False)):
+            query = "q" * length
+
+            payload = _rpc(
+                client,
+                token,
+                "tools/call",
+                {"name": "vault_search", "arguments": {"query": query, "limit": 1}},
+            )
+            mcp_refused = payload["result"].get("isError", False)
+
+            http = client.get(
+                "/api/v1/vault/search",
+                params={"q": query, "limit": 1},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            http_refused = http.status_code == 422
+
+            assert mcp_refused is not accepted, f"MCP disagreed at {length}"
+            assert http_refused is not accepted, f"HTTP disagreed at {length}"
+    finally:
+        _drop(credential_id)
+
+
+def test_both_adapters_treat_a_padded_query_the_same_way(client: TestClient) -> None:
+    """Padding counts toward the bound on both sides, or neither is a bound.
+
+    The bound applies to the raw string, so whitespace is length like any other
+    character. Bounding one adapter before stripping and the other after is
+    what let a padded 504-character query through MCP while HTTP refused it --
+    parity claimed by a test that only exercised one transport.
+    """
+
+    credential_id, token = _issue((VaultScope.READ,))
+    try:
+        for raw, accepted in (
+            ("  " + "q" * (SEARCH_QUERY_MAX_CHARS - 4) + "  ", True),
+            ("  " + "q" * SEARCH_QUERY_MAX_CHARS + "  ", False),
+        ):
+            payload = _rpc(
+                client,
+                token,
+                "tools/call",
+                {"name": "vault_search", "arguments": {"query": raw, "limit": 1}},
+            )
+            mcp_refused = payload["result"].get("isError", False)
+
+            http = client.get(
+                "/api/v1/vault/search",
+                params={"q": raw, "limit": 1},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            http_refused = http.status_code == 422
+
+            assert mcp_refused is not accepted, f"MCP disagreed at {len(raw)}"
+            assert http_refused is not accepted, f"HTTP disagreed at {len(raw)}"
+    finally:
+        _drop(credential_id)

@@ -12,15 +12,19 @@ assertion: whatever the exporter can write, this must read back unchanged.
 """
 
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 
 from app.vault.export import NOTE_KEY_ORDER, WIKI_KEY_ORDER, dump_note
+from app.vault.wikilinks import LinkTarget
 from scripts.import_vault_wiki import (
     FrontmatterError,
     ReferenceResolutionError,
     WikiPageFile,
+    _build_document,
     parse_note,
+    plan_pages,
     resolve_page_source_ids,
 )
 from scripts.remap_vault_reference_ids import IdentityClasses, resolve
@@ -227,3 +231,80 @@ def test_an_ambiguous_source_map_refuses_the_import() -> None:
             resolve(classes, {"live-one", "live-two"}),
             {"live-one", "live-two"},
         )
+
+
+def _related_page(slug: str, title: str, related: list[str]) -> WikiPageFile:
+    page = _page(slug, "2026-08-13T18:56:45Z")
+    page.metadata["Title"] = title
+    page.metadata["Related"] = related
+    return page
+
+
+def test_a_link_to_a_sibling_in_the_same_batch_resolves() -> None:
+    """The case the production data is made of, and the one a live-rows-only
+    index gets wrong.
+
+    Every one of the fourteen Stage-A pages links to other pages in the same
+    import. None of them has a row yet, so an index built from the database
+    alone resolves nothing and drops all twenty-one edges.
+    """
+
+    first = _related_page("one", "Page One", ["[[Page Two]]"])
+    second = _related_page("two", "Page Two", [])
+
+    planned = {p.file.slug: p for p in plan_pages([first, second], [])}
+
+    assert planned["one"].related_ids == (planned["two"].document_id,)
+    assert not planned["one"].dropped_links
+
+
+def test_a_link_to_a_note_already_in_the_corpus_resolves() -> None:
+    existing = LinkTarget("live-note-id", "A Live Note", "a-live-note")
+    page = _related_page("one", "Page One", ["[[A Live Note]]"])
+
+    [planned] = plan_pages([page], [existing])
+
+    assert planned.related_ids == ("live-note-id",)
+
+
+def test_a_link_naming_nothing_is_dropped_and_reported() -> None:
+    """ADR 0025: an unresolved name is not an id, and `related_ids` holds ids."""
+
+    page = _related_page("one", "Page One", ["[[Nobody Wrote This]]"])
+
+    [planned] = plan_pages([page], [])
+
+    assert planned.related_ids == ()
+    assert planned.dropped_links == ("[[Nobody Wrote This]]",)
+
+
+def test_an_ambiguous_link_refuses_the_import() -> None:
+    """Same rule as an ambiguous source: an edge pointing at the wrong note
+    reads exactly like a working one, and this script runs once."""
+
+    page = _related_page("one", "Page One", ["[[Shared Title]]"])
+    duplicates = [
+        LinkTarget("id-one", "Shared Title", "shared-title"),
+        LinkTarget("id-two", "Shared Title", "shared-title-2"),
+    ]
+
+    with pytest.raises(ReferenceResolutionError, match="ambiguous Related"):
+        plan_pages([page], duplicates)
+
+
+def test_the_row_stores_ids_and_keeps_the_original_links_as_frontmatter() -> None:
+    """The import boundary ADR 0025 describes: the edge becomes an id, and the
+    typed frontmatter it came from is preserved verbatim rather than destroyed.
+    """
+
+    first = _related_page("one", "Page One", ["[[Page Two]]"])
+    second = _related_page("two", "Page Two", [])
+    planned = {p.file.slug: p for p in plan_pages([first, second], [])}
+
+    document = _build_document(planned["one"], uuid4(), "wiki-importer")
+
+    assert document.id == planned["one"].document_id
+    assert document.related_ids == (planned["two"].document_id,)
+    assert document.frontmatter == {"Related": ["[[Page Two]]"]}
+    # A page with no links carries no copy at all, rather than an empty one.
+    assert _build_document(planned["two"], uuid4(), "wiki-importer").frontmatter == {}

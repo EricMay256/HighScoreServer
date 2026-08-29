@@ -38,6 +38,19 @@ in the database. Import maps are composed across generations and each source is
 repointed at the one live id in its equivalence class. An unresolved or
 ambiguous source refuses the import rather than storing false provenance.
 
+**``Related`` is resolved too, and it is the boundary ADR 0025 describes.** A
+page's ``Related`` is a list of ``[[Title]]`` wikilinks, and inside the database
+every edge is an id -- so each link is resolved to the one document it names
+before the row is written, and the original list is preserved verbatim in
+``frontmatter`` JSONB. Until 2026-08-26 this script stored the wikilinks
+themselves, which is how twenty-one of them reached ``related_ids`` in
+production; ``scripts/resolve_vault_wikilinks.py`` repairs rows already written
+that way. Most of these links name *sibling pages in the same batch*, which have
+no rows yet, so the index is built over the live corpus **and** the ids this run
+is about to mint. An unresolvable link is dropped, per ADR 0025; an ambiguous
+one refuses the import, because a graph edge pointing at the wrong note reads
+exactly like a working one.
+
 **What the frontmatter parser handles, and what it refuses.** These files were
 written by the canonical renderer -- scalars and block sequences, nothing else --
 so the inverse is about forty lines and needs no YAML dependency, which is the
@@ -54,6 +67,7 @@ import argparse
 import asyncio
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,9 +75,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import insert, select
+from sqlalchemy import text as text_sql
 
 from app.env import load_environment
-from app.vault.constants import WIKI_SCHEMA_VERSION
+from app.vault.constants import CORPUS_LOCK_KEY, WIKI_SCHEMA_VERSION
 from app.vault.db import create_vault_engine, describe_database
 from app.vault.domain import (
     CompileRunState,
@@ -82,6 +97,7 @@ from app.vault.repository import (
 from app.vault.service import AGENT_WIKI_DIRECTORY, VaultTransactionService
 from app.vault.settings import EmbeddingSettings, VaultSettings
 from app.vault.tables import vault_compile_runs, vault_documents
+from app.vault.wikilinks import LinkIndex, LinkTarget, resolve_edges, slug_of
 from scripts.remap_vault_reference_ids import Resolution, load_maps, remap, resolve
 
 
@@ -275,7 +291,111 @@ def resolve_page_source_ids(
     return resolved
 
 
-def _build_document(page: WikiPageFile, run_id: UUID, principal_id: str) -> NewVaultDocument:
+@dataclass(frozen=True, slots=True)
+class PlannedPage:
+    """One page with the id it will take and the edges its links resolved to.
+
+    The id is minted *before* the documents are built, which is what lets a page
+    link to a sibling in the same batch: those pages have no rows yet, so
+    nothing in the database can resolve them and the index has to be told what
+    this run is about to create.
+    """
+
+    file: WikiPageFile
+    document_id: str
+    related_ids: tuple[str, ...]
+    # `Related` links naming no document in the live corpus or in this batch.
+    # Dropped from `related_ids` per ADR 0025 and reported, not stored: an
+    # unresolved name is not an id. The original list survives verbatim in
+    # `frontmatter`, which is what makes the drop lossless.
+    dropped_links: tuple[str, ...] = ()
+
+
+def plan_pages(
+    pages: list[WikiPageFile],
+    existing: Sequence[LinkTarget],
+    document_ids_by_slug: dict[str, str] | None = None,
+) -> list[PlannedPage]:
+    """Mint each page's id and resolve its ``Related`` wikilinks against it.
+
+    An ambiguous link refuses the whole import, matching what
+    ``resolve_page_source_ids`` does with an ambiguous source and for the same
+    reason: an edge pointing at the wrong note is indistinguishable from a
+    working one, and this script exists to run once.
+
+    ``document_ids_by_slug`` reuses ids a previous call minted, and the
+    under-lock revalidation must pass it. Minting fresh ones there compared two
+    plans keyed on ids that could not overlap, so every page read as changed on
+    a corpus that had not moved and no import could ever commit -- a refusal
+    that looked exactly like the race it was meant to detect. Ids are also what
+    sibling links resolve to, so re-minting would rewrite the very edges being
+    compared.
+    """
+
+    minted = (
+        dict(document_ids_by_slug)
+        if document_ids_by_slug is not None
+        else {page.slug: uuid4().hex for page in pages}
+    )
+    index = LinkIndex(
+        (
+            *existing,
+            *(
+                LinkTarget(
+                    document_id=minted[page.slug],
+                    title=str(page.metadata["Title"]),
+                    slug=page.slug,
+                    aliases=tuple(_as_list(page.metadata.get("aliases"))),
+                )
+                for page in pages
+            ),
+        )
+    )
+
+    planned: list[PlannedPage] = []
+    ambiguous: list[str] = []
+    malformed: list[str] = []
+    for page in pages:
+        resolution = resolve_edges(_as_list(page.metadata.get("Related")), index)
+        ambiguous.extend(
+            f"{page.path.name}: {link} -> {', '.join(candidates)}"
+            for link, candidates in resolution.ambiguous
+        )
+        # A bare title, a single bracket, a padded name. `resolve_edges` leaves
+        # these alone at this boundary rather than guessing, so importing one
+        # would store a title in `related_ids` where an id belongs -- which is
+        # exactly the corruption `resolve_vault_wikilinks` exists to undo, and
+        # exactly what the API's own validators refuse. Refuse it here too,
+        # before embedding cost is spent, rather than writing it and warning.
+        malformed.extend(f"{page.path.name}: {value}" for value in resolution.malformed)
+        planned.append(
+            PlannedPage(
+                file=page,
+                document_id=minted[page.slug],
+                related_ids=resolution.values,
+                dropped_links=resolution.dropped,
+            )
+        )
+
+    if ambiguous:
+        raise ReferenceResolutionError(
+            "ambiguous Related wikilinks: " + "; ".join(ambiguous)
+        )
+    if malformed:
+        raise ReferenceResolutionError(
+            "Related values that name a document but are not [[wikilinks]]: "
+            + "; ".join(malformed)
+            + ". Write them as [[Title]], or run scripts.resolve_vault_wikilinks "
+            "over rows already stored this way."
+        )
+    return planned
+
+
+def _build_document(
+    planned: PlannedPage,
+    run_id: UUID,
+    principal_id: str,
+) -> NewVaultDocument:
     """One page as the row it becomes.
 
     ``compiled_by`` and ``compiled_at`` take the *upstream* values directly,
@@ -286,8 +406,9 @@ def _build_document(page: WikiPageFile, run_id: UUID, principal_id: str) -> NewV
     authoring timestamps the database will overwrite with ``now()``.
     """
 
+    page = planned.file
     return NewVaultDocument(
-        id=uuid4().hex,
+        id=planned.document_id,
         kind=DocumentKind.WIKI,
         doc_type=str(page.metadata.get("Type") or "Wiki Page"),
         # The existing slug, never re-derived. ADR 0010 makes vault_path the
@@ -304,9 +425,22 @@ def _build_document(page: WikiPageFile, run_id: UUID, principal_id: str) -> NewV
         tags=tuple(_as_list(page.metadata.get("tags"))),
         aliases=tuple(_as_list(page.metadata.get("aliases"))),
         source_ids=tuple(_as_list(page.metadata.get("SourceIDs"))),
-        related_ids=tuple(_as_list(page.metadata.get("Related"))),
+        # Ids, never the `[[Title]]` strings the file carries: inside the
+        # database every edge is an id (ADR 0025), and a wikilink stored here is
+        # a name pretending to be one. The names are not lost -- `frontmatter`
+        # below keeps the original list verbatim, which is exactly what ADR 0025
+        # says the import boundary does with the typed frontmatter it flattens.
+        related_ids=planned.related_ids,
         contributed_by=f"agent:{principal_id}",
         provenance={"principal_id": principal_id, "imported_from": page.path.name},
+        # The un-flattened original. `Related` is an assigned key in
+        # `export.WIKI_KEY_ORDER`, so this copy is evidence in the database and
+        # is never re-emitted into the file alongside the rendered one.
+        frontmatter=(
+            {"Related": _as_list(page.metadata.get("Related"))}
+            if page.metadata.get("Related")
+            else {}
+        ),
         origin={
             "author": page.compiled_by,
             "created_at": str(page.metadata.get("CreatedAt") or ""),
@@ -318,6 +452,112 @@ def _build_document(page: WikiPageFile, run_id: UUID, principal_id: str) -> NewV
         compiled_by=page.compiled_by,
         compiled_at=page.compiled_at,
     )
+
+
+async def _revalidate_under_lock(
+    connection,
+    *,
+    pages: list[WikiPageFile],
+    planned_pages: list[PlannedPage],
+    classes: Any,
+) -> None:
+    """Re-derive the plan against the locked corpus, or raise.
+
+    Raises ``ReferenceResolutionError``, so the surrounding transaction rolls
+    back rather than committing half an import. Nothing has been written when
+    this runs; raising keeps that true if anything is ever added above it.
+
+    What is compared is the *resolved answers*, not the corpus. Another writer
+    may have changed a dozen things this import does not touch, and none of
+    them matter. What matters is whether any of them changed an answer already
+    baked into a row that is about to be written.
+    """
+
+    existing_rows = (
+        await connection.execute(
+            select(
+                vault_documents.c.id,
+                vault_documents.c.vault_path,
+                vault_documents.c.kind,
+                vault_documents.c.title,
+                vault_documents.c.aliases,
+            )
+        )
+    ).all()
+
+    taken = {
+        row.vault_path
+        for row in existing_rows
+        if row.kind == DocumentKind.WIKI.value
+    }
+    claimed = [
+        page.slug
+        for page in pages
+        if f"{AGENT_WIKI_DIRECTORY}{page.slug}.md" in taken
+    ]
+    if claimed:
+        raise ReferenceResolutionError(
+            "a page path was claimed while this import was embedding: "
+            + ", ".join(sorted(claimed)[:3])
+        )
+
+    live_ids = {
+        row.id for row in existing_rows if row.kind == DocumentKind.NOTE.value
+    }
+    targets = [
+        LinkTarget(
+            document_id=row.id,
+            title=row.title,
+            slug=slug_of(row.vault_path),
+            aliases=tuple(row.aliases or ()),
+        )
+        for row in existing_rows
+    ]
+
+    # The same two resolutions the plan used. Either of them raising here is
+    # already the right answer: a source that has been retired, or a link that
+    # has become ambiguous, must not be guessed at now that the guess would be
+    # committed.
+    rechecked_pages = resolve_page_source_ids(
+        pages, resolve(classes, live_ids), live_ids
+    )
+    # The ids the first plan minted, not new ones. They are already in the
+    # prepared documents and are what sibling links resolved to.
+    rechecked = plan_pages(
+        rechecked_pages,
+        targets,
+        {planned.file.slug: planned.document_id for planned in planned_pages},
+    )
+
+    # Keyed on slug, which is stable by construction and is what a human reads
+    # in the refusal. Keying on the id would only work because it is now
+    # reused, and would silently stop working if that ever changed.
+    before_edges = {p.file.slug: p.related_ids for p in planned_pages}
+    after_edges = {p.file.slug: p.related_ids for p in rechecked}
+    moved = sorted(
+        slug
+        for slug, edges in before_edges.items()
+        if after_edges.get(slug) != edges
+    )
+
+    before_sources = {p.slug: tuple(_as_list(p.metadata.get("SourceIDs"))) for p in pages}
+    after_sources = {
+        p.slug: tuple(_as_list(p.metadata.get("SourceIDs"))) for p in rechecked_pages
+    }
+    resourced = sorted(
+        slug
+        for slug, sources in before_sources.items()
+        if after_sources.get(slug) != sources
+    )
+
+    if moved or resourced:
+        raise ReferenceResolutionError(
+            "the corpus changed while this import was embedding: "
+            f"{len(moved)} page(s) would now resolve different Related edges "
+            f"and {len(resourced)} different SourceIDs "
+            f"({', '.join((moved + resourced)[:3])}). Nothing was written; "
+            "re-run the import."
+        )
 
 
 async def run_import(
@@ -388,6 +628,8 @@ async def run_import(
                     vault_documents.c.id,
                     vault_documents.c.vault_path,
                     vault_documents.c.kind,
+                    vault_documents.c.title,
+                    vault_documents.c.aliases,
                 )
             )
             existing_rows = existing.all()
@@ -401,6 +643,18 @@ async def run_import(
                 for row in existing_rows
                 if row.kind == DocumentKind.WIKI.value
             }
+            # Every row a `Related` wikilink could name. Notes and pages both:
+            # `related_ids` does not care which kind it points at, and a page
+            # citing a note is an ordinary edge.
+            existing_targets = [
+                LinkTarget(
+                    document_id=row.id,
+                    title=row.title,
+                    slug=slug_of(row.vault_path),
+                    aliases=tuple(row.aliases or ()),
+                )
+                for row in existing_rows
+            ]
         collisions = [p.slug for p in pages if f"{AGENT_WIKI_DIRECTORY}{p.slug}.md" in taken]
         if collisions:
             # Refuse rather than upsert. This script exists to run once, and a
@@ -419,9 +673,22 @@ async def run_import(
                 resolve(classes, live_ids),
                 live_ids,
             )
+            planned_pages = plan_pages(pages, existing_targets)
         except ReferenceResolutionError as error:
             print(f"Refusing: {error}", file=sys.stderr)
             return 1
+
+        stored_edges = sum(len(p.related_ids) for p in planned_pages)
+        print(
+            f"{stored_edges} Related edge(s) stored as ids "
+            f"across {len(planned_pages)} page(s)"
+        )
+        for planned in planned_pages:
+            for link in planned.dropped_links:
+                # Named, not counted. A dropped edge is the one outcome a human
+                # may want to act on, and "2 links were dropped" is not
+                # something anyone can check.
+                print(f"  dropped (names no document): {planned.file.path.name}  {link}")
 
         # Embed before the transaction that writes, for the reason the write
         # path does: an embedding call is a third-party round trip and holding
@@ -429,15 +696,41 @@ async def run_import(
         # package keeps naming.
         prepared: list[tuple[NewVaultDocument, tuple[float, ...], bytes]] = []
         run_ids = {key: uuid4() for key in by_run}
-        for page in pages:
-            document = _build_document(page, run_ids[page.run_key], principal_id)
+        for planned in planned_pages:
+            document = _build_document(
+                planned, run_ids[planned.file.run_key], principal_id
+            )
             text = assemble_embedding_text(document)
             digest = embedding_text_digest(text)
             vector = await embed_one(provider, text, EmbeddingInputKind.DOCUMENT)
             prepared.append((document, vector, digest))
-            print(f"  embedded {page.slug}")
+            print(f"  embedded {planned.file.slug}")
 
         async with transactions.transaction() as connection:
+            # Everything above was decided from a snapshot taken before a dozen
+            # third-party embedding calls. A governed writer can commit in that
+            # window: give a second document the same title, rename a target,
+            # retire a source, or claim one of these paths. The plan is then
+            # stale in the one way that does not look stale -- every id it holds
+            # still exists, so nothing downstream objects, and a link that
+            # resolved uniquely at planning time gets written as the id it
+            # picked when the corpus now offers two.
+            #
+            # So: take the lock, re-read, re-resolve, and refuse on any
+            # difference. Edges are excluded from the embedding text (asserted
+            # by `test_embedding_text`), so re-resolving costs no provider call
+            # and the vectors above stay valid.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": CORPUS_LOCK_KEY},
+            )
+            await _revalidate_under_lock(
+                connection,
+                pages=pages,
+                planned_pages=planned_pages,
+                classes=classes,
+            )
+
             for key, run_id in run_ids.items():
                 group = by_run[key]
                 started = min(p.compiled_at for p in group)
@@ -468,6 +761,13 @@ async def run_import(
                         text_sha256=digest,
                     ),
                 )
+    except ReferenceResolutionError as error:
+        # Raised by the under-lock revalidation, which rolls the write
+        # transaction back on its way out. Reported like the planning refusal
+        # above rather than as a traceback: it is the same answer arriving
+        # later, and the operator's move is the same -- re-run.
+        print(f"Refusing: {error}", file=sys.stderr)
+        return 1
     finally:
         await engine.dispose()
 

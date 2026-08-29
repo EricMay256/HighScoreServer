@@ -42,6 +42,7 @@ from .api_models import (
     VaultCompilePlanResponse,
     VaultCompileRunSummary,
     VaultCompileSettleRequest,
+    VaultContributionDetail,
     VaultContributionRequest,
     VaultContributionResponse,
     VaultDocumentDetail,
@@ -51,20 +52,22 @@ from .api_models import (
     VaultReviewDecisionRequest,
     VaultReviewDecisionResponse,
     VaultReviewQueueResponse,
-    VaultSearchHit,
     VaultSearchResponse,
-    VaultSimilarNote,
+    VaultSetSummaryRequest,
+    VaultSetSummaryResponse,
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
     canonical_request_digest,
     compile_run_summary,
     compile_work_item,
+    contribution_response,
     document_detail,
     review_case_summary,
+    search_response,
 )
 from .auth import VaultCredential, VaultScope
-from .constants import resolve_text_search_config
+from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
 from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
@@ -106,6 +109,11 @@ from .service import (
     ReviewCaseAlreadyDecided,
     ReviewCaseNotFound,
     ReviewDecisionRequest,
+    SetSummaryRequest,
+    SummaryAlreadyPresent,
+    SummaryRejected,
+    SummaryStale,
+    SummaryWindowClosed,
     UnresolvedSources,
     UpdateRequest,
     UpdateWouldDuplicate,
@@ -113,6 +121,7 @@ from .service import (
     VaultCompileService,
     VaultContributionService,
     VaultDocumentRetireService,
+    VaultDocumentSummaryService,
     VaultDocumentUpdateService,
     VaultReviewService,
     VaultSearchService,
@@ -292,7 +301,11 @@ def _search_service() -> VaultSearchService:
     summary="Hybrid lexical and vector search over the vault corpus",
 )
 async def search_vault(
-    q: str = Query(min_length=1, max_length=500, description="Search query."),
+    q: str = Query(
+        min_length=1,
+        max_length=SEARCH_QUERY_MAX_CHARS,
+        description="Search query.",
+    ),
     limit: int = Query(default=10, ge=1, le=50),
 ) -> VaultSearchResponse:
     # min_length alone admits an all-whitespace query, which the embedding port
@@ -308,21 +321,14 @@ async def search_vault(
         )
 
     outcome = await _search_service().search(query, limit)
-    return VaultSearchResponse(
+    return search_response(
         # The stripped query is what was actually searched, so it is what the
         # response reports.
         query=query,
         profile_id=outcome.profile_id,
         vector_status=outcome.vector_status,
-        hits=[
-            VaultSearchHit(
-                **document_detail(result.document).model_dump(),
-                score=result.score,
-                lexical_rank=result.lexical_rank,
-                vector_rank=result.vector_rank,
-            )
-            for result in outcome.results
-        ],
+        results=outcome.results,
+        has_more=outcome.has_more,
     )
 
 
@@ -451,20 +457,19 @@ async def contribute(
             detail={"message": outcome.message, "errors": outcome.errors},
         )
 
-    return VaultContributionResponse(
-        status=outcome.status,
-        note_id=outcome.note_id,
-        message=outcome.message,
-        idempotent_replay=outcome.idempotent_replay,
-        similars=[
-            VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
-            for s in outcome.similars
-        ],
-        related_pages=[
-            VaultSimilarNote(note_id=s.note_id, title=s.title, score=s.score)
-            for s in outcome.related_pages
-        ],
-        errors=list(outcome.errors),
+    # Review detail, where the MCP surface defaults to outcome. The split is
+    # deliberate and is about who is asking: this caller is a program, often
+    # one building an adjudication surface, and its contract already carried
+    # the gate's whole working. `max_similarity` is additive here -- nothing
+    # was taken away. The MCP default is the narrow one because a model that
+    # just wrote a note does not need ten scored note ids inviting a read.
+    return contribution_response(
+        outcome,
+        detail=VaultContributionDetail.REVIEW,
+        summary_supplied=body.summary is not None,
+        # Unconditional: this handler runs under `vault:write`, which is the
+        # scope the carveout runs under too, so the caller can act on it.
+        summary_operation="POST /notes/{id}/summary",
     )
 
 
@@ -647,6 +652,132 @@ async def update_vault_document(
         note_id=outcome.note_id,
         message=outcome.message,
         re_embedded=outcome.re_embedded,
+    )
+
+
+async def set_summary_quota(
+    credential: VaultCredential = Depends(require_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "set_summary")
+    return credential
+
+
+@router.post(
+    "/notes/{note_id}/summary",
+    response_model=VaultSetSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Supply a summary a contribution omitted",
+)
+async def set_vault_document_summary(
+    body: VaultSetSummaryRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(set_summary_quota),
+) -> VaultSetSummaryResponse:
+    """Fill in an absent summary on the caller's own recent note (ADR 0035).
+
+    Under `vault:write` rather than `vault:update`, which is the whole point:
+    the contributor that omitted a summary can supply one without holding
+    replacement authority over the corpus. It is a sub-resource rather than a
+    PATCH on the note for the same reason -- a partial update of `/notes/{id}`
+    would imply the other fields are reachable here, and they are not.
+
+    Refuses three ways, each distinct in the status it returns: 404 when the
+    note is not the caller's own (or does not exist -- see the service on why
+    those are one answer), 409 when it already has a summary or the grace
+    period has closed, and 409 again when the resulting note would duplicate a
+    different one.
+    """
+
+    service = VaultDocumentSummaryService(
+        transactions=VaultTransactionService(get_vault_engine()),
+        provider=get_embedding_provider(),
+    )
+
+    try:
+        outcome = await service.set_summary(
+            SetSummaryRequest(
+                document_id=note_id,
+                summary=body.summary,
+                principal_id=credential.principal_id,
+                # From the credential, never the body. Same claim and same
+                # reasoning as the contribution path's.
+                contributed_by=f"agent:{credential.principal_id}",
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except DocumentNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Note not found",
+        ) from exc
+    except SummaryAlreadyPresent as exc:
+        # 409 rather than 422: the request is well-formed and the caller is
+        # entitled to make it; the resource is simply not in a state that
+        # accepts it. Same reading as the update path's collision.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except SummaryWindowClosed as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "grace_seconds": exc.grace_seconds,
+            },
+        ) from exc
+    except UpdateWouldDuplicate as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "similars": [
+                    {"note_id": s.note_id, "title": s.title, "score": s.score}
+                    for s in exc.similars
+                ],
+            },
+        ) from exc
+    except SummaryStale as exc:
+        # 409 like the others, but this one is worth retrying: the note moved
+        # while the summary was being embedded, and a second attempt embeds
+        # against the current text.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": str(exc), "retryable": True},
+        ) from exc
+    except SummaryRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": "Summary failed validation", "errors": [str(exc)]},
+        ) from exc
+    except DedupUnavailable as exc:
+        logger.error("Refusing a vault summary: no embedding provider")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Setting a summary is unavailable: no embedding provider configured",
+        ) from exc
+    except EmbeddingInputTooLong as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document exceeds the embedding model input limit",
+        ) from exc
+    except EmbeddingError as exc:
+        # Type only, never the message: an embedding exception can carry the
+        # note body.
+        logger.error(
+            "Vault summary failed to embed",
+            extra={"error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Setting a summary is temporarily unavailable",
+        ) from exc
+
+    return VaultSetSummaryResponse(
+        note_id=outcome.note_id,
+        message=outcome.message,
+        content_revision=outcome.content_revision,
     )
 
 

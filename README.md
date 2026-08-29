@@ -137,6 +137,10 @@ configuring REST, verifying, and revoking — is documented end to end under "Gr
 access" in
 [`app/vault/docs/vault-configuration.md`](app/vault/docs/vault-configuration.md).
 
+What a client has to do after a change — nothing for an MCP deploy, a manual copy for a
+skill update, and why a skill cannot update itself — is under "Shipping a change to clients"
+in the same file.
+
 The package boundary is also an extraction seam: the eventual target keeps HSS and the private
 knowledge runtime in focused repositories and lets private composition CI build the combined
 deployment. HSS never fetches the private repository.
