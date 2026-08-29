@@ -39,13 +39,23 @@ from .snippet import lead_snippet
 from .wikilinks import looks_like_a_name
 
 
+# The transport bounds the write path accepts, named because more than one
+# adapter has to publish the same numbers. The MCP span-edit tool declares them
+# on its parameters so a generated client can discover them; leaving it to a
+# hand-written check meant the schema said `string` and the bound existed only
+# at runtime, which is a bound no caller can see.
+MAX_BODY_CHARS = 100_000
+MAX_RATIONALE_CHARS = 2_000
+MAX_DOCUMENT_ID_CHARS = 256
+
+
 class VaultDocumentContentRequest(BaseModel):
     """Content fields and normalization shared by create and replacement."""
 
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1, max_length=300)
-    body: str = Field(min_length=1, max_length=100_000)
+    body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     summary: str | None = Field(
         default=None,
         max_length=2_000,
@@ -355,7 +365,9 @@ class VaultAmendmentProposalRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    target_note_id: str = Field(min_length=1, max_length=256)
+    target_note_id: str = Field(
+        min_length=1, max_length=MAX_DOCUMENT_ID_CHARS
+    )
     base_revision: int = Field(ge=1)
     change: VaultAmendmentChange
     rationale: str = Field(min_length=1, max_length=2_000)
@@ -1296,7 +1308,7 @@ class VaultCompilePageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1, max_length=200)
-    body: str = Field(min_length=1, max_length=100_000)
+    body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     source_ids: list[str] = Field(
         min_length=1,
         description=(

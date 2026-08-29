@@ -40,6 +40,11 @@ from typing import Any
 
 import pytest
 
+from app.vault.api_models import (
+    MAX_BODY_CHARS,
+    MAX_DOCUMENT_ID_CHARS,
+    MAX_RATIONALE_CHARS,
+)
 from app.vault.constants import SEARCH_QUERY_MAX_CHARS
 from app.vault.mcp import _TOOL_SCOPES, build_vault_mcp_server
 from app.vault.settings import vault_enabled
@@ -295,3 +300,35 @@ def test_a_read_only_tool_is_not_annotated_destructive() -> None:
 if __name__ == "__main__":
     _write_golden()
     print(f"wrote {GOLDEN}")
+
+
+def test_the_span_edit_tool_publishes_its_bounds() -> None:
+    """The other amendment tools validate a Pydantic model, so their bounds
+    reach the schema for free. This one takes loose parameters, so the bounds
+    are declared on them -- and a bound only enforced in the body is one no
+    generated client can discover, and one that is checked after the corpus
+    lock is already held.
+    """
+
+    server = build_vault_mcp_server()
+    tool = next(
+        t
+        for t in server._tool_manager.list_tools()
+        if t.name == "vault_propose_note_span_edit"
+    )
+    properties = tool.parameters["properties"]
+
+    assert properties["note_id"]["maxLength"] == MAX_DOCUMENT_ID_CHARS
+    assert properties["note_id"]["minLength"] == 1
+    assert properties["base_revision"]["minimum"] == 1
+    assert properties["expected_text"]["maxLength"] == MAX_BODY_CHARS
+    assert properties["expected_text"]["minLength"] == 1
+    assert properties["replacement_text"]["maxLength"] == MAX_BODY_CHARS
+    assert properties["rationale"]["maxLength"] == MAX_RATIONALE_CHARS
+    assert properties["rationale"]["minLength"] == 1
+    # Nullable, so the bound sits inside the union rather than beside it.
+    assert any(
+        member.get("minimum") == 1
+        for member in properties["occurrence"]["anyOf"]
+        if isinstance(member, dict)
+    )

@@ -2355,6 +2355,7 @@
       "note_id": "string",
       "occurrence": [
         {
+          "minimum": 1,
           "type": "integer"
         },
         {

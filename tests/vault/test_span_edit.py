@@ -173,3 +173,108 @@ def test_the_rendered_diff_reports_the_removal_a_reviewer_must_acknowledge() -> 
     applied = apply_body_unified_diff(BODY, diff)
 
     assert [line.text for line in applied.removed_lines] == ["Gamma line three."]
+
+
+def test_overlapping_matches_count_as_matches() -> None:
+    """`str.count` counts non-overlapping runs; selection stepped by one.
+
+    Two policies in one function meant "aa" in "aaa" reported a single match,
+    passed the uniqueness check, and was edited at the first of two candidate
+    offsets -- guessing, which ADR 0033 exists to prevent. Overlapping is the
+    safer reading of "every place this span begins": it can only refuse more.
+    """
+
+    with pytest.raises(SpanEditError, match="appears 2 times"):
+        apply_span_edit("aaa", expected_text="aa", replacement_text="X")
+
+
+def test_overlapping_occurrences_are_selectable_and_bounded() -> None:
+    """The same list that counts is the list that selects, so occurrence 2
+    reaches the second overlapping span rather than being refused as absent."""
+
+    assert (
+        apply_span_edit("aaa", expected_text="aa", replacement_text="X", occurrence=1)
+        == "Xa"
+    )
+    assert (
+        apply_span_edit("aaa", expected_text="aa", replacement_text="X", occurrence=2)
+        == "aX"
+    )
+    with pytest.raises(SpanEditError, match="out of range"):
+        apply_span_edit("aaa", expected_text="aa", replacement_text="X", occurrence=3)
+
+
+def test_a_self_overlapping_pattern_reports_every_starting_offset() -> None:
+    """More than two, so the fix is not an off-by-one that happens to work."""
+
+    # "aaaa" contains "aa" starting at 0, 1 and 2.
+    with pytest.raises(SpanEditError, match="appears 3 times"):
+        apply_span_edit("aaaa", expected_text="aa", replacement_text="X")
+
+    assert (
+        apply_span_edit("aaaa", expected_text="aa", replacement_text="X", occurrence=3)
+        == "aaX"
+    )
+
+
+def test_a_lone_carriage_return_is_refused_rather_than_silently_rewritten() -> None:
+    """A bare CR is a line boundary to `splitlines`.
+
+    So the stored diff would apply "x\ny" for a requested "x\ry" -- a proposal
+    describing text the caller never asked for. CRLF is still normalized
+    against the stored body; this is what survives that normalization.
+    """
+
+    with pytest.raises(SpanEditError, match="carriage return"):
+        apply_span_edit(BODY, expected_text="Beta line two.", replacement_text="x\ry")
+
+    with pytest.raises(SpanEditError, match="carriage return"):
+        apply_span_edit(BODY, expected_text="Beta\rline two.", replacement_text="x")
+
+
+def test_changing_the_trailing_newline_state_is_refused() -> None:
+    """The diff grammar has no no-newline marker and the applier keeps the
+    original's trailing-newline state, so this cannot be carried by the stored
+    artifact. Refused rather than accepted and dropped."""
+
+    with pytest.raises(SpanEditError, match="ends with a newline"):
+        span_edit_to_unified_diff("abc", expected_text="abc", replacement_text="xyz\n")
+
+    with pytest.raises(SpanEditError, match="ends with a newline"):
+        span_edit_to_unified_diff(
+            "abc\n", expected_text="abc\n", replacement_text="xyz"
+        )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_text", "replacement_text"),
+    [
+        (BODY, "Beta line two.", "Beta line two, revised."),
+        (BODY, "Beta line two.\n", ""),
+        (BODY, "Gamma line three.", "One.\nTwo.\nThree."),
+        # A CRLF-stored body with the caller's span written either way.
+        (BODY.replace("\n", "\r\n"), "Beta line two.", "Revised."),
+        (BODY.replace("\n", "\r\n"), "Beta line two.\r\n", "Revised.\r\n"),
+    ],
+)
+def test_the_stored_diff_reproduces_the_requested_text(
+    body: str, expected_text: str, replacement_text: str
+) -> None:
+    """The invariant the feature rests on, asserted directly.
+
+    A span edit is only "another authoring form for the same artifact" if the
+    artifact applies to exactly what was asked for. `span_edit_to_unified_diff`
+    now round-trips before storing; this pins that the check is real across the
+    shapes that reach it.
+    """
+
+    intended = apply_span_edit(
+        body, expected_text=expected_text, replacement_text=replacement_text
+    )
+    diff = span_edit_to_unified_diff(
+        body, expected_text=expected_text, replacement_text=replacement_text
+    )
+
+    applied = apply_body_unified_diff(body.replace("\r\n", "\n"), diff)
+
+    assert applied.body == intended

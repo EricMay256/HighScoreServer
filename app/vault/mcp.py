@@ -71,6 +71,9 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .api_models import (
+    MAX_BODY_CHARS,
+    MAX_DOCUMENT_ID_CHARS,
+    MAX_RATIONALE_CHARS,
     VaultAmendmentDecisionResponse,
     VaultAmendmentProposalDetail,
     VaultAmendmentProposalRequest,
@@ -1199,12 +1202,12 @@ def build_vault_mcp_server() -> VaultMCPServer:
         ),
     )
     async def vault_propose_note_span_edit(
-        note_id: str,
-        base_revision: int,
-        expected_text: str,
-        replacement_text: str,
-        rationale: str,
-        occurrence: int | None = None,
+        note_id: Annotated[str, Field(min_length=1, max_length=MAX_DOCUMENT_ID_CHARS)],
+        base_revision: Annotated[int, Field(ge=1)],
+        expected_text: Annotated[str, Field(min_length=1, max_length=MAX_BODY_CHARS)],
+        replacement_text: Annotated[str, Field(max_length=MAX_BODY_CHARS)],
+        rationale: Annotated[str, Field(min_length=1, max_length=MAX_RATIONALE_CHARS)],
+        occurrence: Annotated[int | None, Field(ge=1)] = None,
     ) -> VaultAmendmentProposalResponse:
         """Propose a body change by naming the old text, not by writing a patch.
 

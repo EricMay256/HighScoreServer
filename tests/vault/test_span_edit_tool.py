@@ -9,6 +9,7 @@ path, the storage shape and the compact-diff policy stay unchanged.
 
 import asyncio
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -16,8 +17,18 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
 from app.vault.auth import VaultScope
-from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
+from app.vault.domain import (
+    AmendmentProposalKind,
+    DocumentKind,
+    DocumentStatus,
+    NewVaultDocument,
+)
 from app.vault.repository import VaultDocumentRepository
+from app.vault.service import (
+    AmendmentProposalRequest,
+    SpanEdit,
+    VaultAmendmentService,
+)
 from app.vault.settings import vault_enabled
 from app.vault.tables import vault_amendment_proposals, vault_documents
 from tests.vault.test_mcp import _rpc
@@ -296,3 +307,59 @@ def test_the_tool_needs_the_propose_scope(
 
     assert "error" in outcome
     assert VaultScope.PROPOSE in outcome["error"]
+
+
+def test_a_span_request_carrying_a_contradictory_kind_is_refused() -> None:
+    """The stored payload and its label are decided in the same place.
+
+    `_materialize_span` resolves a span to a body diff, but `propose` used to
+    persist the request's *pre-resolution* kind. The MCP adapter happens to
+    send BODY_DIFF, so the public path was correct and the latent case was a
+    body-diff payload stored under a replacement label -- which preview and
+    acceptance would then read with the wrong shape. A service-level invariant
+    rather than an adapter obligation.
+    """
+
+    request = AmendmentProposalRequest(
+        target_document_id="note-1",
+        base_revision=1,
+        change_kind=AmendmentProposalKind.REPLACEMENT,
+        rationale="Because.",
+        principal_id="test",
+        request_id="req-1",
+        span=SpanEdit(
+            expected_text="Beta line two.",
+            replacement_text="Revised.",
+            occurrence=None,
+        ),
+    )
+    target = SimpleNamespace(body="Alpha.\nBeta line two.\nGamma.\n")
+
+    with pytest.raises(ValueError, match="contradicts the span"):
+        VaultAmendmentService._materialize_span(request, target)
+
+
+def test_a_span_request_resolves_to_a_body_diff_kind() -> None:
+    """The other half: the resolved kind is what a caller may persist, and it
+    is BODY_DIFF regardless of how the span was authored."""
+
+    request = AmendmentProposalRequest(
+        target_document_id="note-1",
+        base_revision=1,
+        change_kind=AmendmentProposalKind.BODY_DIFF,
+        rationale="Because.",
+        principal_id="test",
+        request_id="req-1",
+        span=SpanEdit(
+            expected_text="Beta line two.",
+            replacement_text="Revised.",
+            occurrence=None,
+        ),
+    )
+    target = SimpleNamespace(body="Alpha.\nBeta line two.\nGamma.\n")
+
+    resolved = VaultAmendmentService._materialize_span(request, target)
+
+    assert resolved.change_kind is AmendmentProposalKind.BODY_DIFF
+    assert resolved.span is None
+    assert resolved.body_diff is not None

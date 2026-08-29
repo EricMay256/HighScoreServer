@@ -1623,7 +1623,13 @@ class VaultAmendmentService:
                 connection,
                 target_document_id=target.id,
                 target_revision=target.content_revision,
-                change_kind=request.change_kind,
+                # `resolved`, not `request`: a span edit is materialized into a
+                # body diff above, so the pre-resolution kind would label a
+                # body-diff payload as whatever the caller sent. The MCP
+                # adapter happens to send BODY_DIFF, which is why this was
+                # invisible -- but the stored shape must not depend on an
+                # adapter getting a redundant field right.
+                change_kind=resolved.change_kind,
                 change=change,
                 rationale=rationale,
                 proposed_by=f"agent:{request.principal_id}",
@@ -1929,6 +1935,16 @@ class VaultAmendmentService:
             return request
         if request.body_diff is not None or request.replacement is not None:
             raise ValueError("a span edit carries neither body_diff nor replacement")
+        # The kind a span resolves to is BODY_DIFF and nothing else, so a
+        # request arriving with a contradictory one is a caller that disagrees
+        # with this function about what it is building. Refuse rather than
+        # quietly overwrite it: the stored payload and its label have to be
+        # decided in the same place.
+        if request.change_kind is not AmendmentProposalKind.BODY_DIFF:
+            raise ValueError(
+                "a span edit resolves to a body diff; change_kind "
+                f"{request.change_kind.value!r} contradicts the span"
+            )
 
         return replace(
             request,

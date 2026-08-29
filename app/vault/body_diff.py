@@ -267,10 +267,40 @@ def apply_span_edit(
     needle = expected_text.replace("\r\n", "\n")
     replacement = replacement_text.replace("\r\n", "\n")
 
+    # CRLF is normalized above because the stored body decides the convention.
+    # A carriage return that survives that is a *lone* one, and it is not
+    # representable: the diff is built with `splitlines`, which treats a bare
+    # \r as a line boundary, so the stored patch would apply "x\ny" for a
+    # requested "x\ry" -- a proposal that silently describes different text
+    # from the one the caller asked for.
+    for label, value in (("expected_text", needle), ("replacement_text", replacement)):
+        if "\r" in value:
+            raise SpanEditError(
+                f"{label} contains a carriage return that is not part of a "
+                "CRLF line ending. The stored diff cannot represent it. Use "
+                "\\n line endings."
+            )
+
     if needle == replacement:
         raise BodyDiffError("expected_text and replacement_text are identical")
 
-    count = body.count(needle)
+    # Every offset the span begins at, **including overlapping ones**, and the
+    # same list answers both "is this ambiguous" and "which one did you mean".
+    #
+    # Two different overlap policies used to be in play here: `str.count`
+    # counts non-overlapping occurrences, while stepping with
+    # `index(needle, previous + 1)` finds overlapping ones. For "aa" in "aaa"
+    # that meant the count said 1 and the ambiguity check passed, so the edit
+    # landed on the first of two candidate spans without asking -- the one
+    # thing ADR 0033 says this must never do. Overlapping is the safer reading
+    # of "every place this span begins": it can only ever refuse more.
+    offsets: list[int] = []
+    search_from = 0
+    while (found := body.find(needle, search_from)) != -1:
+        offsets.append(found)
+        search_from = found + 1
+
+    count = len(offsets)
     if count == 0:
         raise SpanEditError(
             "expected_text does not appear in the note body; fetch the note "
@@ -283,16 +313,14 @@ def apply_span_edit(
                 f"expected_text appears {count} times; pass occurrence to say "
                 "which one, or extend the span until it is unique"
             )
-        index = body.index(needle)
+        index = offsets[0]
     else:
         if not 1 <= occurrence <= count:
             raise SpanEditError(
                 f"occurrence {occurrence} is out of range; expected_text "
                 f"appears {count} time{'s' if count != 1 else ''}"
             )
-        index = -1
-        for _ in range(occurrence):
-            index = body.index(needle, index + 1)
+        index = offsets[occurrence - 1]
 
     return body[:index] + replacement + body[index + len(needle) :]
 
@@ -312,10 +340,35 @@ def span_edit_to_unified_diff(
     that ends at this function.
     """
 
+    body = original.replace("\r\n", "\n")
     updated = apply_span_edit(
         original,
         expected_text=expected_text,
         replacement_text=replacement_text,
         occurrence=occurrence,
     )
-    return summarize_body_change(original.replace("\r\n", "\n"), updated).unified_diff
+
+    # The diff grammar has no `\ No newline at end of file` marker, and the
+    # applier keeps the original body's trailing-newline state, so an edit that
+    # adds or removes the final newline cannot be carried by the artifact that
+    # gets stored. Refused here rather than accepted and quietly dropped.
+    if body.endswith("\n") != updated.endswith("\n"):
+        raise SpanEditError(
+            "this edit changes whether the body ends with a newline, which the "
+            "stored diff cannot represent. Propose it as a replacement instead."
+        )
+
+    diff = summarize_body_change(body, updated).unified_diff
+
+    # The invariant the whole feature rests on: what is stored has to apply to
+    # exactly the text that was asked for. Everything above refuses a known
+    # unrepresentable input; this catches the ones nobody has thought of yet,
+    # by round-tripping the artifact before it is persisted rather than
+    # discovering the difference at review time when the patch is applied.
+    applied = apply_body_unified_diff(body, diff)
+    if applied.body != updated:
+        raise SpanEditError(
+            "the diff generated for this span does not reproduce the requested "
+            "text, so it was not stored. Propose the change as a replacement."
+        )
+    return diff
