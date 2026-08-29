@@ -58,6 +58,15 @@ Nothing already summarized is touched. `summary IS NULL` is in the predicate as
 well as in the plan, so a second run writes nothing and a note summarized by an
 agent between the emit and the apply is left as the agent wrote it.
 
+**A summary is only valid for the text it was written about.** Authoring takes
+as long as it takes and the note stays writable throughout, so each emitted
+entry records the `content_revision` its body was read at, and the apply refuses
+any entry whose note has moved since. That is a separate question from whether
+the vector is consistent -- a precis of the old note embedded with the new one
+produces a row that agrees with itself and misdescribes the document, in the two
+fields retrieval actually reads. A refused entry needs re-emitting and
+re-authoring; rerunning the same file will refuse it again, which is the point.
+
 Usage:
     Report:   python -m scripts.backfill_vault_summaries
     Emit:     python -m scripts.backfill_vault_summaries --emit work.json
@@ -102,6 +111,13 @@ MAX_SUMMARY_CHARS = 2_000
 # `measure_dedup_similarity`, which is the only other script that embeds in
 # bulk; there is no reason for the two to disagree.
 EMBED_BATCH_SIZE = 64
+
+# The work-file shape. 1 is the original, which carried no `content_revision`
+# per entry; 2 adds it. Version 1 files are refused rather than assumed
+# current, because the whole point of the field is that its absence cannot be
+# distinguished from "the note has not moved" -- and guessing that wrongly
+# writes a summary describing a note that no longer exists in that form.
+WORK_FILE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -199,9 +215,14 @@ def emit(notes: list[Undescribed], path: Path) -> None:
     having only if it was written against the whole note, and an author handed
     the first paragraph would produce the lead extract this script exists not
     to produce.
+
+    Each entry records the `content_revision` its body was read at, which is
+    what `read_work_file` compares against the corpus later. Authoring takes as
+    long as it takes, and the note is writable throughout.
     """
 
     payload = {
+        "schema_version": WORK_FILE_SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
         "instructions": (
             "Write `summary` for each entry: two or three sentences saying "
@@ -213,6 +234,13 @@ def emit(notes: list[Undescribed], path: Path) -> None:
         "notes": [
             {
                 "id": note.document_id,
+                # The revision the `body` below was read at, and therefore the
+                # one the author's summary will describe. Compared against the
+                # note at apply time: a precis of a note that has since been
+                # rewritten is wrong in a way no vector check can see, because
+                # the vector would be consistent with the new text and the
+                # sentence would still be about the old.
+                "content_revision": note.content_revision,
                 "vault_path": note.vault_path,
                 "title": note.title,
                 "summary": "",
@@ -241,8 +269,19 @@ def read_work_file(
     Re-reads the corpus rather than trusting the file's copy of it: the body in
     a work file is a snapshot, and the summary has to be embedded alongside
     whatever the note says *now*. An id in the file that is no longer
-    undescribed is reported and skipped, which is what makes the emit-then-
-    apply gap safe to leave open for as long as authoring takes.
+    undescribed is reported and skipped.
+
+    **Re-reading makes the vector right and says nothing about the sentence.**
+    The author wrote its precis against the body this file exported. If the
+    note was rewritten in between, pairing that precis with the current text
+    produces a row whose vector and digest agree with each other perfectly and
+    whose summary describes a document that no longer exists -- and since the
+    summary is both the search preview and an embedded ranking signal, that is
+    a note misrepresenting itself in the two places retrieval looks. No
+    consistency check downstream can catch it, because nothing downstream knows
+    what the summary was written about. So the emitted `content_revision` is
+    compared here, and a mismatch is a problem rather than a skip: it needs a
+    person to re-author, not a rerun.
     """
 
     by_id = {note.document_id: note for note in notes}
@@ -250,6 +289,20 @@ def read_work_file(
     work: list[Authored] = []
     skipped: list[str] = []
     problems: list[str] = []
+
+    version = document.get("schema_version")
+    if version != WORK_FILE_SCHEMA_VERSION:
+        return (
+            [],
+            [],
+            [
+                f"work file is schema_version {version!r}, not "
+                f"{WORK_FILE_SCHEMA_VERSION}. Files written before this "
+                "version do not record which revision each summary was "
+                "authored against, and that cannot be reconstructed. Re-emit "
+                "and re-author."
+            ],
+        )
 
     for entry in document.get("notes", []):
         document_id = entry.get("id")
@@ -260,6 +313,22 @@ def read_work_file(
         if note is None:
             skipped.append(
                 f"{document_id}: already summarized, or no longer an active note"
+            )
+            continue
+        authored_against = entry.get("content_revision")
+        if authored_against is None:
+            problems.append(
+                f"{document_id}: entry records no content_revision, so there "
+                "is no way to tell what this summary was written about. "
+                "Re-emit and re-author it."
+            )
+            continue
+        if authored_against != note.content_revision:
+            problems.append(
+                f"{document_id}: authored against revision {authored_against}, "
+                f"but the note is now at {note.content_revision}. The summary "
+                "describes text the note no longer has. Re-emit and re-author "
+                "it."
             )
             continue
         if len(summary) > MAX_SUMMARY_CHARS:
@@ -548,8 +617,9 @@ async def run(
             for note in stale:
                 print(f"  {note.vault_path}")
             print(
-                "\nRe-run --from with the same work file: the plan re-reads and "
-                "re-embeds whatever was skipped."
+                "\nRe-emit and re-author these entries. Re-running the same "
+                "work file will now refuse them: the summaries were written "
+                "against text the notes no longer have."
             )
             return 1
         return 0

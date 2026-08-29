@@ -22,9 +22,11 @@ from app.vault.embedding_text import assemble_embedding_text, embedding_text_dig
 from app.vault.embeddings import EmbeddingInputKind, EmbeddingVector
 from scripts.backfill_vault_summaries import (
     MAX_SUMMARY_CHARS,
+    WORK_FILE_SCHEMA_VERSION,
     Authored,
     Undescribed,
     embeddable,
+    emit,
     governance_problems,
     read_work_file,
     run,
@@ -77,8 +79,19 @@ def _note(document_id: str = "note-1", **overrides) -> Undescribed:
 
 
 def _work_file(tmp_path: Path, entries: list[dict]) -> Path:
+    """A current-schema work file. Entries default to the revision `_note`
+    reports, so a test that cares about staleness has to say so."""
+
     path = tmp_path / "work.json"
-    path.write_text(json.dumps({"notes": entries}), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": WORK_FILE_SCHEMA_VERSION,
+                "notes": [{"content_revision": 1, **entry} for entry in entries],
+            }
+        ),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -126,6 +139,76 @@ def test_a_note_summarized_since_the_emit_is_reported_and_skipped(
     assert skipped == [
         "note-gone: already summarized, or no longer an active note"
     ]
+
+
+def test_a_summary_authored_against_an_older_revision_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Re-reading the corpus fixes the vector and not the sentence.
+
+    The author wrote its precis against the body the emit exported. If the note
+    was rewritten since, pairing that precis with the current text gives a row
+    whose vector and digest agree perfectly and whose summary is about a
+    document that no longer exists. Nothing downstream can catch that, because
+    nothing downstream knows what the summary was written about.
+
+    A problem rather than a skip: it needs re-authoring, not a rerun.
+    """
+
+    path = _work_file(
+        tmp_path,
+        [{"id": "note-1", "summary": "Describes the note as it used to read."}],
+    )
+
+    work, skipped, problems = read_work_file(path, [_note(content_revision=4)])
+
+    assert work == []
+    assert skipped == []
+    assert len(problems) == 1
+    assert "authored against revision 1" in problems[0]
+    assert "now at 4" in problems[0]
+    assert "re-author" in problems[0].lower()
+
+
+def test_a_work_file_without_revisions_is_refused_rather_than_assumed_current(
+    tmp_path: Path,
+) -> None:
+    """The absence of the field is indistinguishable from "it has not moved",
+    and guessing that wrongly is the whole failure this prevents."""
+
+    path = tmp_path / "old.json"
+    path.write_text(
+        json.dumps({"notes": [{"id": "note-1", "summary": "Written earlier."}]}),
+        encoding="utf-8",
+    )
+
+    work, skipped, problems = read_work_file(path, [_note()])
+
+    assert (work, skipped) == ([], [])
+    assert len(problems) == 1
+    assert "schema_version" in problems[0]
+
+
+def test_an_emitted_work_file_records_the_revision_it_was_read_at(
+    tmp_path: Path,
+) -> None:
+    """The emit half of the same contract: without this the comparison above
+    has nothing to compare against."""
+
+    path = tmp_path / "work.json"
+    emit([_note(content_revision=7)], path)
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+
+    assert document["schema_version"] == WORK_FILE_SCHEMA_VERSION
+    assert document["notes"][0]["content_revision"] == 7
+    # And the round trip is accepted, so emit and read cannot drift apart.
+    work, _skipped, problems = read_work_file(
+        _work_file(tmp_path, [{"id": "note-1", "summary": "Fine.", "content_revision": 7}]),
+        [_note(content_revision=7)],
+    )
+    assert problems == []
+    assert len(work) == 1
 
 
 def test_an_over_long_summary_fails_in_the_dry_run(tmp_path: Path) -> None:
@@ -202,7 +285,14 @@ def test_dry_run_then_apply_writes_the_summary_and_its_vector_together(
 
         work = tmp_path / "work.json"
         work.write_text(
-            json.dumps({"notes": [{"id": note_id, "summary": summary}]}),
+            json.dumps(
+                {
+                    "schema_version": WORK_FILE_SCHEMA_VERSION,
+                    "notes": [
+                        {"id": note_id, "summary": summary, "content_revision": 1}
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -330,7 +420,14 @@ def test_a_note_edited_after_embedding_is_skipped_not_indexed_stale(
 
         work = tmp_path / "work.json"
         work.write_text(
-            json.dumps({"notes": [{"id": note_id, "summary": summary}]}),
+            json.dumps(
+                {
+                    "schema_version": WORK_FILE_SCHEMA_VERSION,
+                    "notes": [
+                        {"id": note_id, "summary": summary, "content_revision": 1}
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -355,6 +452,109 @@ def test_a_note_edited_after_embedding_is_skipped_not_indexed_stale(
         # vector claims to describe it.
         assert stored_summary is None
         assert digest is None
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM vault.vault_document_embeddings WHERE document_id = %s",
+                (note_id,),
+            )
+            cursor.execute(
+                "DELETE FROM vault.vault_documents WHERE id = %s", (note_id,)
+            )
+        connection.commit()
+        connection.close()
+
+
+def test_a_note_rewritten_between_emit_and_apply_is_not_summarized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end, against the database: emit at N, rewrite to N+1, apply.
+
+    The gap this covers is the long one -- authoring, not embedding. Nothing is
+    written and no embedding call is spent, because the summary in the file
+    describes a note that no longer reads that way.
+    """
+
+    test_url = os.environ["TEST_DATABASE_URL"]
+    monkeypatch.setenv("VAULT_DATABASE_URL", test_url)
+    monkeypatch.setenv("VAULT_EMBEDDING_API_KEY", "test-key")
+
+    stub = StubProvider()
+    monkeypatch.setattr(
+        "scripts.backfill_vault_summaries.create_embedding_provider",
+        lambda settings: stub,
+    )
+
+    note_id = f"test-backfill-emitgap-{uuid4().hex[:8]}"
+    work = tmp_path / "work.json"
+
+    connection = psycopg.connect(test_url)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO vault.vault_documents
+                    (id, kind, doc_type, vault_path, status, doc_status,
+                     title, body, tags, aliases, source_ids, related_ids,
+                     contributed_by, schema_version)
+                VALUES
+                    (%s, 'note', 'Agent Note', %s, 'active', 'Active',
+                     %s, %s, %s, '{}', '{}', '{}', 'agent:test', 2)
+                """,
+                (
+                    note_id,
+                    f"Agent/notes/{note_id}.md",
+                    "A note about the original subject",
+                    "The original body, which the summary will describe.",
+                    ["testing"],
+                ),
+            )
+        connection.commit()
+
+        # 1. Emit, and author against what it exported.
+        assert asyncio.run(run(work, None, apply=False)) == 0
+        document = json.loads(work.read_text(encoding="utf-8"))
+        entry = next(e for e in document["notes"] if e["id"] == note_id)
+        assert entry["content_revision"] == 1
+        entry["summary"] = "Establishes something about the original subject."
+        work.write_text(json.dumps(document), encoding="utf-8")
+
+        # 2. The note is rewritten while the summary is being authored.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE vault.vault_documents
+                SET body = %s, title = %s,
+                    content_revision = content_revision + 1
+                WHERE id = %s
+                """,
+                (
+                    "An entirely different body about an unrelated subject.",
+                    "A note about something else",
+                    note_id,
+                ),
+            )
+        connection.commit()
+
+        # 3. Apply refuses it.
+        assert asyncio.run(run(None, work, apply=True)) == 1
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT d.summary, e.embedded_text_sha256
+                FROM vault.vault_documents d
+                LEFT JOIN vault.vault_document_embeddings e
+                    ON e.document_id = d.id AND e.profile_id = %s
+                WHERE d.id = %s
+                """,
+                (PROFILE_ID, note_id),
+            )
+            stored_summary, digest = cursor.fetchone()
+
+        assert stored_summary is None
+        assert digest is None
+        assert stub.texts == [], "a refused entry must not spend an embedding call"
     finally:
         with connection.cursor() as cursor:
             cursor.execute(
