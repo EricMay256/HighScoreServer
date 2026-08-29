@@ -134,10 +134,72 @@ def _strip_markdown_noise(text: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
     # [[Wikilink]] -> Wikilink.
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
-    # Inline code, bold, italic, strikethrough markers.
-    text = re.sub(r"[`*_~]", "", text)
+    # Inline code, keeping its contents exactly. First, so a backticked
+    # identifier is settled before the emphasis rules can look inside it.
+    text = re.sub(r"`+([^`]+)`+", r"\1", text)
+    # Emphasis and strikethrough, as *pairs* rather than as characters.
+    #
+    # A blanket `[`*_~]` deletion turned `TEST_DATABASE_URL` into
+    # `TESTDATABASEURL` and `jsonb_path_ops` into `jsonbpathops`. In a corpus
+    # of engineering notes an identifier is one of the strongest selection
+    # signals a preview carries, and a mangled one is worse than none: it
+    # names a symbol that does not exist. Requiring a closing delimiter, and
+    # requiring `_` emphasis to sit at a word boundary, leaves snake_case
+    # alone -- an underscore inside a word is not emphasis in any Markdown
+    # dialect, which is why CommonMark has the same rule.
+    text = re.sub(r"(\*{1,3})(\S(?:.*?\S)?)\1", r"\2", text)
+    text = re.sub(r"(?<![A-Za-z0-9_])(_{1,3})(\S(?:.*?\S)?)\1(?![A-Za-z0-9_])", r"\2", text)
+    text = re.sub(r"(~{1,2})(\S(?:.*?\S)?)\1", r"\2", text)
     # Leading list bullets and quote markers on the first line only.
     return re.sub(r"^\s{0,3}([-+*]|\d+\.|>)\s+", "", text)
+
+
+def _blocks_outside_fences(body: str) -> list[str]:
+    """Blank-line-delimited blocks, with fenced regions removed entirely.
+
+    Splitting on blank lines first and then testing each block's first line for
+    a fence loses the fence state at the first blank line *inside* the code --
+    and a blank line inside a fenced block is ordinary, especially in the
+    Python and SQL listings this corpus is full of. The second half of such a
+    block then looked like a fresh block of prose, so a listing's middle became
+    the preview: a body opening with a fenced snippet containing one blank line
+    previewed as its own source code rather than as the claim underneath it.
+
+    Fence state is therefore tracked line by line, and a closing fence must be
+    at least as long as the one that opened it and use the same character --
+    which is what lets a ```` ```` ```` block contain a ``` ``` `` line.
+    """
+
+    blocks: list[str] = []
+    current: list[str] = []
+    fence: str | None = None
+
+    for line in body.split("\n"):
+        opening = _FENCE.match(line)
+        if fence is None and opening is not None:
+            # Everything gathered so far ends here; the fence starts a region
+            # that contributes nothing.
+            if current:
+                blocks.append("\n".join(current))
+                current = []
+            fence = opening.group(1)
+            continue
+        if fence is not None:
+            closing = _FENCE.match(line)
+            if closing is not None:
+                marker = closing.group(1)
+                if marker[0] == fence[0] and len(marker) >= len(fence):
+                    fence = None
+            continue
+        if line.strip():
+            current.append(line)
+        elif current:
+            blocks.append("\n".join(current))
+            current = []
+
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
 
 
 def lead_snippet(body: str, *, limit: int = SNIPPET_MAX_CHARS) -> str | None:
@@ -156,7 +218,7 @@ def lead_snippet(body: str, *, limit: int = SNIPPET_MAX_CHARS) -> str | None:
     if not body:
         return None
 
-    for block in re.split(r"\n\s*\n", body):
+    for block in _blocks_outside_fences(body):
         if not _is_prose(block):
             continue
         text = " ".join(_strip_markdown_noise(block).split())

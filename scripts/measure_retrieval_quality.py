@@ -77,57 +77,89 @@ SEARCH_LIMIT = 10
 
 @dataclass(frozen=True, slots=True)
 class CaseOutcome:
-    """What one case found."""
+    """What one case found, and whether it was a fair question to ask.
+
+    Scoring is by ``vault_path`` rather than by title. A title is how a label
+    is *written* -- ids churn and a path is unreadable in a case file -- but it
+    is not an identity: this corpus permits two documents to share one, and
+    `test_wikilinks` pins that as legitimate. Scoring on titles let an
+    unrelated document with a matching title count as a relevant hit, which
+    inflates exactly the numbers this harness exists to decide a design on.
+    """
 
     case: RetrievalCase
+    returned_paths: tuple[str, ...]
     returned_titles: tuple[str, ...]
+    relevant_paths: tuple[str, ...]
+    # Labels naming no active readable document, and labels naming more than
+    # one. Both make the case unscoreable rather than merely narrower.
     unresolvable: tuple[str, ...]
+    ambiguous: tuple[str, ...]
     vector_status: str
 
     @property
-    def resolvable_titles(self) -> tuple[str, ...]:
-        return tuple(
-            title
-            for title in self.case.relevant_titles
-            if title not in self.unresolvable
-        )
+    def valid(self) -> bool:
+        """Whether this case's labels describe exactly the documents they name."""
+
+        return not self.unresolvable and not self.ambiguous
 
     def recall_at(self, depth: int) -> float | None:
         """Share of relevant documents inside the top ``depth``.
 
-        None when nothing in the case resolves against this corpus -- which is
-        distinct from a recall of zero, and must stay distinct: one means the
-        search missed, the other means the question was never asked.
+        None for an invalid case, and an invalid case is excluded from the run
+        rather than from the denominator. Dropping a missing label instead --
+        which this used to do -- lets a two-document case that has lost one
+        document score 1.0 for finding the survivor, so corpus drift reads as
+        an improvement in retrieval quality.
         """
 
-        wanted = set(self.resolvable_titles)
+        if not self.valid:
+            return None
+        wanted = set(self.relevant_paths)
         if not wanted:
             return None
-        found = wanted.intersection(self.returned_titles[:depth])
+        found = wanted.intersection(self.returned_paths[:depth])
         return len(found) / len(wanted)
 
     @property
     def reciprocal_rank(self) -> float | None:
         """1/rank of the best relevant hit, or 0.0 if none appeared."""
 
-        if not self.resolvable_titles:
+        if not self.valid or not self.relevant_paths:
             return None
-        wanted = set(self.resolvable_titles)
-        for position, title in enumerate(self.returned_titles, start=1):
-            if title in wanted:
+        wanted = set(self.relevant_paths)
+        for position, path in enumerate(self.returned_paths, start=1):
+            if path in wanted:
                 return 1.0 / position
         return 0.0
 
 
-async def run_case(service: VaultSearchService, case: RetrievalCase,
-                   known_titles: set[str]) -> CaseOutcome:
+async def run_case(
+    service: VaultSearchService,
+    case: RetrievalCase,
+    corpus: dict[str, tuple[str, ...]],
+) -> CaseOutcome:
     outcome = await service.search(case.query, SEARCH_LIMIT)
+
+    resolved: list[str] = []
+    unresolvable: list[str] = []
+    ambiguous: list[str] = []
+    for title in case.relevant_titles:
+        paths = corpus.get(title, ())
+        if not paths:
+            unresolvable.append(title)
+        elif len(paths) > 1:
+            ambiguous.append(title)
+        else:
+            resolved.append(paths[0])
+
     return CaseOutcome(
         case=case,
+        returned_paths=tuple(result.document.vault_path for result in outcome.results),
         returned_titles=tuple(result.document.title for result in outcome.results),
-        unresolvable=tuple(
-            title for title in case.relevant_titles if title not in known_titles
-        ),
+        relevant_paths=tuple(resolved),
+        unresolvable=tuple(unresolvable),
+        ambiguous=tuple(ambiguous),
         vector_status=str(outcome.vector_status),
     )
 
@@ -140,22 +172,47 @@ def _format(value: float | None) -> str:
     return "  n/a" if value is None else f"{value:5.2f}"
 
 
-def report(outcomes: list[CaseOutcome], show_misses: bool) -> None:
-    unresolvable = {
-        title for outcome in outcomes for title in outcome.unresolvable
-    }
-    if unresolvable:
-        print("\nUNRESOLVABLE LABELS -- these cases scored nothing:")
-        for title in sorted(unresolvable):
-            print(f"  {title}")
+def report(outcomes: list[CaseOutcome], show_misses: bool) -> int:
+    """Print the run. Returns the exit code: nonzero means do not quote it.
+
+    An aggregate is only a measurement if every case in it asked the same
+    question of the same corpus. Two things break that, and both used to be
+    printed as a note above numbers that were published anyway.
+    """
+
+    invalid = [outcome for outcome in outcomes if not outcome.valid]
+    if invalid:
+        print("\nINVALID LABELS -- this run cannot be scored:")
+        for outcome in invalid:
+            for title in outcome.unresolvable:
+                print(f"  [missing]   {title}")
+            for title in outcome.ambiguous:
+                print(f"  [ambiguous] {title}")
         print(
             "  A label names a document by title because ids churn. A title "
-            "that\n  no longer resolves means the corpus moved, not that the "
-            "case passed."
+            "that\n  resolves to nothing means the corpus moved; one that "
+            "resolves to two\n  documents does not name either of them. "
+            "Neither is a narrower case --\n  scoring around them lets drift "
+            "read as an improvement."
         )
 
     statuses = {outcome.vector_status for outcome in outcomes}
     print(f"\nvector_status: {', '.join(sorted(statuses))}")
+    mixed = len(statuses) > 1
+    if mixed:
+        print(
+            "  MIXED -- some cases ran hybrid and some fell back to lexical, "
+            "so an\n  average over them is neither baseline. A transient "
+            "provider failure\n  changes what part of a run measured."
+        )
+
+    if invalid or mixed:
+        print(
+            "\nAggregates suppressed. Fix the labels or re-run against a "
+            "single retrieval mode."
+        )
+        _report_provisional(outcomes)
+        return 1
 
     by_category: dict[str, list[CaseOutcome]] = defaultdict(list)
     for outcome in outcomes:
@@ -188,6 +245,22 @@ def report(outcomes: list[CaseOutcome], show_misses: bool) -> None:
         f"{_format(overall_mrr)}"
     )
 
+    _report_provisional(outcomes)
+
+    misses = [o for o in outcomes if o.reciprocal_rank == 0.0]
+    if misses:
+        print(f"\n{len(misses)} case(s) returned no relevant document at all:")
+        for outcome in misses:
+            print(f"  [{outcome.case.category}] {outcome.case.query}")
+            if show_misses:
+                print(f"      wanted: {', '.join(outcome.relevant_paths)}")
+                for path in outcome.returned_paths[:5]:
+                    print(f"      got   : {path}")
+    print()
+    return 0
+
+
+def _report_provisional(outcomes: list[CaseOutcome]) -> None:
     provisional = sum(1 for o in outcomes if not o.case.validated)
     if provisional:
         print(
@@ -196,17 +269,6 @@ def report(outcomes: list[CaseOutcome], show_misses: bool) -> None:
             "Confirm them against the\ncorpus and set `validated=True` before "
             "quoting these numbers as a baseline."
         )
-
-    misses = [o for o in outcomes if o.reciprocal_rank == 0.0]
-    if misses:
-        print(f"\n{len(misses)} case(s) returned no relevant document at all:")
-        for outcome in misses:
-            print(f"  [{outcome.case.category}] {outcome.case.query}")
-            if show_misses:
-                print(f"      wanted: {', '.join(outcome.resolvable_titles)}")
-                for title in outcome.returned_titles[:5]:
-                    print(f"      got   : {title}")
-    print()
 
 
 async def run(lexical_only: bool, validated_only: bool, show_misses: bool) -> int:
@@ -244,33 +306,48 @@ async def run(lexical_only: bool, validated_only: bool, show_misses: bool) -> in
             text_search_config=resolve_text_search_config(),
         )
 
-        # Every title in the corpus, so an unresolvable label is distinguished
-        # from a search miss. One query rather than one per case.
-        known = await _known_titles(transactions)
+        # Every title in the corpus and the paths it names, so a label that
+        # resolves to nothing and a label that resolves to two documents are
+        # both distinguished from a search miss. One query, not one per case.
+        corpus = await _corpus_by_title(transactions)
 
-        outcomes = [await run_case(service, case, known) for case in cases]
-        report(outcomes, show_misses)
+        outcomes = [await run_case(service, case, corpus) for case in cases]
+        # The report decides the exit code: an unscoreable run has to be
+        # noticeable to whatever ran it, not only to whoever reads the output.
+        return report(outcomes, show_misses)
     finally:
         if provider is not None:
             await provider.aclose()
         await engine.dispose()
-    return 0
 
 
-async def _known_titles(transactions: VaultTransactionService) -> set[str]:
+async def _corpus_by_title(
+    transactions: VaultTransactionService,
+) -> dict[str, tuple[str, ...]]:
+    """Every active readable title, mapped to the paths carrying it.
+
+    A tuple rather than a single path because a shared title is legal here, and
+    the harness has to be able to say so: a label naming two documents names
+    neither, and guessing which was meant is how a measurement stops measuring.
+    """
+
+    from collections import defaultdict as _defaultdict
+
     from sqlalchemy import select
 
     from app.vault.domain import DocumentStatus
     from app.vault.read_policy import readable_path_predicate
     from app.vault.tables import vault_documents
 
-    statement = select(vault_documents.c.title).where(
+    statement = select(vault_documents.c.title, vault_documents.c.vault_path).where(
         vault_documents.c.status == DocumentStatus.ACTIVE.value,
         readable_path_predicate(),
     )
+    index: dict[str, list[str]] = _defaultdict(list)
     async with transactions.transaction() as connection:
-        rows = (await connection.execute(statement)).scalars().all()
-    return set(rows)
+        for title, path in (await connection.execute(statement)).all():
+            index[title].append(path)
+    return {title: tuple(sorted(paths)) for title, paths in index.items()}
 
 
 def main() -> int:

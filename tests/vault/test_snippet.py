@@ -6,7 +6,13 @@ are the ones where the first block of a document is not the document's claim
 240 characters" produces a preview that is worse than none.
 """
 
-from app.vault.snippet import SNIPPET_MAX_CHARS, lead_snippet
+import pytest
+
+from app.vault.snippet import (
+    SNIPPET_MAX_CHARS,
+    _strip_markdown_noise,
+    lead_snippet,
+)
 
 
 def test_a_short_opening_paragraph_is_returned_whole() -> None:
@@ -139,3 +145,94 @@ def test_a_hit_may_carry_neither_summary_nor_snippet() -> None:
         "    indented = 'code'",
     ):
         assert lead_snippet(body) is None, body
+
+
+# --- Stage 1E: fenced regions and literal identifiers ---
+
+
+def test_a_blank_line_inside_a_fence_does_not_end_the_code_block() -> None:
+    """Splitting on blank lines first loses the fence state at the first blank
+    line *inside* the code, and a blank line inside a Python or SQL listing is
+    ordinary. The second half of the listing then read as fresh prose, so a
+    note opening with a code block previewed as its own source.
+    """
+
+    body = (
+        "```python\n"
+        "setup()\n"
+        "\n"
+        "TEST_DATABASE_URL = value\n"
+        "```\n"
+        "\n"
+        "Actual claim."
+    )
+
+    assert lead_snippet(body) == "Actual claim."
+
+
+def test_tilde_fences_are_tracked_like_backtick_fences() -> None:
+    body = (
+        "~~~sql\n"
+        "SELECT 1;\n"
+        "\n"
+        "SELECT 2;\n"
+        "~~~\n"
+        "\n"
+        "The claim."
+    )
+
+    assert lead_snippet(body) == "The claim."
+
+
+def test_a_longer_fence_is_closed_only_by_one_at_least_as_long() -> None:
+    """Which is what lets a four-backtick block contain a three-backtick one.
+    Treating any fence as a closer would end the outer block early and expose
+    its contents."""
+
+    body = (
+        "````\n"
+        "```\n"
+        "nested code\n"
+        "```\n"
+        "````\n"
+        "\n"
+        "The claim."
+    )
+
+    assert lead_snippet(body) == "The claim."
+
+
+def test_an_unclosed_fence_swallows_the_rest_rather_than_leaking_code() -> None:
+    """A body that opens a fence and never closes it is malformed. Preferring
+    no preview to a preview of source is the same call `lead_snippet` already
+    makes for a body that is entirely code."""
+
+    assert lead_snippet("```\ncode\n\nmore code") is None
+
+
+def test_prose_before_a_fence_is_still_preferred() -> None:
+    assert lead_snippet("The claim.\n\n```\ncode\n```") == "The claim."
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # The failure this fixes: a blanket delete of `*_~` mangled every
+        # snake_case identifier, and an identifier is one of the strongest
+        # selection signals a preview of an engineering note carries.
+        ("TEST_DATABASE_URL is required", "TEST_DATABASE_URL is required"),
+        ("Use jsonb_path_ops for containment", "Use jsonb_path_ops for containment"),
+        # Inline code keeps its contents exactly, delimiters removed.
+        ("Set `max_length` on the field", "Set max_length on the field"),
+        ("`TEST_DATABASE_URL`", "TEST_DATABASE_URL"),
+        # Emphasis still flattens, which is why the rule exists at all.
+        ("*emphasis* and **bold**", "emphasis and bold"),
+        ("_leading emphasis_ here", "leading emphasis here"),
+        ("~~struck~~ text", "struck text"),
+        # A lone delimiter with no partner is literal text, not markup.
+        ("2 * 3 = 6", "2 * 3 = 6"),
+        ("a_b_c_d", "a_b_c_d"),
+    ],
+)
+def test_markdown_cleanup_keeps_literal_identifiers(raw: str, expected: str) -> None:
+    assert _strip_markdown_noise(raw) == expected
