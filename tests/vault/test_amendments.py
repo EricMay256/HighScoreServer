@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, func, update
+from sqlalchemy import delete, func, select, update
 
 from app.vault.auth import VaultScope
 from app.vault.domain import (
@@ -24,6 +24,7 @@ from app.vault.settings import vault_enabled
 from app.vault.tables import (
     vault_amendment_proposals,
     vault_audit_events,
+    vault_document_embeddings,
     vault_documents,
 )
 from tests.vault.test_contributions import StubEmbeddingProvider
@@ -705,3 +706,164 @@ def test_http_patch_refuses_an_empty_change(
     finally:
         _cleanup()
         _drop(credential_id)
+
+
+def test_metadata_acceptance_works_with_no_embedding_provider(
+    client: TestClient, tokens: tuple[str, str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A providerless deployment is an ordinary state, not a broken one.
+
+    The shared acceptance path requires a provider before it does anything, so
+    a metadata proposal used to fail with 503 on a deployment configured
+    lexical-only -- refusing a change that needs no embedding because a
+    component it never touches was absent.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    monkeypatch.setattr("app.vault.routes.get_embedding_provider", lambda: None)
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": ["a" * 32]},
+                "rationale": "Connect it, with no provider configured.",
+            },
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        decision = client.post(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["outcome"] == "accepted"
+        assert decision.json()["target"]["related_ids"] == ["a" * 32]
+    finally:
+        _cleanup()
+
+
+def test_metadata_acceptance_leaves_a_note_without_an_embedding_alone(
+    client: TestClient, tokens: tuple[str, str, str], provider: StubEmbeddingProvider
+) -> None:
+    """A note with no vector must not acquire one from a metadata change.
+
+    The seeded note has no embedding row, which is the state the shared path
+    treated as "must embed". Doing so from a metadata acceptance writes a
+    vector this change had no business creating -- the clearest possible
+    violation of the claim that metadata cannot affect retrieval.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": ["b" * 32]},
+                "rationale": "Connect a note that was never embedded.",
+            },
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        decision = client.post(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["target"]["related_ids"] == ["b" * 32]
+        assert provider.calls == 0, (
+            "A note with no embedding acquired one from a metadata change. Do "
+            "not accept this by expecting a call: the vector would describe "
+            "text this change never touched, and writing it is precisely the "
+            "retrieval effect ADR 0036 says a metadata edit cannot have."
+        )
+        assert _embedding_row_count(note_id) == 0, (
+            "A vector row was created by a metadata acceptance."
+        )
+    finally:
+        _cleanup()
+
+
+def test_metadata_acceptance_leaves_an_existing_vector_byte_for_byte(
+    client: TestClient, tokens: tuple[str, str, str], provider: StubEmbeddingProvider
+) -> None:
+    """The third state: a note that does have a vector keeps exactly that one."""
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    _ensure_embedded(note_id, provider)
+    before = _embedding_digest(note_id)
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "facets": {"area": ["gameplay"]}},
+                "rationale": "Reclassify without re-indexing.",
+            },
+        )
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+        decision = client.post(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+
+        assert decision.status_code == 200, decision.text
+        assert _embedding_digest(note_id) == before
+        assert provider.calls == 0
+    finally:
+        _cleanup()
+
+
+def _embedding_row_count(note_id: str) -> int:
+    transactions, engine = vault_service()
+
+    async def count() -> int:
+        try:
+            async with transactions.transaction() as connection:
+                return (
+                    await connection.execute(
+                        select(func.count()).select_from(
+                            vault_document_embeddings
+                        ).where(vault_document_embeddings.c.document_id == note_id)
+                    )
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(count())
+
+
+def _embedding_digest(note_id: str) -> bytes | None:
+    transactions, engine = vault_service()
+
+    async def digest() -> bytes | None:
+        try:
+            async with transactions.transaction() as connection:
+                return (
+                    await connection.execute(
+                        select(
+                            vault_document_embeddings.c.embedded_text_sha256
+                        ).where(vault_document_embeddings.c.document_id == note_id)
+                    )
+                ).scalar_one_or_none()
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(digest())

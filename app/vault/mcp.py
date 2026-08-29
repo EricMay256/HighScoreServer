@@ -63,7 +63,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, ValidationError
 from slowapi.errors import RateLimitExceeded
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -85,6 +85,7 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultMetadataUpdateRequest,
     VaultPromotionResponse,
     VaultRetirementResponse,
     VaultReviewCaseResponse,
@@ -419,6 +420,51 @@ def _content_payload(
     if source_url is not None:
         payload["source_url"] = source_url
     return payload
+
+
+def _metadata_change(
+    *,
+    related_ids: list[str] | None,
+    source_ids: list[str] | None,
+    facets: dict[str, list[str]] | None,
+    source_url: str | None,
+    clear_source_url: bool,
+) -> MetadataChange:
+    """Validate a metadata change the way the HTTP boundary does.
+
+    Built through `VaultMetadataUpdateRequest` rather than from the raw
+    arguments, because the tool signature accepts `list[str]` and a list of
+    strings is not an edge list. Skipping the model let duplicates and
+    `[[wikilinks]]` into `related_ids` on both metadata tools -- the exact
+    corruption ADR 0030 forbids, reintroduced on a new path because it did not
+    reuse the validator the old one had.
+
+    Raises `ValueError`; the callers turn that into a `ToolError`.
+    """
+
+    validated = VaultMetadataUpdateRequest(
+        base_revision=1,
+        related_ids=related_ids,
+        source_ids=source_ids,
+        facets=facets,
+        source_url=source_url,
+        clear_source_url=clear_source_url,
+    )
+    return MetadataChange(
+        related_ids=(
+            tuple(validated.related_ids)
+            if validated.related_ids is not None
+            else None
+        ),
+        source_ids=(
+            tuple(validated.source_ids)
+            if validated.source_ids is not None
+            else None
+        ),
+        facets=validated.facets,
+        source_url=str(validated.source_url) if validated.source_url else None,
+        clear_source_url=validated.clear_source_url,
+    )
 
 
 def build_vault_mcp_server() -> VaultMCPServer:
@@ -1079,13 +1125,16 @@ def build_vault_mcp_server() -> VaultMCPServer:
 
         credential = await _authorized("vault_update_note_metadata")
 
-        change = MetadataChange(
-            related_ids=tuple(related_ids) if related_ids is not None else None,
-            source_ids=tuple(source_ids) if source_ids is not None else None,
-            facets=facets,
-            source_url=source_url,
-            clear_source_url=clear_source_url,
-        )
+        try:
+            change = _metadata_change(
+                related_ids=related_ids,
+                source_ids=source_ids,
+                facets=facets,
+                source_url=source_url,
+                clear_source_url=clear_source_url,
+            )
+        except (ValidationError, ValueError) as exc:
+            raise ToolError(f"Invalid metadata change: {exc}") from exc
         if change.is_empty():
             raise ToolError(
                 "Nothing to change. Pass at least one of related_ids, "
@@ -1473,13 +1522,16 @@ def build_vault_mcp_server() -> VaultMCPServer:
         if not rationale.strip():
             raise ToolError("rationale must contain non-whitespace text")
 
-        change = MetadataChange(
-            related_ids=tuple(related_ids) if related_ids is not None else None,
-            source_ids=tuple(source_ids) if source_ids is not None else None,
-            facets=facets,
-            source_url=source_url,
-            clear_source_url=clear_source_url,
-        )
+        try:
+            change = _metadata_change(
+                related_ids=related_ids,
+                source_ids=source_ids,
+                facets=facets,
+                source_url=source_url,
+                clear_source_url=clear_source_url,
+            )
+        except (ValidationError, ValueError) as exc:
+            raise ToolError(f"Invalid metadata change: {exc}") from exc
         if change.is_empty():
             raise ToolError(
                 "Nothing to change. Pass at least one of related_ids, "

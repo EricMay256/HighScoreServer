@@ -3340,6 +3340,9 @@
         "VaultMetadataChange": {
           "additionalProperties": false,
           "properties": {
+            "clear_source_url": {
+              "type": "boolean"
+            },
             "facets": {
               "anyOf": [
                 {
@@ -3636,6 +3639,9 @@
             {
               "additionalProperties": false,
               "properties": {
+                "clear_source_url": {
+                  "type": "boolean"
+                },
                 "facets": {
                   "anyOf": [
                     {

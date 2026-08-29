@@ -61,12 +61,33 @@ AND change <> '{}'::jsonb
 AND change - 'related_ids' - 'source_ids' - 'facets' - 'source_url' = '{}'::jsonb
 ```
 
-Acceptance reuses the existing machinery. A stored metadata proposal
-materialises into an `UpdateRequest` built from the target with only the named
-fields overridden — the same shape `_body_only_update` already uses for body
-diffs. Because the embedding text is unchanged, the update path's existing
-`embedded_text_sha256` comparison skips re-embedding on its own; no special
-case is needed and no provider call is spent.
+A stored metadata proposal materialises into an `UpdateRequest` built from the
+target with only the named fields overridden — the same shape
+`_body_only_update` already uses for body diffs.
+
+**Acceptance takes its own path, and an earlier draft of this ADR was wrong to
+say it did not.** That draft claimed the shared update path's
+`embedded_text_sha256` comparison would skip re-embedding on its own, so no
+special case was needed. It skips the *re-embed*, but the path around it does
+two other things: it refuses outright when no embedding provider is configured,
+and it embeds unconditionally when the note has no stored vector to compare
+against. Both are ordinary states — a lexical-only deployment, and a note that
+was never embedded — and in both the promise above was false: the first refused
+a change that needs no embedding, the second wrote a vector the change had no
+business creating.
+
+`_settle_metadata_acceptance` therefore runs the same sequence as the ordinary
+acceptance — lock, re-read, verify the revision, write under a CAS, settle,
+audit — with the embedding, vector upsert, similarity search, and dedup
+decision *absent* rather than conditional. Absent is the point: a conditional
+skip is a claim that has to be re-checked whenever the path around it changes,
+and this one was not.
+
+The edge validation is likewise shared rather than reimplemented.
+`validate_edge_ids` is module-level and both metadata models call it, because
+the first version of this kind did not and accepted duplicates and
+`[[wikilinks]]` in `related_ids` — reintroducing on a new path the exact
+corruption ADR 0030 forbids.
 
 ## Consequences
 
@@ -86,11 +107,17 @@ narrowness, and widening the payload later would forfeit the guarantee that
 this operation cannot touch retrieval.
 
 Migration `0018_metadata_amendments` widens the two CHECK constraints. Its
-downgrade deletes pending metadata proposals, because they cannot satisfy the
-narrower constraint — safe because a proposal is inert by construction: it is
-absent from search and dedup and has changed no document, so discarding one
-loses a queued intention and never any corpus content. Decided proposals are
-kept, since their record is history rather than pending work.
+downgrade deletes **every** metadata proposal, whatever its state.
+
+An earlier version deleted only the pending ones and kept decided proposals as
+history. That was self-contradictory rather than merely conservative: the
+restored constraint has no `metadata` in its vocabulary, so a surviving decided
+row makes `ADD CONSTRAINT` fail and the downgrade impossible. There is nothing
+to keep such a row *as*. What is lost is bounded — a pending proposal is inert,
+and a decided one has already been applied or refused, with the decision itself
+recorded in `vault_audit_events` under `vault.amendment.review`, which this
+migration does not touch. The proposal row is the request; the audit event is
+the record.
 
 ## Alternatives considered
 

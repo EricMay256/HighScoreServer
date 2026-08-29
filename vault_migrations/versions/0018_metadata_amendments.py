@@ -57,15 +57,24 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Metadata proposals cannot survive the narrower constraint. Pending ones
-    # are deleted rather than left to fail the ADD: a proposal is inert by
-    # construction (it is absent from search and dedup and has changed no
-    # document), so discarding one loses a queued intention and never any
-    # corpus content. Decided ones are kept -- their record is history.
+    # Every metadata proposal goes, whatever its state.
+    #
+    # An earlier version of this deleted only the pending ones, on the reasoning
+    # that a decided proposal is history worth keeping. That reasoning was
+    # self-contradictory: the constraint restored below has no `metadata` in its
+    # vocabulary, so a surviving decided row makes `ADD CONSTRAINT` fail and the
+    # downgrade impossible. There is nothing to keep such a row *as*.
+    #
+    # What is actually lost is small. A pending proposal is inert -- absent from
+    # search and dedup, having changed no document -- so discarding it loses a
+    # queued intention. A decided one has already been applied or refused, and
+    # the decision itself survives in `vault_audit_events` under
+    # `vault.amendment.review`, which this migration does not touch. The row
+    # here is the request, not the record.
     op.execute(
         """
         DELETE FROM vault.vault_amendment_proposals
-        WHERE change_kind = 'metadata' AND state = 'pending'
+        WHERE change_kind = 'metadata'
         """
     )
     op.execute(
