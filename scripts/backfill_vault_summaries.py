@@ -304,6 +304,32 @@ def read_work_file(
             ],
         )
 
+    # Two entries for one note is a work file that disagrees with itself, and
+    # it fails in a way that reads as success: the first write lands, the
+    # second finds `summary IS NULL` false and is reported as a stale row, so
+    # the run looks like it lost a race with an agent rather than like it was
+    # handed two different summaries for one document. Caught before either.
+    authored_ids = [
+        entry.get("id")
+        for entry in document.get("notes", [])
+        if (entry.get("summary") or "").strip()
+    ]
+    duplicated = sorted({
+        document_id
+        for document_id in authored_ids
+        if authored_ids.count(document_id) > 1
+    })
+    if duplicated:
+        return (
+            [],
+            [],
+            [
+                f"{document_id}: appears more than once with a summary; one "
+                "note cannot have two"
+                for document_id in duplicated
+            ],
+        )
+
     for entry in document.get("notes", []):
         document_id = entry.get("id")
         summary = (entry.get("summary") or "").strip()
@@ -559,6 +585,19 @@ async def run(
             print(f"\n{len(problems)} problem(s) to fix in the work file:")
             for problem in problems:
                 print(f"  {problem}")
+            # Nothing is embedded and nothing is written, whichever mode this
+            # is. Applying the valid remainder made a partly-broken work file
+            # look like a clean run: the dry run exited 0, the apply spent
+            # provider calls on the entries it liked, and the entries it did
+            # not were reported once and then invisible in the exit status.
+            # The work file is one artifact and it is either right or it is
+            # not -- which is the same all-or-nothing this script already
+            # claims for its writes.
+            print(
+                "\nNothing was embedded or written. Fix the work file and "
+                "re-run; a\npartially valid backfill is not a backfill."
+            )
+            return 1
 
         if not work:
             print("\nNothing to write.")

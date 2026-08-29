@@ -78,6 +78,14 @@ def _note(document_id: str = "note-1", **overrides) -> Undescribed:
     return Undescribed(**{**base, **overrides})
 
 
+
+def _stub_load(notes):
+    async def _load(engine):
+        return notes
+
+    return _load
+
+
 def _work_file(tmp_path: Path, entries: list[dict]) -> Path:
     """A current-schema work file. Entries default to the revision `_note`
     reports, so a test that cares about staleness has to say so."""
@@ -566,3 +574,94 @@ def test_a_note_rewritten_between_emit_and_apply_is_not_summarized(
             )
         connection.commit()
         connection.close()
+
+
+def test_a_work_file_with_any_problem_is_refused_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A work file is one artifact: it is right or it is not.
+
+    Applying the valid remainder made a partly-broken file look like a clean
+    run -- the dry run exited 0, the apply spent provider calls on the entries
+    it liked, and the ones it rejected were printed once and then absent from
+    the exit status. Nothing is embedded and nothing is written now.
+    """
+
+    monkeypatch.setenv("VAULT_DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+    monkeypatch.setenv("VAULT_EMBEDDING_API_KEY", "test-key")
+
+    stub = StubProvider()
+    monkeypatch.setattr(
+        "scripts.backfill_vault_summaries.create_embedding_provider",
+        lambda settings: stub,
+    )
+    # One valid entry beside one that fails the length bound.
+    path = _work_file(
+        tmp_path,
+        [
+            {"id": "note-1", "summary": "A perfectly good precis."},
+            {"id": "note-2", "summary": "x" * (MAX_SUMMARY_CHARS + 1)},
+        ],
+    )
+    monkeypatch.setattr(
+        "scripts.backfill_vault_summaries.load_undescribed",
+        _stub_load([_note(), _note("note-2")]),
+    )
+
+    assert asyncio.run(run(None, path, apply=True)) == 1
+    assert stub.texts == [], "a refused work file must not spend an embedding call"
+
+
+def test_a_wholly_valid_work_file_is_still_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The boundary of the rule above: strictness must not break the ordinary
+    path, so the same shape without the bad entry still plans."""
+
+    path = _work_file(tmp_path, [{"id": "note-1", "summary": "A good precis."}])
+
+    work, skipped, problems = read_work_file(path, [_note()])
+
+    assert (skipped, problems) == ([], [])
+    assert len(work) == 1
+
+
+def test_two_entries_for_one_note_invalidate_the_file(tmp_path: Path) -> None:
+    """It fails in a way that reads as success otherwise.
+
+    The first write lands, the second finds `summary IS NULL` false and is
+    reported as a stale row -- so a work file that disagrees with itself looks
+    like a lost race with an agent rather than like two summaries for one note.
+    """
+
+    path = _work_file(
+        tmp_path,
+        [
+            {"id": "note-1", "summary": "One description."},
+            {"id": "note-1", "summary": "A different description."},
+        ],
+    )
+
+    work, _skipped, problems = read_work_file(path, [_note()])
+
+    assert work == []
+    assert len(problems) == 1
+    assert "more than once" in problems[0]
+
+
+def test_a_blank_duplicate_is_not_a_conflict(tmp_path: Path) -> None:
+    """Only authored entries collide. A blank one is how an author declines a
+    note, and declining twice is not a disagreement."""
+
+    path = _work_file(
+        tmp_path,
+        [
+            {"id": "note-1", "summary": "The only description."},
+            {"id": "note-1", "summary": ""},
+        ],
+    )
+
+    work, _skipped, problems = read_work_file(path, [_note()])
+
+    assert problems == []
+    assert len(work) == 1

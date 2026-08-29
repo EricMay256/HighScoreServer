@@ -200,6 +200,53 @@ def _strip_markdown_noise(text: str) -> str:
     return re.sub(r"^\s{0,3}([-+*]|\d+\.|>)\s+", "", text)
 
 
+def fenced_line_mask(body: str) -> list[bool]:
+    """One flag per line: True when that line belongs to a fenced code region.
+
+    Public, and shared, because two callers need exactly this answer and had
+    two different wrong versions of it. This module tracked fence state per
+    line but only after splitting on blank lines, which lost it inside code;
+    `measure_chunk_eligibility` paired fence lines by position, which ignored
+    the marker character and length entirely. The second fed section counts
+    that a chunking decision rests on.
+
+    The rules, in one place:
+
+    - an opening fence may carry an info string (```python);
+    - a closing fence carries its markers and nothing but whitespace;
+    - a close must use the opening character and be at least as long, which is
+      what lets a four-backtick block contain a three-backtick one;
+    - a line that merely starts with markers is content, not a close;
+    - an unclosed fence runs to the end of the document, as a renderer treats
+      it.
+
+    The fence lines themselves are flagged, so a caller blanking the region
+    removes the markers too.
+    """
+
+    mask: list[bool] = []
+    fence: str | None = None
+
+    for line in body.split("\n"):
+        if fence is None:
+            opening = _FENCE.match(line)
+            if opening is not None:
+                fence = opening.group(1)
+                mask.append(True)
+                continue
+            mask.append(False)
+            continue
+
+        mask.append(True)
+        closing = _FENCE_CLOSE.match(line)
+        if closing is not None:
+            marker = closing.group(1)
+            if marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+
+    return mask
+
+
 def _blocks_outside_fences(body: str) -> list[str]:
     """Blank-line-delimited blocks, with fenced regions removed entirely.
 
@@ -218,30 +265,18 @@ def _blocks_outside_fences(body: str) -> list[str]:
 
     blocks: list[str] = []
     current: list[str] = []
-    fence: str | None = None
 
-    for line in body.split("\n"):
-        opening = _FENCE.match(line)
-        if fence is None and opening is not None:
-            # Everything gathered so far ends here; the fence starts a region
-            # that contributes nothing.
+    for line, fenced in zip(
+        body.split("\n"), fenced_line_mask(body), strict=True
+    ):
+        # A fence ends whatever was being gathered and contributes nothing,
+        # exactly as a blank line ends it.
+        if fenced or not line.strip():
             if current:
                 blocks.append("\n".join(current))
                 current = []
-            fence = opening.group(1)
             continue
-        if fence is not None:
-            closing = _FENCE_CLOSE.match(line)
-            if closing is not None:
-                marker = closing.group(1)
-                if marker[0] == fence[0] and len(marker) >= len(fence):
-                    fence = None
-            continue
-        if line.strip():
-            current.append(line)
-        elif current:
-            blocks.append("\n".join(current))
-            current = []
+        current.append(line)
 
     if current:
         blocks.append("\n".join(current))

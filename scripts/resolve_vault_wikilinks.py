@@ -49,8 +49,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy import text as text_sql
 
 from app.env import load_environment
+from app.vault.constants import CORPUS_LOCK_KEY
 from app.vault.db import create_vault_engine, describe_database
 from app.vault.domain import DocumentKind
 from app.vault.service import VaultTransactionService
@@ -163,6 +165,25 @@ async def run(apply: bool) -> int:
     transactions = VaultTransactionService(engine, observer)
     try:
         async with transactions.transaction() as connection:
+            if apply:
+                # Taken before the rows are read, not before the writes.
+                #
+                # The per-row compare-and-set below protects the row being
+                # *written*; it says nothing about the rows a name was resolved
+                # *against*. A governed write that gives a second document the
+                # same title turns a unique match into an ambiguity without
+                # touching the citing row at all, so every predicate still
+                # matches and the repair commits a choice it would now refuse
+                # to make. That is a graph-integrity race rather than a lost
+                # update, and only the lock closes it: the index and the plan
+                # have to be built from a corpus nothing else can move.
+                #
+                # The dry run stays unlocked because it writes nothing, and
+                # says in its own output that apply re-evaluates the corpus.
+                await connection.execute(
+                    text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": CORPUS_LOCK_KEY},
+                )
             rows = (
                 await connection.execute(
                     select(
@@ -302,12 +323,18 @@ def _report(changes: list[Change], stale: list[Change], applied: bool) -> int:
             print(f"  {change.vault_path}")
 
     if not applied:
-        print("\nDry run. Re-run with --apply to write.")
-    # A refused or stale row is work this run was asked to do and did not do,
-    # so the exit code says so. Ambiguity deliberately still exits 0: it is
-    # pre-existing behaviour and whether it should signal is a separate
-    # question from these two, which is being settled elsewhere.
-    return 1 if (refused or stale) else 0
+        print(
+            "\nDry run. Re-run with --apply to write. Apply holds the corpus "
+            "lock and\nre-resolves against the corpus as it is then, so a name "
+            "that is unique here\ncan be ambiguous there -- this plan is a "
+            "preview, not a promise."
+        )
+    # Every one of these is work the corpus still needs and this run did not
+    # do. Ambiguity included, in both modes: an ambiguous value is a *name*
+    # sitting in a column whose contract is ids, and the exporter omits names
+    # -- so a repair that reports success while leaving one behind invites the
+    # next export to drop the relationship it was run to preserve.
+    return 1 if (refused or stale or ambiguous) else 0
 
 
 def main() -> int:

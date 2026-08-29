@@ -20,7 +20,7 @@ import pytest
 
 import scripts.resolve_vault_wikilinks as resolve_script
 from app.vault.wikilinks import LinkIndex, LinkTarget
-from scripts.resolve_vault_wikilinks import plan, run
+from scripts.resolve_vault_wikilinks import _report, plan, run
 
 
 class _Row:
@@ -391,3 +391,43 @@ def test_apply_refuses_a_row_a_governed_update_changed_under_it(
             )
         connection.commit()
         connection.close()
+
+
+def test_a_remaining_ambiguity_exits_nonzero(capsys) -> None:
+    """An ambiguous value is a *name* in a column whose contract is ids.
+
+    The exporter omits names, so a repair that reports success while leaving
+    one behind invites the next export to drop the very relationship the
+    repair was run to preserve. Ambiguity needs a human, and the exit code is
+    how a caller learns there is one waiting.
+    """
+
+    index = LinkIndex(
+        [
+            LinkTarget("id-a", "Shared Title", "one"),
+            LinkTarget("id-b", "Shared Title", "two"),
+        ]
+    )
+    row = _Row("page", "wiki", "Agent/wiki/page.md", ["[[Shared Title]]"])
+
+    changes = plan([row], index)
+
+    assert _report(changes, [], applied=False) == 1
+    assert "name more than one document" in capsys.readouterr().out
+
+
+def test_a_dry_run_says_apply_re_evaluates_the_corpus(capsys) -> None:
+    """The plan is a preview, not a promise: apply takes the corpus lock and
+    resolves against whatever the corpus is then."""
+
+    _report([], [], applied=False)
+
+    output = capsys.readouterr().out
+    assert "corpus lock" in output
+    assert "preview, not a promise" in output
+
+
+def test_a_clean_run_still_exits_zero(capsys) -> None:
+    """The boundary: nothing ambiguous, refused or stale is success."""
+
+    assert _report([], [], applied=True) == 0

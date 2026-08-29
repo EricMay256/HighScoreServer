@@ -58,6 +58,7 @@ from app.vault.domain import DocumentStatus
 from app.vault.measurement import percentile
 from app.vault.read_policy import readable_path_predicate
 from app.vault.settings import VaultSettings
+from app.vault.snippet import fenced_line_mask
 from app.vault.tables import vault_documents
 
 
@@ -76,11 +77,6 @@ CANDIDATE_THRESHOLDS = (800, 1200, 2000)
 # An ATX heading. Setext headings are not matched: the corpus does not use
 # them, and a false positive here would overstate how sectioned a document is.
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
-
-# A fenced block. Headings inside one are code, not structure -- a shell
-# comment starting with `#` is the common false positive.
-_FENCE = re.compile(r"^\s{0,3}(?:`{3,}|~{3,})", re.MULTILINE)
-
 
 @dataclass(frozen=True, slots=True)
 class DocumentShape:
@@ -115,21 +111,23 @@ def strip_fenced_blocks(body: str) -> str:
     Replacing with spaces rather than deleting keeps every later character
     index meaningful, so section sizes measured against the result still
     describe the real document.
+
+    The fence scanning is `snippet.fenced_line_mask` rather than a second copy
+    here. The copy this replaces paired fence lines by *position*, ignoring the
+    marker character and length: inside a four-backtick block a three-backtick
+    content line was read as the close, the real close became a new unclosed
+    opener, and from there headings inside code were counted while genuine
+    ones after the block were masked. Those counts are what ADR 0034's chunking
+    decision rests on, so the bug was in the measurement rather than in a
+    preview.
     """
 
-    out = list(body)
-    fences = [match.start() for match in _FENCE.finditer(body)]
-    # Pair them up. An unclosed final fence runs to the end of the document,
-    # which is what a markdown renderer does with one too.
-    for index in range(0, len(fences), 2):
-        start = fences[index]
-        end = fences[index + 1] if index + 1 < len(fences) else len(body)
-        stop = body.find("\n", end)
-        stop = len(body) if stop == -1 else stop
-        for position in range(start, stop):
-            if out[position] != "\n":
-                out[position] = " "
-    return "".join(out)
+    return "\n".join(
+        " " * len(line) if fenced else line
+        for line, fenced in zip(
+            body.split("\n"), fenced_line_mask(body), strict=True
+        )
+    )
 
 
 def shape_of(document_id: str, kind: str, title: str, body: str) -> DocumentShape:

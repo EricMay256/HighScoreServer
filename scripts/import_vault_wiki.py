@@ -75,9 +75,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import insert, select
+from sqlalchemy import text as text_sql
 
 from app.env import load_environment
-from app.vault.constants import WIKI_SCHEMA_VERSION
+from app.vault.constants import CORPUS_LOCK_KEY, WIKI_SCHEMA_VERSION
 from app.vault.db import create_vault_engine, describe_database
 from app.vault.domain import (
     CompileRunState,
@@ -440,6 +441,103 @@ def _build_document(
     )
 
 
+async def _revalidate_under_lock(
+    connection,
+    *,
+    pages: list[WikiPageFile],
+    planned_pages: list[PlannedPage],
+    classes: Any,
+) -> None:
+    """Re-derive the plan against the locked corpus, or raise.
+
+    Raises ``ReferenceResolutionError``, so the surrounding transaction rolls
+    back rather than committing half an import. Nothing has been written when
+    this runs; raising keeps that true if anything is ever added above it.
+
+    What is compared is the *resolved answers*, not the corpus. Another writer
+    may have changed a dozen things this import does not touch, and none of
+    them matter. What matters is whether any of them changed an answer already
+    baked into a row that is about to be written.
+    """
+
+    existing_rows = (
+        await connection.execute(
+            select(
+                vault_documents.c.id,
+                vault_documents.c.vault_path,
+                vault_documents.c.kind,
+                vault_documents.c.title,
+                vault_documents.c.aliases,
+            )
+        )
+    ).all()
+
+    taken = {
+        row.vault_path
+        for row in existing_rows
+        if row.kind == DocumentKind.WIKI.value
+    }
+    claimed = [
+        page.slug
+        for page in pages
+        if f"{AGENT_WIKI_DIRECTORY}{page.slug}.md" in taken
+    ]
+    if claimed:
+        raise ReferenceResolutionError(
+            "a page path was claimed while this import was embedding: "
+            + ", ".join(sorted(claimed)[:3])
+        )
+
+    live_ids = {
+        row.id for row in existing_rows if row.kind == DocumentKind.NOTE.value
+    }
+    targets = [
+        LinkTarget(
+            document_id=row.id,
+            title=row.title,
+            slug=slug_of(row.vault_path),
+            aliases=tuple(row.aliases or ()),
+        )
+        for row in existing_rows
+    ]
+
+    # The same two resolutions the plan used. Either of them raising here is
+    # already the right answer: a source that has been retired, or a link that
+    # has become ambiguous, must not be guessed at now that the guess would be
+    # committed.
+    rechecked_pages = resolve_page_source_ids(
+        pages, resolve(classes, live_ids), live_ids
+    )
+    rechecked = plan_pages(rechecked_pages, targets)
+
+    before_edges = {p.document_id: p.related_ids for p in planned_pages}
+    after_edges = {p.document_id: p.related_ids for p in rechecked}
+    moved = sorted(
+        document_id
+        for document_id, edges in before_edges.items()
+        if after_edges.get(document_id) != edges
+    )
+
+    before_sources = {p.slug: tuple(_as_list(p.metadata.get("SourceIDs"))) for p in pages}
+    after_sources = {
+        p.slug: tuple(_as_list(p.metadata.get("SourceIDs"))) for p in rechecked_pages
+    }
+    resourced = sorted(
+        slug
+        for slug, sources in before_sources.items()
+        if after_sources.get(slug) != sources
+    )
+
+    if moved or resourced:
+        raise ReferenceResolutionError(
+            "the corpus changed while this import was embedding: "
+            f"{len(moved)} page(s) would now resolve different Related edges "
+            f"and {len(resourced)} different SourceIDs "
+            f"({', '.join((moved + resourced)[:3])}). Nothing was written; "
+            "re-run the import."
+        )
+
+
 async def run_import(
     wiki_directory: Path,
     principal_id: str,
@@ -587,6 +685,30 @@ async def run_import(
             print(f"  embedded {planned.file.slug}")
 
         async with transactions.transaction() as connection:
+            # Everything above was decided from a snapshot taken before a dozen
+            # third-party embedding calls. A governed writer can commit in that
+            # window: give a second document the same title, rename a target,
+            # retire a source, or claim one of these paths. The plan is then
+            # stale in the one way that does not look stale -- every id it holds
+            # still exists, so nothing downstream objects, and a link that
+            # resolved uniquely at planning time gets written as the id it
+            # picked when the corpus now offers two.
+            #
+            # So: take the lock, re-read, re-resolve, and refuse on any
+            # difference. Edges are excluded from the embedding text (asserted
+            # by `test_embedding_text`), so re-resolving costs no provider call
+            # and the vectors above stay valid.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": CORPUS_LOCK_KEY},
+            )
+            await _revalidate_under_lock(
+                connection,
+                pages=pages,
+                planned_pages=planned_pages,
+                classes=classes,
+            )
+
             for key, run_id in run_ids.items():
                 group = by_run[key]
                 started = min(p.compiled_at for p in group)
@@ -617,6 +739,13 @@ async def run_import(
                         text_sha256=digest,
                     ),
                 )
+    except ReferenceResolutionError as error:
+        # Raised by the under-lock revalidation, which rolls the write
+        # transaction back on its way out. Reported like the planning refusal
+        # above rather than as a traceback: it is the same answer arriving
+        # later, and the operator's move is the same -- re-run.
+        print(f"Refusing: {error}", file=sys.stderr)
+        return 1
     finally:
         await engine.dispose()
 
