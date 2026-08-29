@@ -314,6 +314,7 @@ class PlannedPage:
 def plan_pages(
     pages: list[WikiPageFile],
     existing: Sequence[LinkTarget],
+    document_ids_by_slug: dict[str, str] | None = None,
 ) -> list[PlannedPage]:
     """Mint each page's id and resolve its ``Related`` wikilinks against it.
 
@@ -321,9 +322,21 @@ def plan_pages(
     ``resolve_page_source_ids`` does with an ambiguous source and for the same
     reason: an edge pointing at the wrong note is indistinguishable from a
     working one, and this script exists to run once.
+
+    ``document_ids_by_slug`` reuses ids a previous call minted, and the
+    under-lock revalidation must pass it. Minting fresh ones there compared two
+    plans keyed on ids that could not overlap, so every page read as changed on
+    a corpus that had not moved and no import could ever commit -- a refusal
+    that looked exactly like the race it was meant to detect. Ids are also what
+    sibling links resolve to, so re-minting would rewrite the very edges being
+    compared.
     """
 
-    minted = {page.slug: uuid4().hex for page in pages}
+    minted = (
+        dict(document_ids_by_slug)
+        if document_ids_by_slug is not None
+        else {page.slug: uuid4().hex for page in pages}
+    )
     index = LinkIndex(
         (
             *existing,
@@ -508,14 +521,23 @@ async def _revalidate_under_lock(
     rechecked_pages = resolve_page_source_ids(
         pages, resolve(classes, live_ids), live_ids
     )
-    rechecked = plan_pages(rechecked_pages, targets)
+    # The ids the first plan minted, not new ones. They are already in the
+    # prepared documents and are what sibling links resolved to.
+    rechecked = plan_pages(
+        rechecked_pages,
+        targets,
+        {planned.file.slug: planned.document_id for planned in planned_pages},
+    )
 
-    before_edges = {p.document_id: p.related_ids for p in planned_pages}
-    after_edges = {p.document_id: p.related_ids for p in rechecked}
+    # Keyed on slug, which is stable by construction and is what a human reads
+    # in the refusal. Keying on the id would only work because it is now
+    # reused, and would silently stop working if that ever changed.
+    before_edges = {p.file.slug: p.related_ids for p in planned_pages}
+    after_edges = {p.file.slug: p.related_ids for p in rechecked}
     moved = sorted(
-        document_id
-        for document_id, edges in before_edges.items()
-        if after_edges.get(document_id) != edges
+        slug
+        for slug, edges in before_edges.items()
+        if after_edges.get(slug) != edges
     )
 
     before_sources = {p.slug: tuple(_as_list(p.metadata.get("SourceIDs"))) for p in pages}
