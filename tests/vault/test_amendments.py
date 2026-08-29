@@ -8,8 +8,18 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, update
 
 from app.vault.auth import VaultScope
-from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
-from app.vault.repository import VaultDocumentRepository
+from app.vault.domain import (
+    DocumentEmbedding,
+    DocumentKind,
+    DocumentStatus,
+    NewVaultDocument,
+)
+from app.vault.embedding_text import assemble_embedding_text, embedding_text_digest
+from app.vault.embeddings import EmbeddingInputKind
+from app.vault.repository import (
+    VaultDocumentEmbeddingRepository,
+    VaultDocumentRepository,
+)
 from app.vault.settings import vault_enabled
 from app.vault.tables import (
     vault_amendment_proposals,
@@ -78,6 +88,43 @@ def _seed_note() -> str:
 
     asyncio.run(seed())
     return note_id
+
+
+def _ensure_embedded(note_id: str, provider) -> None:
+    """Store the vector a contributed note would already have.
+
+    The amendment fixtures insert documents directly, so they carry no row in
+    `vault_document_embeddings`. Any update to such a note embeds -- correctly,
+    since there is nothing to reuse -- which would otherwise make "this change
+    spent no embedding call" untestable against these fixtures.
+    """
+
+    transactions, engine = vault_service()
+
+    async def store() -> None:
+        try:
+            async with transactions.transaction() as connection:
+                document = await VaultDocumentRepository().get_by_id(
+                    connection, note_id, statuses=(DocumentStatus.ACTIVE,)
+                )
+                text = assemble_embedding_text(document)
+                vector = await provider.embed(
+                    [text], EmbeddingInputKind.DOCUMENT
+                )
+                await VaultDocumentEmbeddingRepository().upsert(
+                    connection,
+                    DocumentEmbedding(
+                        document_id=note_id,
+                        profile_id=provider.profile_id,
+                        vector=vector[0],
+                        text_sha256=embedding_text_digest(text),
+                    ),
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(store())
+    provider.calls = 0
 
 
 def _cleanup() -> None:
@@ -413,3 +460,248 @@ def test_rejection_needs_no_embedding_provider(
         assert decision.json()["target"]["content_revision"] == 1
     finally:
         _cleanup()
+
+
+def test_review_accepts_a_metadata_proposal_without_touching_content(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    provider: StubEmbeddingProvider,
+) -> None:
+    """Propose to accept, end to end, for the metadata kind (ADR 0036).
+
+    The acceptance branch is the one piece of this kind whose correctness was
+    otherwise only structural: `_update_request` materialises a stored metadata
+    payload into an `UpdateRequest` built from the target, and nothing proved
+    that the result carries the target's body rather than an empty one.
+
+    The embedding-call count is the load-bearing assertion. Every field this
+    kind accepts is excluded from `assemble_embedding_text`, so the update
+    path's digest comparison must find the text unchanged and skip
+    re-embedding. An unchanged count is therefore evidence of the guarantee,
+    not a performance note — see the assertion message for what a failure
+    means, because the obvious response to it is the wrong one.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    # `_seed_note` inserts the row without an embedding, and the update path
+    # correctly embeds a note that has no vector. Give it one first, so the
+    # assertion below measures the metadata change rather than the fixture.
+    _ensure_embedded(note_id, provider)
+
+    proposal = {
+        "target_note_id": note_id,
+        "base_revision": 1,
+        "change": {
+            "kind": "metadata",
+            "related_ids": ["a" * 32, "b" * 32],
+            "facets": {"area": ["architecture"]},
+        },
+        "rationale": "Connect this note to the two it depends on.",
+    }
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=proposal,
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+        assert submitted.json()["proposal"]["change_kind"] == "metadata"
+
+        detail = client.get(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}",
+            headers=_headers(reviewer),
+        )
+        assert detail.status_code == 200, detail.text
+        # The reviewer sees the change, not a document to diff by eye.
+        assert detail.json()["change"]["kind"] == "metadata"
+        assert detail.json()["change"]["related_ids"] == ["a" * 32, "b" * 32]
+        assert "title" not in detail.json()["change"]
+        assert "body" not in detail.json()["change"]
+
+        calls_before = provider.calls
+        decision = client.post(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["outcome"] == "accepted"
+
+        target = decision.json()["target"]
+        assert target["related_ids"] == ["a" * 32, "b" * 32]
+        assert target["facets"] == {"area": ["architecture"]}
+        assert target["content_revision"] == 2
+        # Content survived the round trip through storage and materialisation.
+        assert target["body"] == "The original note body."
+        assert target["title"]
+
+        assert provider.calls == calls_before, (
+            "Accepting a metadata proposal spent an embedding call. Do not fix "
+            "this by changing the expected count -- that retires the guarantee "
+            "rather than restoring it. Exactly one of two things has broken: "
+            "either the metadata payload now admits a field that joins "
+            "`assemble_embedding_text` (ADR 0036 permits only related_ids, "
+            "source_ids, facets and source_url, none of which are embedded), "
+            "or the update path no longer skips re-embedding when the stored "
+            "digest matches. Both mean a metadata edit can now change what a "
+            "note means to search, which is the one thing this kind promises "
+            "it cannot do."
+        )
+    finally:
+        _cleanup()
+
+
+def test_an_accepted_metadata_proposal_leaves_untouched_fields_alone(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    provider: StubEmbeddingProvider,
+) -> None:
+    """Omitted means unchanged has to survive storage, not just the dataclass.
+
+    The payload stores only the keys the proposer set, so acceptance has to
+    reconstruct "leave this alone" from an absent key rather than from a null.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": ["c" * 32]},
+                "rationale": "Add one edge and nothing else.",
+            },
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        before = client.get(
+            f"/api/v1/vault/notes/{note_id}", headers=_headers(reviewer)
+        ).json()
+
+        decision = client.post(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+        assert decision.status_code == 200, decision.text
+
+        target = decision.json()["target"]
+        assert target["related_ids"] == ["c" * 32]
+        # Everything the proposal did not name is exactly as it was.
+        assert target["source_ids"] == before["source_ids"]
+        assert target["facets"] == before["facets"]
+        assert target["tags"] == before["tags"]
+        assert target["summary"] == before["summary"]
+        assert target["body"] == before["body"]
+    finally:
+        _cleanup()
+
+
+def test_http_patch_applies_metadata_directly_for_an_update_credential(
+    client: TestClient, provider: StubEmbeddingProvider
+) -> None:
+    """The REST counterpart of `vault_update_note_metadata`.
+
+    Without it a REST caller holding `vault:update` still has to resend the
+    body to add one edge — which is the failure this whole path removes, and
+    the runbook designates REST as the supported route for agents without MCP.
+    """
+
+    credential_id, token = _issue(scopes=(VaultScope.READ, VaultScope.UPDATE))
+    note_id = _seed_note()
+    _ensure_embedded(note_id, provider)
+    try:
+        before = client.get(
+            f"/api/v1/vault/notes/{note_id}", headers=_headers(token)
+        ).json()
+
+        response = client.patch(
+            f"/api/v1/vault/notes/{note_id}/metadata",
+            headers=_headers(token),
+            json={"base_revision": 1, "related_ids": ["d" * 32]},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["re_embedded"] is False
+
+        after = client.get(
+            f"/api/v1/vault/notes/{note_id}", headers=_headers(token)
+        ).json()
+        assert after["related_ids"] == ["d" * 32]
+        # Untouched fields, and the content in particular, are exactly as they were.
+        assert after["body"] == before["body"]
+        assert after["title"] == before["title"]
+        assert after["tags"] == before["tags"]
+        assert provider.calls == 0, (
+            "PATCH /metadata spent an embedding call. Do not raise the "
+            "expected count: it is the evidence that this path cannot alter "
+            "retrieval, so changing it deletes the check rather than fixing "
+            "the cause. See the identical assertion in "
+            "test_review_accepts_a_metadata_proposal_without_touching_content "
+            "for the two changes that produce this."
+        )
+    finally:
+        _cleanup()
+        _drop(credential_id)
+
+
+def test_http_patch_refuses_a_stale_revision(
+    client: TestClient, provider: StubEmbeddingProvider
+) -> None:
+    """The compare-and-set, over the transport that has no session to remember
+    what the caller last read."""
+
+    credential_id, token = _issue(scopes=(VaultScope.READ, VaultScope.UPDATE))
+    note_id = _seed_note()
+    _ensure_embedded(note_id, provider)
+    try:
+        first = client.patch(
+            f"/api/v1/vault/notes/{note_id}/metadata",
+            headers=_headers(token),
+            json={"base_revision": 1, "related_ids": ["e" * 32]},
+        )
+        assert first.status_code == 200, first.text
+
+        # The same caller retrying against the revision it originally read.
+        stale = client.patch(
+            f"/api/v1/vault/notes/{note_id}/metadata",
+            headers=_headers(token),
+            json={"base_revision": 1, "related_ids": ["f" * 32]},
+        )
+
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["detail"]["retryable"] is True
+
+        after = client.get(
+            f"/api/v1/vault/notes/{note_id}", headers=_headers(token)
+        ).json()
+        assert after["related_ids"] == ["e" * 32], "the refused write changed nothing"
+    finally:
+        _cleanup()
+        _drop(credential_id)
+
+
+def test_http_patch_refuses_an_empty_change(
+    client: TestClient, provider: StubEmbeddingProvider
+) -> None:
+    """A request that names no field is a caller mistake, not a no-op write."""
+
+    credential_id, token = _issue(scopes=(VaultScope.READ, VaultScope.UPDATE))
+    note_id = _seed_note()
+    try:
+        response = client.patch(
+            f"/api/v1/vault/notes/{note_id}/metadata",
+            headers=_headers(token),
+            json={"base_revision": 1},
+        )
+
+        assert response.status_code == 422, response.text
+    finally:
+        _cleanup()
+        _drop(credential_id)

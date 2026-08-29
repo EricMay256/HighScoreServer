@@ -58,9 +58,17 @@ pytestmark = pytest.mark.skipif(
 GOLDEN = pathlib.Path(__file__).with_name("mcp_surface.json")
 
 REGENERATE = (
-    "The published MCP surface changed. If that was the intent, regenerate the "
-    f"snapshot with:\n\n    python -m tests.vault.test_mcp_contract\n\n"
-    f"and review the diff to {GOLDEN.name} as part of the change."
+    "The published MCP surface changed. This snapshot exists so that arrives "
+    "as a reviewable diff rather than as a deploy, so regenerating without "
+    "reading the diff is the one response that defeats it -- generated clients "
+    "bind to this, and a renamed or retyped output field breaks them "
+    "silently.\n\n"
+    "If the change was intended:\n\n"
+    "    python -m tests.vault.test_mcp_contract\n\n"
+    f"then read the diff to {GOLDEN.name} as part of the change, and check "
+    "whether the `knowledge-vault` skill describes anything that moved -- the "
+    "two live in different repositories with no shared release, so nothing "
+    "else will notice."
 )
 
 
@@ -263,8 +271,19 @@ def test_a_tool_that_can_destroy_is_annotated_as_destructive() -> None:
 
     for name, why in destructive.items():
         annotations = surface[name]["annotations"]
-        assert annotations["destructive_hint"] is True, f"{name}: {why}"
-        assert annotations["read_only_hint"] is False, name
+        assert annotations["destructive_hint"] is True, (
+            f"{name} is annotated non-destructive, but {why}. Do not resolve "
+            "this by removing the tool from this list or flipping the "
+            "annotation to match the code -- the annotation describes what the "
+            "tool MAY do, and a client uses it to decide what to confirm "
+            "before running. Either the tool gained a destructive path and the "
+            "hint must follow, or the hint was weakened and belongs back at "
+            "True."
+        )
+        assert annotations["read_only_hint"] is False, (
+            f"{name} claims to be read-only while {why}. A client may run a "
+            "read-only tool without asking."
+        )
 
 
 def test_the_search_query_bound_is_published_in_the_input_schema() -> None:
@@ -293,8 +312,18 @@ def test_a_read_only_tool_is_not_annotated_destructive() -> None:
 
     for name in ("vault_search", "vault_get_note", "vault_list_review_cases"):
         annotations = surface[name]["annotations"]
-        assert annotations["read_only_hint"] is True, name
-        assert annotations["destructive_hint"] is False, name
+        assert annotations["read_only_hint"] is True, (
+            f"{name} stopped advertising itself as read-only. If it genuinely "
+            "gained a write, move it to the destructive list above rather than "
+            "deleting it from this one -- this half exists so the assertion "
+            "above cannot be satisfied by marking everything destructive, "
+            "which would make the hint useless in the other direction."
+        )
+        assert annotations["destructive_hint"] is False, (
+            f"{name} is a read tool marked destructive. Clients will start "
+            "confirming a call that changes nothing, and a confirmation "
+            "prompt that fires on reads trains people to dismiss it."
+        )
 
 
 if __name__ == "__main__":

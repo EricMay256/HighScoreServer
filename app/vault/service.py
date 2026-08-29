@@ -1521,6 +1521,40 @@ class SpanEdit:
 
 
 @dataclass(frozen=True, slots=True)
+class MetadataChange:
+    """The fields a metadata amendment may set, each optional.
+
+    ``None`` means "leave this alone" and an empty collection means "make this
+    empty", which is the distinction a caller needs in order to clear a field
+    without resending the ones it is not touching.
+
+    Deliberately excludes ``tags`` and ``aliases``. Both join
+    ``assemble_embedding_text``, so changing either is a change to what the note
+    means to search -- it needs a re-embed and a dedup run, and it can collide.
+    Excluding them is what lets this kind promise that it cannot alter
+    retrieval, which is the promise the whole operation is built on. See vault
+    ADR 0036.
+    """
+
+    related_ids: tuple[str, ...] | None = None
+    source_ids: tuple[str, ...] | None = None
+    facets: dict[str, list[str]] | None = None
+    source_url: str | None = None
+    # `source_url` is nullable in storage, so "set it to null" and "leave it
+    # alone" cannot both be spelled `None`. This says which was meant.
+    clear_source_url: bool = False
+
+    def is_empty(self) -> bool:
+        return (
+            self.related_ids is None
+            and self.source_ids is None
+            and self.facets is None
+            and self.source_url is None
+            and not self.clear_source_url
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AmendmentProposalRequest:
     target_document_id: str
     base_revision: int
@@ -1535,6 +1569,7 @@ class AmendmentProposalRequest:
     # adapter because the conversion needs the note's current body, which only
     # the service is allowed to read.
     span: SpanEdit | None = None
+    metadata: MetadataChange | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1552,6 +1587,100 @@ class AmendmentDecisionOutcome:
     proposal: VaultAmendmentProposal
     outcome: str
     target: VaultDocument | None
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataUpdateRequest:
+    """Apply a metadata change directly, for a caller holding update authority."""
+
+    document_id: str
+    base_revision: int
+    change: MetadataChange
+    principal_id: str
+    request_id: str
+
+
+class VaultDocumentMetadataService:
+    """Change a note's edges and classification without touching its content.
+
+    The applied counterpart of the `metadata` amendment kind (ADR 0036), and
+    deliberately *not* a thin wrapper over `VaultDocumentUpdateService`. That
+    service embeds outside the transaction, takes the corpus lock, and runs the
+    dedup gate, because an update can create a duplicate. None of that applies
+    here: every field this accepts is excluded from `assemble_embedding_text`,
+    so the note's embedding text is unchanged by construction, its vector still
+    describes it, and it cannot have become a duplicate of anything.
+
+    Skipping the gate is therefore a consequence of the payload rather than an
+    exemption granted to a caller — which is why the permitted keys are fixed
+    in the schema and not merely in this class.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def update(self, request: MetadataUpdateRequest) -> VaultDocument:
+        if request.change.is_empty():
+            raise ValueError("a metadata update must change at least one field")
+
+        documents = VaultDocumentRepository()
+        async with self._transactions.transaction() as connection:
+            # The corpus lock is still taken. Nothing here can collide, but the
+            # write is a read-modify-write against a row other governed writers
+            # also touch, and the revision check below is only as good as the
+            # window it runs in.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            target = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=READABLE_STATUSES,
+                readable_only=True,
+            )
+            if target is None:
+                raise DocumentNotFound(request.document_id)
+            if target.content_revision != request.base_revision:
+                raise AmendmentBaseRevisionMismatch(
+                    f"{request.document_id} is at revision "
+                    f"{target.content_revision}, not {request.base_revision}"
+                )
+
+            update_request = VaultAmendmentService._metadata_update(
+                request.change,
+                target,
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
+            candidate = VaultDocumentUpdateService._build_candidate(
+                target, update_request
+            )
+            errors = validate(candidate) + validate_facets(candidate.facets)
+            if errors:
+                raise ValueError("; ".join(errors))
+
+            updated = await documents.replace_content(
+                connection,
+                request.document_id,
+                candidate,
+                expected_revision=request.base_revision,
+            )
+            if updated is None:
+                raise AmendmentBaseRevisionMismatch(
+                    f"{request.document_id} changed while this update was in flight"
+                )
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.update_metadata",
+                outcome="updated",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=request.document_id,
+            )
+        return updated
 
 
 class VaultAmendmentService:
@@ -1959,7 +2088,84 @@ class VaultAmendmentService:
         )
 
     @classmethod
+    def _metadata_payload(cls, change: MetadataChange) -> dict[str, object]:
+        """Only the fields the caller actually set.
+
+        Omitting the untouched ones is what makes the stored proposal readable:
+        a reviewer sees the change rather than a whole document with four
+        differences in it.
+        """
+
+        payload: dict[str, object] = {}
+        if change.related_ids is not None:
+            payload["related_ids"] = list(change.related_ids)
+        if change.source_ids is not None:
+            payload["source_ids"] = list(change.source_ids)
+        if change.facets is not None:
+            payload["facets"] = dict(change.facets)
+        if change.clear_source_url:
+            payload["source_url"] = None
+        elif change.source_url is not None:
+            payload["source_url"] = change.source_url
+        if not payload:
+            raise ValueError("a metadata proposal must change at least one field")
+        return payload
+
+    @staticmethod
+    def _metadata_update(
+        change: MetadataChange,
+        target: VaultDocument,
+        *,
+        principal_id: str,
+        request_id: str,
+    ) -> UpdateRequest:
+        """The target with only the named metadata fields replaced.
+
+        Everything else comes from the stored row, which is what makes this a
+        metadata edit rather than a replacement that happens to keep most
+        fields: there is no request field that could reach the title or body
+        even by mistake.
+        """
+
+        source_url = target.source_url
+        if change.clear_source_url:
+            source_url = None
+        elif change.source_url is not None:
+            source_url = change.source_url
+
+        return UpdateRequest(
+            document_id=target.id,
+            title=target.title,
+            body=target.body,
+            principal_id=principal_id,
+            request_id=request_id,
+            summary=target.summary,
+            tags=target.tags,
+            aliases=target.aliases,
+            facets=dict(change.facets) if change.facets is not None else target.facets,
+            related_ids=(
+                tuple(change.related_ids)
+                if change.related_ids is not None
+                else target.related_ids
+            ),
+            source_ids=(
+                tuple(change.source_ids)
+                if change.source_ids is not None
+                else target.source_ids
+            ),
+            source_url=source_url,
+        )
+
+    @classmethod
     def _change_payload(cls, request: AmendmentProposalRequest) -> dict[str, object]:
+        if request.change_kind is AmendmentProposalKind.METADATA:
+            if request.metadata is None:
+                raise ValueError("metadata proposals require a metadata change")
+            if request.replacement is not None or request.body_diff is not None:
+                raise ValueError(
+                    "a metadata proposal carries neither replacement nor body_diff"
+                )
+            return cls._metadata_payload(request.metadata)
         if request.change_kind is AmendmentProposalKind.REPLACEMENT:
             if request.replacement is None or request.body_diff is not None:
                 raise ValueError("replacement proposals require only replacement content")
@@ -1974,6 +2180,15 @@ class VaultAmendmentService:
         request: AmendmentProposalRequest,
         target: VaultDocument,
     ) -> UpdateRequest:
+        if request.change_kind is AmendmentProposalKind.METADATA:
+            if request.metadata is None:
+                raise ValueError("metadata proposals require a metadata change")
+            return cls._metadata_update(
+                request.metadata,
+                target,
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
         if request.change_kind is AmendmentProposalKind.REPLACEMENT:
             if request.replacement is None or request.body_diff is not None:
                 raise ValueError("replacement proposals require only replacement content")
@@ -2019,6 +2234,27 @@ class VaultAmendmentService:
         principal_id: str,
         request_id: str,
     ) -> UpdateRequest:
+        if proposal.change_kind is AmendmentProposalKind.METADATA:
+            stored = proposal.change
+            change = MetadataChange(
+                related_ids=(
+                    tuple(stored["related_ids"]) if "related_ids" in stored else None
+                ),
+                source_ids=(
+                    tuple(stored["source_ids"]) if "source_ids" in stored else None
+                ),
+                facets=dict(stored["facets"]) if "facets" in stored else None,
+                source_url=stored.get("source_url"),
+                clear_source_url=(
+                    "source_url" in stored and stored["source_url"] is None
+                ),
+            )
+            return VaultAmendmentService._metadata_update(
+                change,
+                target,
+                principal_id=principal_id,
+                request_id=request_id,
+            )
         if proposal.change_kind is AmendmentProposalKind.BODY_DIFF:
             patch = proposal.change.get("body_diff")
             if not isinstance(patch, str):
