@@ -347,6 +347,9 @@ async def run(lexical_only: bool, validated_only: bool, show_misses: bool) -> in
             text_search_config=resolve_text_search_config(),
         )
 
+        if provider is not None:
+            await _warn_on_embedding_gaps(transactions, provider.profile_id)
+
         # Every title in the corpus and the paths it names, so a label that
         # resolves to nothing and a label that resolves to two documents are
         # both distinguished from a search miss. One query, not one per case.
@@ -360,6 +363,57 @@ async def run(lexical_only: bool, validated_only: bool, show_misses: bool) -> in
         if provider is not None:
             await provider.aclose()
         await engine.dispose()
+
+
+async def _warn_on_embedding_gaps(
+    transactions: VaultTransactionService, profile_id: str
+) -> None:
+    """Say so when the vector arm cannot see part of the corpus. Never fails.
+
+    `vector_status` reports whether the vector arm *ran*, which is a different
+    question from whether it could see everything: a document with no row for
+    the active profile is invisible to that arm however healthy the provider
+    is, and the lexical arm still returns it, so nothing in the response looks
+    wrong. Recall then reads a little low for a reason no number explains.
+
+    Keyed on the profile, because that is where this realistically goes wrong.
+    Every write path stores the vector in the same transaction as the content,
+    so drift is not routine -- but changing embedding model leaves every
+    existing row under the old profile, and the corpus is then fully embedded
+    and entirely invisible at the same time.
+
+    A warning rather than a refusal: partial coverage still measures something,
+    and the operator running this is the one who would be mid-migration.
+    """
+
+    from sqlalchemy import func, select
+
+    from app.vault.domain import DocumentStatus
+    from app.vault.read_policy import readable_path_predicate
+    from app.vault.tables import vault_document_embeddings, vault_documents
+
+    embedded = (
+        select(vault_document_embeddings.c.document_id)
+        .where(vault_document_embeddings.c.profile_id == profile_id)
+        .scalar_subquery()
+    )
+    statement = select(func.count()).select_from(vault_documents).where(
+        vault_documents.c.status == DocumentStatus.ACTIVE.value,
+        readable_path_predicate(),
+        vault_documents.c.id.notin_(embedded),
+    )
+    async with transactions.transaction() as connection:
+        missing = (await connection.execute(statement)).scalar_one()
+
+    if missing:
+        print(
+            f"coverage  : {missing} active document(s) have no embedding for "
+            f"{profile_id}.\n"
+            "            The vector arm cannot return them; the lexical arm "
+            "still can, so\n"
+            "            recall below is a floor rather than a measurement of "
+            "hybrid search."
+        )
 
 
 async def _corpus_by_title(
