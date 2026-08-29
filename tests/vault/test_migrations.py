@@ -337,3 +337,94 @@ def test_roll_forward_application_rollback_keeps_both_migration_graphs(
     assert version(shared_url, "vault", "vault_alembic_version") == (
         "0018_metadata_amendments"
     )
+
+
+def test_metadata_downgrade_removes_decided_proposals_not_only_pending_ones(
+    disposable_database_urls: dict[str, str],
+) -> None:
+    """The downgrade has to survive rows a real deployment would hold.
+
+    An earlier version of 0018 deleted only pending metadata proposals and kept
+    decided ones "as history". That is impossible rather than conservative: the
+    restored CHECK has no 'metadata' in its vocabulary, so a surviving accepted
+    row makes ADD CONSTRAINT fail and the rollback unavailable at exactly the
+    moment a rollback is wanted. Every existing migration test downgrades an
+    empty table, which is why the defect shipped.
+
+    If this fails, fix the migration -- do not narrow the fixture to pending
+    rows. An accepted proposal is the ordinary state of this table.
+    """
+
+    database_url = disposable_database_urls["shared"]
+    run_vault_migration(database_url, "head")
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            """
+            INSERT INTO vault.vault_amendment_proposals
+                (id, target_document_id, target_revision, change_kind, change,
+                 rationale, proposed_by, state)
+            VALUES (%s, 'note-pending', 1, 'metadata',
+                    '{"related_ids": ["a"]}'::jsonb, 'pending fixture',
+                    'agent:test', 'pending')
+            """,
+            (uuid4(),),
+        )
+        connection.execute(
+            """
+            INSERT INTO vault.vault_amendment_proposals
+                (id, target_document_id, target_revision, change_kind, change,
+                 rationale, proposed_by, state, decided_at, decided_by,
+                 applied_revision)
+            VALUES (%s, 'note-accepted', 1, 'metadata',
+                    '{"facets": {"area": ["x"]}}'::jsonb, 'accepted fixture',
+                    'agent:test', 'accepted', now(), 'agent:reviewer', 2)
+            """,
+            (uuid4(),),
+        )
+        connection.execute(
+            """
+            INSERT INTO vault.vault_amendment_proposals
+                (id, target_document_id, target_revision, change_kind, change,
+                 rationale, proposed_by, state, decided_at, decided_by)
+            VALUES (%s, 'note-kept', 1, 'body_diff',
+                    '{"body_diff": "unchanged by the downgrade"}'::jsonb,
+                    'other-kind fixture', 'agent:test', 'rejected', now(),
+                    'agent:reviewer')
+            """,
+            (uuid4(),),
+        )
+
+    config = Config(str(REPO_ROOT / "alembic-vault.ini"))
+    with migration_environment(
+        database_url_value=database_url,
+        vault_database_url_value=database_url,
+    ):
+        command.downgrade(config, "0017_oauth_entitlements")
+
+    with psycopg.connect(database_url) as connection:
+        surviving = {
+            row[0]
+            for row in connection.execute(
+                "SELECT target_document_id FROM vault.vault_amendment_proposals"
+            ).fetchall()
+        }
+        assert surviving == {"note-kept"}, (
+            "The downgrade left a metadata proposal behind, or removed a "
+            "proposal of another kind. Only the rows the restored CHECK cannot "
+            "describe should go."
+        )
+
+        # The constraint is back, which is the thing the deletion buys.
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                """
+                INSERT INTO vault.vault_amendment_proposals
+                    (id, target_document_id, target_revision, change_kind,
+                     change, rationale, proposed_by, state)
+                VALUES (%s, 'note-after', 1, 'metadata',
+                        '{"related_ids": ["a"]}'::jsonb, 'after downgrade',
+                        'agent:test', 'pending')
+                """,
+                (uuid4(),),
+            )

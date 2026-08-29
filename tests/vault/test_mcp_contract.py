@@ -43,6 +43,7 @@ import pytest
 from app.vault.api_models import (
     MAX_BODY_CHARS,
     MAX_DOCUMENT_ID_CHARS,
+    MAX_EDGE_IDS,
     MAX_RATIONALE_CHARS,
 )
 from app.vault.constants import SEARCH_QUERY_MAX_CHARS
@@ -332,11 +333,15 @@ if __name__ == "__main__":
 
 
 def test_the_span_edit_tool_publishes_its_bounds() -> None:
-    """The other amendment tools validate a Pydantic model, so their bounds
-    reach the schema for free. This one takes loose parameters, so the bounds
-    are declared on them -- and a bound only enforced in the body is one no
-    generated client can discover, and one that is checked after the corpus
-    lock is already held.
+    """A bound only enforced in the body is one no generated client can
+    discover, and one that is checked after the corpus lock is already held.
+
+    This tool's parameters are loose, so the bounds are declared on them. So
+    are every other write tool's: an earlier version of this docstring claimed
+    they "validate a Pydantic model, so their bounds reach the schema for
+    free", which is false and is why the edge parameters published none for so
+    long. Validating a model *inside* the function body tells a caller nothing;
+    only the annotation reaches the schema. See the edge-parameter test below.
     """
 
     server = build_vault_mcp_server()
@@ -361,3 +366,54 @@ def test_the_span_edit_tool_publishes_its_bounds() -> None:
         for member in properties["occurrence"]["anyOf"]
         if isinstance(member, dict)
     )
+
+
+def test_every_edge_parameter_publishes_its_bounds() -> None:
+    """The schema has to say what the server will refuse.
+
+    `related_ids`, `source_ids`, and `source_url` were plain `list[str]` and
+    `str` on all five write tools. The models bounded them, so an oversized
+    list or a malformed URL was rejected -- but only at call time, leaving a
+    generated client to discover the limit by being refused, and no client
+    able to validate before spending a request.
+
+    Asserted across every tool that takes edges rather than only the newest
+    two, because the gap was uniform and a fix on the tools a reviewer happened
+    to be looking at would leave the same hole in the older ones.
+
+    If a new write tool fails this, annotate its parameters with `EdgeIds` and
+    `SourceUrl` -- do not exempt the tool here.
+    """
+
+    server = build_vault_mcp_server()
+    edge_tools = [
+        tool
+        for tool in server._tool_manager.list_tools()
+        if "related_ids" in tool.parameters.get("properties", {})
+    ]
+
+    assert len(edge_tools) == 5, (
+        "The set of tools writing edges changed. Add the new one to the "
+        "expectation once its parameters carry the annotations."
+    )
+
+    for tool in edge_tools:
+        properties = tool.parameters["properties"]
+        for field in ("related_ids", "source_ids"):
+            array = next(
+                member
+                for member in properties[field]["anyOf"]
+                if member.get("type") == "array"
+            )
+            assert array["maxItems"] == MAX_EDGE_IDS, (
+                f"{tool.name}.{field} publishes no item bound. The value "
+                "belongs on the annotation; enforcing it only in the body "
+                "leaves the schema saying the server accepts any length."
+            )
+        # `format` sits beside the `anyOf` rather than inside it: it annotates
+        # the instance, and the null member is not a string to constrain.
+        assert properties["source_url"]["format"] == "uri", (
+            f"{tool.name}.source_url publishes no format. The model parses it "
+            "as AnyUrl, so a client sending a non-URL is refused either way -- "
+            "the schema should say so first."
+        )

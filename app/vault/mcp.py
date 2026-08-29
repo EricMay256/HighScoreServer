@@ -73,6 +73,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .api_models import (
     MAX_BODY_CHARS,
     MAX_DOCUMENT_ID_CHARS,
+    MAX_EDGE_IDS,
     MAX_RATIONALE_CHARS,
     VaultAmendmentDecisionResponse,
     VaultAmendmentProposalDetail,
@@ -176,6 +177,16 @@ _credential: ContextVar[VaultCredential | None] = ContextVar(
     "vault_mcp_credential",
     default=None,
 )
+
+# The edge parameters, annotated once so every tool that writes edges publishes
+# the same schema. The models have always enforced these bounds, but a bound the
+# server enforces and the schema omits is one a generated client cannot honour:
+# it discovers the limit by being refused. `format: uri` is carried as schema
+# metadata rather than by typing the parameter `AnyUrl`, because these values
+# flow into request payloads that are hashed for the request digest, and a
+# parsed URL object there would change what the digest is taken over.
+EdgeIds = Annotated[list[str] | None, Field(max_length=MAX_EDGE_IDS)]
+SourceUrl = Annotated[str | None, Field(json_schema_extra={"format": "uri"})]
 
 # Which scope each tool requires, and the single statement of it. The quota
 # operation deliberately reuses the HTTP surface's name: a separate "mcp.search"
@@ -663,9 +674,9 @@ def build_vault_mcp_server() -> VaultMCPServer:
         tags: list[str] | None = None,
         aliases: list[str] | None = None,
         facets: dict[str, list[str]] | None = None,
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
-        source_url: str | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        source_url: SourceUrl = None,
         response_detail: str = "outcome",
     ) -> VaultContributionResponse:
         """Contribute a note through the governed write path.
@@ -967,9 +978,9 @@ def build_vault_mcp_server() -> VaultMCPServer:
         tags: list[str] | None = None,
         aliases: list[str] | None = None,
         facets: dict[str, list[str]] | None = None,
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
-        source_url: str | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        source_url: SourceUrl = None,
     ) -> VaultDocumentUpdateResponse:
         """Replace one note's content in full.
 
@@ -1086,10 +1097,10 @@ def build_vault_mcp_server() -> VaultMCPServer:
     async def vault_update_note_metadata(
         note_id: Annotated[str, Field(min_length=1, max_length=MAX_DOCUMENT_ID_CHARS)],
         base_revision: Annotated[int, Field(ge=1)],
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
         facets: dict[str, list[str]] | None = None,
-        source_url: str | None = None,
+        source_url: SourceUrl = None,
         clear_source_url: bool = False,
     ) -> VaultDocumentUpdateResponse:
         """Change a note's edges or classification directly, without a review.
@@ -1196,9 +1207,9 @@ def build_vault_mcp_server() -> VaultMCPServer:
         tags: list[str] | None = None,
         aliases: list[str] | None = None,
         facets: dict[str, list[str]] | None = None,
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
-        source_url: str | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        source_url: SourceUrl = None,
     ) -> VaultAmendmentProposalResponse:
         """Propose a full replacement without editing the note.
 
@@ -1479,10 +1490,10 @@ def build_vault_mcp_server() -> VaultMCPServer:
         note_id: Annotated[str, Field(min_length=1, max_length=MAX_DOCUMENT_ID_CHARS)],
         base_revision: Annotated[int, Field(ge=1)],
         rationale: Annotated[str, Field(min_length=1, max_length=MAX_RATIONALE_CHARS)],
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
         facets: dict[str, list[str]] | None = None,
-        source_url: str | None = None,
+        source_url: SourceUrl = None,
         clear_source_url: bool = False,
     ) -> VaultAmendmentProposalResponse:
         """Change a note's edges or classification without resending it.

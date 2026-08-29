@@ -54,6 +54,7 @@ from .wikilinks import looks_like_a_name
 MAX_BODY_CHARS = 100_000
 MAX_RATIONALE_CHARS = 2_000
 MAX_DOCUMENT_ID_CHARS = 256
+MAX_EDGE_IDS = 50
 
 
 def validate_edge_ids(ids: list[str]) -> list[str]:
@@ -396,8 +397,8 @@ class VaultMetadataUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_revision: int = Field(ge=1)
-    related_ids: list[str] | None = Field(default=None, max_length=50)
-    source_ids: list[str] | None = Field(default=None, max_length=50)
+    related_ids: list[str] | None = Field(default=None, max_length=MAX_EDGE_IDS)
+    source_ids: list[str] | None = Field(default=None, max_length=MAX_EDGE_IDS)
     facets: dict[str, list[str]] | None = None
     source_url: AnyUrl | None = None
     clear_source_url: bool = False
@@ -440,8 +441,8 @@ class VaultMetadataChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["metadata"]
-    related_ids: list[str] | None = Field(default=None, max_length=50)
-    source_ids: list[str] | None = Field(default=None, max_length=50)
+    related_ids: list[str] | None = Field(default=None, max_length=MAX_EDGE_IDS)
+    source_ids: list[str] | None = Field(default=None, max_length=MAX_EDGE_IDS)
     facets: dict[str, list[str]] | None = None
     source_url: AnyUrl | None = None
     # Present here as well as on the applied request, because a REST proposer
