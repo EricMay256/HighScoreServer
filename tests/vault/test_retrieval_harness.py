@@ -103,7 +103,13 @@ def test_an_invalid_run_suppresses_its_aggregates_and_exits_nonzero(
     )
 
     output = capsys.readouterr().out
-    assert exit_code == 1
+    assert exit_code == 1, (
+        "An unscoreable run exited zero. Do not fix this by relaxing the exit "
+        "code: it is how a caller that does not read the output learns the "
+        "numbers are not quotable, and this harness exists to decide a design "
+        "question. Either label validation stopped invalidating the run, or "
+        "the aggregate path no longer checks it."
+    )
     assert "INVALID LABELS" in output
     assert "Aggregates suppressed" in output
     # The table itself never gets printed, so there is nothing to misread.

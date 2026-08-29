@@ -358,8 +358,54 @@ class VaultBodyDiffChange(BaseModel):
     body_diff: str = Field(min_length=1, max_length=MAX_BODY_DIFF_CHARS)
 
 
+class VaultMetadataUpdateRequest(BaseModel):
+    """A metadata-only edit, applied directly by an update-scoped caller.
+
+    Every field is optional and replaces the one it names. Absent means
+    unchanged, an empty list means empty, and `clear_source_url` says which of
+    those a null `source_url` meant -- over JSON the two are otherwise the same
+    thing on the wire.
+
+    `title`, `body`, `tags`, `aliases` and `summary` are absent by design. Each
+    joins `assemble_embedding_text` or is content outright, and excluding them
+    is what lets this path skip the re-embed and the dedup gate the full
+    replacement runs. See ADR 0036.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_revision: int = Field(ge=1)
+    related_ids: list[str] | None = Field(default=None, max_length=50)
+    source_ids: list[str] | None = Field(default=None, max_length=50)
+    facets: dict[str, list[str]] | None = None
+    source_url: AnyUrl | None = None
+    clear_source_url: bool = False
+
+
+class VaultMetadataChange(BaseModel):
+    """Edges and classification only, with each field optional.
+
+    An absent field means unchanged; an empty list or map means empty. That
+    distinction is the point of the kind: a caller can add one edge without
+    restating the note, and a reviewer sees the change rather than a document
+    with four differences hidden in it.
+
+    `tags` and `aliases` are absent on purpose -- both join the embedding text,
+    so editing them alters what the note means to search and belongs on the
+    replacement path that re-embeds and re-runs dedup. See vault ADR 0036.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["metadata"]
+    related_ids: list[str] | None = Field(default=None, max_length=50)
+    source_ids: list[str] | None = Field(default=None, max_length=50)
+    facets: dict[str, list[str]] | None = None
+    source_url: AnyUrl | None = None
+
+
 VaultAmendmentChange = Annotated[
-    VaultReplacementChange | VaultBodyDiffChange,
+    VaultReplacementChange | VaultBodyDiffChange | VaultMetadataChange,
     Field(discriminator="kind"),
 ]
 
@@ -1230,6 +1276,8 @@ def amendment_proposal_change(
 ) -> VaultAmendmentChange:
     if proposal.change_kind is AmendmentProposalKind.BODY_DIFF:
         return VaultBodyDiffChange(kind="body_diff", **proposal.change)
+    if proposal.change_kind is AmendmentProposalKind.METADATA:
+        return VaultMetadataChange(kind="metadata", **proposal.change)
     return VaultReplacementChange(
         kind="replacement",
         replacement=VaultDocumentUpdateRequest.model_validate(proposal.change),

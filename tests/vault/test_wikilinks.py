@@ -200,8 +200,18 @@ def test_an_id_that_arrives_twice_is_left_alone() -> None:
 
     resolution = resolve_edges([PAGE, PAGE], _index())
 
-    assert resolution.values == (PAGE, PAGE)
-    assert not resolution.changed
+    assert resolution.values == (PAGE, PAGE), (
+        "A pre-existing duplicate was collapsed. Do not accept this by "
+        "updating the expected value: the rule is that resolution collapses "
+        "what resolution created and nothing else, so a function that also "
+        "tidies its input has quietly taken on a second job and will rewrite "
+        "rows nobody asked it to touch."
+    )
+    assert not resolution.changed, (
+        "`changed` went true for input that was left identical, which makes "
+        "the repair script rewrite rows it does not need to and lose its "
+        "second-run-writes-nothing property."
+    )
 
 
 def test_a_name_shaped_value_that_names_nothing_is_dropped() -> None:
