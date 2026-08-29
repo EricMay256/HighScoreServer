@@ -162,3 +162,29 @@ def test_scoring_uses_paths_so_a_matching_title_is_not_a_hit() -> None:
     assert outcome.valid
     assert outcome.recall_at(5) == 0.0
     assert outcome.reciprocal_rank == 0.0
+
+
+def test_a_miss_is_reported_by_title_not_by_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scoring key and display label are different jobs.
+
+    Every path is `Agent/notes/<slug>.md` or `Agent/wiki/<slug>.md`, and the
+    slug is the title truncated to fit a filename -- so showing the path to a
+    human reading a miss shows a worse version of the label they wrote.
+    """
+
+    report(
+        [
+            _outcome(
+                relevant_paths=("Agent/notes/two-implementations-agreeing-is-str.md",),
+                returned_paths=("Agent/notes/something-else.md",),
+                titles=("Two implementations agreeing is stronger evidence",),
+            )
+        ],
+        show_misses=True,
+    )
+
+    output = capsys.readouterr().out
+    assert "wanted: Two implementations agreeing is stronger evidence" in output
+    assert "Agent/notes/" not in output

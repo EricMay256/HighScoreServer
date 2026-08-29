@@ -79,12 +79,22 @@ SEARCH_LIMIT = 10
 class CaseOutcome:
     """What one case found, and whether it was a fair question to ask.
 
-    Scoring is by ``vault_path`` rather than by title. A title is how a label
-    is *written* -- ids churn and a path is unreadable in a case file -- but it
-    is not an identity: this corpus permits two documents to share one, and
-    `test_wikilinks` pins that as legitimate. Scoring on titles let an
-    unrelated document with a matching title count as a relevant hit, which
-    inflates exactly the numbers this harness exists to decide a design on.
+    Labels are written as titles and scored as ``vault_path``, and the split is
+    deliberate in both directions.
+
+    A title is what a human can write and read in a case file, and it is what
+    the misses report prints. It is not an identity: `vault_path` carries a
+    unique constraint and `title` carries none, and the corpus deliberately
+    permits two documents to share a title (`test_wikilinks` pins that as
+    legitimate, and the resolver refuses to guess between them). Scoring on a
+    non-unique key let an unrelated document with a matching title count as a
+    relevant hit -- inflating the numbers this harness exists to decide a
+    design on, and doing it silently.
+
+    The path is not a *better* label, only an unambiguous one: every document
+    lives under `Agent/notes/` or `Agent/wiki/`, and the leaf is the title
+    slugified and truncated to a filename. That is why it is the scoring key
+    and never the thing displayed.
     """
 
     case: RetrievalCase
@@ -253,9 +263,14 @@ def report(outcomes: list[CaseOutcome], show_misses: bool) -> int:
         for outcome in misses:
             print(f"  [{outcome.case.category}] {outcome.case.query}")
             if show_misses:
-                print(f"      wanted: {', '.join(outcome.relevant_paths)}")
-                for path in outcome.returned_paths[:5]:
-                    print(f"      got   : {path}")
+                # Titles, not paths. Scoring uses the path because it is the
+                # unique key; a human reading a miss wants the label they
+                # wrote. The path's leaf is a slug of the title truncated to
+                # fit a filename, so printing it here would show a worse
+                # version of the same string.
+                print(f"      wanted: {', '.join(outcome.case.relevant_titles)}")
+                for title in outcome.returned_titles[:5]:
+                    print(f"      got   : {title}")
     print()
     return 0
 
