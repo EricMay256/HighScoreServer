@@ -3343,6 +3343,18 @@
           ],
           "type": "object"
         },
+        "VaultEdgeRef": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
         "VaultMetadataChange": {
           "additionalProperties": false,
           "properties": {
@@ -3412,6 +3424,144 @@
           },
           "required": [
             "kind"
+          ],
+          "type": "object"
+        },
+        "VaultMetadataPreview": {
+          "additionalProperties": false,
+          "properties": {
+            "changes_nothing": {
+              "type": "boolean"
+            },
+            "facets_after": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "facets_before": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "related_added": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "related_removed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "related_reordered": {
+              "type": "boolean"
+            },
+            "source_added": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "source_removed": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "source_reordered": {
+              "type": "boolean"
+            },
+            "source_url_after": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_url_before": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_url_changed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "related_added",
+            "related_removed",
+            "source_added",
+            "source_removed",
+            "source_url_changed",
+            "changes_nothing"
           ],
           "type": "object"
         },
@@ -3713,6 +3863,151 @@
                 "kind"
               ],
               "type": "object"
+            }
+          ]
+        },
+        "metadata_preview": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "changes_nothing": {
+                  "type": "boolean"
+                },
+                "facets_after": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "facets_before": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "related_added": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "related_removed": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "related_reordered": {
+                  "type": "boolean"
+                },
+                "source_added": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "source_removed": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "source_reordered": {
+                  "type": "boolean"
+                },
+                "source_url_after": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_url_before": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_url_changed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "related_added",
+                "related_removed",
+                "source_added",
+                "source_removed",
+                "source_url_changed",
+                "changes_nothing"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
             }
           ]
         },

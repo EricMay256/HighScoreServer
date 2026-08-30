@@ -56,6 +56,7 @@ from .api_models import (
     VaultSearchResponse,
     VaultSetSummaryRequest,
     VaultSetSummaryResponse,
+    amendment_metadata_preview,
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
@@ -1137,6 +1138,9 @@ async def read_amendment_proposal(proposal_id: UUID) -> VaultAmendmentProposalDe
         change=amendment_proposal_change(proposal),
         target=document_detail(target) if target is not None else None,
         preview=amendment_preview(service.preview(proposal, target)),
+        metadata_preview=amendment_metadata_preview(
+            await service.metadata_preview(proposal, target)
+        ),
     )
 
 

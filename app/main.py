@@ -225,6 +225,7 @@ def create_app() -> FastAPI:
         public_url = (os.environ.get("VAULT_PUBLIC_URL") or "").rstrip("/")
         if public_url:
             from app.vault.oauth_routes import build_vault_oauth_routes
+            from app.vault.review_console import build_vault_review_routes
 
             app.router.routes.extend(
                 build_vault_oauth_routes(
@@ -232,6 +233,10 @@ def create_app() -> FastAPI:
                     mcp_url=f"{public_url}/api/v1/vault/mcp",
                 )
             )
+            # The review console authorizes itself through the routes above, so
+            # it is gated on the same variable: without a reachable issuer it
+            # could render but never sign in. See vault ADR 0037.
+            app.router.routes.extend(build_vault_review_routes())
     # 5. SPA assets mount — MUST come before the SPA catch-all router below.
     spa_routes.mount_spa_assets(app)
     # 6. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.

@@ -305,6 +305,70 @@ class VaultAmendmentProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class EdgeRef:
+    """One edge in a review preview, with the title it points at.
+
+    ``title`` is ``None`` when the id resolves to no document. Edges are not
+    existence-checked on write (ADR 0025), so a proposal may legitimately
+    reference a note that is archived, or illegitimately reference one that was
+    never written. A reviewer is the first person positioned to tell those
+    apart, so the preview reports the absence rather than hiding it.
+    """
+
+    id: str
+    title: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataChangeSummary:
+    """What a metadata proposal changes, rendered for a human reviewer.
+
+    The body-shaped preview cannot describe this kind: a metadata change leaves
+    the body byte-identical, so ``summarize_body_change`` correctly reports an
+    empty diff and the reviewer learns nothing. This is the counterpart that
+    says what actually moved.
+
+    Edges are carried as ``EdgeRef`` rather than bare ids because the decision
+    a reviewer makes is "do these two notes belong together", and a 32-character
+    id cannot be judged. Facets and the source URL are reported as before/after
+    pairs, left ``None`` when the proposal does not touch them, so "unchanged"
+    and "changed to empty" stay distinguishable.
+    """
+
+    related_added: tuple[EdgeRef, ...] = ()
+    related_removed: tuple[EdgeRef, ...] = ()
+    source_added: tuple[EdgeRef, ...] = ()
+    source_removed: tuple[EdgeRef, ...] = ()
+    # Same members, different order. Additions and removals are set
+    # differences, so a pure reorder produces neither -- and `related_ids` is a
+    # stored ordered array, so accepting one still rewrites the column and
+    # advances the revision. Reporting that as "changes nothing" would invite a
+    # reviewer to wave through a write on the grounds that it is not a write.
+    related_reordered: bool = False
+    source_reordered: bool = False
+    facets_before: dict[str, list[str]] | None = None
+    facets_after: dict[str, list[str]] | None = None
+    source_url_before: str | None = None
+    source_url_after: str | None = None
+    source_url_changed: bool = False
+
+    @property
+    def is_empty(self) -> bool:
+        """True when the proposal would change nothing on the current base."""
+
+        return not (
+            self.related_added
+            or self.related_removed
+            or self.source_added
+            or self.source_removed
+            or self.related_reordered
+            or self.source_reordered
+            or self.facets_before != self.facets_after
+            or self.source_url_changed
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PoolSnapshot:
     pool_size: int
     checked_out: int

@@ -95,6 +95,7 @@ from .api_models import (
     VaultSearchResponse,
     VaultSetSummaryRequest,
     VaultSetSummaryResponse,
+    amendment_metadata_preview,
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
@@ -1867,6 +1868,9 @@ def build_vault_mcp_server() -> VaultMCPServer:
             change=amendment_proposal_change(proposal),
             target=document_detail(target) if target is not None else None,
             preview=preview,
+            metadata_preview=amendment_metadata_preview(
+                await service.metadata_preview(proposal, target)
+            ),
         )
 
     @server.tool(

@@ -109,6 +109,20 @@ Review becomes tractable. A metadata proposal renders as the change — "these
 four edges" — instead of as a document a reviewer must diff against the stored
 one to find the difference.
 
+That was true of the payload and false of the review surface, which this ADR
+originally failed to consider. `preview` summarizes a *body* change, so for
+this kind it correctly reported an empty diff: the one field designed to tell a
+reviewer what a proposal does said nothing about the only kind whose whole
+point is to be easy to review. Worse, the sparse payload it left them with is a
+list of 32-character ids, and "do these two notes belong together" is not a
+question anyone can answer from an id.
+
+`metadata_preview` is the counterpart, carried beside `preview` rather than
+replacing it, and resolves every added and removed edge to its title. A null
+title is reported rather than hidden: edges are not existence-checked on write
+(ADR 0025), so the reviewer is the first person positioned to tell a legitimate
+reference to an archived note from a typo that points at nothing.
+
 The kind is not general. Editing tags still means a full replacement, and a
 caller who wants to change a body *and* an edge needs two proposals or one
 replacement. That is the intended shape: the cheapness is bought by the

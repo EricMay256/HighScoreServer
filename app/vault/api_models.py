@@ -35,6 +35,8 @@ from .domain import (
     CompileWorkItem,
     DocumentKind,
     DocumentStatus,
+    EdgeRef,
+    MetadataChangeSummary,
     VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
@@ -588,6 +590,7 @@ class VaultAmendmentProposalDetail(BaseModel):
     change: VaultAmendmentChange
     target: "VaultDocumentDetail | None"
     preview: "VaultAmendmentPreview | None"
+    metadata_preview: "VaultMetadataPreview | None" = None
 
 
 class VaultRemovedBodyLine(BaseModel):
@@ -607,6 +610,61 @@ class VaultAmendmentPreview(BaseModel):
     removed_line_count: int = Field(ge=0)
     hunk_count: int = Field(ge=0)
     requires_removal_acknowledgement: bool
+
+
+class VaultEdgeRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str | None = Field(
+        default=None,
+        description=(
+            "The title this edge points at, or null when the id resolves to no "
+            "document. Edges are not existence-checked on write (ADR 0025), so "
+            "null means the reviewer should look: an archived note is "
+            "legitimate, a note that was never written is a dangling edge."
+        ),
+    )
+
+
+class VaultMetadataPreview(BaseModel):
+    """What a metadata proposal changes, resolved for a human reviewer.
+
+    Present only for `change_kind: "metadata"`. The sibling `preview` field
+    describes a *body* change, which this kind cannot have -- it reports an
+    empty diff, truthfully and uselessly. Read this instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    related_added: list[VaultEdgeRef]
+    related_removed: list[VaultEdgeRef]
+    source_added: list[VaultEdgeRef]
+    source_removed: list[VaultEdgeRef]
+    related_reordered: bool = Field(
+        default=False,
+        description=(
+            "Same edges, different order. Additions and removals are set "
+            "differences and report nothing here, but the stored list is "
+            "ordered, so accepting still rewrites it and advances the revision."
+        ),
+    )
+    source_reordered: bool = False
+    facets_before: dict[str, list[str]] | None = Field(
+        default=None,
+        description="Null when the proposal does not touch facets at all.",
+    )
+    facets_after: dict[str, list[str]] | None = None
+    source_url_before: str | None = None
+    source_url_after: str | None = None
+    source_url_changed: bool
+    changes_nothing: bool = Field(
+        description=(
+            "True when the proposal would leave the note exactly as it is. A "
+            "reviewer can accept it harmlessly, but it is worth seeing: it "
+            "usually means the change already landed by another route."
+        )
+    )
 
 
 class VaultAmendmentDecisionRequest(BaseModel):
@@ -1408,6 +1466,31 @@ def amendment_proposal_change(
     return VaultReplacementChange(
         kind="replacement",
         replacement=VaultDocumentUpdateRequest.model_validate(proposal.change),
+    )
+
+
+def amendment_metadata_preview(
+    summary: MetadataChangeSummary | None,
+) -> VaultMetadataPreview | None:
+    if summary is None:
+        return None
+
+    def refs(items: tuple[EdgeRef, ...]) -> list[VaultEdgeRef]:
+        return [VaultEdgeRef(id=item.id, title=item.title) for item in items]
+
+    return VaultMetadataPreview(
+        related_added=refs(summary.related_added),
+        related_removed=refs(summary.related_removed),
+        source_added=refs(summary.source_added),
+        source_removed=refs(summary.source_removed),
+        related_reordered=summary.related_reordered,
+        source_reordered=summary.source_reordered,
+        facets_before=summary.facets_before,
+        facets_after=summary.facets_after,
+        source_url_before=summary.source_url_before,
+        source_url_after=summary.source_url_after,
+        source_url_changed=summary.source_url_changed,
+        changes_nothing=summary.is_empty,
     )
 
 

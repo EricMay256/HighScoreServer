@@ -919,3 +919,192 @@ def test_rest_refuses_a_source_url_that_is_both_set_and_cleared(
     finally:
         _cleanup()
         _drop(credential_id)
+
+
+def test_a_metadata_proposal_previews_its_edges_with_titles(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """The review surface has to describe a change that touches no body.
+
+    `preview` summarizes a *body* change, and a metadata proposal has none by
+    construction -- so it reported an empty diff, truthfully and uselessly, and
+    a reviewer reading that pane learned nothing about a change that can rewire
+    a note's whole position in the graph. That is the gap this covers.
+
+    Titles rather than ids because the decision being made is "do these two
+    notes belong together", and a 32-character id cannot be judged. If this
+    fails on the titles, resolve them -- do not drop the assertion back to ids.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    neighbour_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": [neighbour_id]},
+                "rationale": "Connect these two.",
+            },
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        detail = client.get(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}",
+            headers=_headers(reviewer),
+        )
+        assert detail.status_code == 200, detail.text
+        preview = detail.json()["metadata_preview"]
+
+        assert preview is not None, (
+            "A metadata proposal came back with no metadata preview. The body "
+            "preview cannot describe this kind -- it has no body change -- so "
+            "without this a reviewer sees an empty diff and nothing else."
+        )
+        assert preview["related_added"] == [
+            {"id": neighbour_id, "title": "Shell transport constraints"}
+        ]
+        assert preview["related_removed"] == []
+        assert preview["changes_nothing"] is False
+        # Untouched fields report None rather than an empty value, so
+        # "not mentioned" stays distinguishable from "set to empty".
+        assert preview["facets_before"] is None
+        assert preview["source_url_changed"] is False
+    finally:
+        _cleanup()
+
+
+def test_a_metadata_preview_reports_an_edge_that_points_at_nothing(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """A dangling edge is exactly what a reviewer is there to catch.
+
+    Edges are not existence-checked on write (ADR 0025) because a note may
+    reference one that is archived or not yet written. That makes the reviewer
+    the first person positioned to tell a legitimate forward reference from a
+    typo, so the preview reports a null title rather than omitting the edge.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    missing = "0" * 32
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": [missing]},
+                "rationale": "Point at a note that does not exist.",
+            },
+        )
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+        detail = client.get(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}",
+            headers=_headers(reviewer),
+        )
+
+        assert detail.json()["metadata_preview"]["related_added"] == [
+            {"id": missing, "title": None}
+        ]
+    finally:
+        _cleanup()
+
+
+def test_a_body_proposal_has_no_metadata_preview(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """The two previews describe different kinds and must not both fire."""
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_id),
+        )
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+        detail = client.get(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}",
+            headers=_headers(reviewer),
+        ).json()
+
+        assert detail["metadata_preview"] is None
+        assert detail["preview"] is not None, (
+            "A replacement lost its body preview. The metadata preview is an "
+            "addition beside it, not a replacement for it."
+        )
+    finally:
+        _cleanup()
+
+
+def test_reordering_edges_is_not_reported_as_changing_nothing(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """A pure reorder is a write, and the preview has to say so.
+
+    Additions and removals are set differences, so swapping [a, b] to [b, a]
+    produces neither -- and `related_ids` is a stored ordered array, so
+    accepting still rewrites the column and advances the revision. Reporting
+    `changes_nothing` there invites a reviewer to wave a write through on the
+    grounds that it is not one.
+
+    Do not fix a failure here by making the comparison order-insensitive: that
+    is the bug. Either the preview reports the reorder or the write path stops
+    preserving order, and it does preserve it.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    first, second = _seed_note(), _seed_note()
+    try:
+        seeded = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": [first, second]},
+                "rationale": "Establish an order.",
+            },
+        )
+        accepted = client.post(
+            f"/api/v1/vault/amendment-proposals/{seeded.json()['proposal']['proposal_id']}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+        assert accepted.status_code == 200, accepted.text
+
+        swapped = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 2,
+                "change": {"kind": "metadata", "related_ids": [second, first]},
+                "rationale": "Same edges, opposite order.",
+            },
+        )
+        assert swapped.status_code == 200, swapped.text
+        detail = client.get(
+            f"/api/v1/vault/amendment-proposals/{swapped.json()['proposal']['proposal_id']}",
+            headers=_headers(reviewer),
+        ).json()
+        preview = detail["metadata_preview"]
+
+        assert preview["related_added"] == []
+        assert preview["related_removed"] == []
+        assert preview["related_reordered"] is True
+        assert preview["changes_nothing"] is False, (
+            "A reorder was reported as changing nothing. It rewrites the "
+            "stored ordered list and bumps the revision, so a reviewer told "
+            "otherwise is being told something false about a write."
+        )
+    finally:
+        _cleanup()

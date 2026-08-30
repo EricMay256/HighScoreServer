@@ -486,6 +486,28 @@ class VaultDocumentRepository:
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
 
+    async def titles_for(
+        self,
+        connection: AsyncConnection,
+        document_ids: Sequence[str],
+    ) -> dict[str, str]:
+        """Title for each id that resolves, in one query.
+
+        For rendering edges to a human. Unfiltered by status for the same
+        reason ``get_by_id`` is: an edge may point at an archived note, and a
+        reviewer needs to see that it points at *something* rather than have it
+        reported as dangling. Ids that resolve to nothing are simply absent
+        from the mapping; the caller decides what an absence means.
+        """
+
+        if not document_ids:
+            return {}
+        statement = select(
+            vault_documents.c.id, vault_documents.c.title
+        ).where(vault_documents.c.id.in_(list(dict.fromkeys(document_ids))))
+        result = await connection.execute(statement)
+        return {row.id: row.title for row in result}
+
     async def list_under_path_prefixes(
         self,
         connection: AsyncConnection,
