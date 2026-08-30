@@ -20,9 +20,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {# Authorization pages must not be framed: a clickjacked consent screen is a
-   scope grant the operator did not intend. The header is set on the response
-   too; this is the belt to those braces. #}
-<meta http-equiv="Content-Security-Policy" content="frame-ancestors 'none'">
+   scope grant the operator did not intend.
+
+   That protection is the `Content-Security-Policy` and `X-Frame-Options`
+   headers on the response, and only those. A `<meta http-equiv>` CSP carrying
+   `frame-ancestors` used to sit here as "belt to those braces", but the belt
+   was never fastened: the directive is ignored outright when delivered by a
+   meta element, and every browser logged an error saying so. Framing was
+   prevented by the header the whole time, so the tag added a warning and no
+   defence. Do not restore it -- add directives to the response headers in
+   `oauth_routes.py`, where they take effect. #}
 <title>Authorize access &middot; vault</title>
 <style>
   :root { color-scheme: light dark; }

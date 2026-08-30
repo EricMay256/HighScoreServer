@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault review</title>
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #fff; --ink: #1a1a19; --muted: #6b6b66;
+  --line: #e2e2dd; --accept: #1f6f43; --reject: #96341f; --warn: #8a5a00;
+  --add: #1f6f43; --del: #96341f; --chip: #f0efea;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161614; --panel: #1e1d1b; --ink: #ece9e3; --muted: #9d9a92;
+    --line: #322f2b; --accept: #6cc08b; --reject: #e08a70; --warn: #d3a343;
+    --add: #6cc08b; --del: #e08a70; --chip: #2a2825;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header {
+  display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+  padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 5;
+}
+h1 { font-size: 1.05rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+main { max-width: 68rem; margin: 0 auto; padding: 1.25rem; }
+button {
+  font: inherit; border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.accept { color: var(--accept); border-color: var(--accept); }
+button.reject { color: var(--reject); border-color: var(--reject); }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.tabs { display: flex; gap: 0.4rem; margin-bottom: 1rem; }
+.tab[aria-selected="true"] { background: var(--chip); font-weight: 600; }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 0.85rem 1rem; margin-bottom: 0.7rem;
+}
+.row { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
+.grow { flex: 1 1 18rem; min-width: 0; }
+.kind {
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 0.1rem 0.4rem; border-radius: 4px; background: var(--chip); color: var(--muted);
+}
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; }
+.title { font-weight: 600; }
+.edge { display: block; padding: 0.1rem 0; }
+.edge.add::before { content: "+ "; color: var(--add); font-weight: 700; }
+.edge.del::before { content: "\2212 "; color: var(--del); font-weight: 700; }
+.dangling { color: var(--warn); font-style: italic; }
+pre {
+  background: var(--chip); padding: 0.6rem 0.75rem; border-radius: 6px;
+  overflow-x: auto; font-size: 0.82rem; margin: 0.5rem 0 0;
+}
+.diff-add { color: var(--add); }
+.diff-del { color: var(--del); }
+.notice {
+  border: 1px solid var(--warn); border-left-width: 4px; border-radius: 6px;
+  padding: 0.7rem 0.9rem; margin-bottom: 1rem; background: var(--panel);
+}
+.danger { border-color: var(--reject); }
+details > summary { cursor: pointer; color: var(--muted); font-size: 0.88rem; }
+label.check { display: flex; gap: 0.4rem; align-items: center; font-size: 0.88rem; }
+.hidden { display: none !important; }
+.bulkbar {
+  position: sticky; bottom: 0; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0.6rem 0.9rem; display: flex; gap: 0.7rem;
+  align-items: center; flex-wrap: wrap; margin-top: 0.8rem;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Vault review</h1>
+  <span id="who" class="muted small"></span>
+  <span class="grow"></span>
+  <button id="refresh" class="hidden">Refresh</button>
+  <button id="signin" class="primary hidden">Sign in</button>
+  <button id="signout" class="hidden">Sign out</button>
+</header>
+<main>
+  <div id="messages"></div>
+  <div id="app" class="hidden">
+    <div class="tabs">
+      <button class="tab" id="tab-proposals" aria-selected="true">Amendment proposals</button>
+      <button class="tab" id="tab-cases" aria-selected="false">Near-duplicate cases</button>
+    </div>
+    <div id="panel-proposals"></div>
+    <div id="panel-cases" class="hidden"></div>
+  </div>
+</main>
+
+<script id="cfg" type="application/json">{{ {"apiBase": api_base, "scopes": scopes, "reviewPath": review_path} | tojson }}</script>
+<script>
+"use strict";
+const CFG = JSON.parse(document.getElementById("cfg").textContent);
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+
+/* ---------- OAuth: authorization code + PKCE against our own AS ---------- */
+/* The token lives in sessionStorage, not localStorage: it is a one-hour
+   reviewer credential and it should not outlive the tab that earned it. */
+const STORE = { client: "vault.review.client_id", verifier: "vault.review.pkce",
+                state: "vault.review.state", token: "vault.review.token" };
+let TOKEN = sessionStorage.getItem(STORE.token) || null;
+let META = null;
+
+const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const randomString = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
+
+async function metadata() {
+  if (META) return META;
+  const r = await fetch("/.well-known/oauth-authorization-server");
+  if (!r.ok) throw new Error("This deployment is not serving OAuth metadata (is VAULT_PUBLIC_URL set?)");
+  META = await r.json();
+  return META;
+}
+
+async function clientId() {
+  const cached = localStorage.getItem(STORE.client);
+  if (cached) return cached;
+  const m = await metadata();
+  const redirect = window.location.origin + CFG.reviewPath;
+  const r = await fetch(m.registration_endpoint, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_name: "Vault review console",
+      redirect_uris: [redirect],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+      scope: CFG.scopes,
+    }),
+  });
+  if (!r.ok) throw new Error("Client registration failed: " + (await r.text()).slice(0, 200));
+  const id = (await r.json()).client_id;
+  localStorage.setItem(STORE.client, id);
+  return id;
+}
+
+async function signIn() {
+  const m = await metadata();
+  const id = await clientId();
+  const verifier = randomString();
+  const state = randomString();
+  sessionStorage.setItem(STORE.verifier, verifier);
+  sessionStorage.setItem(STORE.state, state);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const url = new URL(m.authorization_endpoint);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", id);
+  url.searchParams.set("redirect_uri", window.location.origin + CFG.reviewPath);
+  url.searchParams.set("scope", CFG.scopes);
+  url.searchParams.set("state", state);
+  url.searchParams.set("code_challenge", b64url(digest));
+  url.searchParams.set("code_challenge_method", "S256");
+  window.location.assign(url.toString());
+}
+
+async function completeSignIn(code, state) {
+  if (state !== sessionStorage.getItem(STORE.state)) {
+    throw new Error("Authorization state did not match. Start again.");
+  }
+  const m = await metadata();
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: window.location.origin + CFG.reviewPath,
+    client_id: await clientId(),
+    code_verifier: sessionStorage.getItem(STORE.verifier) || "",
+  });
+  const r = await fetch(m.token_endpoint, {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body,
+  });
+  if (!r.ok) throw new Error("Token exchange failed: " + (await r.text()).slice(0, 200));
+  TOKEN = (await r.json()).access_token;
+  sessionStorage.setItem(STORE.token, TOKEN);
+  sessionStorage.removeItem(STORE.verifier);
+  sessionStorage.removeItem(STORE.state);
+  window.history.replaceState({}, "", CFG.reviewPath);
+}
+
+function signOut() {
+  TOKEN = null;
+  sessionStorage.removeItem(STORE.token);
+  render();
+}
+
+/* `hssv1_<credential-id>_<secret>`. The console shows the id so the operator
+   can name this exact family when granting the entitlement -- otherwise the
+   command below is a scavenger hunt through `issue_vault_credential list`. */
+const credentialId = () => (TOKEN && TOKEN.split("_").length >= 3) ? TOKEN.split("_")[1] : null;
+
+/* ---------- API ---------- */
+async function api(path, options) {
+  const opts = Object.assign({ headers: {} }, options || {});
+  opts.headers = Object.assign({ Authorization: "Bearer " + TOKEN }, opts.headers);
+  const r = await fetch(CFG.apiBase + path, opts);
+  if (r.status === 401) { signOut(); throw new Error("Session expired. Sign in again."); }
+  if (r.status === 403) { const e = new Error("forbidden"); e.forbidden = true; throw e; }
+  if (!r.ok) throw new Error((await r.text()).slice(0, 300));
+  return r.json();
+}
+
+/* ---------- Messages ---------- */
+function say(kind, node) {
+  const box = el("div", kind === "danger" ? "notice danger" : "notice");
+  box.appendChild(node);
+  $("messages").appendChild(box);
+}
+function clearMessages() { $("messages").textContent = ""; }
+
+function entitlementHelp() {
+  const wrap = document.createElement("div");
+  wrap.appendChild(el("strong", null, "This credential cannot review yet."));
+  wrap.appendChild(el("p", "small",
+    "Signing in grants vault:read only — vault:review is never issued by request, "
+    + "and a browser authorization creates a fresh family that inherits no privileged "
+    + "scopes. Grant it once from an operator shell, then refresh:"));
+  const id = credentialId();
+  wrap.appendChild(el("pre", "mono",
+    "python -m scripts.issue_vault_credential grant-oauth --id "
+    + (id || "<credential-id>") + " --scopes vault:review"));
+  wrap.appendChild(el("p", "small muted",
+    "vault:review may only be granted to a family holding vault:read alone, so this "
+    + "console is deliberately a separate client from anything that contributes or proposes."));
+  return wrap;
+}
+
+/* ---------- Rendering: amendment proposals ---------- */
+function edgeLine(ref, cls) {
+  const n = el("span", "edge " + cls);
+  if (ref.title === null) {
+    n.appendChild(el("span", "mono", ref.id.slice(0, 8)));
+    n.appendChild(el("span", "dangling", "  — points at no document"));
+  } else {
+    n.appendChild(document.createTextNode(ref.title));
+    n.appendChild(el("span", "muted mono", "  " + ref.id.slice(0, 8)));
+  }
+  return n;
+}
+
+function metadataPreview(preview) {
+  const box = document.createElement("div");
+  const groups = [
+    ["related_added", "add"], ["related_removed", "del"],
+    ["source_added", "add"], ["source_removed", "del"],
+  ];
+  let any = false;
+  for (const [key, cls] of groups) {
+    const items = preview[key] || [];
+    if (!items.length) continue;
+    any = true;
+    box.appendChild(el("div", "small muted", key.replace("_", " ")));
+    for (const ref of items) box.appendChild(edgeLine(ref, cls));
+  }
+  if (preview.facets_before !== null || preview.facets_after !== null) {
+    any = true;
+    box.appendChild(el("div", "small muted", "facets"));
+    box.appendChild(el("pre", "mono",
+      JSON.stringify(preview.facets_before) + "\n→ " + JSON.stringify(preview.facets_after)));
+  }
+  if (preview.source_url_changed) {
+    any = true;
+    box.appendChild(el("div", "small muted", "source url"));
+    box.appendChild(el("pre", "mono",
+      String(preview.source_url_before) + "\n→ " + String(preview.source_url_after)));
+  }
+  if (preview.changes_nothing) {
+    box.appendChild(el("p", "small dangling",
+      "This proposal would leave the note exactly as it is — the change most likely landed by another route."));
+  } else if (!any) {
+    box.appendChild(el("p", "small muted", "No metadata differences against the current revision."));
+  }
+  return box;
+}
+
+function bodyPreview(preview) {
+  const box = document.createElement("div");
+  box.appendChild(el("div", "small muted",
+    preview.added_line_count + " added, " + preview.removed_line_count
+    + " removed, " + preview.hunk_count + " hunk(s)"));
+  const pre = el("pre", "mono");
+  for (const line of (preview.unified_diff || "").split("\n")) {
+    const span = el("span", line.startsWith("+") ? "diff-add"
+      : line.startsWith("-") ? "diff-del" : null, line + "\n");
+    pre.appendChild(span);
+  }
+  box.appendChild(pre);
+  return box;
+}
+
+async function proposalCard(summary) {
+  const card = el("div", "card");
+  card.dataset.proposalId = summary.proposal_id;
+
+  const head = el("div", "row");
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.className = "select";
+  head.appendChild(check);
+  head.appendChild(el("span", "kind", summary.change_kind));
+  const titleSlot = el("span", "title grow", summary.target_note_id.slice(0, 8) + "…");
+  head.appendChild(titleSlot);
+  head.appendChild(el("span", "muted small", "base rev " + summary.base_revision));
+  card.appendChild(head);
+  card.appendChild(el("p", "small", summary.rationale));
+
+  const detailSlot = el("div");
+  card.appendChild(detailSlot);
+
+  const actions = el("div", "row");
+  const note = document.createElement("input");
+  note.placeholder = "decision note (optional)";
+  note.className = "grow";
+  note.style.cssText = "padding:.35rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)";
+  const accept = el("button", "accept", "Accept");
+  const reject = el("button", "reject", "Reject");
+  actions.append(note, accept, reject);
+  card.appendChild(actions);
+
+  let ack = null;
+  try {
+    const detail = await api("/amendment-proposals/" + summary.proposal_id);
+    if (detail.target) titleSlot.textContent = detail.target.title;
+    if (detail.metadata_preview) {
+      detailSlot.appendChild(metadataPreview(detail.metadata_preview));
+      if (detail.metadata_preview.changes_nothing) check.disabled = true;
+    } else if (detail.preview) {
+      const d = document.createElement("details");
+      d.appendChild(el("summary", null, "Body diff"));
+      d.appendChild(bodyPreview(detail.preview));
+      detailSlot.appendChild(d);
+      if (detail.preview.requires_removal_acknowledgement) {
+        const wrap = el("label", "check");
+        ack = document.createElement("input");
+        ack.type = "checkbox";
+        wrap.append(ack, document.createTextNode(
+          "Acknowledge " + detail.preview.removed_line_count + " removed line(s)"));
+        detailSlot.appendChild(wrap);
+        check.disabled = true; // never bulk-accept a removal
+      }
+    } else {
+      detailSlot.appendChild(el("p", "small dangling",
+        "No preview: the note has moved since this proposal was written, so it will settle as stale."));
+      check.disabled = true;
+    }
+  } catch (err) {
+    detailSlot.appendChild(el("p", "small dangling", "Could not load detail: " + err.message));
+  }
+
+  const decide = async (decision) => {
+    accept.disabled = reject.disabled = true;
+    try {
+      const out = await api("/amendment-proposals/" + summary.proposal_id + "/decision", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          decision, decision_note: note.value || null,
+          acknowledge_removals: ack ? ack.checked : false,
+        }),
+      });
+      card.replaceChildren(el("div", "row small muted",
+        "✓ " + out.outcome + " — " + (detailTitle(titleSlot))));
+    } catch (err) {
+      accept.disabled = reject.disabled = false;
+      detailSlot.appendChild(el("p", "small dangling", "Refused: " + err.message));
+    }
+  };
+  const detailTitle = (slot) => slot.textContent;
+  accept.onclick = () => decide("accepted");
+  reject.onclick = () => decide("rejected");
+  card.decide = decide;
+  card.checkbox = check;
+  return card;
+}
+
+async function renderProposals() {
+  const panel = $("panel-proposals");
+  panel.replaceChildren(el("p", "muted", "Loading…"));
+  const queue = await api("/amendment-proposals?limit=200");
+  panel.replaceChildren();
+  if (!queue.count) {
+    panel.appendChild(el("p", "muted", "Nothing pending."));
+    return;
+  }
+  panel.appendChild(el("p", "small muted", queue.count + " pending"));
+  const cards = [];
+  for (const summary of queue.pending) {
+    const card = await proposalCard(summary);
+    cards.push(card);
+    panel.appendChild(card);
+  }
+
+  const bar = el("div", "bulkbar");
+  const selectAll = el("button", null, "Select all metadata");
+  const acceptSelected = el("button", "accept", "Accept selected");
+  const status = el("span", "small muted", "");
+  bar.append(selectAll, acceptSelected, status);
+  panel.appendChild(bar);
+
+  selectAll.onclick = () => {
+    for (const c of cards) {
+      if (!c.checkbox.disabled && c.dataset && c.querySelector(".kind").textContent === "metadata") {
+        c.checkbox.checked = true;
+      }
+    }
+  };
+  acceptSelected.onclick = async () => {
+    const chosen = cards.filter((c) => c.checkbox && c.checkbox.checked && !c.checkbox.disabled);
+    acceptSelected.disabled = selectAll.disabled = true;
+    let done = 0;
+    for (const c of chosen) {
+      status.textContent = "accepting " + (++done) + " of " + chosen.length + "…";
+      await c.decide("accepted");
+    }
+    status.textContent = "accepted " + done + ". Refresh to see what remains.";
+    acceptSelected.disabled = selectAll.disabled = false;
+  };
+}
+
+/* ---------- Rendering: near-duplicate review cases ---------- */
+async function renderCases() {
+  const panel = $("panel-cases");
+  panel.replaceChildren(el("p", "muted", "Loading…"));
+  const queue = await api("/reviews?limit=200");
+  panel.replaceChildren();
+  const pending = queue.pending || [];
+  if (!pending.length) {
+    panel.appendChild(el("p", "muted", "Nothing pending."));
+    return;
+  }
+  const warn = el("div", "notice danger");
+  warn.appendChild(el("strong", null, "Rejecting a case deletes the note."));
+  warn.appendChild(el("p", "small",
+    "“Accepted” means the flag was a false positive and the note is published. "
+    + "“Rejected” means it really is a duplicate, and the candidate is DELETED — "
+    + "its content is already in the corpus, which is what the case asserts."));
+  panel.appendChild(warn);
+  panel.appendChild(el("p", "small muted", pending.length + " pending"));
+
+  for (const summary of pending) {
+    const card = el("div", "card");
+    const head = el("div", "row");
+    head.appendChild(el("span", "kind", "duplicate?"));
+    const titleSlot = el("span", "title grow", summary.candidate_id || summary.review_case_id);
+    head.appendChild(titleSlot);
+    if (summary.similarity !== undefined && summary.similarity !== null) {
+      head.appendChild(el("span", "muted small", "similarity " + Number(summary.similarity).toFixed(3)));
+    }
+    card.appendChild(head);
+
+    const body = el("div");
+    card.appendChild(body);
+    try {
+      const detail = await api("/reviews/" + summary.review_case_id);
+      const candidate = detail.candidate;
+      if (candidate) {
+        titleSlot.textContent = candidate.title;
+        const d = document.createElement("details");
+        d.appendChild(el("summary", null, "Candidate body"));
+        d.appendChild(el("pre", "mono", candidate.body));
+        body.appendChild(d);
+      } else {
+        body.appendChild(el("p", "small dangling",
+          "The candidate is gone — the case outlived the document it was about."));
+      }
+    } catch (err) {
+      body.appendChild(el("p", "small dangling", "Could not load detail: " + err.message));
+    }
+
+    const actions = el("div", "row");
+    const note = document.createElement("input");
+    note.placeholder = "decision note (optional)";
+    note.className = "grow";
+    note.style.cssText = "padding:.35rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)";
+    const keep = el("button", "accept", "Not a duplicate — publish");
+    const drop = el("button", "reject", "Duplicate — delete");
+    actions.append(note, keep, drop);
+    card.appendChild(actions);
+
+    const decide = async (decision) => {
+      if (decision === "rejected"
+        && !window.confirm("Delete “" + titleSlot.textContent + "”? This cannot be undone.")) return;
+      keep.disabled = drop.disabled = true;
+      try {
+        const out = await api("/reviews/" + summary.review_case_id + "/decision", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ decision, decision_note: note.value || null }),
+        });
+        card.replaceChildren(el("div", "row small muted",
+          "✓ " + (out.review_case ? out.review_case.state : decision)));
+      } catch (err) {
+        keep.disabled = drop.disabled = false;
+        body.appendChild(el("p", "small dangling", "Refused: " + err.message));
+      }
+    };
+    keep.onclick = () => decide("accepted");
+    drop.onclick = () => decide("rejected");
+    panel.appendChild(card);
+  }
+}
+
+/* ---------- Shell ---------- */
+async function loadAll() {
+  clearMessages();
+  try {
+    await renderProposals();
+    await renderCases();
+  } catch (err) {
+    if (err.forbidden) { say("danger", entitlementHelp()); $("app").classList.add("hidden"); }
+    else say("danger", el("div", null, err.message));
+  }
+}
+
+function render() {
+  const signedIn = Boolean(TOKEN);
+  $("signin").classList.toggle("hidden", signedIn);
+  $("signout").classList.toggle("hidden", !signedIn);
+  $("refresh").classList.toggle("hidden", !signedIn);
+  $("app").classList.toggle("hidden", !signedIn);
+  $("who").textContent = signedIn ? ("credential " + (credentialId() || "?")) : "";
+  clearMessages();
+  if (!signedIn) {
+    const intro = document.createElement("div");
+    intro.appendChild(el("strong", null, "Sign in to review."));
+    intro.appendChild(el("p", "small",
+      "This console authorizes as its own OAuth client holding vault:read, then needs "
+      + "vault:review granted to it once from an operator shell."));
+    say("info", intro);
+    return;
+  }
+  loadAll();
+}
+
+$("signin").onclick = () => signIn().catch((e) => say("danger", el("div", null, e.message)));
+$("signout").onclick = signOut;
+$("refresh").onclick = loadAll;
+$("tab-proposals").onclick = () => {
+  $("tab-proposals").setAttribute("aria-selected", "true");
+  $("tab-cases").setAttribute("aria-selected", "false");
+  $("panel-proposals").classList.remove("hidden");
+  $("panel-cases").classList.add("hidden");
+};
+$("tab-cases").onclick = () => {
+  $("tab-cases").setAttribute("aria-selected", "true");
+  $("tab-proposals").setAttribute("aria-selected", "false");
+  $("panel-cases").classList.remove("hidden");
+  $("panel-proposals").classList.add("hidden");
+};
+
+(async () => {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("error")) {
+    say("danger", el("div", null, "Authorization failed: " + params.get("error")));
+    window.history.replaceState({}, "", CFG.reviewPath);
+  } else if (params.get("code")) {
+    try { await completeSignIn(params.get("code"), params.get("state")); }
+    catch (err) { say("danger", el("div", null, err.message)); }
+  }
+  render();
+})();
+</script>
+</body>
+</html>
