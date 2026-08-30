@@ -32,6 +32,8 @@ from .domain import (
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
+    EdgeRef,
+    MetadataChangeSummary,
     NewVaultDocument,
     NoteCompileState,
     PromotionStatus,
@@ -1829,6 +1831,75 @@ class VaultAmendmentService:
         )
         candidate = VaultDocumentUpdateService._build_candidate(target, update_request)
         return summarize_body_change(target.body, candidate.body)
+
+    async def metadata_preview(
+        self,
+        proposal: VaultAmendmentProposal,
+        target: VaultDocument | None,
+    ) -> MetadataChangeSummary | None:
+        """What a metadata proposal changes, with edges resolved to titles.
+
+        `preview` describes a body change, and a metadata proposal has none by
+        construction -- so it correctly reports an empty diff, and a reviewer
+        reading only that pane learns nothing about a change that may rewire
+        the note's entire position in the graph. This is the counterpart.
+
+        Returns ``None`` for any other kind, and for a stale base, matching
+        `preview`: a preview computed against a revision the proposal is no
+        longer bound to would describe a change that will never be applied.
+        """
+
+        if proposal.change_kind is not AmendmentProposalKind.METADATA:
+            return None
+        if target is None or target.content_revision != proposal.target_revision:
+            return None
+
+        change = proposal.change
+        related_before = tuple(target.related_ids or ())
+        source_before = tuple(target.source_ids or ())
+        related_after = (
+            tuple(change["related_ids"])
+            if change.get("related_ids") is not None
+            else related_before
+        )
+        source_after = (
+            tuple(change["source_ids"])
+            if change.get("source_ids") is not None
+            else source_before
+        )
+
+        related_added = tuple(e for e in related_after if e not in related_before)
+        related_removed = tuple(e for e in related_before if e not in related_after)
+        source_added = tuple(e for e in source_after if e not in source_before)
+        source_removed = tuple(e for e in source_before if e not in source_after)
+
+        async with self._transactions.transaction() as connection:
+            titles = await VaultDocumentRepository().titles_for(
+                connection,
+                related_added + related_removed + source_added + source_removed,
+            )
+
+        def refs(ids: tuple[str, ...]) -> tuple[EdgeRef, ...]:
+            return tuple(EdgeRef(id=i, title=titles.get(i)) for i in ids)
+
+        # `source_url` present-and-null means clear; absent means unchanged.
+        # The two are different requests and the preview has to keep them apart.
+        url_touched = "source_url" in change
+        facets_touched = change.get("facets") is not None
+
+        return MetadataChangeSummary(
+            related_added=refs(related_added),
+            related_removed=refs(related_removed),
+            source_added=refs(source_added),
+            source_removed=refs(source_removed),
+            facets_before=dict(target.facets or {}) if facets_touched else None,
+            facets_after=dict(change["facets"]) if facets_touched else None,
+            source_url_before=target.source_url if url_touched else None,
+            source_url_after=change.get("source_url") if url_touched else None,
+            source_url_changed=(
+                url_touched and change.get("source_url") != target.source_url
+            ),
+        )
 
     async def decide(
         self, request: AmendmentDecisionRequest
