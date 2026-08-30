@@ -176,12 +176,12 @@ def test_decisions_are_withheld_until_the_evidence_loads() -> None:
     page = _page()
 
     assert "Deciding is disabled until" in page
-    assert "Deciding is disabled; open it directly" in page, (
-        "a card whose preview was dropped from the queue must not be decidable "
-        "from its rationale alone"
-    )
     assert "evidenceLoaded" in page and "if (!evidenceLoaded) return;" in page
     assert "if (!loaded) return false;" in page
+    # A card whose preview never arrived starts undecidable. It becomes
+    # decidable by loading the evidence, never by leaving the buttons live --
+    # see test_a_dropped_preview_can_still_be_loaded for the recovery.
+    assert "if (!loaded) {\n    check.disabled = true;" in page
 
 
 def test_the_console_keeps_and_rotates_its_refresh_token() -> None:
@@ -268,6 +268,80 @@ def test_the_persisted_session_is_bounded_by_the_refresh_lifetime() -> None:
     )
     # The access token stays session-scoped: it is renewable from the record.
     assert "sessionStorage.getItem(STORE.token)" in page
+
+
+def test_refresh_rotation_is_serialized_across_tabs() -> None:
+    """Two tabs sharing one refresh token is a family-destroying race.
+
+    Every tab copies the refresh token into memory. If two hold R1 and one
+    rotates it to R2, the other presents a *consumed* token -- which
+    `VaultOAuthProvider.load_refresh_token` treats as a captured credential and
+    answers by burning the whole family, every credential in the chain. That is
+    right for theft and catastrophic for a second tab, because the
+    `vault:review` entitlement dies with the family and must be granted again
+    by hand.
+
+    A Web Lock alone is not the fix: the losing tab must *re-read* storage
+    inside the lock, or it serializes presenting the stale token. Both halves
+    are asserted.
+    """
+
+    page = _page()
+
+    assert "navigator.locks" in page
+    assert "withRefreshLock" in page
+    assert "const current = loadSession();" in page, (
+        "the lock holder must re-read the record; holding a lock while "
+        "presenting a token another tab already consumed changes nothing"
+    )
+    # Presenting the in-memory copy is the bug; the re-read one is the fix.
+    assert "refresh_token: presented," in page
+
+
+def test_the_legacy_session_storage_format_is_migrated() -> None:
+    """The deployed console wrote a different shape, and it is in use.
+
+    Release v74 shipped the console storing `vault.review.client_id` and
+    `vault.review.refresh` in session storage. Reading only the new record
+    would find no refresh token on the first 401 after rollout, end the
+    session, and re-authorize into a family with no entitlement -- so every
+    live reviewer would have to run `grant-oauth` again, which is the chore
+    the persisted record exists to remove.
+
+    The legacy keys are cleared only after the new record is written, so an
+    interrupted upgrade repeats instead of losing the token.
+    """
+
+    page = _page()
+
+    assert "migrateLegacySession" in page
+    assert 'sessionStorage.getItem("vault.review.client_id")' in page
+    assert 'sessionStorage.getItem("vault.review.refresh")' in page
+    assert "loadSession() || migrateLegacySession() || {}" in page, (
+        "migration must run only when no new record exists, or it would "
+        "overwrite a current session with a stale one"
+    )
+    assert "if (localStorage.getItem(STORE.session)) {" in page, (
+        "the legacy keys must not be removed before the new record is saved"
+    )
+
+
+def test_a_dropped_preview_can_still_be_loaded() -> None:
+    """A truncated queue must not make a proposal unreviewable.
+
+    The byte budget drops previews from the tail, and the API contract says
+    they can be fetched individually. A card that says so without offering the
+    fetch is worse than the N+1 it replaced: the old console loaded every
+    detail, so nothing was ever unreachable.
+    """
+
+    page = _page()
+
+    assert "Load preview" in page
+    assert "dropped to fit the response " in page
+    assert "accept.disabled = reject.disabled = false;" in page, (
+        "loading the preview has to enable the decision it was blocking"
+    )
 
 
 def test_the_session_ended_marker_is_actually_consumed() -> None:

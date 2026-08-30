@@ -113,8 +113,10 @@ const el = (tag, cls, text) => {
 };
 
 /* ---------- OAuth: authorization code + PKCE against our own AS ---------- */
-/* The token lives in sessionStorage, not localStorage: it is a one-hour
-   reviewer credential and it should not outlive the tab that earned it. */
+/* The access token stays in sessionStorage: it lasts an hour and is renewable
+   from the persisted record, so there is nothing to gain by keeping it on
+   disk. The record that *is* persisted -- registration plus refresh token --
+   is described at `loadSession`. */
 const STORE = { verifier: "vault.review.pkce", state: "vault.review.state",
                 token: "vault.review.token", session: "vault.review.session" };
 
@@ -151,7 +153,36 @@ function saveSession(next) {
   catch (err) { /* Private mode: the session simply will not persist. */ }
 }
 
-let SESSION = loadSession() || {};
+/* One-time upgrade from the session-scoped format this replaced.
+   `vault.review.client_id` and `vault.review.refresh` are what the deployed
+   console wrote. Without this, the first 401 after a rollout finds no refresh
+   token, ends the session, and re-authorizes into a new family -- which
+   inherits no entitlement, so every live reviewer would have to run
+   `grant-oauth` again. The legacy keys are removed only after the new record
+   is written, so an interrupted upgrade repeats rather than loses. */
+function migrateLegacySession() {
+  try {
+    const client = sessionStorage.getItem("vault.review.client_id");
+    if (!client) return null;
+    const upgraded = {
+      client,
+      refresh: sessionStorage.getItem("vault.review.refresh") || null,
+      /* Dated now, not at the original authorization: the true obtained-at was
+         never recorded. This can only over-estimate the remaining lifetime, and
+         a refresh that fails is handled; a record discarded early would cost
+         the entitlement this migration exists to keep. */
+      obtained: Date.now(),
+    };
+    saveSession(upgraded);
+    if (localStorage.getItem(STORE.session)) {
+      sessionStorage.removeItem("vault.review.client_id");
+      sessionStorage.removeItem("vault.review.refresh");
+    }
+    return upgraded;
+  } catch (err) { return null; }
+}
+
+let SESSION = loadSession() || migrateLegacySession() || {};
 let TOKEN = sessionStorage.getItem(STORE.token) || null;
 let REFRESH = SESSION.refresh || null;
 let META = null;
@@ -171,16 +202,18 @@ async function metadata() {
   return META;
 }
 
-/* Session-scoped, deliberately. A registration cached in localStorage outlives
-   the tab that made it, and `prune_vault_oauth` deletes a registration once its
-   refresh token expires -- so closing the tab without signing out leaves a
-   cached id the server will later delete, and the browser cannot notice. The
-   authorization server answers an unknown client_id with a direct 400 and no
-   redirect (mcp/server/auth/handlers/authorize.py, attempt_load_client=False),
-   so no callback runs and no cleanup fires: the console is stuck for good, and
-   only clearing site data fixes it. Registering once per browser session costs
-   one row and cannot reach that state. The entitlement does not survive
-   re-authorization regardless, so a longer-lived registration bought nothing. */
+/* Registers once per persisted session, not once per tab. The record outlives
+   the tab deliberately -- see the note on `loadSession` -- because the
+   entitlement is keyed to the OAuth family and a lost session costs a manual
+   grant.
+
+   What must never happen is a registration outliving its refresh token:
+   `prune_vault_oauth` deletes a stale registration, and the authorization
+   server answers a deleted client_id with a direct 400 and no redirect
+   (mcp/server/auth/handlers/authorize.py, attempt_load_client=False), so no
+   callback runs and nothing can clean up after the fact. `loadSession`
+   therefore discards the record on its own schedule rather than waiting for an
+   error that never arrives. */
 async function clientId() {
   if (SESSION.client) return SESSION.client;
   const m = await metadata();
@@ -276,24 +309,51 @@ function storeTokens(payload) {
 /* Rotating: the server mints a new refresh token and revokes the presented
    one, so the response must be stored or the chain is broken. A replayed
    refresh token revokes the whole family, which is why this never retries. */
+/* Rotation must be serialized across tabs, and the reason is severe rather
+   than tidy. Every tab copies the refresh token into memory, so two tabs both
+   holding R1 will each present it: the second presentation is of a *consumed*
+   token, which `VaultOAuthProvider.load_refresh_token` treats as a captured
+   credential and answers by burning the entire family -- every credential ever
+   minted in the chain. That is the correct response to theft and a catastrophic
+   one to a second tab, because the vault:review entitlement dies with the
+   family and has to be granted again by hand.
+   A Web Lock plus a re-read inside it means whichever tab wins presents the
+   current token and the loser presents its replacement, never its predecessor.
+
+   Two tabs still take each other's access tokens in turn -- rotation revokes
+   the credential it replaces -- so they refresh alternately. That is chatty and
+   harmless, which is the trade being made: correctness over quiet. */
+async function withRefreshLock(work) {
+  if (!navigator.locks || !navigator.locks.request) return work();
+  return navigator.locks.request("vault.review.refresh", work);
+}
+
 async function refreshTokens() {
-  if (!REFRESH) return false;
-  const m = await metadata();
-  const presented = REFRESH;
-  REFRESH = null;
-  SESSION.refresh = null;
-  saveSession(SESSION);
-  const r = await fetch(m.token_endpoint, {
-    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: presented,
-      client_id: await clientId(),
-    }),
+  return withRefreshLock(async () => {
+    /* Inside the lock, storage is the truth: another tab may have rotated
+       while this one waited, and its own REFRESH is then a consumed token. */
+    const current = loadSession();
+    if (current && current.client) SESSION = current;
+    REFRESH = SESSION.refresh || null;
+    if (!REFRESH) return false;
+
+    const m = await metadata();
+    const presented = REFRESH;
+    REFRESH = null;
+    SESSION.refresh = null;
+    saveSession(SESSION);
+    const r = await fetch(m.token_endpoint, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: presented,
+        client_id: SESSION.client,
+      }),
+    });
+    if (!r.ok) return false;
+    storeTokens(await r.json());
+    return true;
   });
-  if (!r.ok) return false;
-  storeTokens(await r.json());
-  return true;
 }
 
 /* Ends the local session and repaints. `message` is carried through render()
@@ -498,9 +558,45 @@ function proposalCard(summary, preview) {
   if (preview && preview.target_title) titleSlot.textContent = preview.target_title;
 
   if (!preview) {
+    /* Dropped from the queue's byte budget. The detail endpoint still has it,
+       so offer that rather than leaving a card nothing can act on -- the
+       previous console fetched every detail, and losing the tail entirely
+       would be a worse trade than the request it saves. */
     detailSlot.appendChild(el("p", "small dangling",
-      "The queue sent no preview for this proposal — it was dropped to fit the "
-      + "response budget. Deciding is disabled; open it directly to review it."));
+      "No preview came with the queue — it was dropped to fit the response "
+      + "budget. Load it to review this proposal."));
+    const load = el("button", null, "Load preview");
+    detailSlot.appendChild(load);
+    load.onclick = async () => {
+      load.disabled = true;
+      try {
+        const detail = await api("/amendment-proposals/" + summary.proposal_id);
+        const rendered = detail.metadata_preview
+          ? metadataPreview(detail.metadata_preview)
+          : detail.preview
+            ? bodyPreview(detail.preview)
+            : el("p", "small dangling",
+                "The note has moved since this was written; accepting settles it as stale.");
+        detailSlot.replaceChildren(rendered);
+        if (detail.metadata_preview || detail.preview) {
+          loaded = true;
+          accept.disabled = reject.disabled = false;
+          if (detail.preview && detail.preview.requires_removal_acknowledgement) {
+            const wrap = el("label", "check");
+            ack = document.createElement("input");
+            ack.type = "checkbox";
+            wrap.append(ack, document.createTextNode(
+              "Acknowledge " + detail.preview.removed_line_count + " removed line(s)"));
+            detailSlot.appendChild(wrap);
+          }
+        }
+      } catch (err) {
+        if (err.sessionEnded) return;
+        load.disabled = false;
+        detailSlot.appendChild(el("p", "small dangling",
+          "Could not load the preview: " + err.message));
+      }
+    };
   } else if (preview.stale) {
     detailSlot.appendChild(el("p", "small dangling",
       "The note has moved since this proposal was written, so accepting it "
