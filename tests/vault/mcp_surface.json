@@ -51,6 +51,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 50,
           "type": "array"
         },
         {
@@ -63,6 +64,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 50,
           "type": "array"
         },
         {
@@ -277,7 +279,8 @@
         "AmendmentProposalKind": {
           "enum": [
             "replacement",
-            "body_diff"
+            "body_diff",
+            "metadata"
           ],
           "type": "string"
         },
@@ -324,7 +327,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -562,7 +566,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -1256,7 +1261,8 @@
         "AmendmentProposalKind": {
           "enum": [
             "replacement",
-            "body_diff"
+            "body_diff",
+            "metadata"
           ],
           "type": "string"
         },
@@ -1288,7 +1294,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -1391,7 +1398,8 @@
               "change_kind": {
                 "enum": [
                   "replacement",
-                  "body_diff"
+                  "body_diff",
+                  "metadata"
                 ],
                 "type": "string"
               },
@@ -1804,6 +1812,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 50,
           "type": "array"
         },
         {
@@ -1815,6 +1824,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 50,
           "type": "array"
         },
         {
@@ -1857,7 +1867,8 @@
         "AmendmentProposalKind": {
           "enum": [
             "replacement",
-            "body_diff"
+            "body_diff",
+            "metadata"
           ],
           "type": "string"
         },
@@ -1889,7 +1900,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -1988,7 +2000,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -2108,7 +2121,8 @@
         "AmendmentProposalKind": {
           "enum": [
             "replacement",
-            "body_diff"
+            "body_diff",
+            "metadata"
           ],
           "type": "string"
         },
@@ -2140,7 +2154,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -2239,7 +2254,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -2331,39 +2347,75 @@
     }
   },
   {
-    "name": "vault_propose_note_span_edit",
+    "name": "vault_propose_note_metadata",
     "scope": "vault:propose",
     "quota": "amendment_propose",
     "required": [
       "base_revision",
-      "expected_text",
       "note_id",
-      "rationale",
-      "replacement_text"
+      "rationale"
     ],
     "properties": [
       "base_revision",
-      "expected_text",
+      "clear_source_url",
+      "facets",
       "note_id",
-      "occurrence",
       "rationale",
-      "replacement_text"
+      "related_ids",
+      "source_ids",
+      "source_url"
     ],
     "property_types": {
       "base_revision": "integer",
-      "expected_text": "string",
-      "note_id": "string",
-      "occurrence": [
+      "clear_source_url": "boolean",
+      "facets": [
         {
-          "minimum": 1,
-          "type": "integer"
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
         },
         {
           "type": "null"
         }
       ],
+      "note_id": "string",
       "rationale": "string",
-      "replacement_text": "string"
+      "related_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_url": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "output_schema_type": "object",
     "output_schema_is_permissive": false,
@@ -2372,7 +2424,8 @@
         "AmendmentProposalKind": {
           "enum": [
             "replacement",
-            "body_diff"
+            "body_diff",
+            "metadata"
           ],
           "type": "string"
         },
@@ -2404,7 +2457,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -2503,7 +2557,275 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "proposal"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Propose a metadata change",
+      "read_only_hint": false,
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
+  },
+  {
+    "name": "vault_propose_note_span_edit",
+    "scope": "vault:propose",
+    "quota": "amendment_propose",
+    "required": [
+      "base_revision",
+      "expected_text",
+      "note_id",
+      "rationale",
+      "replacement_text"
+    ],
+    "properties": [
+      "base_revision",
+      "expected_text",
+      "note_id",
+      "occurrence",
+      "rationale",
+      "replacement_text"
+    ],
+    "property_types": {
+      "base_revision": "integer",
+      "expected_text": "string",
+      "note_id": "string",
+      "occurrence": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "rationale": "string",
+      "replacement_text": "string"
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "AmendmentProposalKind": {
+          "enum": [
+            "replacement",
+            "body_diff",
+            "metadata"
+          ],
+          "type": "string"
+        },
+        "AmendmentProposalState": {
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "stale"
+          ],
+          "type": "string"
+        },
+        "VaultAmendmentProposalSummary": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff",
+                "metadata"
+              ],
+              "type": "string"
+            },
+            "created_at": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "decided_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decision_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "proposal_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "proposed_by": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "removals_acknowledged": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "accepted",
+                "rejected",
+                "stale"
+              ],
+              "type": "string"
+            },
+            "target_note_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "proposal_id",
+            "target_note_id",
+            "base_revision",
+            "change_kind",
+            "state",
+            "rationale",
+            "proposed_by",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "proposal": {
+          "additionalProperties": false,
+          "properties": {
+            "applied_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "base_revision": {
+              "type": "integer"
+            },
+            "change_kind": {
+              "enum": [
+                "replacement",
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -2614,7 +2936,8 @@
         "AmendmentProposalKind": {
           "enum": [
             "replacement",
-            "body_diff"
+            "body_diff",
+            "metadata"
           ],
           "type": "string"
         },
@@ -2717,7 +3040,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -3019,6 +3343,78 @@
           ],
           "type": "object"
         },
+        "VaultMetadataChange": {
+          "additionalProperties": false,
+          "properties": {
+            "clear_source_url": {
+              "type": "boolean"
+            },
+            "facets": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "const": "metadata",
+              "type": "string"
+            },
+            "related_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 50,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_url": {
+              "anyOf": [
+                {
+                  "format": "uri",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
         "VaultRemovedBodyLine": {
           "additionalProperties": false,
           "properties": {
@@ -3132,6 +3528,7 @@
           "discriminator": {
             "mapping": {
               "body_diff": "#/$defs/VaultBodyDiffChange",
+              "metadata": "#/$defs/VaultMetadataChange",
               "replacement": "#/$defs/VaultReplacementChange"
             },
             "propertyName": "kind"
@@ -3244,6 +3641,78 @@
                 "body_diff"
               ],
               "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "clear_source_url": {
+                  "type": "boolean"
+                },
+                "facets": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "kind": {
+                  "const": "metadata",
+                  "type": "string"
+                },
+                "related_ids": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_ids": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "maxItems": 50,
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_url": {
+                  "anyOf": [
+                    {
+                      "format": "uri",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -3329,7 +3798,8 @@
             "change_kind": {
               "enum": [
                 "replacement",
-                "body_diff"
+                "body_diff",
+                "metadata"
               ],
               "type": "string"
             },
@@ -4554,6 +5024,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 50,
           "type": "array"
         },
         {
@@ -4565,6 +5036,7 @@
           "items": {
             "type": "string"
           },
+          "maxItems": 50,
           "type": "array"
         },
         {
@@ -4672,6 +5144,149 @@
       "read_only_hint": false,
       "destructive_hint": true,
       "idempotent_hint": false,
+      "open_world_hint": false
+    }
+  },
+  {
+    "name": "vault_update_note_metadata",
+    "scope": "vault:update",
+    "quota": "update",
+    "required": [
+      "base_revision",
+      "note_id"
+    ],
+    "properties": [
+      "base_revision",
+      "clear_source_url",
+      "facets",
+      "note_id",
+      "related_ids",
+      "source_ids",
+      "source_url"
+    ],
+    "property_types": {
+      "base_revision": "integer",
+      "clear_source_url": "boolean",
+      "facets": [
+        {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "note_id": "string",
+      "related_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_ids": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "source_url": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "output_schema_type": "object",
+    "output_schema_is_permissive": false,
+    "output_shape": {
+      "$defs": {
+        "VaultSimilarNote": {
+          "additionalProperties": false,
+          "properties": {
+            "note_id": {
+              "type": "string"
+            },
+            "score": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "note_id",
+            "title",
+            "score"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "note_id": {
+          "type": "string"
+        },
+        "re_embedded": {
+          "type": "boolean"
+        },
+        "similars": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "note_id": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "note_id",
+              "title",
+              "score"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "note_id",
+        "message",
+        "re_embedded"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Change a note's edges and classification",
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": true,
       "open_world_hint": false
     }
   }

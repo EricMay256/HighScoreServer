@@ -92,6 +92,9 @@ class AmendmentProposalKind(str, Enum):
 
     REPLACEMENT = "replacement"
     BODY_DIFF = "body_diff"
+    # Edges and classification only -- the fields that do not join the
+    # embedding text. See vault ADR 0036.
+    METADATA = "metadata"
 
 
 class WriteRequestState(str, Enum):

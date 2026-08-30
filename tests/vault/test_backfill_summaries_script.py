@@ -609,7 +609,13 @@ def test_a_work_file_with_any_problem_is_refused_whole(
     )
 
     assert asyncio.run(run(None, path, apply=True)) == 1
-    assert stub.texts == [], "a refused work file must not spend an embedding call"
+    assert stub.texts == [], (
+        "A work file that was refused still spent embedding calls, which means "
+        "validation now runs after embedding rather than before it. Do not fix "
+        "this by expecting calls: the ordering is the point. A partially valid "
+        "file should cost nothing, so that fixing it and re-running is free "
+        "rather than paid for twice."
+    )
 
 
 def test_a_wholly_valid_work_file_is_still_accepted(

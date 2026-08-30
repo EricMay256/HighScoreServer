@@ -63,7 +63,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, ValidationError
 from slowapi.errors import RateLimitExceeded
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -73,6 +73,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .api_models import (
     MAX_BODY_CHARS,
     MAX_DOCUMENT_ID_CHARS,
+    MAX_EDGE_IDS,
     MAX_RATIONALE_CHARS,
     VaultAmendmentDecisionResponse,
     VaultAmendmentProposalDetail,
@@ -85,6 +86,7 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultMetadataUpdateRequest,
     VaultPromotionResponse,
     VaultRetirementResponse,
     VaultReviewCaseResponse,
@@ -135,6 +137,8 @@ from .service import (
     DocumentNotFound,
     DocumentUnderReview,
     IdempotencyConflict,
+    MetadataChange,
+    MetadataUpdateRequest,
     PromotionNotApplicable,
     PromotionRequest,
     RetireRequest,
@@ -151,6 +155,7 @@ from .service import (
     UpdateWouldDuplicate,
     VaultAmendmentService,
     VaultContributionService,
+    VaultDocumentMetadataService,
     VaultDocumentRetireService,
     VaultDocumentSummaryService,
     VaultDocumentUpdateService,
@@ -172,6 +177,16 @@ _credential: ContextVar[VaultCredential | None] = ContextVar(
     "vault_mcp_credential",
     default=None,
 )
+
+# The edge parameters, annotated once so every tool that writes edges publishes
+# the same schema. The models have always enforced these bounds, but a bound the
+# server enforces and the schema omits is one a generated client cannot honour:
+# it discovers the limit by being refused. `format: uri` is carried as schema
+# metadata rather than by typing the parameter `AnyUrl`, because these values
+# flow into request payloads that are hashed for the request digest, and a
+# parsed URL object there would change what the digest is taken over.
+EdgeIds = Annotated[list[str] | None, Field(max_length=MAX_EDGE_IDS)]
+SourceUrl = Annotated[str | None, Field(json_schema_extra={"format": "uri"})]
 
 # Which scope each tool requires, and the single statement of it. The quota
 # operation deliberately reuses the HTTP surface's name: a separate "mcp.search"
@@ -195,7 +210,9 @@ _TOOL_SCOPES: dict[str, tuple[str, str]] = {
     # and a separate bucket would let one principal spend its allowance
     # twice by changing authoring form.
     "vault_propose_note_span_edit": (VaultScope.PROPOSE, "amendment_propose"),
+    "vault_propose_note_metadata": (VaultScope.PROPOSE, "amendment_propose"),
     "vault_update_note": (VaultScope.UPDATE, "update"),
+    "vault_update_note_metadata": (VaultScope.UPDATE, "update"),
     "vault_retire_note": (VaultScope.DELETE, "retire"),
     # Privileged, and on this mount rather than a second one (ADR 0026):
     # `list_tools` filters on the credential, so a session without
@@ -416,6 +433,51 @@ def _content_payload(
     return payload
 
 
+def _metadata_change(
+    *,
+    related_ids: list[str] | None,
+    source_ids: list[str] | None,
+    facets: dict[str, list[str]] | None,
+    source_url: str | None,
+    clear_source_url: bool,
+) -> MetadataChange:
+    """Validate a metadata change the way the HTTP boundary does.
+
+    Built through `VaultMetadataUpdateRequest` rather than from the raw
+    arguments, because the tool signature accepts `list[str]` and a list of
+    strings is not an edge list. Skipping the model let duplicates and
+    `[[wikilinks]]` into `related_ids` on both metadata tools -- the exact
+    corruption ADR 0030 forbids, reintroduced on a new path because it did not
+    reuse the validator the old one had.
+
+    Raises `ValueError`; the callers turn that into a `ToolError`.
+    """
+
+    validated = VaultMetadataUpdateRequest(
+        base_revision=1,
+        related_ids=related_ids,
+        source_ids=source_ids,
+        facets=facets,
+        source_url=source_url,
+        clear_source_url=clear_source_url,
+    )
+    return MetadataChange(
+        related_ids=(
+            tuple(validated.related_ids)
+            if validated.related_ids is not None
+            else None
+        ),
+        source_ids=(
+            tuple(validated.source_ids)
+            if validated.source_ids is not None
+            else None
+        ),
+        facets=validated.facets,
+        source_url=str(validated.source_url) if validated.source_url else None,
+        clear_source_url=validated.clear_source_url,
+    )
+
+
 def build_vault_mcp_server() -> VaultMCPServer:
     """Register the fifteen tools over the existing services.
 
@@ -612,9 +674,9 @@ def build_vault_mcp_server() -> VaultMCPServer:
         tags: list[str] | None = None,
         aliases: list[str] | None = None,
         facets: dict[str, list[str]] | None = None,
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
-        source_url: str | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        source_url: SourceUrl = None,
         response_detail: str = "outcome",
     ) -> VaultContributionResponse:
         """Contribute a note through the governed write path.
@@ -916,9 +978,9 @@ def build_vault_mcp_server() -> VaultMCPServer:
         tags: list[str] | None = None,
         aliases: list[str] | None = None,
         facets: dict[str, list[str]] | None = None,
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
-        source_url: str | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        source_url: SourceUrl = None,
     ) -> VaultDocumentUpdateResponse:
         """Replace one note's content in full.
 
@@ -1020,6 +1082,115 @@ def build_vault_mcp_server() -> VaultMCPServer:
         )
 
     @server.tool(
+        name="vault_update_note_metadata",
+        annotations=ToolAnnotations(
+            title="Change a note's edges and classification",
+            readOnlyHint=False,
+            # Narrower than vault_update_note by construction: the title and
+            # body are unreachable through this payload. It still replaces the
+            # fields it names, so an edge list sent short drops edges.
+            destructiveHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+    async def vault_update_note_metadata(
+        note_id: Annotated[str, Field(min_length=1, max_length=MAX_DOCUMENT_ID_CHARS)],
+        base_revision: Annotated[int, Field(ge=1)],
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        facets: dict[str, list[str]] | None = None,
+        source_url: SourceUrl = None,
+        clear_source_url: bool = False,
+    ) -> VaultDocumentUpdateResponse:
+        """Change a note's edges or classification directly, without a review.
+
+        The applied counterpart of `vault_propose_note_metadata`, for a caller
+        that already holds update authority. Prefer this over
+        `vault_update_note` for any change to edges or facets: that tool is a
+        full replacement and needs the title and body back, so adding one link
+        means resending the note and risking a body rewrite that looks like a
+        metadata change.
+
+        Fetch the note first and use its `content_revision` as `base_revision`.
+        The write refuses if the note moved, rather than overwriting.
+
+        **Omitted means unchanged; an empty list means empty.** Pass
+        `clear_source_url=true` to remove a source URL, since null and omitted
+        are otherwise the same thing.
+
+        `tags` and `aliases` are absent on purpose: both join the note's
+        embedding text, so changing either needs the re-embed and dedup run
+        that `vault_update_note` performs. Nothing this tool accepts affects
+        retrieval, which is why it costs no embedding call.
+
+        Args:
+            note_id: The note's full ID.
+            base_revision: The note's `content_revision` when you read it.
+            related_ids: Full IDs of related notes. Replaces the whole list.
+            source_ids: Full IDs of notes this was derived from. Replaces it.
+            facets: Classification as {name: [values]}. Replaces the whole map.
+            source_url: A new source URL.
+            clear_source_url: Remove the existing source URL. Mutually
+                exclusive with `source_url` -- sending both is refused
+                rather than resolved, because either reading of the
+                pair discards half of what was asked for.
+        """
+
+        credential = await _authorized("vault_update_note_metadata")
+
+        try:
+            change = _metadata_change(
+                related_ids=related_ids,
+                source_ids=source_ids,
+                facets=facets,
+                source_url=source_url,
+                clear_source_url=clear_source_url,
+            )
+        except (ValidationError, ValueError) as exc:
+            raise ToolError(f"Invalid metadata change: {exc}") from exc
+        if change.is_empty():
+            raise ToolError(
+                "Nothing to change. Pass at least one of related_ids, "
+                "source_ids, facets, source_url, or clear_source_url."
+            )
+
+        service = VaultDocumentMetadataService(
+            VaultTransactionService(get_vault_engine()),
+        )
+        try:
+            updated = await service.update(
+                MetadataUpdateRequest(
+                    document_id=note_id,
+                    base_revision=base_revision,
+                    change=change,
+                    principal_id=credential.principal_id,
+                    request_id=uuid4().hex,
+                )
+            )
+        except DocumentNotFound as exc:
+            raise ToolError("Note not found") from exc
+        except AmendmentBaseRevisionMismatch as exc:
+            raise ToolError(
+                "The note changed; fetch it again and retry against the "
+                "current revision"
+            ) from exc
+        except ValueError as exc:
+            raise ToolError(f"Invalid metadata change: {exc}") from exc
+
+        return VaultDocumentUpdateResponse(
+            note_id=updated.id,
+            message=(
+                f"metadata updated; note is now at revision "
+                f"{updated.content_revision}"
+            ),
+            # Always false, and said rather than defaulted: nothing this tool
+            # accepts joins the embedding text, so the note's vector still
+            # describes it and no provider call was spent (ADR 0036).
+            re_embedded=False,
+        )
+
+    @server.tool(
         name="vault_propose_note_amendment",
         annotations=ToolAnnotations(
             title="Propose a replacement",
@@ -1039,9 +1210,9 @@ def build_vault_mcp_server() -> VaultMCPServer:
         tags: list[str] | None = None,
         aliases: list[str] | None = None,
         facets: dict[str, list[str]] | None = None,
-        related_ids: list[str] | None = None,
-        source_ids: list[str] | None = None,
-        source_url: str | None = None,
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        source_url: SourceUrl = None,
     ) -> VaultAmendmentProposalResponse:
         """Propose a full replacement without editing the note.
 
@@ -1303,6 +1474,111 @@ def build_vault_mcp_server() -> VaultMCPServer:
             ) from exc
         except ValueError as exc:
             raise ToolError(f"Invalid span edit: {exc}") from exc
+
+        return VaultAmendmentProposalResponse(
+            proposal=amendment_proposal_summary(proposal),
+        )
+
+    @server.tool(
+        name="vault_propose_note_metadata",
+        annotations=ToolAnnotations(
+            title="Propose a metadata change",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+    async def vault_propose_note_metadata(
+        note_id: Annotated[str, Field(min_length=1, max_length=MAX_DOCUMENT_ID_CHARS)],
+        base_revision: Annotated[int, Field(ge=1)],
+        rationale: Annotated[str, Field(min_length=1, max_length=MAX_RATIONALE_CHARS)],
+        related_ids: EdgeIds = None,
+        source_ids: EdgeIds = None,
+        facets: dict[str, list[str]] | None = None,
+        source_url: SourceUrl = None,
+        clear_source_url: bool = False,
+    ) -> VaultAmendmentProposalResponse:
+        """Change a note's edges or classification without resending it.
+
+        Use this instead of `vault_propose_note_amendment` whenever the change
+        is edges or facets. That tool is a full replacement: it requires the
+        title and body back, so adding one link means retyping the whole note,
+        and a single mistyped character rewrites content while looking like a
+        metadata change. This one cannot touch the title or body at all.
+
+        Fetch the note first and use its `content_revision` as `base_revision`.
+
+        **Omitted means unchanged; an empty list means empty.** Send only the
+        fields you are changing. To drop `source_url` specifically, pass
+        `clear_source_url=true`, since a null and an omission cannot otherwise
+        be told apart.
+
+        `tags` and `aliases` are deliberately absent. Both join the note's
+        embedding text, so changing either alters what the note means to search
+        and needs the full amendment path, which re-embeds and re-runs dedup.
+        Everything this tool accepts is excluded from matching, which is why it
+        can promise not to affect retrieval.
+
+        Args:
+            note_id: The note's full ID.
+            base_revision: The note's `content_revision` when you read it.
+            rationale: Why this change is right, for the reviewer.
+            related_ids: Full IDs of related notes. Replaces the whole list.
+            source_ids: Full IDs of notes this was derived from. Replaces the
+                whole list.
+            facets: Classification as {name: [values]}. Replaces the whole map.
+            source_url: A new source URL.
+            clear_source_url: Remove the existing source URL. Mutually
+                exclusive with `source_url` -- sending both is refused
+                rather than resolved, because either reading of the
+                pair discards half of what was asked for.
+        """
+
+        credential = await _authorized("vault_propose_note_metadata")
+        if not rationale.strip():
+            raise ToolError("rationale must contain non-whitespace text")
+
+        try:
+            change = _metadata_change(
+                related_ids=related_ids,
+                source_ids=source_ids,
+                facets=facets,
+                source_url=source_url,
+                clear_source_url=clear_source_url,
+            )
+        except (ValidationError, ValueError) as exc:
+            raise ToolError(f"Invalid metadata change: {exc}") from exc
+        if change.is_empty():
+            raise ToolError(
+                "Nothing to change. Pass at least one of related_ids, "
+                "source_ids, facets, source_url, or clear_source_url."
+            )
+
+        service = VaultAmendmentService(
+            VaultTransactionService(get_vault_engine()),
+            get_embedding_provider(),
+        )
+        try:
+            proposal = await service.propose(
+                AmendmentProposalRequest(
+                    target_document_id=note_id,
+                    base_revision=base_revision,
+                    change_kind=AmendmentProposalKind.METADATA,
+                    metadata=change,
+                    rationale=rationale,
+                    principal_id=credential.principal_id,
+                    request_id=uuid4().hex,
+                )
+            )
+        except DocumentNotFound as exc:
+            raise ToolError("Note not found") from exc
+        except AmendmentBaseRevisionMismatch as exc:
+            raise ToolError(
+                "The note changed; fetch it again before proposing an edit"
+            ) from exc
+        except ValueError as exc:
+            raise ToolError(f"Invalid metadata change: {exc}") from exc
 
         return VaultAmendmentProposalResponse(
             proposal=amendment_proposal_summary(proposal),

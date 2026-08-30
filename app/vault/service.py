@@ -1521,6 +1521,58 @@ class SpanEdit:
 
 
 @dataclass(frozen=True, slots=True)
+class MetadataChange:
+    """The fields a metadata amendment may set, each optional.
+
+    ``None`` means "leave this alone" and an empty collection means "make this
+    empty", which is the distinction a caller needs in order to clear a field
+    without resending the ones it is not touching.
+
+    Deliberately excludes ``tags`` and ``aliases``. Both join
+    ``assemble_embedding_text``, so changing either is a change to what the note
+    means to search -- it needs a re-embed and a dedup run, and it can collide.
+    Excluding them is what lets this kind promise that it cannot alter
+    retrieval, which is the promise the whole operation is built on. See vault
+    ADR 0036.
+    """
+
+    related_ids: tuple[str, ...] | None = None
+    source_ids: tuple[str, ...] | None = None
+    facets: dict[str, list[str]] | None = None
+    source_url: str | None = None
+    # `source_url` is nullable in storage, so "set it to null" and "leave it
+    # alone" cannot both be spelled `None`. This says which was meant.
+    clear_source_url: bool = False
+
+    def __post_init__(self) -> None:
+        """Setting the URL and clearing it are mutually exclusive.
+
+        Held here as well as at the two transport models because this is the
+        type both of them build, and the type every future caller will build.
+        `_metadata_payload` and `_metadata_update` each had to decide what a
+        contradictory pair meant, and both silently preferred the clear -- so a
+        caller who sent a replacement URL got their existing one deleted. A
+        precedence rule was the wrong shape of answer: the state should not be
+        constructible.
+        """
+
+        if self.clear_source_url and self.source_url is not None:
+            raise ValueError(
+                "source_url and clear_source_url are contradictory: set one or "
+                "the other, not both"
+            )
+
+    def is_empty(self) -> bool:
+        return (
+            self.related_ids is None
+            and self.source_ids is None
+            and self.facets is None
+            and self.source_url is None
+            and not self.clear_source_url
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AmendmentProposalRequest:
     target_document_id: str
     base_revision: int
@@ -1535,6 +1587,7 @@ class AmendmentProposalRequest:
     # adapter because the conversion needs the note's current body, which only
     # the service is allowed to read.
     span: SpanEdit | None = None
+    metadata: MetadataChange | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1552,6 +1605,100 @@ class AmendmentDecisionOutcome:
     proposal: VaultAmendmentProposal
     outcome: str
     target: VaultDocument | None
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataUpdateRequest:
+    """Apply a metadata change directly, for a caller holding update authority."""
+
+    document_id: str
+    base_revision: int
+    change: MetadataChange
+    principal_id: str
+    request_id: str
+
+
+class VaultDocumentMetadataService:
+    """Change a note's edges and classification without touching its content.
+
+    The applied counterpart of the `metadata` amendment kind (ADR 0036), and
+    deliberately *not* a thin wrapper over `VaultDocumentUpdateService`. That
+    service embeds outside the transaction, takes the corpus lock, and runs the
+    dedup gate, because an update can create a duplicate. None of that applies
+    here: every field this accepts is excluded from `assemble_embedding_text`,
+    so the note's embedding text is unchanged by construction, its vector still
+    describes it, and it cannot have become a duplicate of anything.
+
+    Skipping the gate is therefore a consequence of the payload rather than an
+    exemption granted to a caller — which is why the permitted keys are fixed
+    in the schema and not merely in this class.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def update(self, request: MetadataUpdateRequest) -> VaultDocument:
+        if request.change.is_empty():
+            raise ValueError("a metadata update must change at least one field")
+
+        documents = VaultDocumentRepository()
+        async with self._transactions.transaction() as connection:
+            # The corpus lock is still taken. Nothing here can collide, but the
+            # write is a read-modify-write against a row other governed writers
+            # also touch, and the revision check below is only as good as the
+            # window it runs in.
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            target = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=READABLE_STATUSES,
+                readable_only=True,
+            )
+            if target is None:
+                raise DocumentNotFound(request.document_id)
+            if target.content_revision != request.base_revision:
+                raise AmendmentBaseRevisionMismatch(
+                    f"{request.document_id} is at revision "
+                    f"{target.content_revision}, not {request.base_revision}"
+                )
+
+            update_request = VaultAmendmentService._metadata_update(
+                request.change,
+                target,
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
+            candidate = VaultDocumentUpdateService._build_candidate(
+                target, update_request
+            )
+            errors = validate(candidate) + validate_facets(candidate.facets)
+            if errors:
+                raise ValueError("; ".join(errors))
+
+            updated = await documents.replace_content(
+                connection,
+                request.document_id,
+                candidate,
+                expected_revision=request.base_revision,
+            )
+            if updated is None:
+                raise AmendmentBaseRevisionMismatch(
+                    f"{request.document_id} changed while this update was in flight"
+                )
+
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.update_metadata",
+                outcome="updated",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=request.document_id,
+            )
+        return updated
 
 
 class VaultAmendmentService:
@@ -1770,6 +1917,27 @@ class VaultAmendmentService:
                 "acceptance removes existing lines; set acknowledge_removals=true "
                 "after reviewing the removal summary"
             )
+        # A metadata acceptance needs no provider and must not embed.
+        #
+        # Every field that kind can carry is excluded from the embedding text,
+        # so the note's stored vector still describes it and it cannot have
+        # become a duplicate of anything -- there is nothing for the gate to
+        # decide. Falling through to the shared path made ADR 0036's promise
+        # false in two ordinary states: a deployment with no provider refused
+        # the write with 503, and a note that happened to have no embedding row
+        # got one written from this change, which is precisely the "cannot
+        # affect retrieval" claim failing.
+        if proposal.change_kind is AmendmentProposalKind.METADATA:
+            errors = validate(candidate) + validate_facets(candidate.facets)
+            if errors:
+                raise ValueError("; ".join(errors))
+            return await self._settle_metadata_acceptance(
+                request,
+                proposal=proposal,
+                target=target,
+                candidate=candidate,
+            )
+
         if self._provider is None:
             raise DedupUnavailable(
                 "No embedding provider is configured; refusing to write without dedup"
@@ -1875,6 +2043,85 @@ class VaultAmendmentService:
             await self._audit_decision(connection, request, "accepted")
             return AmendmentDecisionOutcome(decided, "accepted", updated)
 
+    async def _settle_metadata_acceptance(
+        self,
+        request: AmendmentDecisionRequest,
+        *,
+        proposal: VaultAmendmentProposal,
+        target: VaultDocument,
+        candidate: NewVaultDocument,
+    ) -> AmendmentDecisionOutcome:
+        """Apply an accepted metadata proposal without touching the index.
+
+        The same sequence the ordinary acceptance runs -- lock, re-read, verify
+        the revision, write under a CAS, settle the proposal, audit -- with the
+        embedding, vector upsert, similarity search, and dedup decision left
+        out rather than made conditional. They are absent because nothing this
+        kind carries reaches `assemble_embedding_text`, so there is no vector
+        to refresh and no duplicate that could have been created.
+
+        Consequences worth stating: this path works with no embedding provider
+        configured, and it leaves a note that has no embedding row exactly as
+        it found it. Both were failures before -- 503 in the first case, an
+        unrelated vector written in the second.
+        """
+
+        proposals = VaultAmendmentProposalRepository()
+        documents = VaultDocumentRepository()
+
+        async with self._transactions.transaction() as connection:
+            await connection.execute(
+                text_sql("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _CONTRIBUTION_LOCK_KEY},
+            )
+            current_proposal = await proposals.get(connection, request.proposal_id)
+            if current_proposal is None:
+                raise AmendmentProposalNotFound(str(request.proposal_id))
+            if current_proposal.state is not AmendmentProposalState.PENDING:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+
+            current = await documents.get_by_id(connection, target.id)
+            if (
+                current is None
+                or current.content_revision != current_proposal.target_revision
+            ):
+                decided = await proposals.decide(
+                    connection,
+                    request.proposal_id,
+                    state=AmendmentProposalState.STALE,
+                    decided_by=f"agent:{request.principal_id}",
+                    decision_note=request.decision_note,
+                )
+                if decided is None:
+                    raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+                await self._audit_decision(connection, request, "stale")
+                return AmendmentDecisionOutcome(decided, "stale", current)
+
+            updated = await documents.replace_content(
+                connection,
+                current.id,
+                candidate,
+                expected_revision=current_proposal.target_revision,
+            )
+            if updated is None:
+                raise AmendmentBaseRevisionMismatch(current.id)
+
+            decided = await proposals.decide(
+                connection,
+                request.proposal_id,
+                state=AmendmentProposalState.ACCEPTED,
+                decided_by=f"agent:{request.principal_id}",
+                decision_note=request.decision_note,
+                applied_revision=updated.content_revision,
+                # A metadata change removes no body lines, so there is nothing
+                # for a reviewer to acknowledge.
+                removals_acknowledged=False,
+            )
+            if decided is None:
+                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+            await self._audit_decision(connection, request, "accepted")
+            return AmendmentDecisionOutcome(decided, "accepted", updated)
+
     async def _settle_stale(
         self,
         request: AmendmentDecisionRequest,
@@ -1959,7 +2206,90 @@ class VaultAmendmentService:
         )
 
     @classmethod
+    def _metadata_payload(cls, change: MetadataChange) -> dict[str, object]:
+        """Only the fields the caller actually set.
+
+        Omitting the untouched ones is what makes the stored proposal readable:
+        a reviewer sees the change rather than a whole document with four
+        differences in it.
+        """
+
+        payload: dict[str, object] = {}
+        if change.related_ids is not None:
+            payload["related_ids"] = list(change.related_ids)
+        if change.source_ids is not None:
+            payload["source_ids"] = list(change.source_ids)
+        if change.facets is not None:
+            payload["facets"] = dict(change.facets)
+        # Not a precedence rule. `MetadataChange` refuses the pair, so at
+        # most one of these branches can apply; an earlier version had no
+        # such guarantee and this `elif` quietly discarded a supplied URL.
+        if change.clear_source_url:
+            payload["source_url"] = None
+        elif change.source_url is not None:
+            payload["source_url"] = change.source_url
+        if not payload:
+            raise ValueError("a metadata proposal must change at least one field")
+        return payload
+
+    @staticmethod
+    def _metadata_update(
+        change: MetadataChange,
+        target: VaultDocument,
+        *,
+        principal_id: str,
+        request_id: str,
+    ) -> UpdateRequest:
+        """The target with only the named metadata fields replaced.
+
+        Everything else comes from the stored row, which is what makes this a
+        metadata edit rather than a replacement that happens to keep most
+        fields: there is no request field that could reach the title or body
+        even by mistake.
+        """
+
+        source_url = target.source_url
+        # Not a precedence rule. `MetadataChange` refuses the pair, so at
+        # most one of these branches can apply; an earlier version had no
+        # such guarantee and this `elif` quietly discarded a supplied URL.
+        if change.clear_source_url:
+            source_url = None
+        elif change.source_url is not None:
+            source_url = change.source_url
+
+        return UpdateRequest(
+            document_id=target.id,
+            title=target.title,
+            body=target.body,
+            principal_id=principal_id,
+            request_id=request_id,
+            summary=target.summary,
+            tags=target.tags,
+            aliases=target.aliases,
+            facets=dict(change.facets) if change.facets is not None else target.facets,
+            related_ids=(
+                tuple(change.related_ids)
+                if change.related_ids is not None
+                else target.related_ids
+            ),
+            source_ids=(
+                tuple(change.source_ids)
+                if change.source_ids is not None
+                else target.source_ids
+            ),
+            source_url=source_url,
+        )
+
+    @classmethod
     def _change_payload(cls, request: AmendmentProposalRequest) -> dict[str, object]:
+        if request.change_kind is AmendmentProposalKind.METADATA:
+            if request.metadata is None:
+                raise ValueError("metadata proposals require a metadata change")
+            if request.replacement is not None or request.body_diff is not None:
+                raise ValueError(
+                    "a metadata proposal carries neither replacement nor body_diff"
+                )
+            return cls._metadata_payload(request.metadata)
         if request.change_kind is AmendmentProposalKind.REPLACEMENT:
             if request.replacement is None or request.body_diff is not None:
                 raise ValueError("replacement proposals require only replacement content")
@@ -1974,6 +2304,15 @@ class VaultAmendmentService:
         request: AmendmentProposalRequest,
         target: VaultDocument,
     ) -> UpdateRequest:
+        if request.change_kind is AmendmentProposalKind.METADATA:
+            if request.metadata is None:
+                raise ValueError("metadata proposals require a metadata change")
+            return cls._metadata_update(
+                request.metadata,
+                target,
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
         if request.change_kind is AmendmentProposalKind.REPLACEMENT:
             if request.replacement is None or request.body_diff is not None:
                 raise ValueError("replacement proposals require only replacement content")
@@ -2019,6 +2358,27 @@ class VaultAmendmentService:
         principal_id: str,
         request_id: str,
     ) -> UpdateRequest:
+        if proposal.change_kind is AmendmentProposalKind.METADATA:
+            stored = proposal.change
+            change = MetadataChange(
+                related_ids=(
+                    tuple(stored["related_ids"]) if "related_ids" in stored else None
+                ),
+                source_ids=(
+                    tuple(stored["source_ids"]) if "source_ids" in stored else None
+                ),
+                facets=dict(stored["facets"]) if "facets" in stored else None,
+                source_url=stored.get("source_url"),
+                clear_source_url=(
+                    "source_url" in stored and stored["source_url"] is None
+                ),
+            )
+            return VaultAmendmentService._metadata_update(
+                change,
+                target,
+                principal_id=principal_id,
+                request_id=request_id,
+            )
         if proposal.change_kind is AmendmentProposalKind.BODY_DIFF:
             patch = proposal.change.get("body_diff")
             if not isinstance(patch, str):

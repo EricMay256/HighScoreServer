@@ -48,6 +48,7 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultMetadataUpdateRequest,
     VaultReviewCaseResponse,
     VaultReviewDecisionRequest,
     VaultReviewDecisionResponse,
@@ -105,6 +106,8 @@ from .service import (
     DocumentNotFound,
     DocumentUnderReview,
     IdempotencyConflict,
+    MetadataChange,
+    MetadataUpdateRequest,
     RetireRequest,
     ReviewCaseAlreadyDecided,
     ReviewCaseNotFound,
@@ -120,6 +123,7 @@ from .service import (
     VaultAmendmentService,
     VaultCompileService,
     VaultContributionService,
+    VaultDocumentMetadataService,
     VaultDocumentRetireService,
     VaultDocumentSummaryService,
     VaultDocumentUpdateService,
@@ -529,6 +533,27 @@ async def propose_amendment(
             if body.change.kind == AmendmentProposalKind.BODY_DIFF.value
             else None
         ),
+        metadata=(
+            MetadataChange(
+                related_ids=(
+                    tuple(body.change.related_ids)
+                    if body.change.related_ids is not None
+                    else None
+                ),
+                source_ids=(
+                    tuple(body.change.source_ids)
+                    if body.change.source_ids is not None
+                    else None
+                ),
+                facets=body.change.facets,
+                source_url=(
+                    str(body.change.source_url) if body.change.source_url else None
+                ),
+                clear_source_url=body.change.clear_source_url,
+            )
+            if body.change.kind == AmendmentProposalKind.METADATA.value
+            else None
+        ),
     )
     try:
         proposal = await _amendment_service().propose(proposal_request)
@@ -554,6 +579,92 @@ async def update_quota(
 ) -> VaultCredential:
     await _enforce_quota(credential, "update")
     return credential
+
+
+@router.patch(
+    "/notes/{note_id}/metadata",
+    response_model=VaultDocumentUpdateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Change one note's edges and classification",
+)
+async def update_vault_document_metadata(
+    body: VaultMetadataUpdateRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(update_quota),
+) -> VaultDocumentUpdateResponse:
+    """Change a note's edges or classification without resending it.
+
+    PATCH rather than PUT because it genuinely is partial: the fields it does
+    not name keep their stored values, which is the whole point. The full
+    replacement at `PUT /notes/{note_id}` remains the path for content.
+
+    `base_revision` is required and checked. A note that moved since the caller
+    read it produces 409 rather than an overwrite.
+
+    Costs no embedding call and runs no dedup gate, because nothing this
+    accepts joins the embedding text -- so the note's vector still describes it
+    and it cannot have become a duplicate of anything (ADR 0036).
+    """
+
+    request_id = request.headers.get("X-Request-Id") or uuid4().hex
+    change = MetadataChange(
+        related_ids=(
+            tuple(body.related_ids) if body.related_ids is not None else None
+        ),
+        source_ids=(
+            tuple(body.source_ids) if body.source_ids is not None else None
+        ),
+        facets=body.facets,
+        source_url=str(body.source_url) if body.source_url else None,
+        clear_source_url=body.clear_source_url,
+    )
+    if change.is_empty():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "Nothing to change. Provide at least one of related_ids, "
+                "source_ids, facets, source_url, or clear_source_url."
+            ),
+        )
+
+    service = VaultDocumentMetadataService(
+        VaultTransactionService(get_vault_engine())
+    )
+    try:
+        updated = await service.update(
+            MetadataUpdateRequest(
+                document_id=note_id,
+                base_revision=body.base_revision,
+                change=change,
+                principal_id=credential.principal_id,
+                request_id=request_id,
+            )
+        )
+    except DocumentNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Note not found",
+        ) from exc
+    except AmendmentBaseRevisionMismatch as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": str(exc), "retryable": True},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"message": "Invalid metadata change", "errors": [str(exc)]},
+        ) from exc
+
+    return VaultDocumentUpdateResponse(
+        note_id=updated.id,
+        message="metadata updated",
+        # Always false, and worth stating rather than defaulting: nothing this
+        # path accepts joins the embedding text, so the note's vector still
+        # describes it and no provider call was spent (ADR 0036).
+        re_embedded=False,
+    )
 
 
 @router.put(

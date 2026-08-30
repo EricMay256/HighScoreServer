@@ -508,7 +508,7 @@ vault_amendment_proposals = Table(
         name="vault_amendment_proposals_target_revision_positive",
     ),
     CheckConstraint(
-        "change_kind IN ('replacement', 'body_diff')",
+        "change_kind IN ('replacement', 'body_diff', 'metadata')",
         name="vault_amendment_proposals_change_kind_known",
     ),
     CheckConstraint(
@@ -521,7 +521,15 @@ vault_amendment_proposals = Table(
         "AND change - 'body_diff' = '{}'::jsonb) OR "
         "(change_kind = 'replacement' "
         "AND jsonb_typeof(change -> 'title') = 'string' "
-        "AND jsonb_typeof(change -> 'body') = 'string')",
+        "AND jsonb_typeof(change -> 'body') = 'string') OR "
+        # A metadata change carries at least one of the non-embedded fields and
+        # nothing else. Enumerated here rather than left open because the whole
+        # claim of this kind is that it cannot touch what is embedded -- an
+        # unlisted key would be that claim quietly failing.
+        "(change_kind = 'metadata' "
+        "AND change <> '{}'::jsonb "
+        "AND change - 'related_ids' - 'source_ids' - 'facets' "
+        "- 'source_url' = '{}'::jsonb)",
         name="vault_amendment_proposals_change_shape",
     ),
     CheckConstraint(
