@@ -285,3 +285,38 @@ def test_a_bulk_run_stops_when_the_session_ends() -> None:
     page = _page()
 
     assert "if (!TOKEN) break;" in page
+
+
+def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:
+    """Structural, because a marker is only useful where it is not swallowed.
+
+    `loadAll` consumed the marker, but the nested detail handlers caught it
+    first and rendered it as an ordinary load failure -- so the queue loop kept
+    going and every remaining card issued another unauthorized request, up to
+    two hundred of them, against a page `endSession` had already repainted.
+
+    Asserted across every catch block rather than the four that were wrong,
+    because the next one written will be wrong the same way. Two are exempt and
+    named below: neither calls `api()`, so neither can ever see the marker.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+    unguarded = []
+    for index, line in enumerate(lines):
+        if "catch (err)" not in line:
+            continue
+        window = lines[index : index + 8]
+        if not any("sessionEnded" in following for following in window):
+            unguarded.append((index + 1, line.strip()[:70]))
+
+    assert len(unguarded) == 2, (
+        "A catch block around an api() call does not propagate session expiry: "
+        f"{unguarded}. Add `if (err.sessionEnded) throw err;` ahead of the "
+        "ordinary failure rendering. Swallowing it lets the caller carry on "
+        "issuing requests against a session that has already ended, and hides "
+        "the expiry from the handler that repaints the sign-in controls."
+    )
+    exempt = " ".join(text for _, text in unguarded)
+    assert "Signing out locally" in exempt, "sign-out revocation should be exempt"
+    assert "PENDING_ERROR" in exempt, "the pre-session token exchange should be exempt"

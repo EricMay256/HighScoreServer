@@ -481,6 +481,11 @@ async function proposalCard(summary) {
     }
     loaded = true;
   } catch (err) {
+    /* An ended session is not this card's problem to report. Swallowing it
+       here left the queue loop running, so the remaining cards each issued
+       another unauthorized request -- up to two hundred of them -- against a
+       page endSession had already repainted. */
+    if (err.sessionEnded) throw err;
     detailSlot.appendChild(el("p", "small dangling",
       "Could not load this proposal's change: " + err.message
       + " — deciding is disabled until it can be shown. Refresh to retry."));
@@ -654,6 +659,7 @@ async function renderCases() {
             row.appendChild(d);
             fetched++;
           } catch (err) {
+            if (err.sessionEnded) throw err;
             row.appendChild(el("p", "small dangling",
               "Could not load this note for comparison: " + err.message));
           }
@@ -666,6 +672,7 @@ async function renderCases() {
          least one comparison the reviewer could actually read. */
       evidenceLoaded = Boolean(candidate) && fetched > 0 && fetched === evidence.length;
     } catch (err) {
+      if (err.sessionEnded) throw err;
       body.appendChild(el("p", "small dangling", "Could not load this case: " + err.message));
     }
 
@@ -698,6 +705,7 @@ async function renderCases() {
         card.replaceChildren(el("div", "row small muted",
           "✓ " + (out.review_case ? out.review_case.state : decision)));
       } catch (err) {
+        if (err.sessionEnded) return;
         keep.disabled = drop.disabled = false;
         body.appendChild(el("p", "small dangling", "Refused: " + err.message));
       }
