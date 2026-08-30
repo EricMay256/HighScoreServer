@@ -116,9 +116,14 @@ const el = (tag, cls, text) => {
 /* The token lives in sessionStorage, not localStorage: it is a one-hour
    reviewer credential and it should not outlive the tab that earned it. */
 const STORE = { client: "vault.review.client_id", verifier: "vault.review.pkce",
-                state: "vault.review.state", token: "vault.review.token" };
+                state: "vault.review.state", token: "vault.review.token",
+                refresh: "vault.review.refresh" };
 let TOKEN = sessionStorage.getItem(STORE.token) || null;
+let REFRESH = sessionStorage.getItem(STORE.refresh) || null;
 let META = null;
+/* Survives the clearMessages() at the top of render(): a callback error is the
+   one message that must outlive the re-render that follows it. */
+let PENDING_ERROR = null;
 
 const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
   .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -189,16 +194,66 @@ async function completeSignIn(code, state) {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body,
   });
   if (!r.ok) throw new Error("Token exchange failed: " + (await r.text()).slice(0, 200));
-  TOKEN = (await r.json()).access_token;
-  sessionStorage.setItem(STORE.token, TOKEN);
+  storeTokens(await r.json());
   sessionStorage.removeItem(STORE.verifier);
   sessionStorage.removeItem(STORE.state);
   window.history.replaceState({}, "", CFG.reviewPath);
 }
 
-function signOut() {
+function storeTokens(payload) {
+  TOKEN = payload.access_token;
+  sessionStorage.setItem(STORE.token, TOKEN);
+  /* Keeping the refresh token is what makes "grant the entitlement once"
+     true. The access token lasts an hour; without a refresh, expiry would
+     send the operator back through authorization, and a new authorization
+     creates a new family that inherits no privileged scopes -- so the
+     entitlement would have to be re-granted every hour, and abandoned
+     families would pile up behind it. */
+  if (payload.refresh_token) {
+    REFRESH = payload.refresh_token;
+    sessionStorage.setItem(STORE.refresh, REFRESH);
+  }
+}
+
+/* Rotating: the server mints a new refresh token and revokes the presented
+   one, so the response must be stored or the chain is broken. A replayed
+   refresh token revokes the whole family, which is why this never retries. */
+async function refreshTokens() {
+  if (!REFRESH) return false;
+  const m = await metadata();
+  const presented = REFRESH;
+  REFRESH = null;
+  sessionStorage.removeItem(STORE.refresh);
+  const r = await fetch(m.token_endpoint, {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: presented,
+      client_id: await clientId(),
+    }),
+  });
+  if (!r.ok) return false;
+  storeTokens(await r.json());
+  return true;
+}
+
+async function signOut() {
+  /* Retire the family rather than abandoning it. A dropped refresh token stays
+     valid until it expires, and the entitlement rides on the family. */
+  const token = REFRESH || TOKEN;
   TOKEN = null;
+  REFRESH = null;
   sessionStorage.removeItem(STORE.token);
+  sessionStorage.removeItem(STORE.refresh);
+  try {
+    const m = await metadata();
+    if (m.revocation_endpoint && token) {
+      await fetch(m.revocation_endpoint, {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token, client_id: await clientId() }),
+      });
+    }
+  } catch (err) { /* Signing out locally must succeed even if revocation cannot. */ }
   render();
 }
 
@@ -208,11 +263,18 @@ function signOut() {
 const credentialId = () => (TOKEN && TOKEN.split("_").length >= 3) ? TOKEN.split("_")[1] : null;
 
 /* ---------- API ---------- */
-async function api(path, options) {
+async function api(path, options, retried) {
   const opts = Object.assign({ headers: {} }, options || {});
   opts.headers = Object.assign({ Authorization: "Bearer " + TOKEN }, opts.headers);
   const r = await fetch(CFG.apiBase + path, opts);
-  if (r.status === 401) { signOut(); throw new Error("Session expired. Sign in again."); }
+  if (r.status === 401) {
+    /* Once. A second 401 after a successful rotation is a real rejection, and
+       retrying a write that may already have applied is worse than failing. */
+    if (!retried && await refreshTokens()) return api(path, options, true);
+    TOKEN = null;
+    sessionStorage.removeItem(STORE.token);
+    throw new Error("Session expired. Sign in again.");
+  }
   if (r.status === 403) { const e = new Error("forbidden"); e.forbidden = true; throw e; }
   if (!r.ok) throw new Error((await r.text()).slice(0, 300));
   return r.json();
@@ -282,6 +344,12 @@ function metadataPreview(preview) {
     box.appendChild(el("pre", "mono",
       String(preview.source_url_before) + "\n→ " + String(preview.source_url_after)));
   }
+  for (const [flag, label] of [["related_reordered", "related_ids"], ["source_reordered", "source_ids"]]) {
+    if (!preview[flag]) continue;
+    any = true;
+    box.appendChild(el("div", "small muted", label));
+    box.appendChild(el("span", "edge", "same edges, reordered — accepting rewrites the stored order"));
+  }
   if (preview.changes_nothing) {
     box.appendChild(el("p", "small dangling",
       "This proposal would leave the note exactly as it is — the change most likely landed by another route."));
@@ -336,6 +404,11 @@ async function proposalCard(summary) {
   card.appendChild(actions);
 
   let ack = null;
+  /* Nothing may be decided until the change has actually been displayed. A
+     card whose detail failed to load shows a rationale and two buttons, and
+     the rationale is written by the proposer -- accepting on that alone is
+     accepting an unexamined write on the strength of its own description. */
+  let loaded = false;
   try {
     const detail = await api("/amendment-proposals/" + summary.proposal_id);
     if (detail.target) titleSlot.textContent = detail.target.title;
@@ -361,12 +434,24 @@ async function proposalCard(summary) {
         "No preview: the note has moved since this proposal was written, so it will settle as stale."));
       check.disabled = true;
     }
+    loaded = true;
   } catch (err) {
-    detailSlot.appendChild(el("p", "small dangling", "Could not load detail: " + err.message));
+    detailSlot.appendChild(el("p", "small dangling",
+      "Could not load this proposal's change: " + err.message
+      + " — deciding is disabled until it can be shown. Refresh to retry."));
   }
 
-  const decide = async (decision) => {
+  if (!loaded) {
+    check.disabled = true;
     accept.disabled = reject.disabled = true;
+  }
+
+  /* Returns whether the decision applied. The bulk loop counts on this: an
+     exception swallowed here once made every refusal look like a success. */
+  const decide = async (decision) => {
+    if (!loaded) return false;
+    accept.disabled = reject.disabled = true;
+    const title = titleSlot.textContent;
     try {
       const out = await api("/amendment-proposals/" + summary.proposal_id + "/decision", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -375,14 +460,14 @@ async function proposalCard(summary) {
           acknowledge_removals: ack ? ack.checked : false,
         }),
       });
-      card.replaceChildren(el("div", "row small muted",
-        "✓ " + out.outcome + " — " + (detailTitle(titleSlot))));
+      card.replaceChildren(el("div", "row small muted", "✓ " + out.outcome + " — " + title));
+      return true;
     } catch (err) {
       accept.disabled = reject.disabled = false;
       detailSlot.appendChild(el("p", "small dangling", "Refused: " + err.message));
+      return false;
     }
   };
-  const detailTitle = (slot) => slot.textContent;
   accept.onclick = () => decide("accepted");
   reject.onclick = () => decide("rejected");
   card.decide = decide;
@@ -424,12 +509,18 @@ async function renderProposals() {
   acceptSelected.onclick = async () => {
     const chosen = cards.filter((c) => c.checkbox && c.checkbox.checked && !c.checkbox.disabled);
     acceptSelected.disabled = selectAll.disabled = true;
-    let done = 0;
+    let attempted = 0, accepted = 0, failed = 0;
     for (const c of chosen) {
-      status.textContent = "accepting " + (++done) + " of " + chosen.length + "…";
-      await c.decide("accepted");
+      status.textContent = "deciding " + (++attempted) + " of " + chosen.length + "…";
+      if (await c.decide("accepted")) accepted++; else failed++;
     }
-    status.textContent = "accepted " + done + ". Refresh to see what remains.";
+    /* Counted separately because a refused decision leaves its card in place
+       with the reason on it. Reporting the attempt count as the accepted count
+       would tell the operator the queue is clear when it is not. */
+    status.textContent = failed
+      ? ("accepted " + accepted + ", refused " + failed
+         + " — the refused cards are still listed with the reason.")
+      : ("accepted " + accepted + ". Refresh to see what remains.");
     acceptSelected.disabled = selectAll.disabled = false;
   };
 }
@@ -458,30 +549,75 @@ async function renderCases() {
     const card = el("div", "card");
     const head = el("div", "row");
     head.appendChild(el("span", "kind", "duplicate?"));
-    const titleSlot = el("span", "title grow", summary.candidate_id || summary.review_case_id);
+    const titleSlot = el("span", "title grow",
+      summary.candidate_note_id || String(summary.review_case_id));
     head.appendChild(titleSlot);
-    if (summary.similarity !== undefined && summary.similarity !== null) {
-      head.appendChild(el("span", "muted small", "similarity " + Number(summary.similarity).toFixed(3)));
-    }
     card.appendChild(head);
+
+    /* The stored reason and scores, not a live recomputation: the reviewer is
+       judging the comparison the write path actually made. */
+    if (summary.reason) card.appendChild(el("p", "small muted", summary.reason));
 
     const body = el("div");
     card.appendChild(body);
+
+    /* A duplicate decision cannot be made from the candidate alone -- the
+       question is whether it duplicates *something*, and that something has to
+       be on screen. Both sides must load before either button is live. */
+    let evidenceLoaded = false;
     try {
       const detail = await api("/reviews/" + summary.review_case_id);
       const candidate = detail.candidate;
+      const evidence = (detail.review_case && detail.review_case.similar) || summary.similar || [];
+
       if (candidate) {
         titleSlot.textContent = candidate.title;
         const d = document.createElement("details");
-        d.appendChild(el("summary", null, "Candidate body"));
+        d.open = true;
+        d.appendChild(el("summary", null, "Candidate (the flagged note)"));
         d.appendChild(el("pre", "mono", candidate.body));
         body.appendChild(d);
       } else {
         body.appendChild(el("p", "small dangling",
-          "The candidate is gone — the case outlived the document it was about."));
+          "The candidate is gone — the case outlived the document it judged, so there is nothing left to publish or delete."));
       }
+
+      if (!evidence.length) {
+        body.appendChild(el("p", "small dangling",
+          "This case records no similar notes, so there is no evidence of duplication to weigh."));
+      }
+      let fetched = 0;
+      for (const item of evidence) {
+        const row = el("div", "card");
+        const rowHead = el("div", "row");
+        rowHead.appendChild(el("span", "title grow", item.title || item.note_id || "(unnamed)"));
+        if (item.score !== undefined && item.score !== null) {
+          rowHead.appendChild(el("span", "muted small",
+            "scored " + Number(item.score).toFixed(3)));
+        }
+        row.appendChild(rowHead);
+        if (item.note_id) {
+          try {
+            const other = await api("/notes/" + item.note_id);
+            const d = document.createElement("details");
+            d.appendChild(el("summary", null, "Body of the note it may duplicate"));
+            d.appendChild(el("pre", "mono", other.body));
+            row.appendChild(d);
+            fetched++;
+          } catch (err) {
+            row.appendChild(el("p", "small dangling",
+              "Could not load this note for comparison: " + err.message));
+          }
+        } else {
+          row.appendChild(el("p", "small dangling", "This evidence names no note id."));
+        }
+        body.appendChild(row);
+      }
+      /* Publishing needs the candidate; deleting needs to be justified by at
+         least one comparison the reviewer could actually read. */
+      evidenceLoaded = Boolean(candidate) && fetched > 0 && fetched === evidence.length;
     } catch (err) {
-      body.appendChild(el("p", "small dangling", "Could not load detail: " + err.message));
+      body.appendChild(el("p", "small dangling", "Could not load this case: " + err.message));
     }
 
     const actions = el("div", "row");
@@ -494,7 +630,14 @@ async function renderCases() {
     actions.append(note, keep, drop);
     card.appendChild(actions);
 
+    if (!evidenceLoaded) {
+      keep.disabled = drop.disabled = true;
+      actions.appendChild(el("span", "small dangling",
+        "Deciding is disabled until the candidate and every note it is compared against have loaded. Refresh to retry."));
+    }
+
     const decide = async (decision) => {
+      if (!evidenceLoaded) return;
       if (decision === "rejected"
         && !window.confirm("Delete “" + titleSlot.textContent + "”? This cannot be undone.")) return;
       keep.disabled = drop.disabled = true;
@@ -536,6 +679,10 @@ function render() {
   $("app").classList.toggle("hidden", !signedIn);
   $("who").textContent = signedIn ? ("credential " + (credentialId() || "?")) : "";
   clearMessages();
+  if (PENDING_ERROR) {
+    say("danger", el("div", null, PENDING_ERROR));
+    PENDING_ERROR = null;
+  }
   if (!signedIn) {
     const intro = document.createElement("div");
     intro.appendChild(el("strong", null, "Sign in to review."));
@@ -567,11 +714,11 @@ $("tab-cases").onclick = () => {
 (async () => {
   const params = new URLSearchParams(window.location.search);
   if (params.get("error")) {
-    say("danger", el("div", null, "Authorization failed: " + params.get("error")));
+    PENDING_ERROR = "Authorization failed: " + params.get("error");
     window.history.replaceState({}, "", CFG.reviewPath);
   } else if (params.get("code")) {
     try { await completeSignIn(params.get("code"), params.get("state")); }
-    catch (err) { say("danger", el("div", null, err.message)); }
+    catch (err) { PENDING_ERROR = err.message; }
   }
   render();
 })();

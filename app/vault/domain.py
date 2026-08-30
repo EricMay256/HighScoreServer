@@ -339,6 +339,13 @@ class MetadataChangeSummary:
     related_removed: tuple[EdgeRef, ...] = ()
     source_added: tuple[EdgeRef, ...] = ()
     source_removed: tuple[EdgeRef, ...] = ()
+    # Same members, different order. Additions and removals are set
+    # differences, so a pure reorder produces neither -- and `related_ids` is a
+    # stored ordered array, so accepting one still rewrites the column and
+    # advances the revision. Reporting that as "changes nothing" would invite a
+    # reviewer to wave through a write on the grounds that it is not a write.
+    related_reordered: bool = False
+    source_reordered: bool = False
     facets_before: dict[str, list[str]] | None = None
     facets_after: dict[str, list[str]] | None = None
     source_url_before: str | None = None
@@ -354,6 +361,8 @@ class MetadataChangeSummary:
             or self.related_removed
             or self.source_added
             or self.source_removed
+            or self.related_reordered
+            or self.source_reordered
             or self.facets_before != self.facets_after
             or self.source_url_changed
         )

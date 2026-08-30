@@ -641,6 +641,15 @@ class VaultMetadataPreview(BaseModel):
     related_removed: list[VaultEdgeRef]
     source_added: list[VaultEdgeRef]
     source_removed: list[VaultEdgeRef]
+    related_reordered: bool = Field(
+        default=False,
+        description=(
+            "Same edges, different order. Additions and removals are set "
+            "differences and report nothing here, but the stored list is "
+            "ordered, so accepting still rewrites it and advances the revision."
+        ),
+    )
+    source_reordered: bool = False
     facets_before: dict[str, list[str]] | None = Field(
         default=None,
         description="Null when the proposal does not touch facets at all.",
@@ -1474,6 +1483,8 @@ def amendment_metadata_preview(
         related_removed=refs(summary.related_removed),
         source_added=refs(summary.source_added),
         source_removed=refs(summary.source_removed),
+        related_reordered=summary.related_reordered,
+        source_reordered=summary.source_reordered,
         facets_before=summary.facets_before,
         facets_after=summary.facets_after,
         source_url_before=summary.source_url_before,

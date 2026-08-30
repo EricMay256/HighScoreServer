@@ -131,3 +131,81 @@ def test_the_console_sets_its_protective_headers(header: str) -> None:
 
     assert header in response.headers
     assert response.status_code == 200
+
+
+def test_the_console_reads_the_field_names_the_api_actually_returns() -> None:
+    """The queue's fields were guessed once, and guessing is invisible in a UI.
+
+    `VaultReviewCaseSummary` carries `candidate_note_id`, `reason` and
+    `similar`; the console read `candidate_id` and `similarity`, which are not
+    fields. Nothing failed loudly -- undefined simply renders as a fallback --
+    so the console looked like it worked while showing the operator nothing.
+    """
+
+    page = _page()
+
+    assert "candidate_note_id" in page
+    assert "candidate_id" not in page.replace("candidate_note_id", "")
+    assert "similarity" not in page
+    assert "review_case.similar" in page or "summary.similar" in page
+
+
+def test_a_duplicate_case_shows_what_it_allegedly_duplicates() -> None:
+    """The question is whether one note duplicates another, so both must show.
+
+    Rendering only the candidate asks the reviewer to answer "is this a
+    duplicate?" without the other side of the comparison -- and the wrong
+    answer deletes a note permanently.
+    """
+
+    page = _page()
+
+    assert "/notes/" in page, "the console never fetches the notes being compared against"
+    assert "may duplicate" in page
+    assert "scored " in page, "similarity scores are recorded evidence and should be shown"
+
+
+def test_decisions_are_withheld_until_the_evidence_loads() -> None:
+    """A failed detail fetch is not cosmetic on a surface that deletes.
+
+    Both queues previously left their buttons live when the detail could not
+    be loaded, so a reviewer could accept a proposal whose change was never
+    displayed, or delete a note whose comparison never loaded.
+    """
+
+    page = _page()
+
+    assert "Deciding is disabled until" in page
+    assert "deciding is disabled until it can be shown" in page
+    assert "evidenceLoaded" in page and "if (!evidenceLoaded) return;" in page
+    assert "if (!loaded) return false;" in page
+
+
+def test_the_console_keeps_and_rotates_its_refresh_token() -> None:
+    """Discarding it silently breaks the documented "grant it once" workflow.
+
+    The access token lasts an hour. Without a refresh, expiry sends the
+    operator back through authorization -- and a new authorization creates a
+    new family that inherits no privileged scopes, so `vault:review` would have
+    to be re-granted hourly while abandoned families accumulated.
+    """
+
+    page = _page()
+
+    assert "refresh_token" in page
+    assert "grant_type: \"refresh_token\"" in page
+    assert "revocation_endpoint" in page, "signing out should retire the family, not abandon it"
+
+
+def test_bulk_acceptance_counts_refusals_separately() -> None:
+    """`decide` returning nothing made every refusal look like a success.
+
+    The bulk loop counted attempts, so a run where the API rejected every
+    proposal still reported them all accepted -- and the operator would have
+    had no reason to look at the cards still sitting in the queue.
+    """
+
+    page = _page()
+
+    assert "refused " in page
+    assert "accepted++" in page and "failed++" in page
