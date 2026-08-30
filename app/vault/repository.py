@@ -508,6 +508,35 @@ class VaultDocumentRepository:
         result = await connection.execute(statement)
         return {row.id: row.title for row in result}
 
+    async def get_many_by_ids(
+        self,
+        connection: AsyncConnection,
+        document_ids: Sequence[str],
+    ) -> dict[str, VaultDocument]:
+        """Every document that resolves, keyed by id, in one query.
+
+        For rendering a queue. The review console previously loaded a proposal
+        list and then fetched each target separately, which is one round trip
+        per row against a pool of two connections -- slow at forty rows and a
+        pool-timeout risk at two hundred.
+
+        Unfiltered by status for the same reason ``get_by_id`` is: a proposal
+        may target a document the public read surface withholds, and a reviewer
+        is the caller who has to see it. Ids that resolve to nothing are absent
+        rather than raising; a proposal whose target is gone is a real state and
+        the caller decides what to do about it.
+        """
+
+        if not document_ids:
+            return {}
+        statement = select(*self._domain_columns).where(
+            vault_documents.c.id.in_(list(dict.fromkeys(document_ids)))
+        )
+        result = await connection.execute(statement)
+        return {
+            row["id"]: document_from_row(row) for row in result.mappings()
+        }
+
     async def list_under_path_prefixes(
         self,
         connection: AsyncConnection,

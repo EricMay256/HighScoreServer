@@ -115,11 +115,45 @@ const el = (tag, cls, text) => {
 /* ---------- OAuth: authorization code + PKCE against our own AS ---------- */
 /* The token lives in sessionStorage, not localStorage: it is a one-hour
    reviewer credential and it should not outlive the tab that earned it. */
-const STORE = { client: "vault.review.client_id", verifier: "vault.review.pkce",
-                state: "vault.review.state", token: "vault.review.token",
-                refresh: "vault.review.refresh" };
+const STORE = { verifier: "vault.review.pkce", state: "vault.review.state",
+                token: "vault.review.token", session: "vault.review.session" };
+
+/* The registration and the refresh token are one durable record, stored
+   together because they are only valid together: refreshing presents both, and
+   a client_id from one authorization cannot renew a token from another.
+   Persisted rather than session-scoped so closing the tab does not destroy the
+   family -- the vault:review entitlement is keyed to the family, so a lost
+   session means re-running `grant-oauth`, and a per-tab session made that a
+   constant chore rather than the monthly one the refresh lifetime implies.
+   `obtained` bounds it: `prune_vault_oauth` deletes a registration once its
+   refresh token expires, and the authorization server answers a deleted
+   client_id with a direct 400 and no redirect, so nothing would tell us. We
+   therefore discard the pair on our own schedule rather than waiting for an
+   error that never arrives. */
+const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(STORE.session);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (!saved.client || !saved.obtained) return null;
+    if (Date.now() - saved.obtained > REFRESH_TTL_MS) {
+      localStorage.removeItem(STORE.session);
+      return null;
+    }
+    return saved;
+  } catch (err) { return null; }
+}
+
+function saveSession(next) {
+  try { localStorage.setItem(STORE.session, JSON.stringify(next)); }
+  catch (err) { /* Private mode: the session simply will not persist. */ }
+}
+
+let SESSION = loadSession() || {};
 let TOKEN = sessionStorage.getItem(STORE.token) || null;
-let REFRESH = sessionStorage.getItem(STORE.refresh) || null;
+let REFRESH = SESSION.refresh || null;
 let META = null;
 /* Survives the clearMessages() at the top of render(): a callback error is the
    one message that must outlive the re-render that follows it. */
@@ -148,8 +182,7 @@ async function metadata() {
    one row and cannot reach that state. The entitlement does not survive
    re-authorization regardless, so a longer-lived registration bought nothing. */
 async function clientId() {
-  const cached = sessionStorage.getItem(STORE.client);
-  if (cached) return cached;
+  if (SESSION.client) return SESSION.client;
   const m = await metadata();
   const redirect = window.location.origin + CFG.reviewPath;
   const r = await fetch(m.registration_endpoint, {
@@ -165,7 +198,8 @@ async function clientId() {
   });
   if (!r.ok) throw new Error("Client registration failed: " + (await r.text()).slice(0, 200));
   const id = (await r.json()).client_id;
-  sessionStorage.setItem(STORE.client, id);
+  SESSION = { client: id, refresh: null, obtained: Date.now() };
+  saveSession(SESSION);
   return id;
 }
 
@@ -208,7 +242,10 @@ async function completeSignIn(code, state) {
     /* A registration deleted by `prune_vault_oauth` answers invalid_client
        forever, and the id is cached, so every later attempt repeats it. Drop
        it and the next sign-in registers afresh. */
-    if (detail.includes("invalid_client")) sessionStorage.removeItem(STORE.client);
+    if (detail.includes("invalid_client")) {
+      localStorage.removeItem(STORE.session);
+      SESSION = {};
+    }
     throw new Error("Token exchange failed: " + detail);
   }
   storeTokens(await r.json());
@@ -228,7 +265,11 @@ function storeTokens(payload) {
      families would pile up behind it. */
   if (payload.refresh_token) {
     REFRESH = payload.refresh_token;
-    sessionStorage.setItem(STORE.refresh, REFRESH);
+    SESSION.refresh = REFRESH;
+    /* Not restamped on rotation: `obtained` bounds the *registration*, which
+       is what pruning removes, and rotating a token does not renew that. */
+    SESSION.obtained = SESSION.obtained || Date.now();
+    saveSession(SESSION);
   }
 }
 
@@ -240,7 +281,8 @@ async function refreshTokens() {
   const m = await metadata();
   const presented = REFRESH;
   REFRESH = null;
-  sessionStorage.removeItem(STORE.refresh);
+  SESSION.refresh = null;
+  saveSession(SESSION);
   const r = await fetch(m.token_endpoint, {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -261,7 +303,6 @@ function endSession(message) {
   TOKEN = null;
   REFRESH = null;
   sessionStorage.removeItem(STORE.token);
-  sessionStorage.removeItem(STORE.refresh);
   /* Forget the registration too. `prune_vault_oauth` deletes a registration
      once it is stale, and a registration is never stale while it holds a live
      refresh token -- so ending a session is exactly what makes ours eligible
@@ -269,7 +310,8 @@ function endSession(message) {
      again, and would have no way to notice: the id is cached indefinitely and
      every future attempt reuses it. Registering afresh costs one row, and the
      entitlement does not survive re-authorization anyway. */
-  sessionStorage.removeItem(STORE.client);
+  localStorage.removeItem(STORE.session);
+  SESSION = {};
   if (message) PENDING_ERROR = message;
   render();
 }
@@ -278,11 +320,10 @@ async function signOut() {
   /* Retire the family rather than abandoning it. A dropped refresh token stays
      valid until it expires, and the entitlement rides on the family. */
   const token = REFRESH || TOKEN;
-  const client = sessionStorage.getItem(STORE.client);
+  const client = SESSION.client;
   TOKEN = null;
   REFRESH = null;
   sessionStorage.removeItem(STORE.token);
-  sessionStorage.removeItem(STORE.refresh);
   try {
     const m = await metadata();
     /* The captured id, never `clientId()` -- that would register a brand new
@@ -419,7 +460,7 @@ function bodyPreview(preview) {
   return box;
 }
 
-async function proposalCard(summary) {
+function proposalCard(summary, preview) {
   const card = el("div", "card");
   card.dataset.proposalId = summary.proposal_id;
 
@@ -450,45 +491,63 @@ async function proposalCard(summary) {
 
   let ack = null;
   /* Nothing may be decided until the change has actually been displayed. A
-     card whose detail failed to load shows a rationale and two buttons, and
-     the rationale is written by the proposer -- accepting on that alone is
-     accepting an unexamined write on the strength of its own description. */
+     card showing a rationale and two buttons is showing the proposer's own
+     description of their write, which is not a review. */
   let loaded = false;
-  try {
-    const detail = await api("/amendment-proposals/" + summary.proposal_id);
-    if (detail.target) titleSlot.textContent = detail.target.title;
-    if (detail.metadata_preview) {
-      detailSlot.appendChild(metadataPreview(detail.metadata_preview));
-      if (detail.metadata_preview.changes_nothing) check.disabled = true;
-    } else if (detail.preview) {
-      const d = document.createElement("details");
-      d.appendChild(el("summary", null, "Body diff"));
-      d.appendChild(bodyPreview(detail.preview));
-      detailSlot.appendChild(d);
-      if (detail.preview.requires_removal_acknowledgement) {
-        const wrap = el("label", "check");
-        ack = document.createElement("input");
-        ack.type = "checkbox";
-        wrap.append(ack, document.createTextNode(
-          "Acknowledge " + detail.preview.removed_line_count + " removed line(s)"));
-        detailSlot.appendChild(wrap);
-        check.disabled = true; // never bulk-accept a removal
-      }
-    } else {
-      detailSlot.appendChild(el("p", "small dangling",
-        "No preview: the note has moved since this proposal was written, so it will settle as stale."));
-      check.disabled = true;
-    }
-    loaded = true;
-  } catch (err) {
-    /* An ended session is not this card's problem to report. Swallowing it
-       here left the queue loop running, so the remaining cards each issued
-       another unauthorized request -- up to two hundred of them -- against a
-       page endSession had already repainted. */
-    if (err.sessionEnded) throw err;
+
+  if (preview && preview.target_title) titleSlot.textContent = preview.target_title;
+
+  if (!preview) {
     detailSlot.appendChild(el("p", "small dangling",
-      "Could not load this proposal's change: " + err.message
-      + " — deciding is disabled until it can be shown. Refresh to retry."));
+      "The queue sent no preview for this proposal — it was dropped to fit the "
+      + "response budget. Deciding is disabled; open it directly to review it."));
+  } else if (preview.stale) {
+    detailSlot.appendChild(el("p", "small dangling",
+      "The note has moved since this proposal was written, so accepting it "
+      + "settles it as stale rather than applying it."));
+  } else if (preview.metadata_preview) {
+    /* A metadata preview is the whole proposal, so the card is complete
+       without a second request -- which is the point of carrying it here. */
+    detailSlot.appendChild(metadataPreview(preview.metadata_preview));
+    loaded = true;
+    if (preview.metadata_preview.changes_nothing) check.disabled = true;
+  } else {
+    /* A body change arrives as counts. The diff itself can be a hundred
+       thousand characters, so it is fetched only if this card is opened. */
+    detailSlot.appendChild(el("div", "small muted",
+      preview.added_line_count + " added, " + preview.removed_line_count
+      + " removed, " + preview.hunk_count + " hunk(s)"));
+    const d = document.createElement("details");
+    d.appendChild(el("summary", null, "Body diff (loads on open)"));
+    const slot = el("div", "small muted", "…");
+    d.appendChild(slot);
+    let fetched = false;
+    d.addEventListener("toggle", async () => {
+      if (!d.open || fetched) return;
+      fetched = true;
+      try {
+        const detail = await api("/amendment-proposals/" + summary.proposal_id);
+        slot.replaceChildren(detail.preview
+          ? bodyPreview(detail.preview)
+          : el("p", "small dangling", "No diff: the note has moved since this was written."));
+      } catch (err) {
+        if (err.sessionEnded) return;
+        fetched = false;
+        slot.replaceChildren(el("p", "small dangling",
+          "Could not load the diff: " + err.message));
+      }
+    });
+    detailSlot.appendChild(d);
+    loaded = true;
+    if (preview.requires_removal_acknowledgement) {
+      const wrap = el("label", "check");
+      ack = document.createElement("input");
+      ack.type = "checkbox";
+      wrap.append(ack, document.createTextNode(
+        "Acknowledge " + preview.removed_line_count + " removed line(s)"));
+      detailSlot.appendChild(wrap);
+      check.disabled = true; // never bulk-accept a removal
+    }
   }
 
   if (!loaded) {
@@ -536,9 +595,19 @@ async function renderProposals() {
     return;
   }
   panel.appendChild(el("p", "small muted", queue.count + " pending"));
+  if (queue.truncated) {
+    panel.appendChild(el("p", "small dangling",
+      "Some previews were dropped to fit the response budget. Those cards "
+      + "cannot be decided here; open them directly."));
+  }
+  /* One request built this whole queue. Previews arrive with it, so a card is
+     complete without a second call -- which is what the read burst was
+     catching when each row fetched its own detail. */
+  const previews = {};
+  for (const item of (queue.previews || [])) previews[item.proposal_id] = item;
   const cards = [];
   for (const summary of queue.pending) {
-    const card = await proposalCard(summary);
+    const card = proposalCard(summary, previews[summary.proposal_id]);
     cards.push(card);
     panel.appendChild(card);
   }
@@ -777,7 +846,8 @@ $("tab-cases").onclick = () => {
     /* Any authorization failure casts doubt on the cached registration, and
        keeping a bad one is what makes the failure permanent. Re-registering is
        one row; being unable to sign in is a dead console. */
-    sessionStorage.removeItem(STORE.client);
+    localStorage.removeItem(STORE.session);
+  SESSION = {};
     PENDING_ERROR = "Authorization failed: " + params.get("error")
       + ". The cached client registration was cleared; signing in will register again.";
     window.history.replaceState({}, "", CFG.reviewPath);

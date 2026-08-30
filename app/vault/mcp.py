@@ -99,6 +99,7 @@ from .api_models import (
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
+    amendment_queue_previews,
     canonical_request_digest,
     contribution_response,
     document_detail,
@@ -1818,10 +1819,13 @@ def build_vault_mcp_server() -> VaultMCPServer:
             VaultTransactionService(get_vault_engine()),
             get_embedding_provider(),
         )
-        proposals = await service.list_pending(bounded)
+        proposals, previews, titles = await service.list_pending_previews(bounded)
+        rendered, truncated = amendment_queue_previews(proposals, previews, titles)
         return VaultAmendmentQueueResponse(
             pending=[amendment_proposal_summary(item) for item in proposals],
             count=len(proposals),
+            previews=rendered,
+            truncated=truncated,
         )
 
     @server.tool(
