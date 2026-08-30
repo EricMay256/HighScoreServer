@@ -1892,6 +1892,16 @@ class VaultAmendmentService:
             related_removed=refs(related_removed),
             source_added=refs(source_added),
             source_removed=refs(source_removed),
+            related_reordered=(
+                related_after != related_before
+                and not related_added
+                and not related_removed
+            ),
+            source_reordered=(
+                source_after != source_before
+                and not source_added
+                and not source_removed
+            ),
             facets_before=dict(target.facets or {}) if facets_touched else None,
             facets_after=dict(change["facets"]) if facets_touched else None,
             source_url_before=target.source_url if url_touched else None,

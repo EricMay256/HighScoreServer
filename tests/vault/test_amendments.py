@@ -1042,3 +1042,69 @@ def test_a_body_proposal_has_no_metadata_preview(
         )
     finally:
         _cleanup()
+
+
+def test_reordering_edges_is_not_reported_as_changing_nothing(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """A pure reorder is a write, and the preview has to say so.
+
+    Additions and removals are set differences, so swapping [a, b] to [b, a]
+    produces neither -- and `related_ids` is a stored ordered array, so
+    accepting still rewrites the column and advances the revision. Reporting
+    `changes_nothing` there invites a reviewer to wave a write through on the
+    grounds that it is not one.
+
+    Do not fix a failure here by making the comparison order-insensitive: that
+    is the bug. Either the preview reports the reorder or the write path stops
+    preserving order, and it does preserve it.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    first, second = _seed_note(), _seed_note()
+    try:
+        seeded = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": [first, second]},
+                "rationale": "Establish an order.",
+            },
+        )
+        accepted = client.post(
+            f"/api/v1/vault/amendment-proposals/{seeded.json()['proposal']['proposal_id']}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+        assert accepted.status_code == 200, accepted.text
+
+        swapped = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 2,
+                "change": {"kind": "metadata", "related_ids": [second, first]},
+                "rationale": "Same edges, opposite order.",
+            },
+        )
+        assert swapped.status_code == 200, swapped.text
+        detail = client.get(
+            f"/api/v1/vault/amendment-proposals/{swapped.json()['proposal']['proposal_id']}",
+            headers=_headers(reviewer),
+        ).json()
+        preview = detail["metadata_preview"]
+
+        assert preview["related_added"] == []
+        assert preview["related_removed"] == []
+        assert preview["related_reordered"] is True
+        assert preview["changes_nothing"] is False, (
+            "A reorder was reported as changing nothing. It rewrites the "
+            "stored ordered list and bumps the revision, so a reviewer told "
+            "otherwise is being told something false about a write."
+        )
+    finally:
+        _cleanup()

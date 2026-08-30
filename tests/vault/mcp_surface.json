@@ -3495,6 +3495,9 @@
               },
               "type": "array"
             },
+            "related_reordered": {
+              "type": "boolean"
+            },
             "source_added": {
               "items": {
                 "additionalProperties": false,
@@ -3524,6 +3527,9 @@
                 "type": "object"
               },
               "type": "array"
+            },
+            "source_reordered": {
+              "type": "boolean"
             },
             "source_url_after": {
               "anyOf": [
@@ -3930,6 +3936,9 @@
                   },
                   "type": "array"
                 },
+                "related_reordered": {
+                  "type": "boolean"
+                },
                 "source_added": {
                   "items": {
                     "additionalProperties": false,
@@ -3959,6 +3968,9 @@
                     "type": "object"
                   },
                   "type": "array"
+                },
+                "source_reordered": {
+                  "type": "boolean"
                 },
                 "source_url_after": {
                   "anyOf": [
