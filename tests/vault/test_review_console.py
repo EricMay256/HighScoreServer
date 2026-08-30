@@ -230,25 +230,52 @@ def test_an_ended_session_repaints_the_sign_in_controls() -> None:
     )
 
 
-def test_a_pruned_client_registration_does_not_strand_the_browser() -> None:
-    """Signing out is what makes our own registration eligible for deletion.
+def test_the_client_registration_cannot_outlive_the_browser_session() -> None:
+    """Reactive cleanup cannot reach this, so the fix has to be preventive.
 
-    `prune_vault_oauth` removes a stale registration, and a registration is
-    never stale while it holds a live refresh token -- so revoking on sign-out
-    is precisely what allows ours to be pruned. A browser that cached the
-    deleted client id would reuse it forever, with no path back: the id is
-    cached indefinitely and every authorization repeats it.
+    `prune_vault_oauth` deletes a registration once its refresh token expires,
+    and revoking on sign-out is what makes ours eligible. Close the tab without
+    signing out and session storage goes while a localStorage client id stays
+    -- then the server deletes that registration and the browser reuses it
+    forever.
 
-    Re-registering costs one row. Being unable to sign in costs the console.
+    Nothing recovers, because the authorization server answers an unknown
+    client_id with a *direct 400 and no redirect*
+    (mcp/server/auth/handlers/authorize.py, `attempt_load_client=False`). No
+    callback runs, so neither the callback nor the token-exchange cleanup ever
+    fires, and only clearing site data fixes it.
+
+    Session storage bounds the registration to the session that made it. Do not
+    move this back to localStorage to save a registration row: a row is cheap
+    and the entitlement does not survive re-authorization anyway.
     """
 
     page = _page()
 
-    assert "invalid_client" in page, "a deleted registration is never detected"
-    assert page.count("localStorage.removeItem(STORE.client)") >= 3, (
-        "the cached registration should be dropped on sign-out, on a failed "
-        "token exchange, and on an authorization error -- each is a path where "
-        "the cached id is the thing most likely to be wrong"
+    assert "sessionStorage.getItem(STORE.client)" in page
+    assert "sessionStorage.setItem(STORE.client" in page
+    assert "localStorage" not in page.replace(
+        "A registration cached in localStorage outlives", ""
+    ).replace("The token lives in sessionStorage, not localStorage", ""), (
+        "the console should not persist anything beyond the browser session"
+    )
+
+
+def test_the_session_ended_marker_is_actually_consumed() -> None:
+    """Asserting the marker exists is not asserting anything uses it.
+
+    `endSession` repaints and explains itself, then `api` throws a marked
+    error. Without a caller checking the mark, `loadAll` painted a second,
+    vaguer message underneath the sign-in prompt. The previous test for this
+    checked only that the string appeared, which it did while the bug was live.
+    """
+
+    page = _page()
+
+    assert "if (err.sessionEnded) return;" in page, "loadAll does not consume the marker"
+    assert "if (err.sessionEnded) return false;" in page, (
+        "a card's decision handler does not consume the marker, so it would "
+        "annotate a card that endSession has already torn down"
     )
 
 
