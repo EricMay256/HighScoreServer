@@ -867,3 +867,55 @@ def _embedding_digest(note_id: str) -> bytes | None:
             await engine.dispose()
 
     return asyncio.run(digest())
+
+
+def test_rest_refuses_a_source_url_that_is_both_set_and_cleared(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """Refused at the boundary, and the stored URL is still there afterwards.
+
+    The service used to prefer `clear_source_url` when both arrived, so this
+    request returned 200 and deleted a URL the caller had just asked to
+    replace. Asserting the note afterwards is the part that matters: a 422 with
+    the row already modified would be a worse bug than the one being fixed.
+    """
+
+    proposer, _, _ = tokens
+    credential_id, updater = _issue(scopes=(VaultScope.READ, VaultScope.UPDATE))
+    note_id = _seed_note()
+    try:
+        contradictory = {
+            "source_url": "https://example.invalid/new",
+            "clear_source_url": True,
+        }
+
+        applied = client.patch(
+            f"/api/v1/vault/notes/{note_id}/metadata",
+            headers=_headers(updater),
+            json={"base_revision": 1, **contradictory},
+        )
+        assert applied.status_code == 422, applied.text
+        assert "contradictory" in applied.text
+
+        proposed = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", **contradictory},
+                "rationale": "Set it and clear it at the same time.",
+            },
+        )
+        assert proposed.status_code == 422, proposed.text
+
+        note = client.get(
+            f"/api/v1/vault/notes/{note_id}", headers=_headers(updater)
+        ).json()
+        assert note["content_revision"] == 1, (
+            "A refused metadata request still wrote to the note. The "
+            "validation has to run before the update, not alongside it."
+        )
+    finally:
+        _cleanup()
+        _drop(credential_id)

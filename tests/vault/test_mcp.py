@@ -541,3 +541,62 @@ def test_both_adapters_treat_a_padded_query_the_same_way(client: TestClient) -> 
             assert http_refused is not accepted, f"HTTP disagreed at {len(raw)}"
     finally:
         _drop(credential_id)
+
+
+@pytest.mark.parametrize(
+    ("tool", "scope", "extra"),
+    [
+        ("vault_update_note_metadata", VaultScope.UPDATE, {}),
+        (
+            "vault_propose_note_metadata",
+            VaultScope.PROPOSE,
+            {"rationale": "Set it and clear it at the same time."},
+        ),
+    ],
+)
+def test_metadata_tools_refuse_setting_and_clearing_the_source_url(
+    client: TestClient, tool: str, scope: str, extra: dict[str, Any]
+) -> None:
+    """Both tools publish the pair, so both have to refuse it.
+
+    `clear_source_url` disambiguates a null `source_url`; sending both puts the
+    ambiguity back, and the service resolved it by preferring the clear -- so
+    a caller asking to *replace* a URL silently had it deleted. The refusal
+    lives on the shared model, and this covers the MCP path reaching it.
+    """
+
+    credential_id, token = _issue((VaultScope.READ, scope))
+    try:
+        payload = _rpc(
+            client,
+            token,
+            "tools/call",
+            {
+                "name": tool,
+                "arguments": {
+                    "note_id": "does-not-need-to-exist",
+                    "base_revision": 1,
+                    "source_url": "https://example.invalid/new",
+                    "clear_source_url": True,
+                    **extra,
+                },
+            },
+        )
+    finally:
+        _drop(credential_id)
+
+    # As above: `isError` appears in a success payload too, so matching the
+    # serialized response would pass whether or not the call was refused.
+    assert not isinstance(payload, Response), (
+        f"expected a JSON-RPC response, got HTTP {getattr(payload, 'status_code', '?')}"
+    )
+    if "error" in payload:
+        message = payload["error"]["message"]
+    else:
+        assert payload["result"]["isError"] is True, (
+            f"{tool} accepted a contradictory source_url pair. The refusal "
+            "belongs on the shared model, not in this tool -- adding a check "
+            "here would leave the other tool and the REST path accepting it."
+        )
+        message = payload["result"]["content"][0]["text"]
+    assert "contradictory" in message

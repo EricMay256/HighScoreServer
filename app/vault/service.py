@@ -1544,6 +1544,24 @@ class MetadataChange:
     # alone" cannot both be spelled `None`. This says which was meant.
     clear_source_url: bool = False
 
+    def __post_init__(self) -> None:
+        """Setting the URL and clearing it are mutually exclusive.
+
+        Held here as well as at the two transport models because this is the
+        type both of them build, and the type every future caller will build.
+        `_metadata_payload` and `_metadata_update` each had to decide what a
+        contradictory pair meant, and both silently preferred the clear -- so a
+        caller who sent a replacement URL got their existing one deleted. A
+        precedence rule was the wrong shape of answer: the state should not be
+        constructible.
+        """
+
+        if self.clear_source_url and self.source_url is not None:
+            raise ValueError(
+                "source_url and clear_source_url are contradictory: set one or "
+                "the other, not both"
+            )
+
     def is_empty(self) -> bool:
         return (
             self.related_ids is None
@@ -2203,6 +2221,9 @@ class VaultAmendmentService:
             payload["source_ids"] = list(change.source_ids)
         if change.facets is not None:
             payload["facets"] = dict(change.facets)
+        # Not a precedence rule. `MetadataChange` refuses the pair, so at
+        # most one of these branches can apply; an earlier version had no
+        # such guarantee and this `elif` quietly discarded a supplied URL.
         if change.clear_source_url:
             payload["source_url"] = None
         elif change.source_url is not None:
@@ -2228,6 +2249,9 @@ class VaultAmendmentService:
         """
 
         source_url = target.source_url
+        # Not a precedence rule. `MetadataChange` refuses the pair, so at
+        # most one of these branches can apply; an earlier version had no
+        # such guarantee and this `elif` quietly discarded a supplied URL.
         if change.clear_source_url:
             source_url = None
         elif change.source_url is not None:
