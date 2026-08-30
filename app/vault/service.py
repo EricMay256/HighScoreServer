@@ -1849,35 +1849,84 @@ class VaultAmendmentService:
         longer bound to would describe a change that will never be applied.
         """
 
+        wanted = self._edges_needing_titles(proposal, target)
+        titles: dict[str, str] = {}
+        if wanted:
+            async with self._transactions.transaction() as connection:
+                titles = await VaultDocumentRepository().titles_for(connection, wanted)
+        return self._metadata_summary(proposal, target, titles)
+
+    @staticmethod
+    def _edge_lists(
+        proposal: VaultAmendmentProposal, target: VaultDocument
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """The stored and proposed edge lists, order preserved."""
+
+        change = proposal.change
+        related_before = tuple(target.related_ids or ())
+        source_before = tuple(target.source_ids or ())
+        return (
+            related_before,
+            (
+                tuple(change["related_ids"])
+                if change.get("related_ids") is not None
+                else related_before
+            ),
+            source_before,
+            (
+                tuple(change["source_ids"])
+                if change.get("source_ids") is not None
+                else source_before
+            ),
+        )
+
+    @classmethod
+    def _edges_needing_titles(
+        cls,
+        proposal: VaultAmendmentProposal,
+        target: VaultDocument | None,
+    ) -> tuple[str, ...]:
+        """Which edge ids a metadata preview for this proposal would render."""
+
+        if proposal.change_kind is not AmendmentProposalKind.METADATA:
+            return ()
+        if target is None or target.content_revision != proposal.target_revision:
+            return ()
+        before_r, after_r, before_s, after_s = cls._edge_lists(proposal, target)
+        return (
+            tuple(e for e in after_r if e not in before_r)
+            + tuple(e for e in before_r if e not in after_r)
+            + tuple(e for e in after_s if e not in before_s)
+            + tuple(e for e in before_s if e not in after_s)
+        )
+
+    @classmethod
+    def _metadata_summary(
+        cls,
+        proposal: VaultAmendmentProposal,
+        target: VaultDocument | None,
+        titles: dict[str, str],
+    ) -> MetadataChangeSummary | None:
+        """Assemble one metadata preview from already-resolved titles.
+
+        Pure, so the single-proposal path and the queue share it. The queue
+        resolves every title in one query; doing it per proposal is the round
+        trip per row this exists to remove.
+        """
+
         if proposal.change_kind is not AmendmentProposalKind.METADATA:
             return None
         if target is None or target.content_revision != proposal.target_revision:
             return None
 
-        change = proposal.change
-        related_before = tuple(target.related_ids or ())
-        source_before = tuple(target.source_ids or ())
-        related_after = (
-            tuple(change["related_ids"])
-            if change.get("related_ids") is not None
-            else related_before
+        related_before, related_after, source_before, source_after = cls._edge_lists(
+            proposal, target
         )
-        source_after = (
-            tuple(change["source_ids"])
-            if change.get("source_ids") is not None
-            else source_before
-        )
-
         related_added = tuple(e for e in related_after if e not in related_before)
         related_removed = tuple(e for e in related_before if e not in related_after)
         source_added = tuple(e for e in source_after if e not in source_before)
         source_removed = tuple(e for e in source_before if e not in source_after)
-
-        async with self._transactions.transaction() as connection:
-            titles = await VaultDocumentRepository().titles_for(
-                connection,
-                related_added + related_removed + source_added + source_removed,
-            )
+        change = proposal.change
 
         def refs(ids: tuple[str, ...]) -> tuple[EdgeRef, ...]:
             return tuple(EdgeRef(id=i, title=titles.get(i)) for i in ids)
@@ -1910,6 +1959,67 @@ class VaultAmendmentService:
                 url_touched and change.get("source_url") != target.source_url
             ),
         )
+
+    async def list_pending_previews(
+        self, limit: int = 50
+    ) -> tuple[
+        tuple[VaultAmendmentProposal, ...],
+        dict[UUID, MetadataChangeSummary | BodyChangeSummary | None],
+        dict[str, str],
+    ]:
+        """The queue, and what each proposal would do, in three queries.
+
+        A queue row is a rationale and an id, which is not enough to triage:
+        the reviewer needs to see the change. Fetching it per row is a round
+        trip per proposal against a pool of two connections, which is what the
+        read burst was catching at twenty rows and what would queue on the pool
+        at two hundred.
+
+        Three queries whatever the queue length -- the proposals, their targets,
+        and every edge title any metadata preview will render. Body kinds are
+        summarized in process from the target already in hand, so they add no
+        query; only their diffs are left for the caller to fetch on demand,
+        since a resulting body can be a hundred thousand characters and a queue
+        of them is the one thing this must not send.
+        """
+
+        async with self._transactions.transaction() as connection:
+            proposals = await VaultAmendmentProposalRepository().list_pending(
+                connection, limit
+            )
+            documents = VaultDocumentRepository()
+            targets = await documents.get_many_by_ids(
+                connection, [item.target_document_id for item in proposals]
+            )
+            wanted: list[str] = []
+            for item in proposals:
+                wanted.extend(
+                    self._edges_needing_titles(
+                        item, targets.get(item.target_document_id)
+                    )
+                )
+            titles = await documents.titles_for(connection, wanted)
+
+        previews: dict[UUID, MetadataChangeSummary | BodyChangeSummary | None] = {}
+        for item in proposals:
+            target = targets.get(item.target_document_id)
+            if item.change_kind is AmendmentProposalKind.METADATA:
+                previews[item.id] = self._metadata_summary(item, target, titles)
+                continue
+            if target is None or target.content_revision != item.target_revision:
+                previews[item.id] = None
+                continue
+            candidate = VaultDocumentUpdateService._build_candidate(
+                target,
+                self._update_request(
+                    item, target, principal_id="preview", request_id="preview"
+                ),
+            )
+            previews[item.id] = summarize_body_change(target.body, candidate.body)
+        # The titles come free: the targets were fetched to compute previews,
+        # and a queue row that names only an id is not a row anyone can read.
+        target_titles = {doc.id: doc.title for doc in targets.values()}
+        return proposals, previews, target_titles
 
     async def decide(
         self, request: AmendmentDecisionRequest

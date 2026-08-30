@@ -176,7 +176,10 @@ def test_decisions_are_withheld_until_the_evidence_loads() -> None:
     page = _page()
 
     assert "Deciding is disabled until" in page
-    assert "deciding is disabled until it can be shown" in page
+    assert "Deciding is disabled; open it directly" in page, (
+        "a card whose preview was dropped from the queue must not be decidable "
+        "from its rationale alone"
+    )
     assert "evidenceLoaded" in page and "if (!evidenceLoaded) return;" in page
     assert "if (!loaded) return false;" in page
 
@@ -230,35 +233,41 @@ def test_an_ended_session_repaints_the_sign_in_controls() -> None:
     )
 
 
-def test_the_client_registration_cannot_outlive_the_browser_session() -> None:
-    """Reactive cleanup cannot reach this, so the fix has to be preventive.
+def test_the_persisted_session_is_bounded_by_the_refresh_lifetime() -> None:
+    """The registration may outlive the tab, but never its refresh token.
 
+    The entitlement is keyed to the OAuth *family*, so losing the session means
+    re-running `grant-oauth`. Session-scoping the refresh token made that a
+    chore on every tab close rather than the monthly one the thirty-day refresh
+    lifetime implies, so the record persists.
+
+    What persistence must not do is recreate the stranding bug.
     `prune_vault_oauth` deletes a registration once its refresh token expires,
-    and revoking on sign-out is what makes ours eligible. Close the tab without
-    signing out and session storage goes while a localStorage client id stays
-    -- then the server deletes that registration and the browser reuses it
-    forever.
+    and the authorization server answers a deleted client_id with a direct 400
+    and no redirect (mcp/server/auth/handlers/authorize.py,
+    `attempt_load_client=False`) -- so no error ever comes back to clean up
+    from. The record is therefore discarded on our own schedule, by comparing
+    `obtained` against the refresh lifetime, rather than by waiting for a
+    failure that cannot arrive.
 
-    Nothing recovers, because the authorization server answers an unknown
-    client_id with a *direct 400 and no redirect*
-    (mcp/server/auth/handlers/authorize.py, `attempt_load_client=False`). No
-    callback runs, so neither the callback nor the token-exchange cleanup ever
-    fires, and only clearing site data fixes it.
-
-    Session storage bounds the registration to the session that made it. Do not
-    move this back to localStorage to save a registration row: a row is cheap
-    and the entitlement does not survive re-authorization anyway.
+    The client id and refresh token are one record because they are only valid
+    together: a refresh presents both, and an id from one authorization cannot
+    renew a token from another. Storing them apart is how they drift.
     """
 
     page = _page()
 
-    assert "sessionStorage.getItem(STORE.client)" in page
-    assert "sessionStorage.setItem(STORE.client" in page
-    assert "localStorage" not in page.replace(
-        "A registration cached in localStorage outlives", ""
-    ).replace("The token lives in sessionStorage, not localStorage", ""), (
-        "the console should not persist anything beyond the browser session"
+    assert "REFRESH_TTL_MS" in page
+    assert "Date.now() - saved.obtained > REFRESH_TTL_MS" in page, (
+        "the persisted record must expire on its own schedule; nothing will "
+        "tell the browser its registration was pruned"
     )
+    assert "STORE.session" in page
+    assert "if (!saved.client || !saved.obtained) return null;" in page, (
+        "a half-written record should be discarded rather than half-used"
+    )
+    # The access token stays session-scoped: it is renewable from the record.
+    assert "sessionStorage.getItem(STORE.token)" in page
 
 
 def test_the_session_ended_marker_is_actually_consumed() -> None:
@@ -310,13 +319,27 @@ def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:
         if not any("sessionEnded" in following for following in window):
             unguarded.append((index + 1, line.strip()[:70]))
 
-    assert len(unguarded) == 2, (
+    # Exempt because none of these wrap an `api()` call, so none can ever see
+    # the marker. Named by the reason rather than counted, so adding a catch
+    # has to state which case it is instead of moving a number.
+    exemptions = (
+        "return null;",  # reading the persisted session record
+        "Private mode",  # writing it
+        "Signing out locally",  # revocation, best-effort by design
+        "PENDING_ERROR",  # the token exchange, before a session exists
+    )
+    unexplained = [
+        entry
+        for entry in unguarded
+        if not any(reason in entry[1] for reason in exemptions)
+    ]
+
+    assert not unexplained, (
         "A catch block around an api() call does not propagate session expiry: "
-        f"{unguarded}. Add `if (err.sessionEnded) throw err;` ahead of the "
+        f"{unexplained}. Add `if (err.sessionEnded) throw err;` ahead of the "
         "ordinary failure rendering. Swallowing it lets the caller carry on "
         "issuing requests against a session that has already ended, and hides "
-        "the expiry from the handler that repaints the sign-in controls."
+        "the expiry from the handler that repaints the sign-in controls. If "
+        "the block genuinely cannot see an api() error, add it to `exemptions` "
+        "with the reason."
     )
-    exempt = " ".join(text for _, text in unguarded)
-    assert "Signing out locally" in exempt, "sign-out revocation should be exempt"
-    assert "PENDING_ERROR" in exempt, "the pre-session token exchange should be exempt"
