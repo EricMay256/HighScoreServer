@@ -24,6 +24,7 @@ from pydantic import (
     Field,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 from .body_diff import MAX_BODY_DIFF_CHARS, BodyChangeSummary
@@ -85,6 +86,32 @@ def validate_edge_ids(ids: list[str]) -> list[str]:
             f"{', '.join(repr(value) for value in named[:3])}"
         )
     return ids
+
+
+def validate_source_url_intent(
+    source_url: AnyUrl | None, clear_source_url: bool
+) -> None:
+    """A request may set the URL or clear it, never both.
+
+    `clear_source_url` exists because a null `source_url` cannot mean both
+    "leave it alone" and "remove it" over JSON. Carrying both a replacement URL
+    and the clear flag reintroduces exactly the ambiguity the flag was added to
+    remove, and the service resolved it by precedence: the flag won, the URL
+    the caller supplied was dropped, and a request to *change* a value silently
+    became a request to delete one.
+
+    Refused rather than resolved. There is no reading of the pair that is
+    obviously right, so guessing turns a caller's mistake into data loss they
+    are never told about, on the one path in this kind that can destroy
+    something.
+    """
+
+    if clear_source_url and source_url is not None:
+        raise ValueError(
+            "source_url and clear_source_url=true are contradictory: send "
+            "source_url to replace the existing URL, or clear_source_url=true "
+            "to remove it, not both"
+        )
 
 
 class VaultDocumentContentRequest(BaseModel):
@@ -408,6 +435,11 @@ class VaultMetadataUpdateRequest(BaseModel):
     def validate_ids(cls, ids: list[str] | None) -> list[str] | None:
         return None if ids is None else validate_edge_ids(ids)
 
+    @model_validator(mode="after")
+    def check_source_url_intent(self) -> "VaultMetadataUpdateRequest":
+        validate_source_url_intent(self.source_url, self.clear_source_url)
+        return self
+
     @field_validator("facets")
     @classmethod
     def validate_facet_shape(
@@ -456,6 +488,11 @@ class VaultMetadataChange(BaseModel):
     @classmethod
     def validate_ids(cls, ids: list[str] | None) -> list[str] | None:
         return None if ids is None else validate_edge_ids(ids)
+
+    @model_validator(mode="after")
+    def check_source_url_intent(self) -> "VaultMetadataChange":
+        validate_source_url_intent(self.source_url, self.clear_source_url)
+        return self
 
     @field_validator("facets")
     @classmethod

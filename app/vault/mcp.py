@@ -1131,7 +1131,10 @@ def build_vault_mcp_server() -> VaultMCPServer:
             source_ids: Full IDs of notes this was derived from. Replaces it.
             facets: Classification as {name: [values]}. Replaces the whole map.
             source_url: A new source URL.
-            clear_source_url: Remove the existing source URL.
+            clear_source_url: Remove the existing source URL. Mutually
+                exclusive with `source_url` -- sending both is refused
+                rather than resolved, because either reading of the
+                pair discards half of what was asked for.
         """
 
         credential = await _authorized("vault_update_note_metadata")
@@ -1526,7 +1529,10 @@ def build_vault_mcp_server() -> VaultMCPServer:
                 whole list.
             facets: Classification as {name: [values]}. Replaces the whole map.
             source_url: A new source URL.
-            clear_source_url: Remove the existing source URL.
+            clear_source_url: Remove the existing source URL. Mutually
+                exclusive with `source_url` -- sending both is refused
+                rather than resolved, because either reading of the
+                pair discards half of what was asked for.
         """
 
         credential = await _authorized("vault_propose_note_metadata")

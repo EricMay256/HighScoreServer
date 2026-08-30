@@ -312,3 +312,49 @@ def test_a_cleared_source_url_renders_as_an_explicit_null() -> None:
     rendered = amendment_proposal_change(_Cleared()).model_dump()
 
     assert rendered == {"kind": "metadata", "source_url": None}
+
+
+# --- PR 19 follow-up: a URL cannot be set and cleared at once ---------------
+
+
+@pytest.mark.parametrize(
+    ("label", "model", "extra"),
+    [
+        ("proposal", VaultMetadataChange, {"kind": "metadata"}),
+        ("direct update", VaultMetadataUpdateRequest, {"base_revision": 1}),
+    ],
+)
+def test_setting_and_clearing_the_source_url_at_once_is_refused(
+    label: str, model: type, extra: dict
+) -> None:
+    """The pair is contradictory, and resolving it silently destroys data.
+
+    `clear_source_url` was added because a null `source_url` cannot mean both
+    "leave it" and "remove it". Accepting both at once puts the ambiguity back
+    one level up, and the service settled it by precedence: the flag won, the
+    caller's replacement URL was dropped, and a request to *change* the URL
+    became a request to delete it with nothing reported.
+
+    Do not fix a caller by choosing a winner here. Neither reading is more
+    obviously right than the other, which is the definition of a request that
+    has to be refused rather than guessed.
+    """
+
+    with pytest.raises(ValidationError, match="contradictory"):
+        model(source_url="https://example.invalid/new", clear_source_url=True, **extra)
+
+
+def test_the_change_type_itself_refuses_the_contradiction() -> None:
+    """Held on the type both transports build, not only at the transports.
+
+    A validator on the two models stops today's two callers. The invariant
+    belongs on `MetadataChange` because that is what every caller constructs,
+    including the next one written by someone who has not read this test.
+    """
+
+    with pytest.raises(ValueError, match="contradictory"):
+        MetadataChange(source_url="https://example.invalid/new", clear_source_url=True)
+
+    # Either alone remains valid; the guard rejects the pair, not the fields.
+    assert MetadataChange(source_url="https://example.invalid/x").source_url
+    assert MetadataChange(clear_source_url=True).clear_source_url

@@ -46,6 +46,15 @@ empty. Because `source_url` is nullable in storage, "clear it" and "leave it"
 cannot both be spelled `null`, so the MCP tool carries an explicit
 `clear_source_url` flag.
 
+Sending that flag *and* a `source_url` is refused. The first version accepted
+the pair and resolved it by precedence — the flag won — so a caller asking to
+replace a URL had their existing one deleted and was told the update
+succeeded. Adding a field to disambiguate a null and then allowing it to
+contradict the value it disambiguates puts the ambiguity back one level up.
+The invariant lives on `MetadataChange`, the type both transports construct,
+rather than on each of them: a rule held at the edges is a rule the next entry
+point has to remember.
+
 `tags` and `aliases` are deliberately excluded. Both are embedded — tags at the
 weight ADR 0013 sets, aliases at weight A alongside the title — so changing
 either alters what the note means to search. That requires a re-embed and a
