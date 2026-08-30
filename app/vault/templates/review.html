@@ -148,9 +148,14 @@ function loadSession() {
   } catch (err) { return null; }
 }
 
+/* Every write re-stamps. The stamp is how a tab tells "the record I have been
+   using" from "a record another tab has since replaced" -- which is the
+   difference between ending your own session and destroying someone else's. */
 function saveSession(next) {
+  next.stamp = randomString();
   try { localStorage.setItem(STORE.session, JSON.stringify(next)); }
   catch (err) { /* Private mode: the session simply will not persist. */ }
+  return next;
 }
 
 /* One-time upgrade from the session-scoped format this replaced.
@@ -320,9 +325,12 @@ function storeTokens(payload) {
    A Web Lock plus a re-read inside it means whichever tab wins presents the
    current token and the loser presents its replacement, never its predecessor.
 
-   Two tabs still take each other's access tokens in turn -- rotation revokes
-   the credential it replaces -- so they refresh alternately. That is chatty and
-   harmless, which is the trade being made: correctness over quiet. */
+   Two tabs still take each other's access tokens in turn, because rotation
+   revokes the credential it replaces. That is chatty, and it is *not* harmless
+   on its own: a tab whose token is revoked twice in a row must not conclude the
+   session is over and delete the record the other tab is using. `api` retries
+   while refreshes succeed and `endSession` clears only a record this tab still
+   owns; those two together are what make the alternation survivable. */
 async function withRefreshLock(work) {
   if (!navigator.locks || !navigator.locks.request) return work();
   return navigator.locks.request("vault.review.refresh", work);
@@ -359,10 +367,30 @@ async function refreshTokens() {
 /* Ends the local session and repaints. `message` is carried through render()
    by PENDING_ERROR, so the reason survives the clearMessages() that render
    begins with. */
-function endSession(message) {
+function endSession(message, force) {
   TOKEN = null;
   REFRESH = null;
   sessionStorage.removeItem(STORE.token);
+  /* Only discard the shared record if this tab still owns it. Rotation revokes
+     the access token it replaces, so a second tab's rotation can 401 this one
+     twice over -- and clearing unconditionally would delete the refresh token
+     that other tab is holding, ending a session that was alive and costing the
+     entitlement with it. `force` is sign-out, where the family really is dead
+     for everyone. */
+  /* `refreshTokens` clears the stored token *before* presenting it, so that a
+     lost response can never cause a replay -- which means a record whose
+     refresh is null has already been spent and is dead for every tab. The
+     record worth protecting is the opposite: one carrying a usable token,
+     written by a tab that is not this one. */
+  const stored = loadSession();
+  const someoneElseAdvancedIt =
+    stored && stored.refresh && SESSION.stamp && stored.stamp !== SESSION.stamp;
+  if (!force && someoneElseAdvancedIt) {
+    SESSION = stored;
+    if (message) PENDING_ERROR = message;
+    render();
+    return;
+  }
   /* Forget the registration too. `prune_vault_oauth` deletes a registration
      once it is stale, and a registration is never stale while it holds a live
      refresh token -- so ending a session is exactly what makes ours eligible
@@ -395,7 +423,7 @@ async function signOut() {
       });
     }
   } catch (err) { /* Signing out locally must succeed even if revocation cannot. */ }
-  endSession(null);
+  endSession(null, true);
 }
 
 /* `hssv1_<credential-id>_<secret>`. The console shows the id so the operator
@@ -404,14 +432,23 @@ async function signOut() {
 const credentialId = () => (TOKEN && TOKEN.split("_").length >= 3) ? TOKEN.split("_")[1] : null;
 
 /* ---------- API ---------- */
-async function api(path, options, retried) {
+const MAX_REFRESH_RETRIES = 3;
+
+async function api(path, options, attempt) {
+  const tries = attempt || 0;
   const opts = Object.assign({ headers: {} }, options || {});
   opts.headers = Object.assign({ Authorization: "Bearer " + TOKEN }, opts.headers);
   const r = await fetch(CFG.apiBase + path, opts);
   if (r.status === 401) {
-    /* Once. A second 401 after a successful rotation is a real rejection, and
-       retrying a write that may already have applied is worse than failing. */
-    if (!retried && await refreshTokens()) return api(path, options, true);
+    /* Retry while a refresh actually succeeds, rather than once. A 401 is
+       refused before the handler runs, so nothing was applied and the retry is
+       safe -- and with two tabs open this tab's freshly-minted token can be
+       revoked again by the other's rotation, so one attempt is not enough to
+       distinguish "the session is over" from "the other tab moved first".
+       Bounded, so a genuinely dead session still terminates. */
+    if (tries < MAX_REFRESH_RETRIES && await refreshTokens()) {
+      return api(path, options, tries + 1);
+    }
     /* Repaint. Clearing the token without re-rendering left the page looking
        signed in -- app panel up, Sign in button hidden -- while telling the
        operator to sign in again, with no control to do it. This is the

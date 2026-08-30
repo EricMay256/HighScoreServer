@@ -417,3 +417,48 @@ def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:
         "the block genuinely cannot see an api() error, add it to `exemptions` "
         "with the reason."
     )
+
+
+def test_a_revoked_access_token_does_not_end_a_live_session() -> None:
+    """Rotation revokes the token it replaces, so one 401 proves nothing.
+
+    With two tabs open, this tab's freshly-minted access token can be revoked
+    again by the other tab's next rotation. Giving up after a single retry
+    read that as "the session is over" and called `endSession`, which deleted
+    the shared record -- taking the other tab's still-valid refresh token with
+    it and costing the entitlement.
+
+    The condition for giving up is therefore that a *refresh* failed, not that
+    a retry was spent. Bounded so a genuinely dead session still terminates.
+    """
+
+    page = _page()
+
+    assert "MAX_REFRESH_RETRIES" in page
+    assert "tries < MAX_REFRESH_RETRIES && await refreshTokens()" in page, (
+        "the retry must be gated on a refresh succeeding; counting attempts "
+        "alone cannot distinguish a dead session from a busy one"
+    )
+
+
+def test_ending_a_session_spares_a_record_another_tab_advanced() -> None:
+    """Local sign-out must not be a global one.
+
+    `refreshTokens` clears the stored token before presenting it, so a record
+    whose refresh is null is spent and dead for everyone -- clearing it is
+    right. A record carrying a usable token written by a different tab is the
+    opposite: deleting it ends a session that was alive.
+
+    Sign-out passes `force`, because there the family really is revoked for
+    every tab.
+    """
+
+    page = _page()
+
+    assert "stored && stored.refresh && SESSION.stamp" in page, (
+        "the guard must require a usable token; a spent record should still "
+        "be cleared"
+    )
+    assert "stored.stamp !== SESSION.stamp" in page
+    assert "endSession(null, true)" in page, "sign-out should force the clear"
+    assert "next.stamp = randomString();" in page
