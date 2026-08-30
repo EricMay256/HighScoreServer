@@ -209,3 +209,52 @@ def test_bulk_acceptance_counts_refusals_separately() -> None:
 
     assert "refused " in page
     assert "accepted++" in page and "failed++" in page
+
+
+def test_an_ended_session_repaints_the_sign_in_controls() -> None:
+    """Clearing the token without repainting strands the operator.
+
+    The page stayed visually signed in -- queues up, Sign in hidden -- while
+    the message said to sign in again, with no control to do it. That is the
+    ordinary end of a thirty-day refresh token, not an edge case, so the
+    recovery has to be reachable rather than merely described.
+    """
+
+    page = _page()
+
+    assert "function endSession" in page
+    assert "endSession(" in page.replace("function endSession(", "")
+    assert "sessionEnded" in page, (
+        "the session-ended error should be distinguishable, so callers do not "
+        "paint a second message over the one endSession already showed"
+    )
+
+
+def test_a_pruned_client_registration_does_not_strand_the_browser() -> None:
+    """Signing out is what makes our own registration eligible for deletion.
+
+    `prune_vault_oauth` removes a stale registration, and a registration is
+    never stale while it holds a live refresh token -- so revoking on sign-out
+    is precisely what allows ours to be pruned. A browser that cached the
+    deleted client id would reuse it forever, with no path back: the id is
+    cached indefinitely and every authorization repeats it.
+
+    Re-registering costs one row. Being unable to sign in costs the console.
+    """
+
+    page = _page()
+
+    assert "invalid_client" in page, "a deleted registration is never detected"
+    assert page.count("localStorage.removeItem(STORE.client)") >= 3, (
+        "the cached registration should be dropped on sign-out, on a failed "
+        "token exchange, and on an authorization error -- each is a path where "
+        "the cached id is the thing most likely to be wrong"
+    )
+
+
+def test_a_bulk_run_stops_when_the_session_ends() -> None:
+    """Otherwise every remaining card 401s, ends the session again, repaints."""
+
+    page = _page()
+
+    assert "if (!TOKEN) break;" in page

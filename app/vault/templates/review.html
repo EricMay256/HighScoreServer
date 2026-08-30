@@ -193,7 +193,14 @@ async function completeSignIn(code, state) {
   const r = await fetch(m.token_endpoint, {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body,
   });
-  if (!r.ok) throw new Error("Token exchange failed: " + (await r.text()).slice(0, 200));
+  if (!r.ok) {
+    const detail = (await r.text()).slice(0, 200);
+    /* A registration deleted by `prune_vault_oauth` answers invalid_client
+       forever, and the id is cached, so every later attempt repeats it. Drop
+       it and the next sign-in registers afresh. */
+    if (detail.includes("invalid_client")) localStorage.removeItem(STORE.client);
+    throw new Error("Token exchange failed: " + detail);
+  }
   storeTokens(await r.json());
   sessionStorage.removeItem(STORE.verifier);
   sessionStorage.removeItem(STORE.state);
@@ -237,24 +244,47 @@ async function refreshTokens() {
   return true;
 }
 
+/* Ends the local session and repaints. `message` is carried through render()
+   by PENDING_ERROR, so the reason survives the clearMessages() that render
+   begins with. */
+function endSession(message) {
+  TOKEN = null;
+  REFRESH = null;
+  sessionStorage.removeItem(STORE.token);
+  sessionStorage.removeItem(STORE.refresh);
+  /* Forget the registration too. `prune_vault_oauth` deletes a registration
+     once it is stale, and a registration is never stale while it holds a live
+     refresh token -- so ending a session is exactly what makes ours eligible
+     for deletion. A browser holding a deleted client_id cannot authorize
+     again, and would have no way to notice: the id is cached indefinitely and
+     every future attempt reuses it. Registering afresh costs one row, and the
+     entitlement does not survive re-authorization anyway. */
+  localStorage.removeItem(STORE.client);
+  if (message) PENDING_ERROR = message;
+  render();
+}
+
 async function signOut() {
   /* Retire the family rather than abandoning it. A dropped refresh token stays
      valid until it expires, and the entitlement rides on the family. */
   const token = REFRESH || TOKEN;
+  const client = localStorage.getItem(STORE.client);
   TOKEN = null;
   REFRESH = null;
   sessionStorage.removeItem(STORE.token);
   sessionStorage.removeItem(STORE.refresh);
   try {
     const m = await metadata();
-    if (m.revocation_endpoint && token) {
+    /* The captured id, never `clientId()` -- that would register a brand new
+       client here purely to name the one being revoked. */
+    if (m.revocation_endpoint && token && client) {
       await fetch(m.revocation_endpoint, {
         method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ token, client_id: await clientId() }),
+        body: new URLSearchParams({ token, client_id: client }),
       });
     }
   } catch (err) { /* Signing out locally must succeed even if revocation cannot. */ }
-  render();
+  endSession(null);
 }
 
 /* `hssv1_<credential-id>_<secret>`. The console shows the id so the operator
@@ -271,9 +301,14 @@ async function api(path, options, retried) {
     /* Once. A second 401 after a successful rotation is a real rejection, and
        retrying a write that may already have applied is worse than failing. */
     if (!retried && await refreshTokens()) return api(path, options, true);
-    TOKEN = null;
-    sessionStorage.removeItem(STORE.token);
-    throw new Error("Session expired. Sign in again.");
+    /* Repaint. Clearing the token without re-rendering left the page looking
+       signed in -- app panel up, Sign in button hidden -- while telling the
+       operator to sign in again, with no control to do it. This is the
+       ordinary end of a thirty-day refresh token, not an edge case. */
+    endSession("Your session ended and could not be renewed. Sign in again.");
+    const ended = new Error("session ended");
+    ended.sessionEnded = true;
+    throw ended;
   }
   if (r.status === 403) { const e = new Error("forbidden"); e.forbidden = true; throw e; }
   if (!r.ok) throw new Error((await r.text()).slice(0, 300));
@@ -513,6 +548,9 @@ async function renderProposals() {
     for (const c of chosen) {
       status.textContent = "deciding " + (++attempted) + " of " + chosen.length + "…";
       if (await c.decide("accepted")) accepted++; else failed++;
+      /* Stop rather than 401 once per remaining card: the session is gone and
+         every further attempt would end it again and repaint. */
+      if (!TOKEN) break;
     }
     /* Counted separately because a refused decision leaves its card in place
        with the reason on it. Reporting the attempt count as the accepted count
@@ -714,7 +752,12 @@ $("tab-cases").onclick = () => {
 (async () => {
   const params = new URLSearchParams(window.location.search);
   if (params.get("error")) {
-    PENDING_ERROR = "Authorization failed: " + params.get("error");
+    /* Any authorization failure casts doubt on the cached registration, and
+       keeping a bad one is what makes the failure permanent. Re-registering is
+       one row; being unable to sign in is a dead console. */
+    localStorage.removeItem(STORE.client);
+    PENDING_ERROR = "Authorization failed: " + params.get("error")
+      + ". The cached client registration was cleared; signing in will register again.";
     window.history.replaceState({}, "", CFG.reviewPath);
   } else if (params.get("code")) {
     try { await completeSignIn(params.get("code"), params.get("state")); }
