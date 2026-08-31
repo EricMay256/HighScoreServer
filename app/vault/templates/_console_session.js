@@ -395,10 +395,24 @@ async function signOut() {
     /* The captured id, never `clientId()` -- that would register a brand new
        client here purely to name the one being revoked. */
     if (m.revocation_endpoint && token && client) {
-      await fetch(m.revocation_endpoint, {
+      const revoked = await fetch(m.revocation_endpoint, {
         method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ token, client_id: client }),
+        /* `client_secret` is empty and still has to be sent. The SDK's
+           `RevocationRequest` declares it without a default, so a form that
+           omits it fails validation with 400 before any token is loaded --
+           and this console is a public client with no secret to put there.
+           Without it, every sign-out since this endpoint existed answered 400
+           and revoked nothing: the family was abandoned rather than retired,
+           and its refresh token stayed live for its full thirty days. */
+        body: new URLSearchParams({ token, client_id: client, client_secret: "" }),
       });
+      /* Reported rather than ignored. The failure above was invisible for
+         months precisely because nothing said anything, and a sign-out that
+         silently leaves a live family is worth a line in the console even
+         though there is nothing the operator can do about it here. */
+      if (!revoked.ok) {
+        console.warn("Vault sign-out could not revoke this session:", revoked.status);
+      }
     }
   } catch (err) { /* Signing out locally must succeed even if revocation cannot. */ }
   await endSession(null, true);

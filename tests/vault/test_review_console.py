@@ -650,3 +650,24 @@ def test_a_signed_out_header_says_nothing() -> None:
         "identity, or a signed-out header keeps naming the family that left"
     )
 
+
+def test_sign_out_sends_the_field_the_revocation_endpoint_requires() -> None:
+    """The console is a public client, and still has to send `client_secret`.
+
+    The SDK's `RevocationRequest` declares it with no default, so a form
+    omitting it is refused with 400 before any token is loaded. That is what
+    every sign-out did until this was fixed: the local session ended, the
+    family did not, and its refresh token stayed valid for thirty days.
+
+    `test_the_console_sign_out_form_is_accepted_by_the_revocation_endpoint`
+    holds the other half of this -- that the endpoint accepts exactly this
+    form.
+    """
+
+    page = _page()
+
+    assert 'client_id: client, client_secret: ""' in page
+    assert "Vault sign-out could not revoke this session:" in page, (
+        "a revocation that fails must say so; this one was silent for months"
+    )
+

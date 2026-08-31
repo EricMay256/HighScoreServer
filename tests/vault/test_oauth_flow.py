@@ -1030,6 +1030,50 @@ def test_the_principal_reads_as_a_name_not_a_uuid() -> None:
 # ------------------------------------------- revocation and replay races ----
 
 
+def test_the_console_sign_out_form_is_accepted_by_the_revocation_endpoint(
+    oauth_client: TestClient,
+) -> None:
+    """The exact body `signOut` posts, asserted against the live endpoint.
+
+    Every other revocation test here sends `token_type_hint` and a
+    `client_secret` read back from registration, because they were written from
+    the RFC. The console sends neither of those things -- it holds a refresh
+    token and a client id and nothing else -- and for months that form was
+    refused with 400 before any token was loaded, so signing out abandoned the
+    family instead of retiring it and left a thirty-day refresh token live.
+
+    Pinned as a shape rather than as a string in the page: what matters is that
+    this form is the one the endpoint accepts.
+    """
+
+    registration = register_full(oauth_client)
+    client_id = registration["client_id"]
+    params = authorize(oauth_client, client_id)
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"][0]
+    tokens = exchange(oauth_client, client_id, code)
+
+    revoked = oauth_client.post(
+        "/revoke",
+        data={
+            "token": tokens["refresh_token"],
+            "client_id": client_id,
+            # Empty, and still required: the SDK's `RevocationRequest` declares
+            # the field without a default. A public client has no secret to put
+            # there, and omitting it is a validation failure rather than an
+            # unauthenticated request.
+            "client_secret": "",
+        },
+    )
+
+    assert revoked.status_code == 200
+    renewed = _refresh(oauth_client, client_id, tokens["refresh_token"])
+    assert renewed.status_code == 400, (
+        "the sign-out was accepted but retired nothing; the family is still "
+        "renewable"
+    )
+
+
 def test_revoking_an_access_token_kills_the_grant(oauth_client: TestClient) -> None:
     """The SDK only calls `revoke_token` when the loaded token's `client_id`
     matches the authenticated client's.
