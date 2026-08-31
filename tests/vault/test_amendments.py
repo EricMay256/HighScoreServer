@@ -1108,3 +1108,129 @@ def test_reordering_edges_is_not_reported_as_changing_nothing(
         )
     finally:
         _cleanup()
+
+
+def test_the_queue_carries_a_preview_for_every_proposal(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """One request has to be enough to triage the queue.
+
+    The console previously listed the queue and then fetched each proposal's
+    detail, which is a round trip per row against a pool of two connections --
+    it exhausted the read burst at twenty rows and would queue on the pool at
+    two hundred. A queue row is a rationale and an id, and neither says what
+    the proposal would do.
+
+    Metadata previews travel in full because they *are* the whole proposal.
+    Body kinds travel as counts only: a replacement may carry a hundred
+    thousand characters, and a queue of them is the payload this avoids.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    neighbour = _seed_note()
+    try:
+        client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": [neighbour]},
+                "rationale": "Connect them.",
+            },
+        )
+        client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_id, body="A rewritten body.\n"),
+        )
+
+        queue = client.get(
+            "/api/v1/vault/amendment-proposals", headers=_headers(reviewer)
+        )
+        assert queue.status_code == 200, queue.text
+        payload = queue.json()
+
+        assert len(payload["previews"]) == payload["count"], (
+            "every listed proposal needs a preview, or the console is back to "
+            "one request per row for the ones that lack it"
+        )
+        assert payload["truncated"] is False
+
+        by_id = {p["proposal_id"]: p for p in payload["previews"]}
+        for summary in payload["pending"]:
+            preview = by_id[summary["proposal_id"]]
+            if summary["change_kind"] == "metadata":
+                assert preview["metadata_preview"] is not None
+                assert preview["metadata_preview"]["related_added"] == [
+                    {"id": neighbour, "title": "Shell transport constraints"}
+                ]
+            else:
+                assert preview["metadata_preview"] is None
+                assert preview["added_line_count"] is not None
+                # The body itself stays behind the detail endpoint.
+                assert "resulting_body" not in preview
+                assert "unified_diff" not in preview
+    finally:
+        _cleanup()
+
+
+def test_the_queue_reports_a_proposal_whose_base_has_moved(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """A stale row has no preview, and saying so is the useful signal.
+
+    Rendering nothing would look like a loading failure. `stale` tells the
+    reviewer that accepting settles it as stale rather than applying it.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    other = _seed_note()
+    try:
+        # Both are filed against revision 1, which is legal. Accepting one
+        # moves the note to 2 and strands the other -- a proposal cannot be
+        # *submitted* against a stale base, so this is the only way to reach
+        # the state the console has to render.
+        stale = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": []},
+                "rationale": "Filed first, decided second.",
+            },
+        )
+        assert stale.status_code == 200, stale.text
+        first = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_id,
+                "base_revision": 1,
+                "change": {"kind": "metadata", "related_ids": [other]},
+                "rationale": "Move the note forward.",
+            },
+        )
+        accepted = client.post(
+            f"/api/v1/vault/amendment-proposals/{first.json()['proposal']['proposal_id']}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+        assert accepted.status_code == 200, accepted.text
+
+        payload = client.get(
+            "/api/v1/vault/amendment-proposals", headers=_headers(reviewer)
+        ).json()
+        entry = next(
+            p
+            for p in payload["previews"]
+            if p["proposal_id"] == stale.json()["proposal"]["proposal_id"]
+        )
+
+        assert entry["stale"] is True
+        assert entry["metadata_preview"] is None
+    finally:
+        _cleanup()

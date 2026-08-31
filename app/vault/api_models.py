@@ -576,11 +576,65 @@ class VaultAmendmentProposalResponse(BaseModel):
     proposal: VaultAmendmentProposalSummary
 
 
+class VaultQueuePreview(BaseModel):
+    """What one queued proposal would do, sized to travel with the queue.
+
+    A metadata preview is carried **in full**: it is small, and it is the whole
+    proposal -- edges and classification with every id resolved to a title, so
+    a reviewer can judge the row without opening it.
+
+    A body change is carried as counts only. `resulting_body` and the unified
+    diff stay behind `GET /amendment-proposals/{id}`, because a replacement may
+    hold a hundred thousand characters and a queue of them is precisely the
+    payload this exists to avoid sending.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: UUID
+    target_title: str | None = Field(
+        default=None,
+        description=(
+            "The note's current title. Null when the target no longer "
+            "resolves. Carried here because the queue is otherwise a list of "
+            "ids, and the service has already fetched the document."
+        ),
+    )
+    metadata_preview: "VaultMetadataPreview | None" = None
+    added_line_count: int | None = None
+    removed_line_count: int | None = None
+    hunk_count: int | None = None
+    requires_removal_acknowledgement: bool | None = None
+    stale: bool = Field(
+        default=False,
+        description=(
+            "The target has moved since this proposal was written, so no "
+            "preview describes it: accepting would settle it as stale."
+        ),
+    )
+
+
 class VaultAmendmentQueueResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     pending: list[VaultAmendmentProposalSummary]
     count: int
+    previews: list[VaultQueuePreview] = Field(
+        default_factory=list,
+        description=(
+            "One entry per proposal in `pending`, same order. Present so a "
+            "reviewer can triage the queue from one request rather than one "
+            "per row."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "Previews were dropped from the tail to fit a byte budget. The "
+            "proposals themselves are all still listed; fetch the missing "
+            "previews individually."
+        ),
+    )
 
 
 class VaultAmendmentProposalDetail(BaseModel):
@@ -1467,6 +1521,66 @@ def amendment_proposal_change(
         kind="replacement",
         replacement=VaultDocumentUpdateRequest.model_validate(proposal.change),
     )
+
+
+# The queue's preview budget. Metadata previews are small -- forty-four of them
+# measured at 8KB of change payload -- so this is not sized to ration them. It
+# bounds the pathological case: `limit` accepts 200, and a queue of proposals
+# each carrying many renamed edges could otherwise assemble a response nobody
+# asked for. Previews are dropped from the tail and the drop is reported; the
+# proposals themselves are never dropped.
+QUEUE_PREVIEW_BUDGET_BYTES = 256 * 1024
+
+
+def amendment_queue_previews(
+    proposals: Sequence[VaultAmendmentProposal],
+    previews: dict[UUID, Any],
+    target_titles: dict[str, str] | None = None,
+    budget_bytes: int = QUEUE_PREVIEW_BUDGET_BYTES,
+) -> tuple[list[VaultQueuePreview], bool]:
+    """Project the queue's previews, trimmed from the tail to fit.
+
+    Trimming the tail is what makes the budget safe: `list_pending` is oldest
+    first, so the rows most at risk of being forgotten keep their previews and
+    the newest lose them. A dropped preview costs one extra request, never a
+    missing proposal.
+    """
+
+    assembled: list[VaultQueuePreview] = []
+    spent = 0
+    truncated = False
+    titles = target_titles or {}
+    for proposal in proposals:
+        summary = previews.get(proposal.id)
+        title = titles.get(proposal.target_document_id)
+        if isinstance(summary, MetadataChangeSummary):
+            item = VaultQueuePreview(
+                proposal_id=proposal.id,
+                target_title=title,
+                metadata_preview=amendment_metadata_preview(summary),
+            )
+        elif isinstance(summary, BodyChangeSummary):
+            item = VaultQueuePreview(
+                proposal_id=proposal.id,
+                target_title=title,
+                added_line_count=summary.added_line_count,
+                removed_line_count=len(summary.removed_lines),
+                hunk_count=summary.hunk_count,
+                requires_removal_acknowledgement=(
+                    summary.requires_removal_acknowledgement
+                ),
+            )
+        else:
+            item = VaultQueuePreview(
+                proposal_id=proposal.id, target_title=title, stale=True
+            )
+
+        spent += len(item.model_dump_json().encode("utf-8"))
+        if spent > budget_bytes and assembled:
+            truncated = True
+            break
+        assembled.append(item)
+    return assembled, truncated
 
 
 def amendment_metadata_preview(

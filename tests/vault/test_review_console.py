@@ -176,9 +176,12 @@ def test_decisions_are_withheld_until_the_evidence_loads() -> None:
     page = _page()
 
     assert "Deciding is disabled until" in page
-    assert "deciding is disabled until it can be shown" in page
     assert "evidenceLoaded" in page and "if (!evidenceLoaded) return;" in page
     assert "if (!loaded) return false;" in page
+    # A card whose preview never arrived starts undecidable. It becomes
+    # decidable by loading the evidence, never by leaving the buttons live --
+    # see test_a_dropped_preview_can_still_be_loaded for the recovery.
+    assert "if (!loaded) {\n    check.disabled = true;" in page
 
 
 def test_the_console_keeps_and_rotates_its_refresh_token() -> None:
@@ -230,34 +233,114 @@ def test_an_ended_session_repaints_the_sign_in_controls() -> None:
     )
 
 
-def test_the_client_registration_cannot_outlive_the_browser_session() -> None:
-    """Reactive cleanup cannot reach this, so the fix has to be preventive.
+def test_the_persisted_session_is_bounded_by_the_refresh_lifetime() -> None:
+    """The registration may outlive the tab, but never its refresh token.
 
+    The entitlement is keyed to the OAuth *family*, so losing the session means
+    re-running `grant-oauth`. Session-scoping the refresh token made that a
+    chore on every tab close rather than the monthly one the thirty-day refresh
+    lifetime implies, so the record persists.
+
+    What persistence must not do is recreate the stranding bug.
     `prune_vault_oauth` deletes a registration once its refresh token expires,
-    and revoking on sign-out is what makes ours eligible. Close the tab without
-    signing out and session storage goes while a localStorage client id stays
-    -- then the server deletes that registration and the browser reuses it
-    forever.
+    and the authorization server answers a deleted client_id with a direct 400
+    and no redirect (mcp/server/auth/handlers/authorize.py,
+    `attempt_load_client=False`) -- so no error ever comes back to clean up
+    from. The record is therefore discarded on our own schedule, by comparing
+    `obtained` against the refresh lifetime, rather than by waiting for a
+    failure that cannot arrive.
 
-    Nothing recovers, because the authorization server answers an unknown
-    client_id with a *direct 400 and no redirect*
-    (mcp/server/auth/handlers/authorize.py, `attempt_load_client=False`). No
-    callback runs, so neither the callback nor the token-exchange cleanup ever
-    fires, and only clearing site data fixes it.
-
-    Session storage bounds the registration to the session that made it. Do not
-    move this back to localStorage to save a registration row: a row is cheap
-    and the entitlement does not survive re-authorization anyway.
+    The client id and refresh token are one record because they are only valid
+    together: a refresh presents both, and an id from one authorization cannot
+    renew a token from another. Storing them apart is how they drift.
     """
 
     page = _page()
 
-    assert "sessionStorage.getItem(STORE.client)" in page
-    assert "sessionStorage.setItem(STORE.client" in page
-    assert "localStorage" not in page.replace(
-        "A registration cached in localStorage outlives", ""
-    ).replace("The token lives in sessionStorage, not localStorage", ""), (
-        "the console should not persist anything beyond the browser session"
+    assert "REFRESH_TTL_MS" in page
+    assert "Date.now() - saved.obtained > REFRESH_TTL_MS" in page, (
+        "the persisted record must expire on its own schedule; nothing will "
+        "tell the browser its registration was pruned"
+    )
+    assert "STORE.session" in page
+    assert "if (!saved.client || !saved.obtained) return null;" in page, (
+        "a half-written record should be discarded rather than half-used"
+    )
+    # The access token stays session-scoped: it is renewable from the record.
+    assert "sessionStorage.getItem(STORE.token)" in page
+
+
+def test_refresh_rotation_is_serialized_across_tabs() -> None:
+    """Two tabs sharing one refresh token is a family-destroying race.
+
+    Every tab copies the refresh token into memory. If two hold R1 and one
+    rotates it to R2, the other presents a *consumed* token -- which
+    `VaultOAuthProvider.load_refresh_token` treats as a captured credential and
+    answers by burning the whole family, every credential in the chain. That is
+    right for theft and catastrophic for a second tab, because the
+    `vault:review` entitlement dies with the family and must be granted again
+    by hand.
+
+    A Web Lock alone is not the fix: the losing tab must *re-read* storage
+    inside the lock, or it serializes presenting the stale token. Both halves
+    are asserted.
+    """
+
+    page = _page()
+
+    assert "navigator.locks" in page
+    assert "withRefreshLock" in page
+    assert "const current = loadSession();" in page, (
+        "the lock holder must re-read the record; holding a lock while "
+        "presenting a token another tab already consumed changes nothing"
+    )
+    # Presenting the in-memory copy is the bug; the re-read one is the fix.
+    assert "refresh_token: presented," in page
+
+
+def test_the_legacy_session_storage_format_is_migrated() -> None:
+    """The deployed console wrote a different shape, and it is in use.
+
+    Release v74 shipped the console storing `vault.review.client_id` and
+    `vault.review.refresh` in session storage. Reading only the new record
+    would find no refresh token on the first 401 after rollout, end the
+    session, and re-authorize into a family with no entitlement -- so every
+    live reviewer would have to run `grant-oauth` again, which is the chore
+    the persisted record exists to remove.
+
+    The legacy keys are cleared only after the new record is written, so an
+    interrupted upgrade repeats instead of losing the token.
+    """
+
+    page = _page()
+
+    assert "migrateLegacySession" in page
+    assert 'sessionStorage.getItem("vault.review.client_id")' in page
+    assert 'sessionStorage.getItem("vault.review.refresh")' in page
+    assert "loadSession() || migrateLegacySession() || {}" in page, (
+        "migration must run only when no new record exists, or it would "
+        "overwrite a current session with a stale one"
+    )
+    assert "if (localStorage.getItem(STORE.session)) {" in page, (
+        "the legacy keys must not be removed before the new record is saved"
+    )
+
+
+def test_a_dropped_preview_can_still_be_loaded() -> None:
+    """A truncated queue must not make a proposal unreviewable.
+
+    The byte budget drops previews from the tail, and the API contract says
+    they can be fetched individually. A card that says so without offering the
+    fetch is worse than the N+1 it replaced: the old console loaded every
+    detail, so nothing was ever unreachable.
+    """
+
+    page = _page()
+
+    assert "Load preview" in page
+    assert "dropped to fit the response " in page
+    assert "accept.disabled = reject.disabled = false;" in page, (
+        "loading the preview has to enable the decision it was blocking"
     )
 
 
@@ -308,15 +391,184 @@ def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:
             continue
         window = lines[index : index + 8]
         if not any("sessionEnded" in following for following in window):
-            unguarded.append((index + 1, line.strip()[:70]))
+            # The window, not the `catch` line: an exemption's reason is
+            # usually written inside the block it excuses.
+            unguarded.append((index + 1, "\n".join(window)))
 
-    assert len(unguarded) == 2, (
+    # Exempt because none of these wrap an `api()` call, so none can ever see
+    # the marker. Named by the reason rather than counted, so adding a catch
+    # has to state which case it is instead of moving a number.
+    exemptions = (
+        "return null;",  # reading the persisted session record
+        "Private mode",  # writing it
+        "Signing out locally",  # revocation, best-effort by design
+        "PENDING_ERROR",  # the token exchange, before a session exists
+        # Renewal, which wraps `refreshTokens` rather than `api`. A network
+        # failure here is not an expiry to propagate -- it is the thing that
+        # must not escape, or startup never renders.
+        "Settle, never reject",
+    )
+    unexplained = [
+        entry
+        for entry in unguarded
+        if not any(reason in entry[1] for reason in exemptions)
+    ]
+
+    assert not unexplained, (
         "A catch block around an api() call does not propagate session expiry: "
-        f"{unguarded}. Add `if (err.sessionEnded) throw err;` ahead of the "
+        f"{unexplained}. Add `if (err.sessionEnded) throw err;` ahead of the "
         "ordinary failure rendering. Swallowing it lets the caller carry on "
         "issuing requests against a session that has already ended, and hides "
-        "the expiry from the handler that repaints the sign-in controls."
+        "the expiry from the handler that repaints the sign-in controls. If "
+        "the block genuinely cannot see an api() error, add it to `exemptions` "
+        "with the reason."
     )
-    exempt = " ".join(text for _, text in unguarded)
-    assert "Signing out locally" in exempt, "sign-out revocation should be exempt"
-    assert "PENDING_ERROR" in exempt, "the pre-session token exchange should be exempt"
+
+
+def test_a_revoked_access_token_does_not_end_a_live_session() -> None:
+    """Rotation revokes the token it replaces, so one 401 proves nothing.
+
+    With two tabs open, this tab's freshly-minted access token can be revoked
+    again by the other tab's next rotation. Giving up after a single retry
+    read that as "the session is over" and called `endSession`, which deleted
+    the shared record -- taking the other tab's still-valid refresh token with
+    it and costing the entitlement.
+
+    The condition for giving up is therefore that a *refresh* failed, not that
+    a retry was spent. Bounded so a genuinely dead session still terminates.
+    """
+
+    page = _page()
+
+    assert "MAX_REFRESH_RETRIES" in page
+    assert "tries < MAX_REFRESH_RETRIES && await refreshTokens()" in page, (
+        "the retry must be gated on a refresh succeeding; counting attempts "
+        "alone cannot distinguish a dead session from a busy one"
+    )
+
+
+def test_ending_a_session_spares_a_record_another_tab_advanced() -> None:
+    """Local sign-out must not be a global one.
+
+    `refreshTokens` clears the stored token before presenting it, so a record
+    whose refresh is null is spent and dead for everyone -- clearing it is
+    right. A record carrying a usable token written by a different tab is the
+    opposite: deleting it ends a session that was alive.
+
+    Sign-out passes `force`, because there the family really is revoked for
+    every tab.
+    """
+
+    page = _page()
+
+    assert "stored && stored.refresh && SESSION.stamp" in page, (
+        "the guard must require a usable token; a spent record should still "
+        "be cleared"
+    )
+    assert "stored.stamp !== SESSION.stamp" in page
+    assert "endSession(null, true)" in page, "sign-out should force the clear"
+    assert "next.stamp = randomString();" in page
+
+
+def test_a_reopened_tab_resumes_from_the_persisted_record() -> None:
+    """Persisting the token is pointless if nothing ever presents it.
+
+    A new tab has no access token -- that lives in session storage -- but the
+    refresh token on disk can mint one. `render` decides signed-in from the
+    access token alone, so without an explicit resume the page showed "Sign in"
+    while holding a usable credential, started a fresh authorization, and
+    landed in a family with no entitlement. That is exactly the outcome
+    persistence was added to prevent, so the feature did nothing at all.
+
+    The resume must complete before the first paint, or the operator sees a
+    "Sign in" flash and may click it -- which really does start a new family.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+
+    assert "async function resumeSession()" in page
+    assert "if (!stored || !stored.refresh) return false;" in page
+
+    resumed_at = next(
+        i for i, text in enumerate(lines) if "await resumeSession();" in text
+    )
+    rendered_at = next(
+        i
+        for i, text in enumerate(lines)
+        if text.strip() == "render();" and i > resumed_at
+    )
+    assert resumed_at < rendered_at, (
+        "the resume has to finish before the first render, not after it"
+    )
+
+
+def test_the_session_helpers_exist_before_the_record_is_built() -> None:
+    """A `const` used earlier in the file than it is declared throws.
+
+    `saveSession` stamps with `randomString`, and the record is built during
+    module initialization. With `randomString` declared further down it sat in
+    its temporal dead zone, so the legacy migration threw a ReferenceError that
+    its own broad catch turned into a silent "no legacy session".
+
+    The migration was therefore dead code that tested green, because calling it
+    from a console after load is the one context where the ordering cannot
+    bite. Assert the order, not the behaviour of a hand-run call.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+
+    def line_of(needle: str) -> int:
+        return next(i for i, text in enumerate(lines) if needle in text)
+
+    assert line_of("const randomString =") < line_of("let SESSION = loadSession()"), (
+        "randomString is declared after the record that stamps itself with it, "
+        "so module initialization throws into a catch that hides the failure"
+    )
+
+
+def test_a_failed_renewal_still_leaves_the_operator_a_control() -> None:
+    """The page starts with every control hidden, so not rendering is fatal.
+
+    `signin`, `signout`, `refresh` and the queues all carry `hidden` in the
+    initial markup; `render` is what reveals the right ones. A renewal that
+    rejects -- an unreachable metadata endpoint, a dropped token request --
+    escaped before `render` and left an inert page with nothing to click, which
+    is worse than any renewal failure it was reporting.
+
+    `resumeSession` therefore settles rather than rejecting, and `render` runs
+    in a `finally` regardless. Both, because either alone is one refactor away
+    from the same blank page.
+    """
+
+    page = _page()
+
+    assert "Settle, never reject" in page
+    assert "} finally {" in page
+    lines = page.splitlines()
+    finally_at = next(i for i, text in enumerate(lines) if "} finally {" in text)
+    assert "render();" in lines[finally_at + 1], (
+        "rendering must be the finally body; a renewal failure has to leave a "
+        "usable page behind it"
+    )
+    assert "Could not renew this session" in page, (
+        "a blank recovery is only marginally better than a blank page -- say "
+        "what failed and that a reload retries it"
+    )
+
+
+def test_the_startup_sequence_is_callable_on_its_own() -> None:
+    """Named so it can be executed by a test rather than approximated by one.
+
+    Every defect found in this file hid in the gap between a function and the
+    moment it runs: a migration that worked when called by hand and threw at
+    initialization, a resume that existed and was never invoked, a stub so
+    broad it answered the metadata request. An anonymous startup body cannot be
+    driven, only guessed at.
+    """
+
+    page = _page()
+
+    assert "async function boot()" in page
+    assert "\nboot();" in page, "the named boot must actually be invoked"

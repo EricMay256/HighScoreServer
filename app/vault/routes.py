@@ -60,6 +60,7 @@ from .api_models import (
     amendment_preview,
     amendment_proposal_change,
     amendment_proposal_summary,
+    amendment_queue_previews,
     canonical_request_digest,
     compile_run_summary,
     compile_work_item,
@@ -1114,10 +1115,15 @@ async def decide_review_case(
 async def list_amendment_proposals(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> VaultAmendmentQueueResponse:
-    proposals = await _amendment_service().list_pending(limit)
+    proposals, previews, titles = await _amendment_service().list_pending_previews(
+        limit
+    )
+    rendered, truncated = amendment_queue_previews(proposals, previews, titles)
     return VaultAmendmentQueueResponse(
         pending=[amendment_proposal_summary(item) for item in proposals],
         count=len(proposals),
+        previews=rendered,
+        truncated=truncated,
     )
 
 

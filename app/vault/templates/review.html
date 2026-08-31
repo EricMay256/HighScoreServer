@@ -113,21 +113,129 @@ const el = (tag, cls, text) => {
 };
 
 /* ---------- OAuth: authorization code + PKCE against our own AS ---------- */
-/* The token lives in sessionStorage, not localStorage: it is a one-hour
-   reviewer credential and it should not outlive the tab that earned it. */
-const STORE = { client: "vault.review.client_id", verifier: "vault.review.pkce",
-                state: "vault.review.state", token: "vault.review.token",
-                refresh: "vault.review.refresh" };
+/* The access token stays in sessionStorage: it lasts an hour and is renewable
+   from the persisted record, so there is nothing to gain by keeping it on
+   disk. The record that *is* persisted -- registration plus refresh token --
+   is described at `loadSession`. */
+const STORE = { verifier: "vault.review.pkce", state: "vault.review.state",
+                token: "vault.review.token", session: "vault.review.session" };
+
+/* The registration and the refresh token are one durable record, stored
+   together because they are only valid together: refreshing presents both, and
+   a client_id from one authorization cannot renew a token from another.
+   Persisted rather than session-scoped so closing the tab does not destroy the
+   family -- the vault:review entitlement is keyed to the family, so a lost
+   session means re-running `grant-oauth`, and a per-tab session made that a
+   constant chore rather than the monthly one the refresh lifetime implies.
+   `obtained` bounds it: `prune_vault_oauth` deletes a registration once its
+   refresh token expires, and the authorization server answers a deleted
+   client_id with a direct 400 and no redirect, so nothing would tell us. We
+   therefore discard the pair on our own schedule rather than waiting for an
+   error that never arrives. */
+/* Declared above the session helpers on purpose. `saveSession` stamps every
+   record with `randomString`, and the record is built during module
+   initialization -- so a `const` declared further down sits in its temporal
+   dead zone and throws when the migration runs, which a broad catch then
+   turns into a silent "no legacy session". */
+const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const randomString = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
+
+const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(STORE.session);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (!saved.client || !saved.obtained) return null;
+    if (Date.now() - saved.obtained > REFRESH_TTL_MS) {
+      localStorage.removeItem(STORE.session);
+      return null;
+    }
+    return saved;
+  } catch (err) { return null; }
+}
+
+/* Every write re-stamps. The stamp is how a tab tells "the record I have been
+   using" from "a record another tab has since replaced" -- which is the
+   difference between ending your own session and destroying someone else's. */
+function saveSession(next) {
+  next.stamp = randomString();
+  try { localStorage.setItem(STORE.session, JSON.stringify(next)); }
+  catch (err) { /* Private mode: the session simply will not persist. */ }
+  return next;
+}
+
+/* One-time upgrade from the session-scoped format this replaced.
+   `vault.review.client_id` and `vault.review.refresh` are what the deployed
+   console wrote. Without this, the first 401 after a rollout finds no refresh
+   token, ends the session, and re-authorizes into a new family -- which
+   inherits no entitlement, so every live reviewer would have to run
+   `grant-oauth` again. The legacy keys are removed only after the new record
+   is written, so an interrupted upgrade repeats rather than loses. */
+function migrateLegacySession() {
+  try {
+    const client = sessionStorage.getItem("vault.review.client_id");
+    if (!client) return null;
+    const upgraded = {
+      client,
+      refresh: sessionStorage.getItem("vault.review.refresh") || null,
+      /* Dated now, not at the original authorization: the true obtained-at was
+         never recorded. This can only over-estimate the remaining lifetime, and
+         a refresh that fails is handled; a record discarded early would cost
+         the entitlement this migration exists to keep. */
+      obtained: Date.now(),
+    };
+    saveSession(upgraded);
+    if (localStorage.getItem(STORE.session)) {
+      sessionStorage.removeItem("vault.review.client_id");
+      sessionStorage.removeItem("vault.review.refresh");
+    }
+    return upgraded;
+  } catch (err) { return null; }
+}
+
+/* The whole point of persisting the record: a new tab has no access token in
+   session storage, but the refresh token on disk can mint one. Without this a
+   reopened tab shows "Sign in" while holding a usable credential, starts a
+   fresh authorization, and lands in a family with no entitlement -- which is
+   the exact outcome persistence was added to prevent. */
+async function resumeSession() {
+  if (TOKEN) return true;
+  const stored = loadSession();
+  if (!stored || !stored.refresh) return false;
+  SESSION = stored;
+  REFRESH = stored.refresh;
+  try {
+    return await refreshTokens();
+  } catch (err) {
+    /* Settle, never reject. Both callers branch on the boolean, and a
+       rejection at startup escapes before `render` -- leaving the operator
+       with the initial markup, where the sign-in button, the sign-out button
+       and the queues are all hidden. An inert page with no control on it is a
+       worse outcome than any renewal failure.
+
+       `refreshTokens` reaches the metadata endpoint before it discards the
+       stored token, so a failure there leaves the record intact and a reload
+       can retry. A failure at the token endpoint itself has already spent it,
+       deliberately: a request whose response was lost may have rotated, and
+       presenting it again would burn the family. */
+    PENDING_ERROR =
+      "Could not renew this session: " + err.message
+      + ". Reload to try again, or sign in.";
+    return false;
+  }
+}
+
+let SESSION = loadSession() || migrateLegacySession() || {};
 let TOKEN = sessionStorage.getItem(STORE.token) || null;
-let REFRESH = sessionStorage.getItem(STORE.refresh) || null;
+let REFRESH = SESSION.refresh || null;
 let META = null;
 /* Survives the clearMessages() at the top of render(): a callback error is the
    one message that must outlive the re-render that follows it. */
 let PENDING_ERROR = null;
 
-const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
-  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const randomString = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
 
 async function metadata() {
   if (META) return META;
@@ -137,19 +245,20 @@ async function metadata() {
   return META;
 }
 
-/* Session-scoped, deliberately. A registration cached in localStorage outlives
-   the tab that made it, and `prune_vault_oauth` deletes a registration once its
-   refresh token expires -- so closing the tab without signing out leaves a
-   cached id the server will later delete, and the browser cannot notice. The
-   authorization server answers an unknown client_id with a direct 400 and no
-   redirect (mcp/server/auth/handlers/authorize.py, attempt_load_client=False),
-   so no callback runs and no cleanup fires: the console is stuck for good, and
-   only clearing site data fixes it. Registering once per browser session costs
-   one row and cannot reach that state. The entitlement does not survive
-   re-authorization regardless, so a longer-lived registration bought nothing. */
+/* Registers once per persisted session, not once per tab. The record outlives
+   the tab deliberately -- see the note on `loadSession` -- because the
+   entitlement is keyed to the OAuth family and a lost session costs a manual
+   grant.
+
+   What must never happen is a registration outliving its refresh token:
+   `prune_vault_oauth` deletes a stale registration, and the authorization
+   server answers a deleted client_id with a direct 400 and no redirect
+   (mcp/server/auth/handlers/authorize.py, attempt_load_client=False), so no
+   callback runs and nothing can clean up after the fact. `loadSession`
+   therefore discards the record on its own schedule rather than waiting for an
+   error that never arrives. */
 async function clientId() {
-  const cached = sessionStorage.getItem(STORE.client);
-  if (cached) return cached;
+  if (SESSION.client) return SESSION.client;
   const m = await metadata();
   const redirect = window.location.origin + CFG.reviewPath;
   const r = await fetch(m.registration_endpoint, {
@@ -165,7 +274,8 @@ async function clientId() {
   });
   if (!r.ok) throw new Error("Client registration failed: " + (await r.text()).slice(0, 200));
   const id = (await r.json()).client_id;
-  sessionStorage.setItem(STORE.client, id);
+  SESSION = { client: id, refresh: null, obtained: Date.now() };
+  saveSession(SESSION);
   return id;
 }
 
@@ -208,7 +318,10 @@ async function completeSignIn(code, state) {
     /* A registration deleted by `prune_vault_oauth` answers invalid_client
        forever, and the id is cached, so every later attempt repeats it. Drop
        it and the next sign-in registers afresh. */
-    if (detail.includes("invalid_client")) sessionStorage.removeItem(STORE.client);
+    if (detail.includes("invalid_client")) {
+      localStorage.removeItem(STORE.session);
+      SESSION = {};
+    }
     throw new Error("Token exchange failed: " + detail);
   }
   storeTokens(await r.json());
@@ -228,40 +341,101 @@ function storeTokens(payload) {
      families would pile up behind it. */
   if (payload.refresh_token) {
     REFRESH = payload.refresh_token;
-    sessionStorage.setItem(STORE.refresh, REFRESH);
+    SESSION.refresh = REFRESH;
+    /* Not restamped on rotation: `obtained` bounds the *registration*, which
+       is what pruning removes, and rotating a token does not renew that. */
+    SESSION.obtained = SESSION.obtained || Date.now();
+    saveSession(SESSION);
   }
 }
 
 /* Rotating: the server mints a new refresh token and revokes the presented
    one, so the response must be stored or the chain is broken. A replayed
    refresh token revokes the whole family, which is why this never retries. */
+/* Rotation must be serialized across tabs, and the reason is severe rather
+   than tidy. Every tab copies the refresh token into memory, so two tabs both
+   holding R1 will each present it: the second presentation is of a *consumed*
+   token, which `VaultOAuthProvider.load_refresh_token` treats as a captured
+   credential and answers by burning the entire family -- every credential ever
+   minted in the chain. That is the correct response to theft and a catastrophic
+   one to a second tab, because the vault:review entitlement dies with the
+   family and has to be granted again by hand.
+   A Web Lock plus a re-read inside it means whichever tab wins presents the
+   current token and the loser presents its replacement, never its predecessor.
+
+   Two tabs still take each other's access tokens in turn, because rotation
+   revokes the credential it replaces. That is chatty, and it is *not* harmless
+   on its own: a tab whose token is revoked twice in a row must not conclude the
+   session is over and delete the record the other tab is using. `api` retries
+   while refreshes succeed and `endSession` clears only a record this tab still
+   owns; those two together are what make the alternation survivable. */
+async function withRefreshLock(work) {
+  if (!navigator.locks || !navigator.locks.request) return work();
+  return navigator.locks.request("vault.review.refresh", work);
+}
+
 async function refreshTokens() {
-  if (!REFRESH) return false;
-  const m = await metadata();
-  const presented = REFRESH;
-  REFRESH = null;
-  sessionStorage.removeItem(STORE.refresh);
-  const r = await fetch(m.token_endpoint, {
-    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: presented,
-      client_id: await clientId(),
-    }),
+  return withRefreshLock(async () => {
+    /* Inside the lock, storage is the truth: another tab may have rotated
+       while this one waited, and its own REFRESH is then a consumed token. */
+    const current = loadSession();
+    if (current && current.client) SESSION = current;
+    REFRESH = SESSION.refresh || null;
+    if (!REFRESH) return false;
+
+    const m = await metadata();
+    const presented = REFRESH;
+    REFRESH = null;
+    SESSION.refresh = null;
+    saveSession(SESSION);
+    const r = await fetch(m.token_endpoint, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: presented,
+        client_id: SESSION.client,
+      }),
+    });
+    if (!r.ok) return false;
+    storeTokens(await r.json());
+    return true;
   });
-  if (!r.ok) return false;
-  storeTokens(await r.json());
-  return true;
 }
 
 /* Ends the local session and repaints. `message` is carried through render()
    by PENDING_ERROR, so the reason survives the clearMessages() that render
    begins with. */
-function endSession(message) {
+async function endSession(message, force) {
   TOKEN = null;
   REFRESH = null;
   sessionStorage.removeItem(STORE.token);
-  sessionStorage.removeItem(STORE.refresh);
+  /* Only discard the shared record if this tab still owns it. Rotation revokes
+     the access token it replaces, so a second tab's rotation can 401 this one
+     twice over -- and clearing unconditionally would delete the refresh token
+     that other tab is holding, ending a session that was alive and costing the
+     entitlement with it. `force` is sign-out, where the family really is dead
+     for everyone. */
+  /* `refreshTokens` clears the stored token *before* presenting it, so that a
+     lost response can never cause a replay -- which means a record whose
+     refresh is null has already been spent and is dead for every tab. The
+     record worth protecting is the opposite: one carrying a usable token,
+     written by a tab that is not this one. */
+  const stored = loadSession();
+  const someoneElseAdvancedIt =
+    stored && stored.refresh && SESSION.stamp && stored.stamp !== SESSION.stamp;
+  if (!force && someoneElseAdvancedIt) {
+    SESSION = stored;
+    /* Their record is not just spared, it is used: they left a usable token,
+       so this tab renews from it rather than signing out beside a live
+       session. */
+    if (await resumeSession()) {
+      render();
+      return;
+    }
+    if (message) PENDING_ERROR = message;
+    render();
+    return;
+  }
   /* Forget the registration too. `prune_vault_oauth` deletes a registration
      once it is stale, and a registration is never stale while it holds a live
      refresh token -- so ending a session is exactly what makes ours eligible
@@ -269,7 +443,8 @@ function endSession(message) {
      again, and would have no way to notice: the id is cached indefinitely and
      every future attempt reuses it. Registering afresh costs one row, and the
      entitlement does not survive re-authorization anyway. */
-  sessionStorage.removeItem(STORE.client);
+  localStorage.removeItem(STORE.session);
+  SESSION = {};
   if (message) PENDING_ERROR = message;
   render();
 }
@@ -278,11 +453,10 @@ async function signOut() {
   /* Retire the family rather than abandoning it. A dropped refresh token stays
      valid until it expires, and the entitlement rides on the family. */
   const token = REFRESH || TOKEN;
-  const client = sessionStorage.getItem(STORE.client);
+  const client = SESSION.client;
   TOKEN = null;
   REFRESH = null;
   sessionStorage.removeItem(STORE.token);
-  sessionStorage.removeItem(STORE.refresh);
   try {
     const m = await metadata();
     /* The captured id, never `clientId()` -- that would register a brand new
@@ -294,7 +468,7 @@ async function signOut() {
       });
     }
   } catch (err) { /* Signing out locally must succeed even if revocation cannot. */ }
-  endSession(null);
+  await endSession(null, true);
 }
 
 /* `hssv1_<credential-id>_<secret>`. The console shows the id so the operator
@@ -303,19 +477,28 @@ async function signOut() {
 const credentialId = () => (TOKEN && TOKEN.split("_").length >= 3) ? TOKEN.split("_")[1] : null;
 
 /* ---------- API ---------- */
-async function api(path, options, retried) {
+const MAX_REFRESH_RETRIES = 3;
+
+async function api(path, options, attempt) {
+  const tries = attempt || 0;
   const opts = Object.assign({ headers: {} }, options || {});
   opts.headers = Object.assign({ Authorization: "Bearer " + TOKEN }, opts.headers);
   const r = await fetch(CFG.apiBase + path, opts);
   if (r.status === 401) {
-    /* Once. A second 401 after a successful rotation is a real rejection, and
-       retrying a write that may already have applied is worse than failing. */
-    if (!retried && await refreshTokens()) return api(path, options, true);
+    /* Retry while a refresh actually succeeds, rather than once. A 401 is
+       refused before the handler runs, so nothing was applied and the retry is
+       safe -- and with two tabs open this tab's freshly-minted token can be
+       revoked again by the other's rotation, so one attempt is not enough to
+       distinguish "the session is over" from "the other tab moved first".
+       Bounded, so a genuinely dead session still terminates. */
+    if (tries < MAX_REFRESH_RETRIES && await refreshTokens()) {
+      return api(path, options, tries + 1);
+    }
     /* Repaint. Clearing the token without re-rendering left the page looking
        signed in -- app panel up, Sign in button hidden -- while telling the
        operator to sign in again, with no control to do it. This is the
        ordinary end of a thirty-day refresh token, not an edge case. */
-    endSession("Your session ended and could not be renewed. Sign in again.");
+    await endSession("Your session ended and could not be renewed. Sign in again.");
     const ended = new Error("session ended");
     ended.sessionEnded = true;
     throw ended;
@@ -419,7 +602,7 @@ function bodyPreview(preview) {
   return box;
 }
 
-async function proposalCard(summary) {
+function proposalCard(summary, preview) {
   const card = el("div", "card");
   card.dataset.proposalId = summary.proposal_id;
 
@@ -450,45 +633,99 @@ async function proposalCard(summary) {
 
   let ack = null;
   /* Nothing may be decided until the change has actually been displayed. A
-     card whose detail failed to load shows a rationale and two buttons, and
-     the rationale is written by the proposer -- accepting on that alone is
-     accepting an unexamined write on the strength of its own description. */
+     card showing a rationale and two buttons is showing the proposer's own
+     description of their write, which is not a review. */
   let loaded = false;
-  try {
-    const detail = await api("/amendment-proposals/" + summary.proposal_id);
-    if (detail.target) titleSlot.textContent = detail.target.title;
-    if (detail.metadata_preview) {
-      detailSlot.appendChild(metadataPreview(detail.metadata_preview));
-      if (detail.metadata_preview.changes_nothing) check.disabled = true;
-    } else if (detail.preview) {
-      const d = document.createElement("details");
-      d.appendChild(el("summary", null, "Body diff"));
-      d.appendChild(bodyPreview(detail.preview));
-      detailSlot.appendChild(d);
-      if (detail.preview.requires_removal_acknowledgement) {
-        const wrap = el("label", "check");
-        ack = document.createElement("input");
-        ack.type = "checkbox";
-        wrap.append(ack, document.createTextNode(
-          "Acknowledge " + detail.preview.removed_line_count + " removed line(s)"));
-        detailSlot.appendChild(wrap);
-        check.disabled = true; // never bulk-accept a removal
-      }
-    } else {
-      detailSlot.appendChild(el("p", "small dangling",
-        "No preview: the note has moved since this proposal was written, so it will settle as stale."));
-      check.disabled = true;
-    }
-    loaded = true;
-  } catch (err) {
-    /* An ended session is not this card's problem to report. Swallowing it
-       here left the queue loop running, so the remaining cards each issued
-       another unauthorized request -- up to two hundred of them -- against a
-       page endSession had already repainted. */
-    if (err.sessionEnded) throw err;
+
+  if (preview && preview.target_title) titleSlot.textContent = preview.target_title;
+
+  if (!preview) {
+    /* Dropped from the queue's byte budget. The detail endpoint still has it,
+       so offer that rather than leaving a card nothing can act on -- the
+       previous console fetched every detail, and losing the tail entirely
+       would be a worse trade than the request it saves. */
     detailSlot.appendChild(el("p", "small dangling",
-      "Could not load this proposal's change: " + err.message
-      + " — deciding is disabled until it can be shown. Refresh to retry."));
+      "No preview came with the queue — it was dropped to fit the response "
+      + "budget. Load it to review this proposal."));
+    const load = el("button", null, "Load preview");
+    detailSlot.appendChild(load);
+    load.onclick = async () => {
+      load.disabled = true;
+      try {
+        const detail = await api("/amendment-proposals/" + summary.proposal_id);
+        const rendered = detail.metadata_preview
+          ? metadataPreview(detail.metadata_preview)
+          : detail.preview
+            ? bodyPreview(detail.preview)
+            : el("p", "small dangling",
+                "The note has moved since this was written; accepting settles it as stale.");
+        detailSlot.replaceChildren(rendered);
+        if (detail.metadata_preview || detail.preview) {
+          loaded = true;
+          accept.disabled = reject.disabled = false;
+          if (detail.preview && detail.preview.requires_removal_acknowledgement) {
+            const wrap = el("label", "check");
+            ack = document.createElement("input");
+            ack.type = "checkbox";
+            wrap.append(ack, document.createTextNode(
+              "Acknowledge " + detail.preview.removed_line_count + " removed line(s)"));
+            detailSlot.appendChild(wrap);
+          }
+        }
+      } catch (err) {
+        if (err.sessionEnded) return;
+        load.disabled = false;
+        detailSlot.appendChild(el("p", "small dangling",
+          "Could not load the preview: " + err.message));
+      }
+    };
+  } else if (preview.stale) {
+    detailSlot.appendChild(el("p", "small dangling",
+      "The note has moved since this proposal was written, so accepting it "
+      + "settles it as stale rather than applying it."));
+  } else if (preview.metadata_preview) {
+    /* A metadata preview is the whole proposal, so the card is complete
+       without a second request -- which is the point of carrying it here. */
+    detailSlot.appendChild(metadataPreview(preview.metadata_preview));
+    loaded = true;
+    if (preview.metadata_preview.changes_nothing) check.disabled = true;
+  } else {
+    /* A body change arrives as counts. The diff itself can be a hundred
+       thousand characters, so it is fetched only if this card is opened. */
+    detailSlot.appendChild(el("div", "small muted",
+      preview.added_line_count + " added, " + preview.removed_line_count
+      + " removed, " + preview.hunk_count + " hunk(s)"));
+    const d = document.createElement("details");
+    d.appendChild(el("summary", null, "Body diff (loads on open)"));
+    const slot = el("div", "small muted", "…");
+    d.appendChild(slot);
+    let fetched = false;
+    d.addEventListener("toggle", async () => {
+      if (!d.open || fetched) return;
+      fetched = true;
+      try {
+        const detail = await api("/amendment-proposals/" + summary.proposal_id);
+        slot.replaceChildren(detail.preview
+          ? bodyPreview(detail.preview)
+          : el("p", "small dangling", "No diff: the note has moved since this was written."));
+      } catch (err) {
+        if (err.sessionEnded) return;
+        fetched = false;
+        slot.replaceChildren(el("p", "small dangling",
+          "Could not load the diff: " + err.message));
+      }
+    });
+    detailSlot.appendChild(d);
+    loaded = true;
+    if (preview.requires_removal_acknowledgement) {
+      const wrap = el("label", "check");
+      ack = document.createElement("input");
+      ack.type = "checkbox";
+      wrap.append(ack, document.createTextNode(
+        "Acknowledge " + preview.removed_line_count + " removed line(s)"));
+      detailSlot.appendChild(wrap);
+      check.disabled = true; // never bulk-accept a removal
+    }
   }
 
   if (!loaded) {
@@ -536,9 +773,19 @@ async function renderProposals() {
     return;
   }
   panel.appendChild(el("p", "small muted", queue.count + " pending"));
+  if (queue.truncated) {
+    panel.appendChild(el("p", "small dangling",
+      "Some previews were dropped to fit the response budget. Those cards "
+      + "cannot be decided here; open them directly."));
+  }
+  /* One request built this whole queue. Previews arrive with it, so a card is
+     complete without a second call -- which is what the read burst was
+     catching when each row fetched its own detail. */
+  const previews = {};
+  for (const item of (queue.previews || [])) previews[item.proposal_id] = item;
   const cards = [];
   for (const summary of queue.pending) {
-    const card = await proposalCard(summary);
+    const card = proposalCard(summary, previews[summary.proposal_id]);
     cards.push(card);
     panel.appendChild(card);
   }
@@ -771,13 +1018,14 @@ $("tab-cases").onclick = () => {
   $("panel-proposals").classList.add("hidden");
 };
 
-(async () => {
+async function boot() {
   const params = new URLSearchParams(window.location.search);
   if (params.get("error")) {
     /* Any authorization failure casts doubt on the cached registration, and
        keeping a bad one is what makes the failure permanent. Re-registering is
        one row; being unable to sign in is a dead console. */
-    sessionStorage.removeItem(STORE.client);
+    localStorage.removeItem(STORE.session);
+  SESSION = {};
     PENDING_ERROR = "Authorization failed: " + params.get("error")
       + ". The cached client registration was cleared; signing in will register again.";
     window.history.replaceState({}, "", CFG.reviewPath);
@@ -785,8 +1033,21 @@ $("tab-cases").onclick = () => {
     try { await completeSignIn(params.get("code"), params.get("state")); }
     catch (err) { PENDING_ERROR = err.message; }
   }
-  render();
-})();
+  /* Before the first paint, or the page flashes "Sign in" at an operator who
+     is still signed in. In a `finally` because rendering is what gives them a
+     control to act with; nothing above is worth a blank page. */
+  try {
+    await resumeSession();
+  } finally {
+    render();
+  }
+}
+
+/* Named rather than inlined in the IIFE so the startup sequence is reachable
+   as itself. Every bug found in this file so far hid in the difference between
+   a function and the moment it runs, and an anonymous boot body can only be
+   approximated by a test, never executed by one. */
+boot();
 </script>
 </body>
 </html>
