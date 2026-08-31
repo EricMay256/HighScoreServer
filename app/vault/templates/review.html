@@ -503,6 +503,12 @@ async function renderCases() {
 async function loadAll() {
   clearMessages();
   refreshIdentity();
+  /* Unhidden here as well as in `render`, because the 403 path below hides the
+     panel and `Refresh` calls this function directly. Granting the entitlement
+     and clicking Refresh -- the exact sequence the message below asks for --
+     therefore loaded the queue behind a panel that stayed hidden, and the only
+     way out was a reload nobody was told to do. */
+  $("app").classList.remove("hidden");
   try {
     await renderProposals();
     await renderCases();

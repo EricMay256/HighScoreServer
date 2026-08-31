@@ -671,3 +671,24 @@ def test_sign_out_sends_the_field_the_revocation_endpoint_requires() -> None:
         "a revocation that fails must say so; this one was silent for months"
     )
 
+
+def test_a_refresh_after_the_entitlement_lands_shows_the_queue() -> None:
+    """The sequence the console itself instructs, which used to end blank.
+
+    A 403 hides the app panel and prints the `grant-oauth` command. Running it
+    and clicking Refresh calls `loadAll` directly -- never `render` -- so the
+    queue loaded into a panel that was still hidden, and the operator saw an
+    empty page with no message. `render` unhiding it was not enough, because
+    nothing re-rendered.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+    start = next(i for i, line in enumerate(lines) if "async function loadAll()" in line)
+    body = lines[start : start + 14]
+
+    assert any('$("app").classList.remove("hidden")' in line for line in body), (
+        "loadAll must reveal the panel it is about to fill; the 403 path hides "
+        "it and Refresh does not re-render"
+    )
+
