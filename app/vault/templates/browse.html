@@ -252,12 +252,16 @@ async function openNote(noteId) {
   const propose = el("button", null, "Propose an edit");
   propose.id = "propose-open";
   propose.onclick = startPropose;
-  if (!mayPropose()) {
+  const refusal = proposeRefusal(detail);
+  if (refusal) {
     propose.disabled = true;
-    propose.title = "This credential holds vault:read only.";
+    propose.title = refusal;
   }
   actions.appendChild(propose);
   panel.appendChild(actions);
+  /* Said on the page, not only in a tooltip: a disabled control explains
+     itself to a mouse and to nobody else. */
+  if (refusal) panel.appendChild(el("div", "small muted", refusal));
 
   const head = el("div", "row");
   head.appendChild(el("span", "title", detail.title));
@@ -344,12 +348,29 @@ function occurrenceOf(body, expected, start) {
   return seen + 1;
 }
 
-function mayPropose() {
-  /* From `/authorization`, so a family authorized before this console asked
-     for the scope is told why the control is inert instead of discovering it
-     at submit time with a 403. Unknown identity means the control stays
-     enabled: the honest failure is the server's answer, not a guess here. */
-  return !IDENTITY || !IDENTITY.scopes || IDENTITY.scopes.includes("vault:propose");
+/* Why this note cannot be amended, or null when it can.
+
+   Two reasons, both known before the operator fills anything in, and both
+   worth saying rather than discovering at submit time.
+
+   A wiki page is the sharper one. `Agent/wiki/` is readable, so pages list and
+   open like notes, but `VaultAmendmentService.propose` accepts note targets
+   only -- a proposal against a page comes back 404 "Note not found", which
+   reads as a bug in the console rather than as the rule it is. A page restates
+   the notes it was compiled from; the amendment belongs to those.
+
+   The scope reason comes from `/authorization`, so a family authorized before
+   this console asked for `vault:propose` says so. Unknown identity is not a
+   refusal: the honest failure is then the server's answer, not a guess here. */
+function proposeRefusal(detail) {
+  if (detail.kind !== "note") {
+    return "Only notes take amendments. A " + detail.kind
+      + " is compiled from notes -- propose against the notes it was built from.";
+  }
+  if (IDENTITY && IDENTITY.scopes && !IDENTITY.scopes.includes("vault:propose")) {
+    return "This credential holds vault:read only.";
+  }
+  return null;
 }
 
 /* The same span, chosen by line number instead of by dragging.
@@ -522,6 +543,14 @@ function startPropose() {
   clearMessages();
   const existing = $("propose");
   if (existing) existing.remove();
+
+  /* Checked again here, not only when the button was built: the button is
+     built once per note and `IDENTITY` can arrive after it. */
+  const refusal = proposeRefusal(NOTE);
+  if (refusal) {
+    say("info", el("div", null, refusal));
+    return;
+  }
 
   /* A selection when there is one, the first line when there is not. Opening
      with no selection is the keyboard path, and it opens on something real

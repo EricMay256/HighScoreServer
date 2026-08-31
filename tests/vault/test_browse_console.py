@@ -265,6 +265,40 @@ def test_the_propose_control_reads_the_scope_it_needs() -> None:
     assert 'IDENTITY.scopes.includes("vault:propose")' in page
 
 
+def test_a_wiki_page_does_not_offer_an_edit_it_cannot_take() -> None:
+    """`Agent/wiki/` is readable, so pages list and open like notes.
+
+    `VaultAmendmentService.propose` accepts note targets only, and answers
+    anything else with 404 "Note not found" -- which, at the end of a filled-in
+    form, reads as a bug in the console rather than as the rule it is. A page
+    restates the notes it was compiled from, and the amendment belongs to
+    those.
+    """
+
+    page = _page()
+
+    assert 'if (detail.kind !== "note")' in page
+    assert "Only notes take amendments." in page
+
+
+def test_a_refused_edit_says_why_on_the_page() -> None:
+    """A disabled control explains itself to a mouse and to nobody else."""
+
+    page = _page()
+
+    assert 'if (refusal) panel.appendChild(el("div", "small muted", refusal));' in page
+
+
+def test_the_refusal_is_rechecked_when_the_form_opens() -> None:
+    """The button is built once per note; `IDENTITY` can arrive after it."""
+
+    page = _page()
+    lines = page.splitlines()
+    start = next(i for i, line in enumerate(lines) if "function startPropose()" in line)
+
+    assert any("proposeRefusal(NOTE)" in line for line in lines[start : start + 14])
+
+
 def test_the_form_is_built_through_text_content() -> None:
     """It quotes note text back at the operator, which is agent-written."""
 
