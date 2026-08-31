@@ -49,6 +49,7 @@ textarea {
       <button id="apply-filters">Filter</button>
       <button id="clear-filters">Clear</button>
     </div>
+    <div id="folders"></div>
     <div id="listing"></div>
     <div id="note" class="hidden"></div>
   </div>
@@ -72,6 +73,9 @@ let PREFIX = "";
 let FILTERS = { tag: "", facet: "" };
 let CURSOR = null;
 let ROWS = [];
+/* Folders already shown, so an appended page adds the ones it discovers
+   without repeating those already on screen. */
+let FOLDERS = [];
 /* The open note, as fetched. Held rather than re-read from the DOM because a
    span edit is resolved against the body the server sent and the revision it
    sent it at -- neither of which the rendered page is the authority on. */
@@ -116,17 +120,27 @@ function folderOf(vaultPath) {
   return cut === -1 ? "" : vaultPath.slice(0, cut + 1);
 }
 
-function subfolders() {
-  /* Folders derived from the page in hand, not fetched. The listing endpoint
-     returns notes, and asking it for a folder tree would be asking a second
-     question of a surface that answers one. What this shows is therefore
-     honest but partial: the folders containing the notes on this page. */
-  const seen = [];
-  for (const row of ROWS) {
+/* Folders derived from the notes seen so far, not fetched. The listing
+   endpoint returns notes, and asking it for a folder tree would be asking a
+   second question of a surface that answers one. What this shows is therefore
+   partial -- the folders of the notes loaded so far -- and it says so.
+
+   Rendered per page rather than once. Folders came from the first page alone,
+   so a folder whose notes sort after the first fifty never became navigable:
+   `Load more` grew the list and the folder cards did not. */
+function renderFolders(rows) {
+  const panel = $("folders");
+  for (const row of rows) {
     const folder = folderOf(row.vault_path);
-    if (folder && folder !== PREFIX && !seen.includes(folder)) seen.push(folder);
+    if (!folder || folder === PREFIX || FOLDERS.includes(folder)) continue;
+    FOLDERS.push(folder);
+    const card = el("div", "card");
+    const into = el("button", "link title", folder);
+    into.onclick = () => { PREFIX = folder; loadAll(); };
+    card.appendChild(into);
+    card.appendChild(el("span", "small muted", "  folder"));
+    panel.appendChild(card);
   }
-  return seen;
 }
 
 function noteRow(row) {
@@ -148,27 +162,24 @@ function noteRow(row) {
 
 async function renderListing(append) {
   const panel = $("listing");
-  if (!append) { panel.textContent = ""; ROWS = []; CURSOR = null; }
+  if (!append) {
+    panel.textContent = "";
+    $("folders").textContent = "";
+    ROWS = [];
+    FOLDERS = [];
+    CURSOR = null;
+  }
 
   const page = await api("/notes?" + listingParams(append ? CURSOR : null).toString());
   ROWS = ROWS.concat(page.notes);
   CURSOR = page.next_cursor;
 
-  if (!append) {
-    crumbs();
-    for (const folder of subfolders()) {
-      const card = el("div", "card");
-      const into = el("button", "link title", folder);
-      into.onclick = () => { PREFIX = folder; loadAll(); };
-      card.appendChild(into);
-      card.appendChild(el("span", "small muted", "  folder"));
-      panel.appendChild(card);
-    }
-  }
+  if (!append) crumbs();
+  renderFolders(page.notes);
 
   for (const row of page.notes) panel.appendChild(noteRow(row));
 
-  if (!ROWS.length) {
+  if (!ROWS.length && !FOLDERS.length) {
     panel.appendChild(el("div", "card muted",
       "Nothing here. The read policy withholds folders the vault does not "
       + "publish, so an empty folder and an unpublished one look the same."));

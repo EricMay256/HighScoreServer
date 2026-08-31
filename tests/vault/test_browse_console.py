@@ -303,3 +303,29 @@ def test_the_open_handler_catches_its_own_rejection() -> None:
 
     assert "openNote(row.note_id).catch(showError)" in page
 
+
+def test_every_page_contributes_its_folders() -> None:
+    """Folders came from the first page alone.
+
+    `Load more` grew the note list without growing the folder list, so a folder
+    whose notes sort after the first fifty was unreachable by navigation --
+    present in the corpus, absent from the only control that walks into it.
+    """
+
+    page = _page()
+
+    assert "renderFolders(page.notes)" in page
+    assert "if (!append) crumbs();" in page, (
+        "breadcrumbs describe the current prefix and are painted once; folders "
+        "accumulate and are not"
+    )
+
+
+def test_a_folder_is_not_listed_twice() -> None:
+    """Appending is per page, so the guard has to be per folder."""
+
+    page = _page()
+
+    assert "FOLDERS.includes(folder)" in page
+    assert "FOLDERS = []" in page, "a fresh listing starts with no folders shown"
+
