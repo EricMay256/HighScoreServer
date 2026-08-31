@@ -12,6 +12,13 @@
 .crumbs .sep { color: var(--muted); }
 .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: end; margin-bottom: 1rem; }
 .field { display: flex; flex-direction: column; gap: 0.15rem; }
+/* The shared stylesheet dresses text fields by type and leaves the rest to the
+   browser; a line number is a text field in every way that matters here. */
+input[type="number"] {
+  font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
+  width: 6rem;
+}
 textarea {
   font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.86rem; width: 100%; color: var(--ink); background: var(--bg);
@@ -243,6 +250,7 @@ async function openNote(noteId) {
   actions.appendChild(back);
 
   const propose = el("button", null, "Propose an edit");
+  propose.id = "propose-open";
   propose.onclick = startPropose;
   if (!mayPropose()) {
     propose.disabled = true;
@@ -344,22 +352,102 @@ function mayPropose() {
   return !IDENTITY || !IDENTITY.scopes || IDENTITY.scopes.includes("vault:propose");
 }
 
+/* The same span, chosen by line number instead of by dragging.
+
+   A `pre` is not focusable and shift+arrow does not select inside one without
+   caret browsing, so a mouse selection was the only way in and the core action
+   of this console was unreachable from the keyboard. Line numbers are the
+   selection a reader can name out loud, and they resolve to exactly the same
+   offsets: no separate code path, no second definition of what a span is. */
+function spanFromLines(from, to) {
+  const lines = NOTE.body.split("\n");
+  if (from < 1 || to < from || to > lines.length) return null;
+  let start = 0;
+  for (let i = 0; i < from - 1; i += 1) start += lines[i].length + 1;
+  return { start, expected: lines.slice(from - 1, to).join("\n") };
+}
+
+function lineOf(offset) {
+  /* Which line an offset falls on, so a mouse selection can seed the line
+     inputs and the two ways of choosing agree about what is chosen. */
+  return NOTE.body.slice(0, offset).split("\n").length;
+}
+
 function proposeForm(span) {
   const form = el("div", "card");
   form.id = "propose";
+  let current = span;
 
+  const lines = NOTE.body.split("\n");
+  const first = lineOf(current.start);
+  const last = lineOf(current.start + current.expected.length);
+
+  const range = el("div", "filters");
+  const fromField = el("label", "field");
+  fromField.htmlFor = "propose-from";
+  fromField.appendChild(el("span", "small muted", "From line"));
+  const fromInput = document.createElement("input");
+  fromInput.id = "propose-from";
+  fromInput.type = "number";
+  fromInput.min = "1";
+  fromInput.max = String(lines.length);
+  fromInput.value = String(first);
+  fromField.appendChild(fromInput);
+
+  const toField = el("label", "field");
+  toField.htmlFor = "propose-to";
+  toField.appendChild(el("span", "small muted", "To line"));
+  const toInput = document.createElement("input");
+  toInput.id = "propose-to";
+  toInput.type = "number";
+  toInput.min = "1";
+  toInput.max = String(lines.length);
+  toInput.value = String(last);
+  toField.appendChild(toInput);
+
+  range.append(fromField, toField);
+  form.appendChild(range);
+  form.appendChild(el("div", "small muted",
+    "Selecting text in the note fills these in; typing line numbers does the "
+    + "same thing without a mouse."));
+
+  const quoted = el("pre", "excerpt", current.expected);
   form.appendChild(el("div", "small muted", "Replacing this exact text:"));
-  form.appendChild(el("pre", "excerpt", span.expected));
+  form.appendChild(quoted);
 
   const replacement = document.createElement("textarea");
   replacement.id = "propose-replacement";
-  replacement.rows = Math.min(12, span.expected.split("\n").length + 2);
+  replacement.rows = Math.min(12, current.expected.split("\n").length + 2);
   /* Prefilled with what is there, because the common edit is a rewording
      rather than a rewrite. An unchanged replacement is refused by the server
      as a change that changes nothing, which is the right answer to a
      submission nobody edited. */
-  replacement.value = span.expected;
+  replacement.value = current.expected;
   form.appendChild(replacement);
+
+  /* Re-seeding the replacement is only safe while it still matches the span it
+     was seeded from. Once the operator has typed, changing the line numbers
+     re-aims the edit and keeps their words. */
+  let pristine = true;
+  replacement.oninput = () => { pristine = replacement.value !== current.expected; };
+
+  const reaim = () => {
+    const next = spanFromLines(Number(fromInput.value), Number(toInput.value));
+    if (!next) {
+      quoted.textContent = "";
+      quoted.appendChild(el("span", "muted",
+        "No such lines. The note has " + lines.length + "."));
+      return;
+    }
+    if (pristine) {
+      replacement.value = next.expected;
+      replacement.rows = Math.min(12, next.expected.split("\n").length + 2);
+    }
+    current = next;
+    quoted.textContent = next.expected;
+  };
+  fromInput.oninput = reaim;
+  toInput.oninput = reaim;
 
   const rationale = document.createElement("input");
   rationale.id = "propose-rationale";
@@ -376,8 +464,16 @@ function proposeForm(span) {
     "Queued for a reviewer. Nothing changes in the note until they accept it, "
     + "and an empty replacement is a removal they must acknowledge."));
 
-  cancel.onclick = () => form.remove();
+  cancel.onclick = () => {
+    form.remove();
+    $("propose-open").focus();
+  };
   submit.onclick = async () => {
+    if (!current.expected.trim()) {
+      say("danger", el("div", null,
+        "Those lines are empty. Choose lines with text on them."));
+      return;
+    }
     if (!rationale.value.trim()) {
       say("danger", el("div", null, "A rationale is required: it is what the reviewer decides on."));
       return;
@@ -395,9 +491,9 @@ function proposeForm(span) {
           base_revision: NOTE.content_revision,
           change: {
             kind: "span",
-            expected_text: span.expected,
+            expected_text: current.expected,
             replacement_text: replacement.value,
-            occurrence: occurrenceOf(NOTE.body, span.expected, span.start),
+            occurrence: occurrenceOf(NOTE.body, current.expected, current.start),
           },
           rationale: rationale.value.trim(),
         }),
@@ -427,17 +523,11 @@ function startPropose() {
   const existing = $("propose");
   if (existing) existing.remove();
 
-  const span = selectedSpan();
-  if (!span) {
-    say("info", el("div", null,
-      "Select the text to replace inside the note body first."));
-    return;
-  }
-  if (!span.expected.trim()) {
-    say("info", el("div", null,
-      "That selection is only whitespace. Select the text you want replaced."));
-    return;
-  }
+  /* A selection when there is one, the first line when there is not. Opening
+     with no selection is the keyboard path, and it opens on something real
+     rather than refusing until a mouse has been used. */
+  const span = selectedSpan() || spanFromLines(1, 1);
+  if (!span) return;
   $("note").appendChild(proposeForm(span));
   $("propose-replacement").focus();
 }

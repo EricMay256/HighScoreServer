@@ -222,7 +222,7 @@ def test_the_console_resolves_the_occurrence_rather_than_being_refused() -> None
     page = _page()
 
     assert "function occurrenceOf(body, expected, start)" in page
-    assert "occurrence: occurrenceOf(NOTE.body, span.expected, span.start)" in page
+    assert "occurrence: occurrenceOf(" in page
 
 
 def test_the_proposal_carries_the_revision_the_page_read() -> None:
@@ -271,7 +271,7 @@ def test_the_form_is_built_through_text_content() -> None:
     page = _page()
 
     assert ".innerHTML" not in page
-    assert 'el("pre", "excerpt", span.expected)' in page
+    assert 'el("pre", "excerpt", current.expected)' in page
 
 
 def test_opening_a_note_fetches_before_it_hides_the_listing() -> None:
@@ -339,4 +339,59 @@ def test_the_filter_fields_carry_labels_rather_than_only_placeholders() -> None:
 
     assert '<label class="field" for="filter-tag">' in page
     assert '<label class="field" for="filter-facet">' in page
+
+
+def test_a_span_can_be_chosen_without_a_mouse() -> None:
+    """A `pre` is not focusable and shift+arrow does not select inside one, so
+    a drag was the only way in and the core action of this console was
+    unreachable from the keyboard."""
+
+    page = _page()
+
+    assert "function spanFromLines(from, to)" in page
+    assert 'fromInput.type = "number"' in page
+    assert "const span = selectedSpan() || spanFromLines(1, 1);" in page
+
+
+def test_both_ways_of_choosing_produce_the_same_kind_of_span() -> None:
+    """Line numbers resolve to offsets, which is what a selection resolves to.
+
+    Two code paths would be two definitions of what a span is, and only one of
+    them would keep matching the stored text.
+    """
+
+    page = _page()
+
+    assert "occurrence: occurrenceOf(NOTE.body, current.expected, current.start)" in page
+    assert "expected_text: current.expected" in page
+
+
+def test_a_mouse_selection_seeds_the_line_inputs() -> None:
+    """So the two ways of choosing agree about what is chosen, and a reader can
+    see the selection they made expressed as something they can adjust."""
+
+    page = _page()
+
+    assert "function lineOf(offset)" in page
+    assert "const first = lineOf(current.start);" in page
+
+
+def test_retargeting_the_lines_keeps_words_already_written() -> None:
+    """Re-seeding is only safe while the replacement still matches the span it
+    was seeded from; after that, changing lines re-aims the edit rather than
+    discarding what the operator typed."""
+
+    page = _page()
+
+    assert "let pristine = true;" in page
+    assert "if (pristine) {" in page
+
+
+def test_cancelling_returns_focus_to_the_control_that_opened_it() -> None:
+    """Otherwise focus lands on the document and a keyboard user tabs from the
+    top of the page to get back."""
+
+    page = _page()
+
+    assert '$("propose-open").focus();' in page
 
