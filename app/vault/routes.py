@@ -119,6 +119,7 @@ from .service import (
     ReviewCaseNotFound,
     ReviewDecisionRequest,
     SetSummaryRequest,
+    SpanEdit,
     SummaryAlreadyPresent,
     SummaryRejected,
     SummaryStale,
@@ -681,10 +682,21 @@ async def propose_amendment(
         if body.change.kind == AmendmentProposalKind.REPLACEMENT.value
         else None
     )
+    # A span is an authoring form, not a stored kind: the service resolves it
+    # against the loaded body under the lock that checked `base_revision` and
+    # writes the canonical diff, so it is labelled BODY_DIFF here and the
+    # adapter does no converting of its own (ADR 0033). Same handling as the
+    # MCP tool, deliberately -- the two surfaces must not disagree about what
+    # a span becomes.
+    is_span = body.change.kind == "span"
     proposal_request = AmendmentProposalRequest(
         target_document_id=body.target_note_id,
         base_revision=body.base_revision,
-        change_kind=AmendmentProposalKind(body.change.kind),
+        change_kind=(
+            AmendmentProposalKind.BODY_DIFF
+            if is_span
+            else AmendmentProposalKind(body.change.kind)
+        ),
         rationale=body.rationale,
         principal_id=credential.principal_id,
         request_id=request_id,
@@ -711,6 +723,15 @@ async def propose_amendment(
         body_diff=(
             body.change.body_diff
             if body.change.kind == AmendmentProposalKind.BODY_DIFF.value
+            else None
+        ),
+        span=(
+            SpanEdit(
+                expected_text=body.change.expected_text,
+                replacement_text=body.change.replacement_text,
+                occurrence=body.change.occurrence,
+            )
+            if is_span
             else None
         ),
         metadata=(

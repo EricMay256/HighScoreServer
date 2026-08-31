@@ -431,6 +431,49 @@ class VaultBodyDiffChange(BaseModel):
     body_diff: str = Field(min_length=1, max_length=MAX_BODY_DIFF_CHARS)
 
 
+class VaultSpanChange(BaseModel):
+    """A body change named as its old text rather than written as a patch.
+
+    Not a stored kind. The service resolves the span against the note's body
+    under the same lock that checked `base_revision`, writes the canonical
+    unified diff, and stores an ordinary `body_diff` -- so a reviewer reads one
+    artifact whichever way it was authored (ADR 0033).
+
+    It exists over HTTP because a browser cannot honestly produce the
+    alternative: generating a unified diff needs a diff implementation the page
+    would have to hand-roll, and a selection with a replacement is exactly the
+    two texts this carries (ADR 0039).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["span"]
+    expected_text: str = Field(
+        min_length=1,
+        max_length=MAX_BODY_CHARS,
+        description=(
+            "The existing text to replace, copied verbatim -- whitespace "
+            "included -- from the note as fetched."
+        ),
+    )
+    replacement_text: str = Field(
+        max_length=MAX_BODY_CHARS,
+        description=(
+            "What to put in its place. Empty removes the span, which counts "
+            "as a removal at review time."
+        ),
+    )
+    occurrence: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Which match to edit, 1-based, when the text is not unique. Omit "
+            "it to require uniqueness: a span matching more than one place is "
+            "refused rather than guessed at, and so is one matching none."
+        ),
+    )
+
+
 class VaultMetadataUpdateRequest(BaseModel):
     """A metadata-only edit, applied directly by an update-scoped caller.
 
@@ -560,6 +603,20 @@ VaultAmendmentChange = Annotated[
     Field(discriminator="kind"),
 ]
 
+# What a *request* may carry, which is one kind more than a response can return.
+# A span is an authoring form: it is resolved to a body diff before anything is
+# stored, so no proposal ever reads back as one. Two unions rather than a shared
+# one with a kind that never appears in a response -- a reader of the detail
+# model should not have to work out which members are unreachable.
+VaultAmendmentProposedChange = Annotated[
+    VaultReplacementChange
+    | VaultBodyDiffChange
+    | VaultMetadataChange
+    | VaultSpanChange,
+    Field(discriminator="kind"),
+]
+
+
 class VaultAmendmentProposalRequest(BaseModel):
     """An immutable change proposed against one document revision."""
 
@@ -569,7 +626,7 @@ class VaultAmendmentProposalRequest(BaseModel):
         min_length=1, max_length=MAX_DOCUMENT_ID_CHARS
     )
     base_revision: int = Field(ge=1)
-    change: VaultAmendmentChange
+    change: VaultAmendmentProposedChange
     rationale: str = Field(min_length=1, max_length=2_000)
 
 

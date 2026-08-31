@@ -1264,8 +1264,19 @@ An amendment request carries a discriminated `change`. Use
 Hunks may add, edit, or remove lines but must anchor to exact existing text. The service refuses
 patches over 50,000 characters, 20 hunks, 200 changed lines, or the per-note 25%/20-line budget;
 use `{"kind":"replacement","replacement":{...all content fields...}}` for metadata or
-larger changes. Both forms require the note's current `content_revision` as `base_revision`; a
+larger changes. Every form requires the note's current `content_revision` as `base_revision`; a
 mismatch returns 409 at proposal time and settles stale at review time.
+
+`{"kind":"span","expected_text":"...","replacement_text":"...","occurrence":null}`
+names the old text instead of writing a patch. The server locates the span
+against the body under the same lock that checked `base_revision` and stores
+the canonical unified diff, so **a span is never a stored kind**: the proposal
+reads back as `body_diff` and is reviewed as one. The span must identify
+exactly one place — a text matching nothing or several places is refused with
+422 rather than guessed at; extend `expected_text` or pass a 1-based
+`occurrence`. Prefer it over `body_diff` unless a diff is already in hand,
+which is what makes an inline edit from a browser possible at all (ADR 0033,
+ADR 0039).
 
 `replacement` uses the same complete caller-controlled content shape as `PUT /notes/{id}`;
 omitted optional fields are cleared rather than inherited:
