@@ -5,73 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vault review</title>
 <style>
-:root {
-  --bg: #fbfbfa; --panel: #fff; --ink: #1a1a19; --muted: #6b6b66;
-  --line: #e2e2dd; --accept: #1f6f43; --reject: #96341f; --warn: #8a5a00;
-  --add: #1f6f43; --del: #96341f; --chip: #f0efea;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #161614; --panel: #1e1d1b; --ink: #ece9e3; --muted: #9d9a92;
-    --line: #322f2b; --accept: #6cc08b; --reject: #e08a70; --warn: #d3a343;
-    --add: #6cc08b; --del: #e08a70; --chip: #2a2825;
-  }
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; background: var(--bg); color: var(--ink);
-  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-}
-header {
-  display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
-  padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel);
-  position: sticky; top: 0; z-index: 5;
-}
-h1 { font-size: 1.05rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-main { max-width: 68rem; margin: 0 auto; padding: 1.25rem; }
-button {
-  font: inherit; border: 1px solid var(--line); background: var(--panel);
-  color: var(--ink); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer;
-}
-button:hover:not(:disabled) { border-color: var(--muted); }
-button:disabled { opacity: 0.45; cursor: default; }
-button.accept { color: var(--accept); border-color: var(--accept); }
-button.reject { color: var(--reject); border-color: var(--reject); }
-button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+{% include "_console_style.css" %}
+
+/* Reviewing only, from here down. */
 .tabs { display: flex; gap: 0.4rem; margin-bottom: 1rem; }
 .tab[aria-selected="true"] { background: var(--chip); font-weight: 600; }
-.card {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-  padding: 0.85rem 1rem; margin-bottom: 0.7rem;
-}
-.row { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
-.grow { flex: 1 1 18rem; min-width: 0; }
-.kind {
-  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
-  padding: 0.1rem 0.4rem; border-radius: 4px; background: var(--chip); color: var(--muted);
-}
-.muted { color: var(--muted); }
-.small { font-size: 0.85rem; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; }
-.title { font-weight: 600; }
 .edge { display: block; padding: 0.1rem 0; }
 .edge.add::before { content: "+ "; color: var(--add); font-weight: 700; }
 .edge.del::before { content: "\2212 "; color: var(--del); font-weight: 700; }
 .dangling { color: var(--warn); font-style: italic; }
-pre {
-  background: var(--chip); padding: 0.6rem 0.75rem; border-radius: 6px;
-  overflow-x: auto; font-size: 0.82rem; margin: 0.5rem 0 0;
-}
 .diff-add { color: var(--add); }
 .diff-del { color: var(--del); }
-.notice {
-  border: 1px solid var(--warn); border-left-width: 4px; border-radius: 6px;
-  padding: 0.7rem 0.9rem; margin-bottom: 1rem; background: var(--panel);
-}
-.danger { border-color: var(--reject); }
-details > summary { cursor: pointer; color: var(--muted); font-size: 0.88rem; }
 label.check { display: flex; gap: 0.4rem; align-items: center; font-size: 0.88rem; }
-.hidden { display: none !important; }
 .bulkbar {
   position: sticky; bottom: 0; background: var(--panel); border: 1px solid var(--line);
   border-radius: 8px; padding: 0.6rem 0.9rem; display: flex; gap: 0.7rem;

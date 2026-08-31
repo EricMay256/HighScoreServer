@@ -1,0 +1,89 @@
+/* The look every vault console shares: tokens, reset, chrome, and the handful
+   of utility classes both pages build their DOM out of.
+
+   Included into each page's own <style>, first, so a console can override any
+   of it afterwards and its own rules win on order as well as specificity. What
+   stays with a page is what only that page has -- the reviewer's tabs, diff
+   colouring and bulk bar; the browser's breadcrumbs and note body.
+
+   Two consoles that looked like two products would be the smaller cost of
+   copying this; the real one is a token changed in one file and not the other,
+   which reads as a rendering bug rather than as a missed edit. */
+
+:root {
+  --bg: #fbfbfa; --panel: #fff; --ink: #1a1a19; --muted: #6b6b66;
+  --line: #e2e2dd; --accept: #1f6f43; --reject: #96341f; --warn: #8a5a00;
+  --add: #1f6f43; --del: #96341f; --chip: #f0efea;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161614; --panel: #1e1d1b; --ink: #ece9e3; --muted: #9d9a92;
+    --line: #322f2b; --accept: #6cc08b; --reject: #e08a70; --warn: #d3a343;
+    --add: #6cc08b; --del: #e08a70; --chip: #2a2825;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header {
+  display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+  padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 5;
+}
+h1 { font-size: 1.05rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+main { max-width: 68rem; margin: 0 auto; padding: 1.25rem; }
+button {
+  font: inherit; border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.accept { color: var(--accept); border-color: var(--accept); }
+button.reject { color: var(--reject); border-color: var(--reject); }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+/* A button that reads as a link. Still a button: it does something on this
+   page rather than going somewhere, and an anchor with no href is a control
+   the keyboard cannot reach. */
+button.link {
+  border: none; background: none; padding: 0; color: inherit; text-align: left;
+  cursor: pointer; font: inherit;
+}
+button.link:hover { text-decoration: underline; }
+/* Text fields only, by type rather than by element. A bare `input` selector
+   would also restyle the reviewer's bulk-select checkboxes -- padding and a
+   border on a checkbox is the one place this stylesheet would visibly break a
+   control whose look belongs to the browser. */
+input:not([type]), input[type="text"], input[type="search"] {
+  font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
+}
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 0.85rem 1rem; margin-bottom: 0.7rem;
+}
+.row { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
+.grow { flex: 1 1 18rem; min-width: 0; }
+/* One rule, two names. `.kind` is what the reviewer's cards already carried and
+   `.chip` is what the browser's call it; aliasing them here keeps the two pages
+   identical to look at without renaming a class in either one's DOM code. */
+.chip, .kind {
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 0.1rem 0.4rem; border-radius: 4px; background: var(--chip); color: var(--muted);
+}
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; }
+.title { font-weight: 600; }
+pre {
+  background: var(--chip); padding: 0.6rem 0.75rem; border-radius: 6px;
+  overflow-x: auto; font-size: 0.82rem; margin: 0.5rem 0 0;
+}
+.notice {
+  border: 1px solid var(--warn); border-left-width: 4px; border-radius: 6px;
+  padding: 0.7rem 0.9rem; margin-bottom: 1rem; background: var(--panel);
+}
+.danger { border-color: var(--reject); }
+details > summary { cursor: pointer; color: var(--muted); font-size: 0.88rem; }
+.hidden { display: none !important; }

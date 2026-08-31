@@ -5,67 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vault browse</title>
 <style>
-:root {
-  --bg: #fbfbfa; --panel: #fff; --ink: #1a1a19; --muted: #6b6b66;
-  --line: #e2e2dd; --warn: #8a5a00; --reject: #96341f; --chip: #f0efea;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #161614; --panel: #1e1d1b; --ink: #ece9e3; --muted: #9d9a92;
-    --line: #322f2b; --warn: #d3a343; --reject: #e08a70; --chip: #2a2825;
-  }
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; background: var(--bg); color: var(--ink);
-  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-}
-header {
-  display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
-  padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel);
-  position: sticky; top: 0; z-index: 5;
-}
-h1 { font-size: 1.05rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-main { max-width: 68rem; margin: 0 auto; padding: 1.25rem; }
-button {
-  font: inherit; border: 1px solid var(--line); background: var(--panel);
-  color: var(--ink); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer;
-}
-button:hover:not(:disabled) { border-color: var(--muted); }
-button:disabled { opacity: 0.45; cursor: default; }
-button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-button.link {
-  border: none; background: none; padding: 0; color: inherit; text-align: left;
-  cursor: pointer; font: inherit;
-}
-button.link:hover { text-decoration: underline; }
-input {
-  font: inherit; color: var(--ink); background: var(--panel);
-  border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
-}
-.card {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-  padding: 0.85rem 1rem; margin-bottom: 0.7rem;
-}
-.row { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
-.grow { flex: 1 1 18rem; min-width: 0; }
-.muted { color: var(--muted); }
-.small { font-size: 0.85rem; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; }
-.title { font-weight: 600; }
-.chip {
-  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
-  padding: 0.1rem 0.4rem; border-radius: 4px; background: var(--chip); color: var(--muted);
-}
+{% include "_console_style.css" %}
+
+/* Browsing only, from here down. */
 .crumbs { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
 .crumbs .sep { color: var(--muted); }
 .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-.notice {
-  border: 1px solid var(--warn); border-left-width: 4px; border-radius: 6px;
-  padding: 0.7rem 0.9rem; margin-bottom: 1rem; background: var(--panel);
-}
-.danger { border-color: var(--reject); }
-.hidden { display: none !important; }
+/* Markdown source, shown as written. Overrides the shared `pre` because a note
+   body is the page's content rather than a quoted fragment inside a card. */
 .body {
   white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1rem;
