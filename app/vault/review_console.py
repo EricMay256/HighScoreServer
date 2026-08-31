@@ -42,16 +42,22 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.routing import Route
 
-from .templating import render
+from .console_page import API_BASE, console_page
 
 
 logger = logging.getLogger(__name__)
 
 REVIEW_PATH = "/vault/review"
 
-# The API the page talks to. Same origin, so the page needs no issuer URL: the
-# authorization server, the resource server, and this page are one deployment.
-API_BASE = "/api/v1/vault"
+__all__ = [
+    "API_BASE",
+    "CLIENT_NAME",
+    "CONSOLE_SCOPES",
+    "REVIEW_PATH",
+    "STORE_PREFIX",
+    "build_vault_review_routes",
+    "review_console",
+]
 
 # What the page asks for. See the module docstring -- this is load-bearing.
 CONSOLE_SCOPES = "vault:read"
@@ -77,34 +83,12 @@ STORE_PREFIX = "vault.review"
 async def review_console(request: Request) -> HTMLResponse:
     """Serve the console shell. Carries no data and requires no credential."""
 
-    body = render(
+    return console_page(
         "review.html",
-        api_base=API_BASE,
-        scopes=CONSOLE_SCOPES,
         console_path=REVIEW_PATH,
+        scopes=CONSOLE_SCOPES,
         client_name=CLIENT_NAME,
         store_prefix=STORE_PREFIX,
-    )
-    return HTMLResponse(
-        body,
-        headers={
-            # A review console that can be framed is a decision the operator
-            # did not intend to make -- the same reasoning as the consent
-            # screen, and the same treatment.
-            "X-Frame-Options": "DENY",
-            "Content-Security-Policy": (
-                "default-src 'self'; "
-                "script-src 'self' 'unsafe-inline'; "
-                "style-src 'self' 'unsafe-inline'; "
-                "connect-src 'self'; "
-                "img-src 'self' data:; "
-                "frame-ancestors 'none'; "
-                "base-uri 'none'; "
-                "form-action 'none'"
-            ),
-            "Referrer-Policy": "no-referrer",
-            "Cache-Control": "no-store",
-        },
     )
 
 

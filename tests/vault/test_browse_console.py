@@ -1,0 +1,195 @@
+"""The browse console: a second page holding a second credential.
+
+What is worth pinning here is mostly what makes it *separate*. Two consoles in
+one browser that share a storage namespace share a session record and present
+each other's refresh tokens, which the authorization server reads as a captured
+credential and answers by burning the family. The reviewer's scope set and this
+one are also kept apart on purpose: `vault:review` may be granted only to a
+family holding `vault:read` alone, so a console that could do both would be a
+console that could do neither properly.
+"""
+
+import pytest
+from starlette.routing import Route
+
+from app.vault import browse_console as browse
+from app.vault import review_console as review
+from app.vault.console_page import CONSOLE_HEADERS, console_page
+from app.vault.constants import (
+    OAUTH_BASELINE_SCOPES,
+    OAUTH_OPERATOR_ENTITLEMENT_SCOPES,
+)
+from app.vault.templating import render
+
+
+def _page() -> str:
+    return render(
+        "browse.html",
+        api_base=browse.API_BASE,
+        scopes=browse.CONSOLE_SCOPES,
+        console_path=browse.BROWSE_PATH,
+        client_name=browse.CLIENT_NAME,
+        store_prefix=browse.STORE_PREFIX,
+    )
+
+
+def test_the_browse_console_asks_only_for_baseline_scopes() -> None:
+    """Which is the whole reason it needs no operator grant.
+
+    A console asking for anything above the baseline would be a console that
+    cannot sign in without somebody running `grant-oauth` first -- and the
+    scopes above the baseline are exactly the ones an operator must decide
+    deliberately.
+    """
+
+    requested = set(browse.CONSOLE_SCOPES.split())
+
+    assert requested <= set(OAUTH_BASELINE_SCOPES)
+    assert requested.isdisjoint(OAUTH_OPERATOR_ENTITLEMENT_SCOPES)
+
+
+def test_the_browse_console_holds_read_and_propose() -> None:
+    """Propose is requested before anything here uses it.
+
+    Consent fixes a family's `authorized_scopes`, so adding the scope when the
+    inline editor lands would mean a second authorization and a second family
+    for the same page. Asking once costs nothing: proposing queues a
+    suggestion, it does not change a note.
+    """
+
+    assert browse.CONSOLE_SCOPES.split() == ["vault:read", "vault:propose"]
+
+
+def test_the_browse_console_never_asks_for_review() -> None:
+    """The separation ADR 0021 draws, asserted rather than assumed.
+
+    `vault:review` may be granted only to a family holding `vault:read` alone.
+    A browse console requesting it would be ineligible for it, and one that
+    somehow received it would be a page that authors and applies its own
+    changes.
+    """
+
+    assert "vault:review" not in browse.CONSOLE_SCOPES
+
+
+def test_the_two_consoles_keep_separate_storage_namespaces() -> None:
+    """The defect this would be: two pages, one session record.
+
+    Both write `<prefix>.session` and `<prefix>.token` and take a lock named
+    `<prefix>.refresh`. Sharing a prefix means each rotates the other's refresh
+    token, and a presentation of a consumed token is what the server treats as
+    theft -- so the failure is not a muddle, it is both consoles losing their
+    families at once.
+    """
+
+    assert browse.STORE_PREFIX != review.STORE_PREFIX
+
+
+def test_the_two_consoles_live_at_different_paths() -> None:
+    """Also their OAuth redirect URIs, so a callback cannot land on the wrong
+    page holding the wrong console's verifier."""
+
+    assert browse.BROWSE_PATH != review.REVIEW_PATH
+
+
+def test_the_two_consoles_name_themselves_differently() -> None:
+    """Unverified text, and still worth keeping distinct: it is what the
+    consent screen shows an operator approving one of them."""
+
+    assert browse.CLIENT_NAME != review.CLIENT_NAME
+
+
+def test_the_route_is_registered_at_the_documented_path() -> None:
+    routes = browse.build_vault_browse_routes()
+
+    assert [route.path for route in routes if isinstance(route, Route)] == [
+        browse.BROWSE_PATH
+    ]
+    assert routes[0].methods == {"GET", "HEAD"}
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "X-Frame-Options",
+        "Content-Security-Policy",
+        "Referrer-Policy",
+        "Cache-Control",
+    ],
+)
+def test_the_console_sets_its_protective_headers(header: str) -> None:
+    """Served from the shared helper, so both consoles carry the same set.
+
+    A second copy of this policy is a policy that drifts, and it drifts
+    silently: the weaker page keeps working.
+    """
+
+    response = console_page(
+        "browse.html",
+        console_path=browse.BROWSE_PATH,
+        scopes=browse.CONSOLE_SCOPES,
+        client_name=browse.CLIENT_NAME,
+        store_prefix=browse.STORE_PREFIX,
+    )
+
+    assert response.headers[header] == CONSOLE_HEADERS[header]
+
+
+def test_the_console_loads_no_third_party_assets() -> None:
+    """Its own CSP forbids them, so a reference would be a broken page."""
+
+    page = _page()
+
+    assert "http://" not in page.replace("http://localhost", "")
+    assert "https://" not in page
+    assert "cdn" not in page.lower()
+
+
+def test_the_page_reads_the_field_names_the_listing_returns() -> None:
+    """A console reading `notes[].path` would render an empty column and no
+    error. The field names are a contract; this asserts the page uses the ones
+    `VaultNoteSummary` publishes."""
+
+    page = _page()
+
+    for field in ("note_id", "vault_path", "doc_status", "summary", "next_cursor"):
+        assert field in page
+
+
+def test_the_body_is_rendered_as_text_and_never_as_markup() -> None:
+    """Note bodies are written by agents, and markdown rendering in a page that
+    cannot fetch a markdown library means hand-rolling one -- which is how
+    untrusted text becomes markup. A `pre` block is the honest form."""
+
+    page = _page()
+
+    assert ".innerHTML" not in page
+    assert 'el("pre", "body", detail.body)' in page
+
+
+def test_the_console_includes_the_session_module_rather_than_its_own_copy() -> None:
+    """The point of the extraction, from the second console's side."""
+
+    template = (
+        browse.__file__.replace("browse_console.py", "templates/browse.html")
+    )
+    with open(template, encoding="utf-8") as handle:
+        source = handle.read()
+
+    assert '{% include "_console_session.js" %}' in source
+    for owned_by_the_module in (
+        "async function refreshTokens()",
+        "async function withRefreshLock(",
+        "async function boot()",
+    ):
+        assert owned_by_the_module not in source
+        assert owned_by_the_module in _page()
+
+
+def test_the_page_supplies_what_the_session_module_expects() -> None:
+    page = _page()
+
+    assert "function render()" in page
+    assert 'id="messages"' in page
+    assert 'id="who"' in page
+    assert "\nboot();" in page

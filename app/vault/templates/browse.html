@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault browse</title>
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #fff; --ink: #1a1a19; --muted: #6b6b66;
+  --line: #e2e2dd; --warn: #8a5a00; --reject: #96341f; --chip: #f0efea;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161614; --panel: #1e1d1b; --ink: #ece9e3; --muted: #9d9a92;
+    --line: #322f2b; --warn: #d3a343; --reject: #e08a70; --chip: #2a2825;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header {
+  display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+  padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 5;
+}
+h1 { font-size: 1.05rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+main { max-width: 68rem; margin: 0 auto; padding: 1.25rem; }
+button {
+  font: inherit; border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button.link {
+  border: none; background: none; padding: 0; color: inherit; text-align: left;
+  cursor: pointer; font: inherit;
+}
+button.link:hover { text-decoration: underline; }
+input {
+  font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
+}
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 0.85rem 1rem; margin-bottom: 0.7rem;
+}
+.row { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
+.grow { flex: 1 1 18rem; min-width: 0; }
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; }
+.title { font-weight: 600; }
+.chip {
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 0.1rem 0.4rem; border-radius: 4px; background: var(--chip); color: var(--muted);
+}
+.crumbs { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+.crumbs .sep { color: var(--muted); }
+.filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.notice {
+  border: 1px solid var(--warn); border-left-width: 4px; border-radius: 6px;
+  padding: 0.7rem 0.9rem; margin-bottom: 1rem; background: var(--panel);
+}
+.danger { border-color: var(--reject); }
+.hidden { display: none !important; }
+.body {
+  white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem; margin: 0.8rem 0 0;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Vault browse</h1>
+  <span id="who" class="muted small"></span>
+  <span class="grow"></span>
+  <button id="refresh" class="hidden">Refresh</button>
+  <button id="signin" class="primary hidden">Sign in</button>
+  <button id="signout" class="hidden">Sign out</button>
+</header>
+<main>
+  <div id="messages"></div>
+  <div id="app" class="hidden">
+    <div id="crumbs" class="crumbs"></div>
+    <div class="filters">
+      <input id="filter-tag" placeholder="tag" size="14">
+      <input id="filter-facet" placeholder="facet, e.g. project:hss" size="24">
+      <button id="apply-filters">Filter</button>
+      <button id="clear-filters">Clear</button>
+    </div>
+    <div id="listing"></div>
+    <div id="note" class="hidden"></div>
+  </div>
+</main>
+
+<script id="cfg" type="application/json">{{ {"apiBase": api_base, "scopes": scopes,
+  "consolePath": console_path, "clientName": client_name,
+  "storePrefix": store_prefix} | tojson }}</script>
+<script>
+"use strict";
+{% include "_console_session.js" %}
+
+/* ---------- Browse state ----------
+
+   Deliberately module-level rather than in the URL. A console path carrying a
+   `?path=` would be a second thing `boot()` reads out of the query string,
+   beside the OAuth `code` and `error` it already parses there -- and the
+   authorization callback rewrites that query on arrival, so a browse location
+   would not survive a sign-in anyway. */
+let PREFIX = "";
+let FILTERS = { tag: "", facet: "" };
+let CURSOR = null;
+let ROWS = [];
+
+/* ---------- Listing ---------- */
+function listingParams(cursor) {
+  const params = new URLSearchParams();
+  if (PREFIX) params.set("path", PREFIX);
+  if (FILTERS.tag) params.set("tag", FILTERS.tag);
+  if (FILTERS.facet) params.set("facet", FILTERS.facet);
+  params.set("limit", "50");
+  if (cursor) params.set("after", cursor);
+  return params;
+}
+
+function crumbs() {
+  /* Every prefix of the current path, so going up is one click rather than an
+     edit. The root is always first: a listing with no prefix is the whole
+     readable corpus, which is a real place to stand rather than an empty
+     state. */
+  const box = $("crumbs");
+  box.textContent = "";
+  const root = el("button", "link", "vault");
+  root.onclick = () => { PREFIX = ""; loadAll(); };
+  box.appendChild(root);
+
+  const parts = PREFIX.split("/").filter((part) => part.length);
+  let walked = "";
+  for (const part of parts) {
+    walked += part + "/";
+    const here = walked;
+    box.appendChild(el("span", "sep", "/"));
+    const crumb = el("button", "link", part);
+    crumb.onclick = () => { PREFIX = here; loadAll(); };
+    box.appendChild(crumb);
+  }
+}
+
+function folderOf(vaultPath) {
+  const cut = vaultPath.lastIndexOf("/");
+  return cut === -1 ? "" : vaultPath.slice(0, cut + 1);
+}
+
+function subfolders() {
+  /* Folders derived from the page in hand, not fetched. The listing endpoint
+     returns notes, and asking it for a folder tree would be asking a second
+     question of a surface that answers one. What this shows is therefore
+     honest but partial: the folders containing the notes on this page. */
+  const seen = [];
+  for (const row of ROWS) {
+    const folder = folderOf(row.vault_path);
+    if (folder && folder !== PREFIX && !seen.includes(folder)) seen.push(folder);
+  }
+  return seen;
+}
+
+function noteRow(row) {
+  const card = el("div", "card");
+  const head = el("div", "row");
+  const open = el("button", "link title", row.title);
+  open.onclick = () => openNote(row.note_id);
+  head.appendChild(open);
+  head.appendChild(el("span", "chip", row.kind));
+  if (row.doc_status) head.appendChild(el("span", "chip", row.doc_status));
+  if (row.status !== "active") head.appendChild(el("span", "chip", row.status));
+  card.appendChild(head);
+  card.appendChild(el("div", "small muted mono", row.vault_path));
+  if (row.summary) card.appendChild(el("div", "small", row.summary));
+  return card;
+}
+
+async function renderListing(append) {
+  const panel = $("listing");
+  if (!append) { panel.textContent = ""; ROWS = []; CURSOR = null; }
+
+  const page = await api("/notes?" + listingParams(append ? CURSOR : null).toString());
+  ROWS = ROWS.concat(page.notes);
+  CURSOR = page.next_cursor;
+
+  if (!append) {
+    crumbs();
+    for (const folder of subfolders()) {
+      const card = el("div", "card");
+      const into = el("button", "link title", folder);
+      into.onclick = () => { PREFIX = folder; loadAll(); };
+      card.appendChild(into);
+      card.appendChild(el("span", "small muted", "  folder"));
+      panel.appendChild(card);
+    }
+  }
+
+  for (const row of page.notes) panel.appendChild(noteRow(row));
+
+  if (!ROWS.length) {
+    panel.appendChild(el("div", "card muted",
+      "Nothing here. The read policy withholds folders the vault does not "
+      + "publish, so an empty folder and an unpublished one look the same."));
+  }
+
+  /* One button, replaced each time rather than accumulated. `has_more` is read
+     from a row past the limit, so it means what it says. */
+  const more = $("more");
+  if (more) more.remove();
+  if (page.has_more) {
+    const button = el("button", null, "Load more");
+    button.id = "more";
+    button.onclick = () => {
+      button.disabled = true;
+      renderListing(true).catch(showError);
+    };
+    panel.appendChild(button);
+  }
+}
+
+/* ---------- One note ---------- */
+function edgeList(label, ids) {
+  const wrap = el("div", "small");
+  wrap.appendChild(el("span", "muted", label + ": "));
+  wrap.appendChild(el("span", "mono", ids.join(", ")));
+  return wrap;
+}
+
+async function openNote(noteId) {
+  const panel = $("note");
+  panel.textContent = "";
+  panel.classList.remove("hidden");
+  $("listing").classList.add("hidden");
+
+  const detail = await api("/notes/" + encodeURIComponent(noteId));
+
+  const back = el("button", null, "Back to listing");
+  back.onclick = () => {
+    panel.classList.add("hidden");
+    panel.textContent = "";
+    $("listing").classList.remove("hidden");
+  };
+  panel.appendChild(back);
+
+  const head = el("div", "row");
+  head.appendChild(el("span", "title", detail.title));
+  head.appendChild(el("span", "chip", detail.kind));
+  if (detail.doc_type) head.appendChild(el("span", "chip", detail.doc_type));
+  if (detail.doc_status) head.appendChild(el("span", "chip", detail.doc_status));
+  panel.appendChild(head);
+  panel.appendChild(el("div", "small muted mono", detail.vault_path));
+  panel.appendChild(el("div", "small muted mono", "revision " + detail.content_revision));
+  if (detail.summary) panel.appendChild(el("div", "small", detail.summary));
+  if (detail.tags.length) {
+    panel.appendChild(el("div", "small muted", "tags: " + detail.tags.join(", ")));
+  }
+  for (const [name, values] of Object.entries(detail.facets || {})) {
+    panel.appendChild(el("div", "small muted", name + ": " + values.join(", ")));
+  }
+  if (detail.related_ids.length) panel.appendChild(edgeList("related", detail.related_ids));
+  if (detail.source_ids.length) panel.appendChild(edgeList("sources", detail.source_ids));
+
+  /* The body as it is written: markdown source, not rendered. Rendering it
+     would mean a markdown implementation the page cannot fetch under its own
+     CSP, and hand-rolling one is how untrusted note text becomes markup. A
+     `pre` block is honest and safe -- and this corpus is read as source by
+     every other consumer it has. */
+  panel.appendChild(el("pre", "body", detail.body));
+}
+
+/* ---------- Shell ---------- */
+function showError(err) {
+  if (err.sessionEnded) return;
+  if (err.forbidden) {
+    say("danger", el("div", null,
+      "This credential may not read the vault. Sign out and in again to "
+      + "authorize with vault:read."));
+    return;
+  }
+  say("danger", el("div", null, err.message));
+}
+
+async function loadAll() {
+  clearMessages();
+  refreshIdentity();
+  $("note").classList.add("hidden");
+  $("listing").classList.remove("hidden");
+  try {
+    await renderListing(false);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+function render() {
+  const signedIn = Boolean(TOKEN);
+  $("signin").classList.toggle("hidden", signedIn);
+  $("signout").classList.toggle("hidden", !signedIn);
+  $("refresh").classList.toggle("hidden", !signedIn);
+  $("app").classList.toggle("hidden", !signedIn);
+  paintWho();
+  clearMessages();
+  if (PENDING_ERROR) {
+    say("danger", el("div", null, PENDING_ERROR));
+    PENDING_ERROR = null;
+  }
+  if (!signedIn) {
+    const intro = document.createElement("div");
+    intro.appendChild(el("strong", null, "Sign in to browse."));
+    intro.appendChild(el("p", "small",
+      "This console authorizes as its own OAuth client holding vault:read and "
+      + "vault:propose. Both are baseline scopes, so signing in is all it needs — "
+      + "no operator grant, unlike the review console."));
+    say("info", intro);
+    return;
+  }
+  loadAll();
+}
+
+$("signin").onclick = () => signIn().catch((e) => say("danger", el("div", null, e.message)));
+$("signout").onclick = signOut;
+$("refresh").onclick = loadAll;
+$("apply-filters").onclick = () => {
+  FILTERS = { tag: $("filter-tag").value.trim(), facet: $("filter-facet").value.trim() };
+  loadAll();
+};
+$("clear-filters").onclick = () => {
+  $("filter-tag").value = "";
+  $("filter-facet").value = "";
+  FILTERS = { tag: "", facet: "" };
+  loadAll();
+};
+
+/* Last, because `boot` renders and `render` reaches every handler above. */
+boot();
+</script>
+</body>
+</html>

@@ -415,6 +415,37 @@ point, and it runs once per authorization rather than once per request. Vault
 ADR 0015 says explicitly not to carry the SHA-256 reasoning across to
 human-chosen passwords; this is where that matters.
 
+### The two consoles
+
+The vault serves two human pages, both gated on `VAULT_PUBLIC_URL` for the same
+reason: each authorizes itself through the OAuth routes above, so without a
+reachable issuer they render and can never sign in.
+
+| Path | Asks for | Needs an operator grant? |
+| --- | --- | --- |
+| `/vault/review` | `vault:read` | Yes — `grant-oauth ... --scopes vault:review`, once per family |
+| `/vault/browse` | `vault:read vault:propose` | No; both are baseline |
+
+The reviewer asks for `vault:read` **alone** deliberately: `vault:review` may be
+granted only to a family holding exactly that, so a page asking for anything
+else makes itself permanently ineligible for the entitlement it exists to use.
+The browse console asks for `vault:propose` before it has anything that
+proposes, because consent fixes a family's `authorized_scopes` — adding the
+scope later means a second authorization and a second family for one page. See
+vault ADR 0037 and ADR 0039.
+
+They are separate registrations with separate credentials, and that separation
+is the point: `vault:review` applies a change and `vault:propose` authors one,
+and ADR 0021 keeps those in different hands. Each console also keeps its own
+browser-storage namespace and refresh lock — sharing one would have two pages
+writing a single session record and presenting each other's refresh tokens,
+which the authorization server reads as a captured credential and answers by
+burning the family.
+
+Both pages hold their OAuth lifecycle in one shared template partial rather
+than a copy each. A change to signing in, renewing, or signing out is therefore
+one edit; a change to what a console *shows* is not.
+
 ### The server tells you when `VAULT_PUBLIC_URL` goes stale
 
 `VAULT_PUBLIC_URL` is configuration rather than something derived per request,
