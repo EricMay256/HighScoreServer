@@ -447,12 +447,21 @@ def _requested_facets(facet: list[str]) -> dict[str, list[str]]:
     Unknown names are refused rather than ignored. `FACET_NAMES` is closed
     (facets.py), so `projects=hss` is a typo, and answering it with an
     unfiltered page is answering a question nobody asked.
+
+    Surrounding whitespace is incidental and is dropped. It has to be dropped
+    *before* the checks rather than only inside them: validating `name.strip()`
+    and then filtering on `name` is a parser that disagrees with itself, and it
+    disagreed in both directions -- `facet= project:hss` was an unknown facet,
+    and `facet=project: hss` filtered on a value no note can carry. Whitespace
+    inside a value is left alone; a facet value may legitimately contain a
+    space.
     """
 
     requested: dict[str, list[str]] = {}
     for pair in facet:
-        name, separator, value = pair.partition(":")
-        if not separator or not name.strip() or not value.strip():
+        raw_name, separator, raw_value = pair.partition(":")
+        name, value = raw_name.strip(), raw_value.strip()
+        if not separator or not name or not value:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"facet must be 'name:value'; got {pair!r}",

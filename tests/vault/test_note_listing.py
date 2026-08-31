@@ -283,6 +283,40 @@ def test_facets_on_different_axes_compose(
     assert _paths(unmatched, corpus) == []
 
 
+def test_incidental_whitespace_around_a_facet_is_dropped(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """A parser that strips when validating must strip when filtering.
+
+    It did not, and disagreed with itself in both directions: `facet=
+    project:hss` was refused as an unknown facet, and `facet=project: hss`
+    filtered on a value with a leading space -- a filter that matches nothing
+    and reports an empty page rather than an error, which is the worse half.
+    """
+
+    padded = _list(client, read_only_token, facet=["  project :  hss  "], limit=100)
+    plain = _list(client, read_only_token, facet=["project:hss"], limit=100)
+
+    assert _paths(padded, corpus) == _paths(plain, corpus) == ["alpha"]
+
+
+def test_a_facet_value_keeps_the_spaces_inside_it(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Only the edges are incidental. A facet value may name something with a
+    space in it, and collapsing that would filter on a value nobody stored."""
+
+    payload = _list(
+        client, read_only_token, facet=["project:not a real project"], limit=100
+    )
+
+    assert payload["notes"] == []
+
+
 def test_an_unknown_facet_name_is_refused_rather_than_ignored(
     client: TestClient,
     read_only_token: str,
