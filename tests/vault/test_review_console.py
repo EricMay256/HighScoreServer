@@ -572,3 +572,67 @@ def test_the_startup_sequence_is_callable_on_its_own() -> None:
 
     assert "async function boot()" in page
     assert "\nboot();" in page, "the named boot must actually be invoked"
+
+
+def test_the_header_prefers_the_label_and_falls_back_to_the_credential_id() -> None:
+    """A name when there is one, the id when there is not.
+
+    The fallback is the whole header before ADR 0040, so losing it would be a
+    regression to a blank header rather than to an unreadable one -- and an
+    unlabelled authorization is the ordinary state, not a failure.
+    """
+
+    page = _page()
+
+    assert "if (IDENTITY && IDENTITY.label) return IDENTITY.label;" in page
+    assert 'return "credential " + (credentialId() || "?");' in page
+
+
+def test_the_label_reaches_the_page_as_text_and_never_as_markup() -> None:
+    """Unverified operator text, rendered by assignment to `textContent`.
+
+    ADR 0040 accepts operator text into the database on the understanding that
+    it is displayed rather than interpreted. That understanding is code, here.
+    """
+
+    page = _page()
+
+    assert 'function paintWho() { $("who").textContent = whoText(); }' in page
+    assert ".innerHTML" not in page, (
+        "the page builds its DOM through textContent; an assignment to "
+        "innerHTML anywhere is a route for operator text to become markup"
+    )
+
+
+def test_the_identity_request_cannot_cost_the_operator_their_queue() -> None:
+    """Awaited, it would put a name in front of the work.
+
+    `loadAll` is the queue. A header lookup that threw inside its `try` would
+    be reported as a failure to load proposals, and one that were awaited would
+    delay them behind a round trip that decorates the page. It is fired without
+    `await` and swallows its own failure, leaving the credential-id fallback.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+    load_all_at = next(
+        i for i, text in enumerate(lines) if "async function loadAll()" in text
+    )
+    body = chr(10).join(lines[load_all_at : load_all_at + 5])
+
+    assert "refreshIdentity();" in body
+    assert "await refreshIdentity()" not in page
+    assert "async function refreshIdentity()" in page
+
+
+def test_a_signed_out_header_says_nothing() -> None:
+    """Sign-out clears the label with the token it described."""
+
+    page = _page()
+
+    assert 'if (!TOKEN) return "";' in page
+    assert page.count("IDENTITY = null;") >= 2, (
+        "both ends of a session -- expiry and sign-out -- have to drop the "
+        "identity, or a signed-out header keeps naming the family that left"
+    )
+

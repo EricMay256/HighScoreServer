@@ -235,6 +235,11 @@ let META = null;
 /* Survives the clearMessages() at the top of render(): a callback error is the
    one message that must outlive the re-render that follows it. */
 let PENDING_ERROR = null;
+/* What the server says this credential is, including the operator's label for
+   the authorization. Not persisted: it belongs to whichever token is in hand,
+   it is one cheap request to re-ask, and a stale name in localStorage would
+   outlive the session it described. */
+let IDENTITY = null;
 
 
 async function metadata() {
@@ -408,6 +413,7 @@ async function refreshTokens() {
 async function endSession(message, force) {
   TOKEN = null;
   REFRESH = null;
+  IDENTITY = null;
   sessionStorage.removeItem(STORE.token);
   /* Only discard the shared record if this tab still owns it. Rotation revokes
      the access token it replaces, so a second tab's rotation can 401 this one
@@ -456,6 +462,7 @@ async function signOut() {
   const client = SESSION.client;
   TOKEN = null;
   REFRESH = null;
+  IDENTITY = null;
   sessionStorage.removeItem(STORE.token);
   try {
     const m = await metadata();
@@ -475,6 +482,39 @@ async function signOut() {
    can name this exact family when granting the entitlement -- otherwise the
    command below is a scavenger hunt through `issue_vault_credential list`. */
 const credentialId = () => (TOKEN && TOKEN.split("_").length >= 3) ? TOKEN.split("_")[1] : null;
+
+/* The label in place of the id, once there is one. `oauth-<uuid4>` and a hex
+   credential id are exact and unreadable; the label is the operator's own name
+   for this authorization (ADR 0040). The id remains in the entitlement command
+   below, which is where it is actually copied from.
+
+   Operator text, and unverified -- assigned through `textContent`, never
+   `innerHTML`. */
+function whoText() {
+  if (!TOKEN) return "";
+  if (IDENTITY && IDENTITY.label) return IDENTITY.label;
+  return "credential " + (credentialId() || "?");
+}
+
+function paintWho() { $("who").textContent = whoText(); }
+
+/* The header alone, so a failure here must not cost the operator their queue:
+   it repaints what it learned and otherwise leaves the fallback standing. Not
+   awaited by `loadAll` for the same reason -- the queue should not wait on a
+   name. */
+async function refreshIdentity() {
+  try {
+    IDENTITY = await api("/authorization");
+  } catch (err) {
+    /* `err.sessionEnded` included, deliberately. `endSession` has already
+       dropped the token and repainted by the time it reaches here, and nothing
+       follows this call to abandon -- while rethrowing out of a promise nobody
+       awaits would only be an unhandled rejection. The header then paints as
+       signed out, which is what it is. */
+    IDENTITY = null;
+  }
+  paintWho();
+}
 
 /* ---------- API ---------- */
 const MAX_REFRESH_RETRIES = 3;
@@ -966,6 +1006,7 @@ async function renderCases() {
 /* ---------- Shell ---------- */
 async function loadAll() {
   clearMessages();
+  refreshIdentity();
   try {
     await renderProposals();
     await renderCases();
@@ -984,7 +1025,7 @@ function render() {
   $("signout").classList.toggle("hidden", !signedIn);
   $("refresh").classList.toggle("hidden", !signedIn);
   $("app").classList.toggle("hidden", !signedIn);
-  $("who").textContent = signedIn ? ("credential " + (credentialId() || "?")) : "";
+  paintWho();
   clearMessages();
   if (PENDING_ERROR) {
     say("danger", el("div", null, PENDING_ERROR));

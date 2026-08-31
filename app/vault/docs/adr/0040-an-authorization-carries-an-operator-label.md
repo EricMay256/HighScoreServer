@@ -4,7 +4,7 @@ Date: 2026-08-30
 
 ## Status
 
-**Proposed.** Not implemented.
+Accepted.
 
 ## Context
 
@@ -63,6 +63,15 @@ subcommand to set and clear it.
 name what they are about to widen rather than echoing a uuid back. Both consoles
 can show a name in place of a credential id.
 
+A console reads its own label from `GET /api/v1/vault/authorization`, which
+returns the presented credential's id, principal, scopes, and label. It requires
+a valid credential and no scope: everything but the label is derivable from the
+token the caller already holds, and gating self-description would leave a page
+unable to name itself while an operator works out what to grant it. Carrying the
+label on the OAuth token response was rejected — it would put a non-standard
+field on a response shaped by the SDK's model, and pin the name's freshness to
+the rotation schedule.
+
 The label is unverified operator text and reaches a browser, so it is rendered
 as text and never as markup. Both consoles already build their DOM through
 `textContent`, so this is a constraint to keep rather than one to add.
@@ -70,9 +79,11 @@ as text and never as markup. Both consoles already build their DOM through
 Nothing existing changes meaning: rows without a label behave exactly as now,
 which is what makes this additive rather than a migration of identity.
 
-An Alembic revision in the vault lineage adds the column. It is nullable with
+Vault migration `0019_oauth_grant_label` adds the column. It is nullable with
 no backfill — an unlabelled authorization is the ordinary state, not a
-deficiency.
+deficiency. Its CHECK refuses the empty string and caps the length, so `NULL`
+is the only spelling of absent and unverified operator text cannot arrive
+unbounded.
 
 ## Alternatives considered
 

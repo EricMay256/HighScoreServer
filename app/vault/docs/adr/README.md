@@ -48,7 +48,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0037 | [The review console is an OAuth client, not an operator session](0037-the-review-console-is-an-oauth-client.md) | Accepted |
 | 0038 | [A first-party reviewer authorization](0038-a-first-party-reviewer-authorization.md) | Proposed (deferred; recommends the narrower alternative) |
 | 0039 | [A browse-and-propose console, separate from the reviewer](0039-a-browse-and-propose-console.md) | Proposed |
-| 0040 | [An authorization carries an operator-assigned label](0040-an-authorization-carries-an-operator-label.md) | Proposed (preserves 0024's amendment) |
+| 0040 | [An authorization carries an operator-assigned label](0040-an-authorization-carries-an-operator-label.md) | Accepted (preserves 0024's amendment) |
 | 0041 | [Human-authored notes in the vault](0041-human-authored-notes-in-the-vault.md) | Deferred |
 | 0042 | [A mutable state store beside the corpus](0042-a-mutable-state-store-beside-the-corpus.md) | Considered, not scheduled |
 

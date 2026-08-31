@@ -410,12 +410,16 @@ class OAuthGrant:
     baseline. ``entitled_scopes`` came only from the operator CLI. Keeping the
     two sets distinct prevents a refresh request from manufacturing privilege
     while allowing operator authority to survive access-token rotation.
+
+    ``label`` is the operator's name for this authorization and is display
+    only -- what distinguishes two families is still ``family_id`` (ADR 0040).
     """
 
     family_id: UUID
     client_id: str
     authorized_scopes: tuple[str, ...]
     entitled_scopes: tuple[str, ...]
+    label: str | None
     created_at: datetime
     updated_at: datetime
 

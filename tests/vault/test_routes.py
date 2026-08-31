@@ -6,13 +6,20 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, insert, select
 from sqlalchemy import delete as sql_delete
+from sqlalchemy import text as sql_text
 
 from app.vault.auth import TOKEN_PREFIX, VaultScope, hash_secret
 from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
 from app.vault.rate_limit import LIMITS
 from app.vault.repository import TOUCH_RESOLUTION, VaultDocumentRepository
 from app.vault.settings import vault_enabled
-from app.vault.tables import vault_agent_credentials, vault_documents
+from app.vault.tables import (
+    vault_agent_credentials,
+    vault_documents,
+    vault_oauth_clients,
+    vault_oauth_grants,
+    vault_oauth_refresh_tokens,
+)
 from tests.vault.test_search import clear_corpus, seed_corpus, vault_service
 
 
@@ -637,3 +644,190 @@ def test_the_quota_is_charged_per_operation_not_per_credential(
     response = client.get("/api/v1/vault/notes/does-not-exist", headers=headers)
 
     assert response.status_code == 404
+
+
+def _oauth_family(credential_id: str, *, label: str | None) -> None:
+    """Make an already-issued credential look OAuth-minted, in one family.
+
+    The endpoint reads the label through the refresh row, so a credential with
+    no family is the static case and needs no wiring at all.
+    """
+
+    client_id = f"test-authz-{uuid4().hex}"
+    service, engine = vault_service()
+
+    async def seed() -> None:
+        async with service.transaction() as connection:
+            await connection.execute(
+                insert(vault_oauth_clients).values(
+                    client_id=client_id, client_info={"client_id": client_id}
+                )
+            )
+            await connection.execute(
+                insert(vault_oauth_grants).values(
+                    family_id=uuid4(),
+                    client_id=client_id,
+                    authorized_scopes=[VaultScope.READ],
+                    entitled_scopes=[],
+                    label=label,
+                )
+            )
+            family_id = (
+                await connection.execute(
+                    select(vault_oauth_grants.c.family_id).where(
+                        vault_oauth_grants.c.client_id == client_id
+                    )
+                )
+            ).scalar_one()
+            await connection.execute(
+                insert(vault_oauth_refresh_tokens).values(
+                    token_sha256=uuid4().bytes + uuid4().bytes,
+                    family_id=family_id,
+                    client_id=client_id,
+                    credential_id=credential_id,
+                    scopes=[VaultScope.READ],
+                    expires_at=sql_text("now() + interval '10 days'"),
+                )
+            )
+
+    async def unseed() -> None:
+        async with service.transaction() as connection:
+            await connection.execute(
+                sql_delete(vault_oauth_refresh_tokens).where(
+                    vault_oauth_refresh_tokens.c.client_id == client_id
+                )
+            )
+            await connection.execute(
+                sql_delete(vault_oauth_grants).where(
+                    vault_oauth_grants.c.client_id == client_id
+                )
+            )
+            await connection.execute(
+                sql_delete(vault_oauth_clients).where(
+                    vault_oauth_clients.c.client_id == client_id
+                )
+            )
+
+    try:
+        asyncio.run(seed())
+    finally:
+        asyncio.run(engine.dispose())
+    _FAMILY_CLEANUP.append(unseed)
+
+
+_FAMILY_CLEANUP: list = []
+
+
+@pytest.fixture(autouse=True)
+def drop_seeded_families():
+    """Remove any OAuth family a test wired up, whatever it asserted."""
+
+    yield
+    while _FAMILY_CLEANUP:
+        remove = _FAMILY_CLEANUP.pop()
+        service, engine = vault_service()
+        try:
+            asyncio.run(remove())
+        finally:
+            asyncio.run(engine.dispose())
+
+
+def test_authorization_requires_a_credential(client: TestClient) -> None:
+    """Describing the caller is still a request from a caller."""
+
+    response = client.get("/api/v1/vault/authorization")
+
+    assert response.status_code == 401
+
+
+def test_authorization_needs_no_scope(client: TestClient) -> None:
+    """A credential holding nothing may still learn what it is.
+
+    Deliberate: the answer is derivable from the token the caller already
+    presented, and gating it would leave a console unable to name itself while
+    an operator works out what to grant it.
+    """
+
+    credential_id, token = _issue(scopes=())
+    try:
+        response = client.get(
+            "/api/v1/vault/authorization",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["credential_id"] == credential_id
+    assert body["scopes"] == []
+    assert body["label"] is None
+
+
+def test_authorization_reports_the_label_on_the_family(
+    client: TestClient,
+) -> None:
+    credential_id, token = _issue()
+    _oauth_family(credential_id, label="laptop review console")
+    try:
+        response = client.get(
+            "/api/v1/vault/authorization",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+
+    assert response.status_code == 200
+    assert response.json()["label"] == "laptop review console"
+
+
+def test_authorization_reports_no_label_for_an_unlabelled_family(
+    client: TestClient,
+) -> None:
+    """Unlabelled is ordinary, not an error the console has to distinguish."""
+
+    credential_id, token = _issue()
+    _oauth_family(credential_id, label=None)
+    try:
+        response = client.get(
+            "/api/v1/vault/authorization",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+
+    assert response.json()["label"] is None
+
+
+def test_authorization_reports_no_label_for_a_static_credential(
+    client: TestClient,
+) -> None:
+    """Labels are on authorizations; a static credential has none."""
+
+    credential_id, token = _issue()
+    try:
+        response = client.get(
+            "/api/v1/vault/authorization",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+
+    assert response.json()["label"] is None
+    assert response.json()["principal_id"] == f"test-principal-{credential_id}"
+
+
+def test_authorization_rejects_a_revoked_credential(client: TestClient) -> None:
+    """Requiring no scope is not the same as requiring no credential."""
+
+    credential_id, token = _issue(revoked_at=datetime(2020, 1, 1, tzinfo=UTC))
+    _oauth_family(credential_id, label="revoked laptop")
+    try:
+        response = client.get(
+            "/api/v1/vault/authorization",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    finally:
+        _drop(credential_id)
+
+    assert response.status_code == 401

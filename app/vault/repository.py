@@ -1295,6 +1295,7 @@ def _oauth_grant_from_row(row: RowMapping) -> OAuthGrant:
         client_id=row["client_id"],
         authorized_scopes=tuple(row["authorized_scopes"]),
         entitled_scopes=tuple(row["entitled_scopes"]),
+        label=row["label"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1570,6 +1571,67 @@ class VaultOAuthGrantRepository:
         )
         row = result.mappings().one_or_none()
         return _oauth_grant_from_row(row) if row is not None else None
+
+    async def set_label(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+        label: str | None,
+    ) -> OAuthGrant | None:
+        """Name this authorization, or clear the name.
+
+        Display only. Nothing resolves a family by label -- two of them may
+        share one, which is why the write is a plain assignment with no
+        uniqueness check to make (ADR 0040).
+
+        A blank label is stored as ``NULL`` rather than as an empty string, so
+        clearing has one representation and readers have one absent case. The
+        column's CHECK refuses the empty string outright; normalising here
+        means an operator typing ``--label " "`` clears it instead of being
+        told about a constraint.
+        """
+
+        cleaned = label.strip() if label is not None else None
+        result = await connection.execute(
+            update(vault_oauth_grants)
+            .where(vault_oauth_grants.c.family_id == family_id)
+            .values(label=cleaned or None, updated_at=func.now())
+            .returning(*vault_oauth_grants.c)
+        )
+        row = result.mappings().one_or_none()
+        return _oauth_grant_from_row(row) if row is not None else None
+
+    async def label_for_credential(
+        self,
+        connection: AsyncConnection,
+        credential_id: str,
+    ) -> str | None:
+        """The operator label on the family one access credential belongs to.
+
+        ``None`` for a static credential, which belongs to no family and so has
+        no label to carry -- and ``None`` for an unlabelled family, which is the
+        ordinary state. The caller cannot tell those apart and does not need to:
+        both mean "no name to show".
+
+        Newest refresh row first, matching
+        ``client_and_family_for_credential``. One credential should have exactly
+        one, and neither query depends on it.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_grants.c.label)
+            .select_from(
+                vault_oauth_refresh_tokens.join(
+                    vault_oauth_grants,
+                    vault_oauth_grants.c.family_id
+                    == vault_oauth_refresh_tokens.c.family_id,
+                )
+            )
+            .where(vault_oauth_refresh_tokens.c.credential_id == credential_id)
+            .order_by(vault_oauth_refresh_tokens.c.created_at.desc())
+            .limit(1)
+        )
+        return result.scalars().one_or_none()
 
     async def adjust_entitlements(
         self,

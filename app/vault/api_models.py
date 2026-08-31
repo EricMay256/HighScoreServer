@@ -116,6 +116,28 @@ def validate_source_url_intent(
         )
 
 
+class VaultAuthorizationResponse(BaseModel):
+    """What the credential on this request is, in the terms an operator uses.
+
+    Everything here is already known to whoever presented the token, which is
+    why the endpoint requires no scope: it discloses nothing a caller could not
+    derive from the token string and a 403. What it adds is the ``label``,
+    which lives on the authorization rather than in the token and so cannot be
+    read out of it.
+
+    ``label`` is unverified operator text and is display only -- ADR 0040. It
+    is not an identifier: two authorizations may share one, and nothing is
+    resolved by it. ``credential_id`` and ``principal_id`` remain the identity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential_id: str
+    principal_id: str
+    scopes: list[str]
+    label: str | None = None
+
+
 class VaultDocumentContentRequest(BaseModel):
     """Content fields and normalization shared by create and replacement."""
 

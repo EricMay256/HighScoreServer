@@ -36,6 +36,7 @@ from .api_models import (
     VaultAmendmentProposalRequest,
     VaultAmendmentProposalResponse,
     VaultAmendmentQueueResponse,
+    VaultAuthorizationResponse,
     VaultCompileDeclineRequest,
     VaultCompileDeclineResponse,
     VaultCompilePageRequest,
@@ -89,7 +90,7 @@ from .principal import (
 )
 from .rate_limit import enforce_preauth_ip_limit
 from .read_policy import READABLE_STATUSES
-from .repository import VaultDocumentRepository
+from .repository import VaultDocumentRepository, VaultOAuthGrantRepository
 from .service import (
     REQUEST_DIGEST_VERSION,
     AmendmentBaseRevisionMismatch,
@@ -290,6 +291,57 @@ async def note_quota(
 ) -> VaultCredential:
     await _enforce_quota(credential, "get_note")
     return credential
+
+
+async def authorization_quota(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Authenticate with no scope requirement, then charge the quota.
+
+    Every other dependency here names a scope, and this one deliberately names
+    none: the question it answers is "what is this credential", which the
+    holder of the credential already knows. A scope would only decide which
+    clients may be told about themselves, and refusing one would leave a
+    console guessing at its own identity rather than reading it.
+    """
+
+    credential = await _authenticated((), credentials)
+    await _enforce_quota(credential, "authorization")
+    return credential
+
+
+@router.get(
+    "/authorization",
+    response_model=VaultAuthorizationResponse,
+    summary="Describe the credential presented on this request",
+)
+async def describe_authorization(
+    credential: VaultCredential = Depends(authorization_quota),
+) -> VaultAuthorizationResponse:
+    """What this credential is, including its authorization's label.
+
+    Exists for the consoles' headers. `oauth-<uuid4>` is exact and unreadable,
+    and the label that fixes it is on the grant family, which a browser holding
+    only an access token cannot see (ADR 0040). Everything else in the response
+    is derivable from the token the caller already holds; the label is not.
+
+    The label is unverified operator text on its way to a browser. It is
+    returned as a JSON string and rendered through `textContent`, never as
+    markup.
+    """
+
+    transactions = VaultTransactionService(get_vault_engine())
+    grants = VaultOAuthGrantRepository()
+
+    async with transactions.transaction() as connection:
+        label = await grants.label_for_credential(connection, credential.id)
+
+    return VaultAuthorizationResponse(
+        credential_id=credential.id,
+        principal_id=credential.principal_id,
+        scopes=list(credential.scopes),
+        label=label,
+    )
 
 
 def _search_service() -> VaultSearchService:

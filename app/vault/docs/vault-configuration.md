@@ -357,10 +357,14 @@ The access token it issues is an ordinary `hssv1_` credential, so it appears in
 `issue_vault_credential list` beside every other one and is revoked the same way.
 Its principal is `oauth-<client_id>` — the server-issued registration id, never the
 client's self-declared name — and that is also what lands in `ContributedBy` on notes
-the client writes. The readable name is on the credential's `display_name`, which is
-what `issue_vault_credential list` shows. A name-derived principal collided across
-separately registered clients that chose the same name, which meant sharing an
-idempotency namespace and a quota; see vault ADR 0024's 2026-08-23 amendment.
+the client writes. The readable name on the credential is `display_name`, taken from the client's
+own declared name at mint time and re-copied on every rotation. An operator who
+wants a name they chose, on the authorization rather than on an hourly copy of
+it, sets a label instead — see
+[naming an OAuth authorization](#naming-an-oauth-authorization). A name-derived
+principal collided across separately registered clients that chose the same
+name, which meant sharing an idempotency namespace and a quota; see vault ADR
+0024's 2026-08-23 amendment.
 
 Google login requests only `openid email`. The callback exchanges the code over
 async HTTPS and validates Google's signature, issuer, audience, expiry, the
@@ -1230,6 +1234,13 @@ Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
 `DELETE /api/v1/vault/notes/{id}`, plus the amendment workflow below. All take
 `Authorization: Bearer <token>`.
 
+`GET /api/v1/vault/authorization` describes the presented credential —
+`credential_id`, `principal_id`, `scopes`, and the authorization's `label`. It
+requires a valid credential and **no scope**: everything but the label is
+derivable from the token the caller already holds, and the label lives on the
+grant family where a token cannot see it. It exists for the consoles' headers,
+which would otherwise read `oauth-<uuid4>`.
+
 | Method and path | Scope | Purpose |
 | --- | --- | --- |
 | `POST /api/v1/vault/amendment-proposals` | `vault:propose` | Store an inert, revision-bound proposal |
@@ -1361,9 +1372,11 @@ python -m scripts.issue_vault_credential list
 python -m scripts.issue_vault_credential revoke --id <credential-id>
 ```
 
-`list` shows each credential's principal, scopes, creation, expiry, revocation,
-and `last_used_at` — which means "last used", not "last attempted", because it
-is written only on success. A credential that has never been used shows `never`,
+`list` shows each credential's label, principal, scopes, creation, expiry,
+revocation, and `last_used_at` — which means "last used", not "last attempted",
+because it is written only on success. The label column is `-` for anything
+unlabelled, including every static credential: labels belong to OAuth
+authorizations (see [naming an OAuth authorization](#naming-an-oauth-authorization)). A credential that has never been used shows `never`,
 which is how a registration that silently failed becomes visible.
 
 Rotation is revoke-then-issue; there is no re-key, because the secret was never
@@ -1416,6 +1429,31 @@ This is intentionally narrower than granting a client registration. A new
 browser authorization creates a new family and inherits no privileged scopes,
 even when it uses the same registration. Revocation of an entitlement narrows
 the live token and future rotations but leaves the OAuth session active.
+
+#### Naming an OAuth authorization
+
+Every OAuth principal reads as `oauth-<uuid4>`, so `list` shows a column of
+indistinguishable ids. A label puts an operator-chosen name beside one:
+
+```bash
+python -m scripts.issue_vault_credential label --id <credential-id> --label "laptop review console"
+python -m scripts.issue_vault_credential label --id <credential-id> --clear
+```
+
+The label lives on the grant family, so it survives rotation and appears
+against every credential minted in that family. Like the entitlement commands,
+the id is a lookup handle: any credential in the family resolves it, including
+a rotated-away one. Unlike them, a family with no live refresh token is
+labelled without complaint — reading history is the ordinary reason to be
+naming one.
+
+**The label is display text, never identity.** It does not resolve a
+credential, key a quota or an idempotency namespace, or appear as an audit
+principal, and two authorizations may carry the same one; `family_id` is what
+tells them apart. Setting one writes no audit event, because it changes nothing
+a request is allowed to reach. Static credentials have no family and are
+refused — they are named by the `--name` they were issued with. See vault ADR
+0040.
 
 `vault:review` has an additional separation-of-duties guard: it can be granted
 only to a separately authorized family holding `vault:read` alone. The final
