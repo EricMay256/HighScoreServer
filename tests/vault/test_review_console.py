@@ -391,7 +391,9 @@ def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:
             continue
         window = lines[index : index + 8]
         if not any("sessionEnded" in following for following in window):
-            unguarded.append((index + 1, line.strip()[:70]))
+            # The window, not the `catch` line: an exemption's reason is
+            # usually written inside the block it excuses.
+            unguarded.append((index + 1, "\n".join(window)))
 
     # Exempt because none of these wrap an `api()` call, so none can ever see
     # the marker. Named by the reason rather than counted, so adding a catch
@@ -401,6 +403,10 @@ def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:
         "Private mode",  # writing it
         "Signing out locally",  # revocation, best-effort by design
         "PENDING_ERROR",  # the token exchange, before a session exists
+        # Renewal, which wraps `refreshTokens` rather than `api`. A network
+        # failure here is not an expiry to propagate -- it is the thing that
+        # must not escape, or startup never renders.
+        "Settle, never reject",
     )
     unexplained = [
         entry
@@ -520,3 +526,49 @@ def test_the_session_helpers_exist_before_the_record_is_built() -> None:
         "randomString is declared after the record that stamps itself with it, "
         "so module initialization throws into a catch that hides the failure"
     )
+
+
+def test_a_failed_renewal_still_leaves_the_operator_a_control() -> None:
+    """The page starts with every control hidden, so not rendering is fatal.
+
+    `signin`, `signout`, `refresh` and the queues all carry `hidden` in the
+    initial markup; `render` is what reveals the right ones. A renewal that
+    rejects -- an unreachable metadata endpoint, a dropped token request --
+    escaped before `render` and left an inert page with nothing to click, which
+    is worse than any renewal failure it was reporting.
+
+    `resumeSession` therefore settles rather than rejecting, and `render` runs
+    in a `finally` regardless. Both, because either alone is one refactor away
+    from the same blank page.
+    """
+
+    page = _page()
+
+    assert "Settle, never reject" in page
+    assert "} finally {" in page
+    lines = page.splitlines()
+    finally_at = next(i for i, text in enumerate(lines) if "} finally {" in text)
+    assert "render();" in lines[finally_at + 1], (
+        "rendering must be the finally body; a renewal failure has to leave a "
+        "usable page behind it"
+    )
+    assert "Could not renew this session" in page, (
+        "a blank recovery is only marginally better than a blank page -- say "
+        "what failed and that a reload retries it"
+    )
+
+
+def test_the_startup_sequence_is_callable_on_its_own() -> None:
+    """Named so it can be executed by a test rather than approximated by one.
+
+    Every defect found in this file hid in the gap between a function and the
+    moment it runs: a migration that worked when called by hand and threw at
+    initialization, a resume that existed and was never invoked, a stub so
+    broad it answered the metadata request. An anonymous startup body cannot be
+    driven, only guessed at.
+    """
+
+    page = _page()
+
+    assert "async function boot()" in page
+    assert "\nboot();" in page, "the named boot must actually be invoked"

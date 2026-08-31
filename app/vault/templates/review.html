@@ -207,7 +207,25 @@ async function resumeSession() {
   if (!stored || !stored.refresh) return false;
   SESSION = stored;
   REFRESH = stored.refresh;
-  return refreshTokens();
+  try {
+    return await refreshTokens();
+  } catch (err) {
+    /* Settle, never reject. Both callers branch on the boolean, and a
+       rejection at startup escapes before `render` -- leaving the operator
+       with the initial markup, where the sign-in button, the sign-out button
+       and the queues are all hidden. An inert page with no control on it is a
+       worse outcome than any renewal failure.
+
+       `refreshTokens` reaches the metadata endpoint before it discards the
+       stored token, so a failure there leaves the record intact and a reload
+       can retry. A failure at the token endpoint itself has already spent it,
+       deliberately: a request whose response was lost may have rotated, and
+       presenting it again would burn the family. */
+    PENDING_ERROR =
+      "Could not renew this session: " + err.message
+      + ". Reload to try again, or sign in.";
+    return false;
+  }
 }
 
 let SESSION = loadSession() || migrateLegacySession() || {};
@@ -1000,7 +1018,7 @@ $("tab-cases").onclick = () => {
   $("panel-proposals").classList.add("hidden");
 };
 
-(async () => {
+async function boot() {
   const params = new URLSearchParams(window.location.search);
   if (params.get("error")) {
     /* Any authorization failure casts doubt on the cached registration, and
@@ -1016,10 +1034,20 @@ $("tab-cases").onclick = () => {
     catch (err) { PENDING_ERROR = err.message; }
   }
   /* Before the first paint, or the page flashes "Sign in" at an operator who
-     is still signed in. */
-  await resumeSession();
-  render();
-})();
+     is still signed in. In a `finally` because rendering is what gives them a
+     control to act with; nothing above is worth a blank page. */
+  try {
+    await resumeSession();
+  } finally {
+    render();
+  }
+}
+
+/* Named rather than inlined in the IIFE so the startup sequence is reachable
+   as itself. Every bug found in this file so far hid in the difference between
+   a function and the moment it runs, and an anonymous boot body can only be
+   approximated by a test, never executed by one. */
+boot();
 </script>
 </body>
 </html>
