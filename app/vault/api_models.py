@@ -40,6 +40,7 @@ from .domain import (
     VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
+    VaultDocumentBrief,
     VaultReviewCase,
     VectorSearchStatus,
 )
@@ -1505,12 +1506,16 @@ def document_detail(document: VaultDocument) -> VaultDocumentDetail:
     )
 
 
-def note_summary(document: VaultDocument) -> VaultNoteSummary:
-    """Project a document onto one browse row.
+def note_summary(document: VaultDocumentBrief) -> VaultNoteSummary:
+    """Project one listing row.
 
     Beside ``document_detail`` and ``search_hit`` rather than inside the
     router, for the reason they are: a projection written at a transport is a
     projection that drifts from the other transports.
+
+    Takes a ``VaultDocumentBrief`` rather than a ``VaultDocument`` so the type
+    says what the query reads. A body cannot be dropped here because there is
+    never one to drop.
     """
 
     return VaultNoteSummary(

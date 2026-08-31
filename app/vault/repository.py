@@ -7,7 +7,18 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Text, cast, delete, func, insert, or_, select, text, update
+from sqlalchemy import (
+    Select,
+    Text,
+    cast,
+    delete,
+    func,
+    insert,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects.postgresql import ARRAY as PostgresArray
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
@@ -39,6 +50,7 @@ from .domain import (
     VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
+    VaultDocumentBrief,
     VaultReviewCase,
 )
 from .read_policy import readable_path_predicate
@@ -67,6 +79,24 @@ TOUCH_RESOLUTION = timedelta(seconds=60)
 
 # The public projection of a document. Shared with the retrieval module so the
 # two read paths cannot drift into returning different shapes.
+# What a listing reads, and nothing else. `DOCUMENT_DOMAIN_COLUMNS` below is
+# the full row -- body, frontmatter, provenance, every array -- which a browse
+# page of a hundred notes would pull out of Postgres only to discard. The
+# endpoint's contract is body-free; this is that contract expressed as a query
+# rather than as a projection applied after the fact.
+DOCUMENT_BRIEF_COLUMNS = (
+    vault_documents.c.id,
+    vault_documents.c.kind,
+    vault_documents.c.status,
+    vault_documents.c.vault_path,
+    vault_documents.c.doc_type,
+    vault_documents.c.doc_status,
+    vault_documents.c.title,
+    vault_documents.c.summary,
+    vault_documents.c.content_revision,
+    vault_documents.c.updated_at,
+)
+
 DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.id,
     vault_documents.c.kind,
@@ -178,6 +208,75 @@ def _amendment_proposal_from_row(row: RowMapping) -> VaultAmendmentProposal:
         applied_revision=row["applied_revision"],
         removals_acknowledged=row["removals_acknowledged"],
     )
+
+
+def path_page_statement(
+    columns: Sequence[Any],
+    prefixes: Sequence[str],
+    *,
+    after_vault_path: str | None = None,
+    limit: int = 200,
+    statuses: Sequence[DocumentStatus] | None = None,
+    readable_only: bool = False,
+    tags: Sequence[str] = (),
+    facets: Mapping[str, Sequence[str]] | None = None,
+) -> Select:
+    """One page of documents under some path prefixes, as a statement.
+
+    Written once and given its columns, because two listings that differ
+    only in what they select must not differ in what they select *from*:
+    a browse page and an export walking the same prefixes with different
+    filters or a different order would page differently over the same
+    corpus, and only one of them would be right.
+    """
+
+    statement = (
+        select(*columns)
+        .where(
+            or_(
+                *(
+                    vault_documents.c.vault_path.startswith(
+                        prefix, autoescape=True
+                    )
+                    for prefix in prefixes
+                )
+            )
+        )
+        .order_by(vault_documents.c.vault_path)
+        .limit(limit)
+    )
+    if after_vault_path is not None:
+        statement = statement.where(
+            vault_documents.c.vault_path > after_vault_path
+        )
+    if statuses is not None:
+        statement = statement.where(
+            vault_documents.c.status.in_([status.value for status in statuses])
+        )
+    if readable_only:
+        statement = statement.where(readable_path_predicate())
+    if tags:
+        # `@>` spelled out because `tags` is declared with the generic
+        # `ARRAY` type, whose `.contains()` raises rather than guessing at
+        # a dialect. The cast is what tells Postgres the bound list is
+        # text[]; the operator is the one `idx_vault_documents_tags`
+        # serves.
+        statement = statement.where(
+            vault_documents.c.tags.op("@>", is_comparison=True)(
+                cast(list(dict.fromkeys(tags)), PostgresArray(Text))
+            )
+        )
+    for name, values in (facets or {}).items():
+        # One containment test per facet name rather than one over the
+        # whole map: `{"project": [...], "area": [...]}` as a single `@>`
+        # would also mean "all of these", but building it per name keeps
+        # an empty value list from silently matching everything.
+        if not values:
+            continue
+        statement = statement.where(
+            vault_documents.c.facets.contains({name: list(values)})
+        )
+    return statement
 
 
 class VaultDocumentRepository:
@@ -585,54 +684,53 @@ class VaultDocumentRepository:
         if not prefixes:
             return ()
 
-        statement = (
-            select(*self._domain_columns)
-            .where(
-                or_(
-                    *(
-                        vault_documents.c.vault_path.startswith(
-                            prefix, autoescape=True
-                        )
-                        for prefix in prefixes
-                    )
-                )
-            )
-            .order_by(vault_documents.c.vault_path)
-            .limit(limit)
+        statement = path_page_statement(
+            self._domain_columns,
+            prefixes,
+            after_vault_path=after_vault_path,
+            limit=limit,
+            statuses=statuses,
+            readable_only=readable_only,
+            tags=tags,
+            facets=facets,
         )
-        if after_vault_path is not None:
-            statement = statement.where(
-                vault_documents.c.vault_path > after_vault_path
-            )
-        if statuses is not None:
-            statement = statement.where(
-                vault_documents.c.status.in_([status.value for status in statuses])
-            )
-        if readable_only:
-            statement = statement.where(readable_path_predicate())
-        if tags:
-            # `@>` spelled out because `tags` is declared with the generic
-            # `ARRAY` type, whose `.contains()` raises rather than guessing at
-            # a dialect. The cast is what tells Postgres the bound list is
-            # text[]; the operator is the one `idx_vault_documents_tags`
-            # serves.
-            statement = statement.where(
-                vault_documents.c.tags.op("@>", is_comparison=True)(
-                    cast(list(dict.fromkeys(tags)), PostgresArray(Text))
-                )
-            )
-        for name, values in (facets or {}).items():
-            # One containment test per facet name rather than one over the
-            # whole map: `{"project": [...], "area": [...]}` as a single `@>`
-            # would also mean "all of these", but building it per name keeps
-            # an empty value list from silently matching everything.
-            if not values:
-                continue
-            statement = statement.where(
-                vault_documents.c.facets.contains({name: list(values)})
-            )
         result = await connection.execute(statement)
         return tuple(document_from_row(row) for row in result.mappings())
+
+    async def list_briefs_under_path_prefixes(
+        self,
+        connection: AsyncConnection,
+        prefixes: Sequence[str],
+        after_vault_path: str | None = None,
+        limit: int = 200,
+        statuses: Sequence[DocumentStatus] | None = None,
+        readable_only: bool = False,
+        tags: Sequence[str] = (),
+        facets: Mapping[str, Sequence[str]] | None = None,
+    ) -> tuple[VaultDocumentBrief, ...]:
+        """The same page, described rather than fetched whole.
+
+        Same filters, same order, same cursor -- built by the same function, so
+        the two cannot drift into paging differently. What differs is the
+        column list, which is the entire point: a browse page reads ten small
+        fields per row instead of a document each.
+        """
+
+        if not prefixes:
+            return ()
+
+        statement = path_page_statement(
+            DOCUMENT_BRIEF_COLUMNS,
+            prefixes,
+            after_vault_path=after_vault_path,
+            limit=limit,
+            statuses=statuses,
+            readable_only=readable_only,
+            tags=tags,
+            facets=facets,
+        )
+        result = await connection.execute(statement)
+        return tuple(document_brief_from_row(row) for row in result.mappings())
 
     async def vault_paths_under(
         self,
@@ -1331,6 +1429,23 @@ def _registered_client_from_row(row: RowMapping) -> RegisteredOAuthClient:
         client_info=dict(row["client_info"]),
         registered_at=row["registered_at"],
         expires_at=row["expires_at"],
+    )
+
+
+def document_brief_from_row(row: RowMapping) -> VaultDocumentBrief:
+    """Map a `DOCUMENT_BRIEF_COLUMNS` row. Nothing here reads a body."""
+
+    return VaultDocumentBrief(
+        id=row["id"],
+        kind=DocumentKind(row["kind"]),
+        status=DocumentStatus(row["status"]),
+        vault_path=row["vault_path"],
+        doc_type=row["doc_type"],
+        doc_status=row["doc_status"],
+        title=row["title"],
+        summary=row["summary"],
+        content_revision=row["content_revision"],
+        updated_at=row["updated_at"],
     )
 
 

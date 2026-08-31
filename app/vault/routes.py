@@ -533,8 +533,11 @@ async def list_vault_documents(
 
     async with transactions.transaction() as connection:
         # One past the limit, so `has_more` is a fact rather than the guess a
-        # full page would license.
-        page = await documents.list_under_path_prefixes(
+        # full page would license. Briefs, not documents: this response
+        # publishes no bodies, and reading them out of Postgres to drop them
+        # here would make that a property of the projection rather than of the
+        # query -- a hundred notes' worth of body per page, discarded.
+        page = await documents.list_briefs_under_path_prefixes(
             connection,
             prefixes,
             after_vault_path=after,

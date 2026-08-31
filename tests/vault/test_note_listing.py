@@ -15,8 +15,18 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
 from app.vault.auth import VaultScope
-from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
-from app.vault.repository import VaultDocumentRepository
+from app.vault.domain import (
+    DocumentKind,
+    DocumentStatus,
+    NewVaultDocument,
+    VaultDocumentBrief,
+)
+from app.vault.repository import (
+    DOCUMENT_BRIEF_COLUMNS,
+    DOCUMENT_DOMAIN_COLUMNS,
+    VaultDocumentRepository,
+    path_page_statement,
+)
 from app.vault.settings import vault_enabled
 from app.vault.tables import vault_documents
 from tests.vault.test_routes import _drop, _issue
@@ -431,3 +441,60 @@ def test_a_note_without_a_summary_lists_with_a_null_one(
     )
 
     assert row["summary"] is None
+
+
+def test_a_listing_never_asks_postgres_for_a_body() -> None:
+    """The body-free contract as a query, not as a projection.
+
+    The endpoint published summaries while the repository selected the whole
+    row -- body, frontmatter, provenance, every array -- and dropped the rest
+    on the way out. A page of a hundred large notes therefore cost megabytes
+    off the wire to render a list of titles.
+
+    Compiled rather than described: the SQL itself is the claim.
+    """
+
+    statement = path_page_statement(DOCUMENT_BRIEF_COLUMNS, ("Human/",), limit=100)
+    sql = str(statement.compile())
+
+    assert "vault_documents.title" in sql
+    for heavy in ("vault_documents.body", "vault_documents.provenance",
+                  "vault_documents.frontmatter", "vault_documents.aliases"):
+        assert heavy not in sql, f"a listing must not select {heavy}"
+
+
+def test_the_brief_record_cannot_carry_a_body() -> None:
+    """A partially-filled `VaultDocument` would keep the promise in the
+    response and break it in the query, which is the defect this closes."""
+
+    assert not hasattr(VaultDocumentBrief, "body")
+    assert set(VaultDocumentBrief.__slots__) == {
+        column.name for column in DOCUMENT_BRIEF_COLUMNS
+    }
+
+
+def test_both_listings_page_by_the_same_rules() -> None:
+    """Same filters, same order, same cursor -- one function builds both.
+
+    Two listings over one corpus that paged differently would be a bug nobody
+    could see from either one alone.
+    """
+
+    prefixes = ("Human/",)
+    arguments = {
+        "after_vault_path": "Human/03 Projects/alpha.md",
+        "limit": 7,
+        "statuses": (DocumentStatus.ACTIVE,),
+        "readable_only": True,
+        "tags": ("hss",),
+        "facets": {"project": ["hss"]},
+    }
+    brief = str(
+        path_page_statement(DOCUMENT_BRIEF_COLUMNS, prefixes, **arguments).compile()
+    )
+    full = str(
+        path_page_statement(DOCUMENT_DOMAIN_COLUMNS, prefixes, **arguments).compile()
+    )
+
+    assert brief[brief.index("FROM"):] == full[full.index("FROM"):]
+

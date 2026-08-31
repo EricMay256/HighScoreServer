@@ -403,6 +403,32 @@ class RegisteredOAuthClient:
 
 
 @dataclass(frozen=True, slots=True)
+class VaultDocumentBrief:
+    """A document as a listing names it: no body, and no way to acquire one.
+
+    Deliberately its own record rather than a ``VaultDocument`` with fields
+    left out. The listing endpoint publishes a body-free contract, and a
+    partially-filled domain record would keep that promise in the response
+    while breaking it in the query -- which is precisely the defect this
+    exists to close, since the row was read in full and then discarded.
+
+    A reader who needs the body fetches the note. That is one request, and it
+    is the request they were going to make anyway.
+    """
+
+    id: str
+    kind: DocumentKind
+    status: DocumentStatus
+    vault_path: str
+    title: str
+    content_revision: int
+    updated_at: datetime
+    doc_type: str | None = None
+    doc_status: str | None = None
+    summary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthGrant:
     """One operator-approved OAuth authorization and its rotating family.
 
