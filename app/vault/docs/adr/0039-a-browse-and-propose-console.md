@@ -4,7 +4,10 @@ Date: 2026-08-30
 
 ## Status
 
-**Proposed.** Not implemented.
+Accepted. The browse console, `GET /notes`, the REST span-edit kind, and inline
+proposing are implemented. Reviewer-side editing under a second credential --
+the last section of the decision below -- is not, and remains optional: the
+rest stands without it.
 
 ## Context
 

@@ -193,3 +193,83 @@ def test_the_page_supplies_what_the_session_module_expects() -> None:
     assert 'id="messages"' in page
     assert 'id="who"' in page
     assert "\nboot();" in page
+
+
+# ------------------------------------------------ proposing an edit ----
+
+
+def test_the_span_is_sliced_from_the_body_not_from_the_selection() -> None:
+    """The correctness argument for inline editing, pinned as code.
+
+    `expected_text` has to be the stored text byte for byte or the server
+    refuses it, and a stringified selection is a rendering of that text rather
+    than the text -- a `pre-wrap` block wraps long lines, and what a browser
+    returns at a soft wrap has varied between them. Offsets into the body the
+    server sent cannot disagree with what was stored.
+    """
+
+    page = _page()
+
+    assert "NOTE.body.slice(range.startOffset, range.endOffset)" in page
+    assert "selection.toString()" not in page
+
+
+def test_the_console_resolves_the_occurrence_rather_than_being_refused() -> None:
+    """The server refuses an ambiguous span, correctly. Here the ambiguity is
+    already resolved: the operator pointed at one instance, and the offset says
+    which. Counting every starting offset matches how the server counts."""
+
+    page = _page()
+
+    assert "function occurrenceOf(body, expected, start)" in page
+    assert "occurrence: occurrenceOf(NOTE.body, span.expected, span.start)" in page
+
+
+def test_the_proposal_carries_the_revision_the_page_read() -> None:
+    """Not the newest revision, the one on screen. A span resolved against a
+    body nobody saw is an edit to something else."""
+
+    page = _page()
+
+    assert "base_revision: NOTE.content_revision" in page
+
+
+def test_the_console_sends_a_span_and_never_a_diff() -> None:
+    """Generating a unified diff in the browser would need a diff
+    implementation the page cannot fetch under its own CSP, which is the reason
+    the kind exists over HTTP at all (ADR 0039)."""
+
+    page = _page()
+
+    assert 'kind: "span"' in page
+    assert "body_diff" not in page
+
+
+def test_a_selection_outside_the_note_body_is_refused() -> None:
+    """Not clamped to the body: a selection over the title or the metadata is
+    not an edit to the note text, and silently editing something adjacent is
+    worse than declining."""
+
+    page = _page()
+
+    assert "range.startContainer !== text || range.endContainer !== text" in page
+
+
+def test_the_propose_control_reads_the_scope_it_needs() -> None:
+    """From `/authorization`, so a family authorized before this console asked
+    for `vault:propose` says why the button is inert instead of discovering it
+    at submit time with a 403."""
+
+    page = _page()
+
+    assert 'IDENTITY.scopes.includes("vault:propose")' in page
+
+
+def test_the_form_is_built_through_text_content() -> None:
+    """It quotes note text back at the operator, which is agent-written."""
+
+    page = _page()
+
+    assert ".innerHTML" not in page
+    assert 'el("pre", "excerpt", span.expected)' in page
+

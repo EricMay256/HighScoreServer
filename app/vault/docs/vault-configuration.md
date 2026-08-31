@@ -426,6 +426,14 @@ reachable issuer they render and can never sign in.
 | `/vault/review` | `vault:read` | Yes — `grant-oauth ... --scopes vault:review`, once per family |
 | `/vault/browse` | `vault:read vault:propose` | No; both are baseline |
 
+Browsing lists notes by path, opens one, and proposes an edit to it: select the
+text to replace, write what should stand in its place, and the page posts a
+span edit. The server locates the span in the stored body and writes the
+canonical diff, so the proposal reaches the reviewer as an ordinary body diff
+and is decided like any other. The page sends an `occurrence` because it knows
+which instance was selected — a span appearing twice is refused for a caller
+who cannot say which one they meant.
+
 The reviewer asks for `vault:read` **alone** deliberately: `vault:review` may be
 granted only to a family holding exactly that, so a page asking for anything
 else makes itself permanently ineligible for the entitlement it exists to use.

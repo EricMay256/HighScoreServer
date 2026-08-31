@@ -11,6 +11,15 @@
 .crumbs { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
 .crumbs .sep { color: var(--muted); }
 .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+textarea {
+  font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem; width: 100%; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 0.6rem;
+  margin: 0.5rem 0;
+}
+/* The span being replaced, quoted back so the operator can see exactly what
+   the server will be asked to match. */
+.excerpt { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Markdown source, shown as written. Overrides the shared `pre` because a note
    body is the page's content rather than a quoted fragment inside a card. */
 .body {
@@ -63,6 +72,10 @@ let PREFIX = "";
 let FILTERS = { tag: "", facet: "" };
 let CURSOR = null;
 let ROWS = [];
+/* The open note, as fetched. Held rather than re-read from the DOM because a
+   span edit is resolved against the body the server sent and the revision it
+   sent it at -- neither of which the rendered page is the authority on. */
+let NOTE = null;
 
 /* ---------- Listing ---------- */
 function listingParams(cursor) {
@@ -189,14 +202,26 @@ async function openNote(noteId) {
   $("listing").classList.add("hidden");
 
   const detail = await api("/notes/" + encodeURIComponent(noteId));
+  NOTE = detail;
 
+  const actions = el("div", "row");
   const back = el("button", null, "Back to listing");
   back.onclick = () => {
+    NOTE = null;
     panel.classList.add("hidden");
     panel.textContent = "";
     $("listing").classList.remove("hidden");
   };
-  panel.appendChild(back);
+  actions.appendChild(back);
+
+  const propose = el("button", null, "Propose an edit");
+  propose.onclick = startPropose;
+  if (!mayPropose()) {
+    propose.disabled = true;
+    propose.title = "This credential holds vault:read only.";
+  }
+  actions.appendChild(propose);
+  panel.appendChild(actions);
 
   const head = el("div", "row");
   head.appendChild(el("span", "title", detail.title));
@@ -221,8 +246,174 @@ async function openNote(noteId) {
      CSP, and hand-rolling one is how untrusted note text becomes markup. A
      `pre` block is honest and safe -- and this corpus is read as source by
      every other consumer it has. */
-  panel.appendChild(el("pre", "body", detail.body));
+  const body = el("pre", "body", detail.body);
+  body.id = "note-body";
+  panel.appendChild(body);
 }
+
+/* ---------- Proposing an edit to the open note ----------
+
+   The span edit exists for exactly this gesture: select a sentence, write a
+   better one, and let the server work out the patch (ADR 0033, ADR 0039). The
+   page sends the two texts and never a diff -- generating one here would mean a
+   diff implementation this page cannot fetch under its own CSP. */
+
+/* The selection as offsets into the body we were served, not as
+   `Selection.toString()`.
+
+   This is the whole correctness argument for the feature. `expected_text` has
+   to be the stored text byte for byte or the server refuses it, and a
+   stringified selection is a rendering of the text rather than the text: a
+   `pre-wrap` block wraps long lines, and what a browser puts in the clipboard
+   at a soft wrap has varied. Slicing `NOTE.body` at the offsets the range
+   reports cannot disagree with what was stored, because it *is* what was
+   stored.
+
+   The `pre` holds exactly one text node -- `el()` sets `textContent` -- so a
+   range that starts and ends inside it addresses that string directly. A
+   selection reaching outside the body (the title, the metadata) is refused
+   rather than clamped: it is not an edit to the note text. */
+function selectedSpan() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null;
+  const body = $("note-body");
+  if (!body || !body.firstChild || !NOTE) return null;
+
+  const range = selection.getRangeAt(0);
+  const text = body.firstChild;
+  if (range.startContainer !== text || range.endContainer !== text) return null;
+  if (range.endOffset <= range.startOffset) return null;
+
+  return {
+    start: range.startOffset,
+    expected: NOTE.body.slice(range.startOffset, range.endOffset),
+  };
+}
+
+/* Which match this is, counted the way the server counts.
+
+   The server refuses an ambiguous span rather than guessing, and it is right
+   to: a caller who has not thought about duplicates believes their text is
+   unique. Here the caller has pointed at one instance, so the ambiguity is
+   already resolved and sending `occurrence` says which one they meant. Every
+   starting offset counts, overlapping ones included, which is what
+   `span_edit_to_unified_diff` does. */
+function occurrenceOf(body, expected, start) {
+  let seen = 0;
+  let at = body.indexOf(expected);
+  while (at !== -1 && at < start) {
+    seen += 1;
+    at = body.indexOf(expected, at + 1);
+  }
+  return seen + 1;
+}
+
+function mayPropose() {
+  /* From `/authorization`, so a family authorized before this console asked
+     for the scope is told why the control is inert instead of discovering it
+     at submit time with a 403. Unknown identity means the control stays
+     enabled: the honest failure is the server's answer, not a guess here. */
+  return !IDENTITY || !IDENTITY.scopes || IDENTITY.scopes.includes("vault:propose");
+}
+
+function proposeForm(span) {
+  const form = el("div", "card");
+  form.id = "propose";
+
+  form.appendChild(el("div", "small muted", "Replacing this exact text:"));
+  form.appendChild(el("pre", "excerpt", span.expected));
+
+  const replacement = document.createElement("textarea");
+  replacement.id = "propose-replacement";
+  replacement.rows = Math.min(12, span.expected.split("\n").length + 2);
+  /* Prefilled with what is there, because the common edit is a rewording
+     rather than a rewrite. An unchanged replacement is refused by the server
+     as a change that changes nothing, which is the right answer to a
+     submission nobody edited. */
+  replacement.value = span.expected;
+  form.appendChild(replacement);
+
+  const rationale = document.createElement("input");
+  rationale.id = "propose-rationale";
+  rationale.placeholder = "why this reads better, for the reviewer";
+  rationale.className = "grow";
+  form.appendChild(rationale);
+
+  const actions = el("div", "row");
+  const submit = el("button", "primary", "Propose");
+  const cancel = el("button", null, "Cancel");
+  actions.append(submit, cancel);
+  form.appendChild(actions);
+  form.appendChild(el("div", "small muted",
+    "Queued for a reviewer. Nothing changes in the note until they accept it, "
+    + "and an empty replacement is a removal they must acknowledge."));
+
+  cancel.onclick = () => form.remove();
+  submit.onclick = async () => {
+    if (!rationale.value.trim()) {
+      say("danger", el("div", null, "A rationale is required: it is what the reviewer decides on."));
+      return;
+    }
+    submit.disabled = cancel.disabled = true;
+    try {
+      const outcome = await api("/amendment-proposals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_note_id: NOTE.note_id,
+          /* The revision this page actually read. If the note moved since,
+             the server answers 409 and the edit is refused rather than applied
+             to text nobody saw. */
+          base_revision: NOTE.content_revision,
+          change: {
+            kind: "span",
+            expected_text: span.expected,
+            replacement_text: replacement.value,
+            occurrence: occurrenceOf(NOTE.body, span.expected, span.start),
+          },
+          rationale: rationale.value.trim(),
+        }),
+      });
+      form.replaceChildren(el("div", "small",
+        "Proposed. A reviewer decides it: " + outcome.proposal.proposal_id));
+    } catch (err) {
+      submit.disabled = cancel.disabled = false;
+      if (err.sessionEnded) return;
+      if (err.forbidden) {
+        say("danger", el("div", null,
+          "This credential may not propose. Sign out and in again to authorize "
+          + "with vault:propose."));
+        return;
+      }
+      /* 409 and 422 arrive here as ordinary errors carrying the server's own
+         explanation, which is better than one written twice: it knows whether
+         the note moved or the span stopped matching. */
+      say("danger", el("div", null, err.message));
+    }
+  };
+  return form;
+}
+
+function startPropose() {
+  clearMessages();
+  const existing = $("propose");
+  if (existing) existing.remove();
+
+  const span = selectedSpan();
+  if (!span) {
+    say("info", el("div", null,
+      "Select the text to replace inside the note body first."));
+    return;
+  }
+  if (!span.expected.trim()) {
+    say("info", el("div", null,
+      "That selection is only whitespace. Select the text you want replaced."));
+    return;
+  }
+  $("note").appendChild(proposeForm(span));
+  $("propose-replacement").focus();
+}
+
 
 /* ---------- Shell ---------- */
 function showError(err) {

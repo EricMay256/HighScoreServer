@@ -15,12 +15,11 @@ here. That inverts the expected order -- the surface that *writes* is cheaper
 to authorize than the one that reads and decides -- and it is correct: a
 proposal is inert until a reviewer applies it, and a decision is not.
 
-**It asks for `vault:propose` before it can propose.** Reading is all this page
-does today; inline span edits are the next step. The scope is requested now
-because consent is what fixes a family's `authorized_scopes`: adding a scope
-later means a fresh authorization, a fresh family, and an operator wondering
-why a second one appeared. Asking once costs nothing -- the propose scope
-grants no ability to change a note, only to queue a suggestion.
+**Reading and proposing, and nothing else.** Selecting text in a note and
+offering a replacement posts a span edit, which the server resolves against the
+stored body and stores as an ordinary body diff -- so a reviewer decides one
+kind of artifact whoever authored it (ADR 0033). This console cannot decide
+one: that is the separation, and it is why the two pages exist.
 
 **A separate console is a separate credential, deliberately.** One page holding
 both scope sets is impossible as scoped and undesirable if it were: the
