@@ -132,6 +132,15 @@ const STORE = { verifier: "vault.review.pkce", state: "vault.review.state",
    client_id with a direct 400 and no redirect, so nothing would tell us. We
    therefore discard the pair on our own schedule rather than waiting for an
    error that never arrives. */
+/* Declared above the session helpers on purpose. `saveSession` stamps every
+   record with `randomString`, and the record is built during module
+   initialization -- so a `const` declared further down sits in its temporal
+   dead zone and throws when the migration runs, which a broad catch then
+   turns into a silent "no legacy session". */
+const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const randomString = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
+
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function loadSession() {
@@ -187,6 +196,20 @@ function migrateLegacySession() {
   } catch (err) { return null; }
 }
 
+/* The whole point of persisting the record: a new tab has no access token in
+   session storage, but the refresh token on disk can mint one. Without this a
+   reopened tab shows "Sign in" while holding a usable credential, starts a
+   fresh authorization, and lands in a family with no entitlement -- which is
+   the exact outcome persistence was added to prevent. */
+async function resumeSession() {
+  if (TOKEN) return true;
+  const stored = loadSession();
+  if (!stored || !stored.refresh) return false;
+  SESSION = stored;
+  REFRESH = stored.refresh;
+  return refreshTokens();
+}
+
 let SESSION = loadSession() || migrateLegacySession() || {};
 let TOKEN = sessionStorage.getItem(STORE.token) || null;
 let REFRESH = SESSION.refresh || null;
@@ -195,9 +218,6 @@ let META = null;
    one message that must outlive the re-render that follows it. */
 let PENDING_ERROR = null;
 
-const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
-  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const randomString = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
 
 async function metadata() {
   if (META) return META;
@@ -367,7 +387,7 @@ async function refreshTokens() {
 /* Ends the local session and repaints. `message` is carried through render()
    by PENDING_ERROR, so the reason survives the clearMessages() that render
    begins with. */
-function endSession(message, force) {
+async function endSession(message, force) {
   TOKEN = null;
   REFRESH = null;
   sessionStorage.removeItem(STORE.token);
@@ -387,6 +407,13 @@ function endSession(message, force) {
     stored && stored.refresh && SESSION.stamp && stored.stamp !== SESSION.stamp;
   if (!force && someoneElseAdvancedIt) {
     SESSION = stored;
+    /* Their record is not just spared, it is used: they left a usable token,
+       so this tab renews from it rather than signing out beside a live
+       session. */
+    if (await resumeSession()) {
+      render();
+      return;
+    }
     if (message) PENDING_ERROR = message;
     render();
     return;
@@ -423,7 +450,7 @@ async function signOut() {
       });
     }
   } catch (err) { /* Signing out locally must succeed even if revocation cannot. */ }
-  endSession(null, true);
+  await endSession(null, true);
 }
 
 /* `hssv1_<credential-id>_<secret>`. The console shows the id so the operator
@@ -453,7 +480,7 @@ async function api(path, options, attempt) {
        signed in -- app panel up, Sign in button hidden -- while telling the
        operator to sign in again, with no control to do it. This is the
        ordinary end of a thirty-day refresh token, not an edge case. */
-    endSession("Your session ended and could not be renewed. Sign in again.");
+    await endSession("Your session ended and could not be renewed. Sign in again.");
     const ended = new Error("session ended");
     ended.sessionEnded = true;
     throw ended;
@@ -988,6 +1015,9 @@ $("tab-cases").onclick = () => {
     try { await completeSignIn(params.get("code"), params.get("state")); }
     catch (err) { PENDING_ERROR = err.message; }
   }
+  /* Before the first paint, or the page flashes "Sign in" at an operator who
+     is still signed in. */
+  await resumeSession();
   render();
 })();
 </script>

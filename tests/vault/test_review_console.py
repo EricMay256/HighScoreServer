@@ -462,3 +462,61 @@ def test_ending_a_session_spares_a_record_another_tab_advanced() -> None:
     assert "stored.stamp !== SESSION.stamp" in page
     assert "endSession(null, true)" in page, "sign-out should force the clear"
     assert "next.stamp = randomString();" in page
+
+
+def test_a_reopened_tab_resumes_from_the_persisted_record() -> None:
+    """Persisting the token is pointless if nothing ever presents it.
+
+    A new tab has no access token -- that lives in session storage -- but the
+    refresh token on disk can mint one. `render` decides signed-in from the
+    access token alone, so without an explicit resume the page showed "Sign in"
+    while holding a usable credential, started a fresh authorization, and
+    landed in a family with no entitlement. That is exactly the outcome
+    persistence was added to prevent, so the feature did nothing at all.
+
+    The resume must complete before the first paint, or the operator sees a
+    "Sign in" flash and may click it -- which really does start a new family.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+
+    assert "async function resumeSession()" in page
+    assert "if (!stored || !stored.refresh) return false;" in page
+
+    resumed_at = next(
+        i for i, text in enumerate(lines) if "await resumeSession();" in text
+    )
+    rendered_at = next(
+        i
+        for i, text in enumerate(lines)
+        if text.strip() == "render();" and i > resumed_at
+    )
+    assert resumed_at < rendered_at, (
+        "the resume has to finish before the first render, not after it"
+    )
+
+
+def test_the_session_helpers_exist_before_the_record_is_built() -> None:
+    """A `const` used earlier in the file than it is declared throws.
+
+    `saveSession` stamps with `randomString`, and the record is built during
+    module initialization. With `randomString` declared further down it sat in
+    its temporal dead zone, so the legacy migration threw a ReferenceError that
+    its own broad catch turned into a silent "no legacy session".
+
+    The migration was therefore dead code that tested green, because calling it
+    from a console after load is the one context where the ordering cannot
+    bite. Assert the order, not the behaviour of a hand-run call.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+
+    def line_of(needle: str) -> int:
+        return next(i for i, text in enumerate(lines) if needle in text)
+
+    assert line_of("const randomString =") < line_of("let SESSION = loadSession()"), (
+        "randomString is declared after the record that stamps itself with it, "
+        "so module initialization throws into a catch that hides the failure"
+    )
