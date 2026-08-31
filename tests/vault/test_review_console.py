@@ -14,11 +14,13 @@ from app.vault.constants import (
 )
 from app.vault.review_console import (
     API_BASE,
+    CLIENT_NAME,
     CONSOLE_SCOPES,
     REVIEW_PATH,
+    STORE_PREFIX,
     build_vault_review_routes,
 )
-from app.vault.templating import render
+from app.vault.templating import TEMPLATE_DIRECTORY, render
 
 
 def _page() -> str:
@@ -26,8 +28,16 @@ def _page() -> str:
         "review.html",
         api_base=API_BASE,
         scopes=CONSOLE_SCOPES,
-        review_path=REVIEW_PATH,
+        console_path=REVIEW_PATH,
+        client_name=CLIENT_NAME,
+        store_prefix=STORE_PREFIX,
     )
+
+
+def _session_module() -> str:
+    """The shared module as written, before a page includes it."""
+
+    return (TEMPLATE_DIRECTORY / "_console_session.js").read_text(encoding="utf-8")
 
 
 def test_the_console_requests_read_alone() -> None:
@@ -315,8 +325,12 @@ def test_the_legacy_session_storage_format_is_migrated() -> None:
     page = _page()
 
     assert "migrateLegacySession" in page
-    assert 'sessionStorage.getItem("vault.review.client_id")' in page
-    assert 'sessionStorage.getItem("vault.review.refresh")' in page
+    # Composed from the prefix since the session module was shared, so both
+    # halves are asserted: the derivation, and the value that makes it match
+    # what v74 actually wrote.
+    assert STORE_PREFIX == "vault.review"
+    assert 'sessionStorage.getItem(CFG.storePrefix + ".client_id")' in page
+    assert 'sessionStorage.getItem(CFG.storePrefix + ".refresh")' in page
     assert "loadSession() || migrateLegacySession() || {}" in page, (
         "migration must run only when no new record exists, or it would "
         "overwrite a current session with a stale one"

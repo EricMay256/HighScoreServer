@@ -25,6 +25,15 @@ changing this line without changing that rule breaks the console.
 Serving the page requires no scope. Reading or deciding anything requires the
 token, checked by the API as it is for every other client -- so an unauthorized
 visitor gets an empty shell and a sign-in button, never data.
+
+**The OAuth lifecycle itself is not in this page.** It lives in
+``templates/_console_session.js``, included into ``review.html``'s own script
+and configured by the five values rendered below. That module is the expensive
+part -- cross-tab rotation, the persisted record, the settled resume, a startup
+sequence a test can drive -- and a second console (ADR 0039) that copied it
+would copy every defect found in it so far. This module owns the page, the
+scopes it asks for, and the response headers; the session module owns how it
+holds a credential.
 """
 
 import logging
@@ -47,6 +56,23 @@ API_BASE = "/api/v1/vault"
 # What the page asks for. See the module docstring -- this is load-bearing.
 CONSOLE_SCOPES = "vault:read"
 
+# How this console names itself at registration. Unverified free text like any
+# client's, so it decides nothing: the principal is derived from the
+# server-issued registration id (ADR 0024), and the operator's own name for the
+# authorization is its label (ADR 0040).
+CLIENT_NAME = "Vault review console"
+
+# Namespace for this console's browser storage and its refresh lock. A second
+# console must not share it: two pages writing one session record would present
+# each other's refresh tokens, which the authorization server reads as a
+# captured credential and answers by burning the family.
+#
+# The value is also load-bearing backwards. The session-scoped format this
+# replaced wrote `vault.review.client_id` and `vault.review.refresh`, and the
+# shared module derives those legacy keys from this prefix -- so changing it
+# would silently drop every live reviewer's session and cost a re-grant.
+STORE_PREFIX = "vault.review"
+
 
 async def review_console(request: Request) -> HTMLResponse:
     """Serve the console shell. Carries no data and requires no credential."""
@@ -55,7 +81,9 @@ async def review_console(request: Request) -> HTMLResponse:
         "review.html",
         api_base=API_BASE,
         scopes=CONSOLE_SCOPES,
-        review_path=REVIEW_PATH,
+        console_path=REVIEW_PATH,
+        client_name=CLIENT_NAME,
+        store_prefix=STORE_PREFIX,
     )
     return HTMLResponse(
         body,
