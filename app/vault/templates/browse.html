@@ -133,7 +133,9 @@ function noteRow(row) {
   const card = el("div", "card");
   const head = el("div", "row");
   const open = el("button", "link title", row.title);
-  open.onclick = () => openNote(row.note_id);
+  /* Caught, not left to reject unhandled: `openNote` is async and this is the
+     only caller. */
+  open.onclick = () => openNote(row.note_id).catch(showError);
   head.appendChild(open);
   head.appendChild(el("span", "chip", row.kind));
   if (row.doc_status) head.appendChild(el("span", "chip", row.doc_status));
@@ -196,12 +198,16 @@ function edgeList(label, ids) {
 }
 
 async function openNote(noteId) {
+  /* Fetched before anything is hidden. Switching panels first left a 404, a
+     dropped connection or a 500 showing an empty note panel with no Back
+     control on it -- the listing gone, nothing in its place, and no way out
+     but a reload. Nothing moves until there is something to show. */
+  const detail = await api("/notes/" + encodeURIComponent(noteId));
+
   const panel = $("note");
   panel.textContent = "";
   panel.classList.remove("hidden");
   $("listing").classList.add("hidden");
-
-  const detail = await api("/notes/" + encodeURIComponent(noteId));
   NOTE = detail;
 
   const actions = el("div", "row");

@@ -273,3 +273,33 @@ def test_the_form_is_built_through_text_content() -> None:
     assert ".innerHTML" not in page
     assert 'el("pre", "excerpt", span.expected)' in page
 
+
+def test_opening_a_note_fetches_before_it_hides_the_listing() -> None:
+    """A failed fetch used to leave a blank panel with no way back.
+
+    The listing was hidden first, so a 404 or a dropped connection emptied the
+    page and rejected into nothing -- the Back control is built after the
+    await, so it did not exist yet.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+    start = next(i for i, line in enumerate(lines) if "async function openNote(" in line)
+    body = lines[start : start + 20]
+
+    fetch_at = next(i for i, line in enumerate(body) if 'await api("/notes/"' in line)
+    hide_at = next(i for i, line in enumerate(body) if '$("listing").classList.add' in line)
+
+    assert fetch_at < hide_at, (
+        "the note has to arrive before the listing goes away, or a failure "
+        "leaves the operator with neither"
+    )
+
+
+def test_the_open_handler_catches_its_own_rejection() -> None:
+    """`openNote` is async and this is its only caller."""
+
+    page = _page()
+
+    assert "openNote(row.note_id).catch(showError)" in page
+
