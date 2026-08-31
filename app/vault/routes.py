@@ -50,6 +50,7 @@ from .api_models import (
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
     VaultMetadataUpdateRequest,
+    VaultNoteListResponse,
     VaultReviewCaseResponse,
     VaultReviewDecisionRequest,
     VaultReviewDecisionResponse,
@@ -67,6 +68,7 @@ from .api_models import (
     compile_work_item,
     contribution_response,
     document_detail,
+    note_summary,
     review_case_summary,
     search_response,
 )
@@ -81,6 +83,7 @@ from .domain import (
 )
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError, EmbeddingInputTooLong
+from .facets import FACET_NAMES
 from .principal import (
     VaultAuthError,
     VaultQuotaExceeded,
@@ -89,7 +92,7 @@ from .principal import (
     resolve_credential,
 )
 from .rate_limit import enforce_preauth_ip_limit
-from .read_policy import READABLE_STATUSES
+from .read_policy import READABLE_PATH_PREFIXES, READABLE_STATUSES
 from .repository import VaultDocumentRepository, VaultOAuthGrantRepository
 from .service import (
     REQUEST_DIGEST_VERSION,
@@ -416,6 +419,129 @@ async def get_vault_document(
             detail="Note not found",
         )
     return document_detail(document)
+
+
+async def list_notes_quota(
+    credential: VaultCredential = Depends(require_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "list_notes")
+    return credential
+
+
+# The bound on one page. Fifty rows of fixed-size fields is a few tens of
+# kilobytes -- no bodies, no computed extracts -- so this needs no byte budget
+# of the kind `search_response` carries. It bounds the query, not the prose.
+MAX_NOTE_PAGE = 100
+DEFAULT_NOTE_PAGE = 50
+
+
+def _requested_facets(facet: list[str]) -> dict[str, list[str]]:
+    """Parse `facet=name:value` pairs into the filter the repository takes.
+
+    Repeating a name accumulates: `facet=project:hss&facet=project:b2` asks for
+    a note in both, because every filter here narrows. A caller wanting either
+    runs two requests -- an OR would need a syntax, and a listing that
+    sometimes widens when you add a term is worse than one that cannot.
+
+    Unknown names are refused rather than ignored. `FACET_NAMES` is closed
+    (facets.py), so `projects=hss` is a typo, and answering it with an
+    unfiltered page is answering a question nobody asked.
+    """
+
+    requested: dict[str, list[str]] = {}
+    for pair in facet:
+        name, separator, value = pair.partition(":")
+        if not separator or not name.strip() or not value.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"facet must be 'name:value'; got {pair!r}",
+            )
+        if name not in FACET_NAMES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"Unknown facet {name!r}. Known facets: "
+                    f"{', '.join(sorted(FACET_NAMES))}"
+                ),
+            )
+        requested.setdefault(name, []).append(value)
+    return requested
+
+
+@router.get(
+    "/notes",
+    response_model=VaultNoteListResponse,
+    dependencies=[Depends(list_notes_quota)],
+    summary="List notes by vault path, newest revision state, without bodies",
+)
+async def list_vault_documents(
+    path: str | None = Query(
+        default=None,
+        max_length=1024,
+        description=(
+            "Restrict to one vault path prefix, for example "
+            "'Human/03 Projects/'. Omitted lists everything the read policy "
+            "allows. A prefix outside that policy is not an error and returns "
+            "an empty page: what is readable is governance, not a permission "
+            "this endpoint decides."
+        ),
+    ),
+    tag: list[str] = Query(default=[], description="Every tag must be present."),
+    facet: list[str] = Query(
+        default=[],
+        description=(
+            "Facet filter as 'name:value', repeatable. Every one must match."
+        ),
+    ),
+    after: str | None = Query(
+        default=None,
+        max_length=1024,
+        description="The previous page's `next_cursor`, which is a vault_path.",
+    ),
+    limit: int = Query(default=DEFAULT_NOTE_PAGE, ge=1, le=MAX_NOTE_PAGE),
+) -> VaultNoteListResponse:
+    """Browse the corpus by where notes live rather than by what they match.
+
+    `/search` ranks and `/notes/{id}` fetches; between them there was no way to
+    *look around*, which is why reading the vault as a human meant exporting it
+    to somewhere else first (ADR 0039).
+
+    Ordered by `vault_path` and paged by keyset, because that is the corpus's
+    own order: a listing sorted by relevance to no query would be arbitrary,
+    and one sorted by time would scatter a folder across every page.
+
+    The read policy is applied in the query, not to the page: filtering
+    afterwards would return short pages and a cursor that skips whatever it
+    dropped.
+    """
+
+    prefixes = (path,) if path is not None else READABLE_PATH_PREFIXES
+    facets = _requested_facets(facet)
+
+    transactions = VaultTransactionService(get_vault_engine())
+    documents = VaultDocumentRepository()
+
+    async with transactions.transaction() as connection:
+        # One past the limit, so `has_more` is a fact rather than the guess a
+        # full page would license.
+        page = await documents.list_under_path_prefixes(
+            connection,
+            prefixes,
+            after_vault_path=after,
+            limit=limit + 1,
+            statuses=READABLE_STATUSES,
+            readable_only=True,
+            tags=tag,
+            facets=facets,
+        )
+
+    has_more = len(page) > limit
+    visible = page[:limit]
+    return VaultNoteListResponse(
+        notes=[note_summary(document) for document in visible],
+        has_more=has_more,
+        next_cursor=visible[-1].vault_path if has_more and visible else None,
+    )
 
 
 async def write_quota(

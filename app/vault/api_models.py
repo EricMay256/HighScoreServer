@@ -560,7 +560,6 @@ VaultAmendmentChange = Annotated[
     Field(discriminator="kind"),
 ]
 
-
 class VaultAmendmentProposalRequest(BaseModel):
     """An immutable change proposed against one document revision."""
 
@@ -1149,6 +1148,81 @@ class VaultSearchHit(BaseModel):
     )
 
 
+class VaultNoteSummary(BaseModel):
+    """One row of a browse listing: enough to choose a note, and no body.
+
+    The same discipline as ``VaultSearchHit`` -- what earns a field here is
+    *selection* value -- with one deliberate difference. ``vault_path`` was
+    removed from a search hit because a fused ranking is not a place; it is the
+    organising key of a listing, and a browse response without it would name
+    notes the caller cannot locate.
+
+    No snippet. A listing is read by someone who is already looking at a
+    folder, so the title and the path carry most of the meaning, and computing
+    an extract for every row of every page costs more than it tells. A note
+    with no summary is opened, not guessed at.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    title: str
+    vault_path: str = Field(
+        description=(
+            "Vault-root-relative posix path. Also the paging cursor: pass the "
+            "last one back as `after`."
+        )
+    )
+    kind: DocumentKind
+    status: DocumentStatus
+    doc_type: str | None = None
+    doc_status: str | None = None
+    summary: str | None = Field(
+        default=None,
+        description=(
+            "The note's authored precis, when it has one. Null is ordinary "
+            "rather than an error: not every note carries one."
+        ),
+    )
+    updated_at: datetime
+    content_revision: int = Field(
+        ge=1,
+        description=(
+            "Monotonic content version at the time of the listing. Amending a "
+            "note still requires fetching it first -- this is a staleness "
+            "hint, not a substitute for the fetched value."
+        ),
+    )
+
+
+class VaultNoteListResponse(BaseModel):
+    """One ordered page of notes, keyed and paged by ``vault_path``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    notes: list[VaultNoteSummary]
+    has_more: bool = Field(
+        default=False,
+        description=(
+            "Whether another page exists under the same filters. Determined by "
+            "reading one row past the limit, so it is a fact about the corpus "
+            "rather than a guess from a full page."
+        ),
+    )
+    next_cursor: str | None = Field(
+        default=None,
+        description=(
+            "The `vault_path` to pass as `after` for the next page, or null at "
+            "the end. Keyset rather than an offset, so rows inserted behind "
+            "the cursor cannot shift the walk. It is not a snapshot: "
+            "`vault_path` is mutable -- promotion moves a note on purpose -- "
+            "so a row that moves across the cursor between calls can be seen "
+            "twice or not at all. For browsing that is a refresh; for anything "
+            "that must be exact, read the export."
+        ),
+    )
+
+
 class VaultSearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1369,6 +1443,28 @@ def document_detail(document: VaultDocument) -> VaultDocumentDetail:
         source_ids=list(document.source_ids),
         source_url=document.source_url,
         created_at=document.created_at,
+        updated_at=document.updated_at,
+        content_revision=document.content_revision,
+    )
+
+
+def note_summary(document: VaultDocument) -> VaultNoteSummary:
+    """Project a document onto one browse row.
+
+    Beside ``document_detail`` and ``search_hit`` rather than inside the
+    router, for the reason they are: a projection written at a transport is a
+    projection that drifts from the other transports.
+    """
+
+    return VaultNoteSummary(
+        note_id=document.id,
+        title=document.title,
+        vault_path=document.vault_path,
+        kind=document.kind,
+        status=document.status,
+        doc_type=document.doc_type,
+        doc_status=document.doc_status,
+        summary=document.summary,
         updated_at=document.updated_at,
         content_revision=document.content_revision,
     )

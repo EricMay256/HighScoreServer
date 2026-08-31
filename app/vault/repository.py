@@ -7,7 +7,8 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, insert, or_, select, text, update
+from sqlalchemy import Text, cast, delete, func, insert, or_, select, text, update
+from sqlalchemy.dialects.postgresql import ARRAY as PostgresArray
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -543,6 +544,10 @@ class VaultDocumentRepository:
         prefixes: Sequence[str],
         after_vault_path: str | None = None,
         limit: int = 200,
+        statuses: Sequence[DocumentStatus] | None = None,
+        readable_only: bool = False,
+        tags: Sequence[str] = (),
+        facets: Mapping[str, Sequence[str]] | None = None,
     ) -> tuple[VaultDocument, ...]:
         """One ordered page of the documents living under any of ``prefixes``.
 
@@ -558,10 +563,23 @@ class VaultDocumentRepository:
         that is the caller reading every page in one REPEATABLE READ
         transaction, which is what `VaultExportService.documents` does.
 
-        Unfiltered by status and by ``ai_read``, for the reason ``get_by_id``
-        gives: which rows a surface may see is that surface's policy. The
-        projection this serves writes files for a human, not answers for an
-        agent.
+        Unfiltered by status and by ``ai_read`` **by default**, for the reason
+        ``get_by_id`` gives: which rows a surface may see is that surface's
+        policy. The projection this method was written for writes files for a
+        human, not answers for an agent, and passing nothing keeps exactly that
+        behaviour.
+
+        ``statuses`` and ``readable_only`` are the same two knobs ``get_by_id``
+        carries, spelled the same way, so a surface applies its policy here
+        rather than filtering a page after the fact -- which would return short
+        pages and a cursor that skips.
+
+        ``tags`` and ``facets`` narrow rather than order, and both are
+        conjunctive: every tag must be present, and every named facet must
+        carry every value asked of it. Both compile to containment (``@>``),
+        which is what ``idx_vault_documents_tags`` and
+        ``idx_vault_documents_facets`` index -- the latter under
+        ``jsonb_path_ops``, which supports containment and nothing else.
         """
 
         if not prefixes:
@@ -585,6 +603,33 @@ class VaultDocumentRepository:
         if after_vault_path is not None:
             statement = statement.where(
                 vault_documents.c.vault_path > after_vault_path
+            )
+        if statuses is not None:
+            statement = statement.where(
+                vault_documents.c.status.in_([status.value for status in statuses])
+            )
+        if readable_only:
+            statement = statement.where(readable_path_predicate())
+        if tags:
+            # `@>` spelled out because `tags` is declared with the generic
+            # `ARRAY` type, whose `.contains()` raises rather than guessing at
+            # a dialect. The cast is what tells Postgres the bound list is
+            # text[]; the operator is the one `idx_vault_documents_tags`
+            # serves.
+            statement = statement.where(
+                vault_documents.c.tags.op("@>", is_comparison=True)(
+                    cast(list(dict.fromkeys(tags)), PostgresArray(Text))
+                )
+            )
+        for name, values in (facets or {}).items():
+            # One containment test per facet name rather than one over the
+            # whole map: `{"project": [...], "area": [...]}` as a single `@>`
+            # would also mean "all of these", but building it per name keeps
+            # an empty value list from silently matching everything.
+            if not values:
+                continue
+            statement = statement.where(
+                vault_documents.c.facets.contains({name: list(values)})
             )
         result = await connection.execute(statement)
         return tuple(document_from_row(row) for row in result.mappings())

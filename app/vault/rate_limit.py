@@ -85,6 +85,10 @@ LIMITS: dict[str, Limit] = {
     "authorization": Limit(per_minute=60, burst=20),
     "search": Limit(per_minute=30, burst=10),
     "get_note": Limit(per_minute=120, burst=30),
+    # Browsing is a human walking a folder tree: several pages in a row, then a
+    # pause. Priced between search and get_note -- one indexed query with no
+    # embedding call, but a page of rows rather than one.
+    "list_notes": Limit(per_minute=60, burst=20),
     "contribute": Limit(per_minute=30, burst=20),
     # Proposals persist untrusted workflow state but do not embed or mutate the
     # corpus. A distinct bucket matches the distinct OAuth capability.

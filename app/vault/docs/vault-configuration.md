@@ -1229,10 +1229,21 @@ export VAULT_API_TOKEN='hssv1_<credential-id>_<secret>'
 Never on a command line: argv is readable by every process on the host. Never in
 a file the agent writes, and never printed.
 
-Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
+Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes`,
+`GET /api/v1/vault/notes/{id}`,
 `POST /api/v1/vault/contributions`, `PUT /api/v1/vault/notes/{id}`, and
 `DELETE /api/v1/vault/notes/{id}`, plus the amendment workflow below. All take
 `Authorization: Bearer <token>`.
+
+`GET /api/v1/vault/notes` lists notes by `vault_path` for browsing, without
+their bodies: `path` restricts to one prefix, `tag` and `facet` (`name:value`,
+repeatable) narrow conjunctively, and `after` takes the previous page's
+`next_cursor`. It applies the same read policy as `GET /notes/{id}` — flagged
+notes and paths outside `READABLE_PATH_PREFIXES` are absent, and a prefix
+outside that policy returns an empty page rather than an error. Ordered by path
+because that is the corpus's own order; the cursor is keyset, so rows inserted
+behind it cannot shift the walk, but `vault_path` is mutable and a note that
+moves across the cursor between calls can be seen twice or not at all.
 
 `GET /api/v1/vault/authorization` describes the presented credential —
 `credential_id`, `principal_id`, `scopes`, and the authorization's `label`. It
