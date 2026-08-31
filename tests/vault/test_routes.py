@@ -690,32 +690,19 @@ def _oauth_family(credential_id: str, *, label: str | None) -> None:
                 )
             )
 
-    async def unseed() -> None:
-        async with service.transaction() as connection:
-            await connection.execute(
-                sql_delete(vault_oauth_refresh_tokens).where(
-                    vault_oauth_refresh_tokens.c.client_id == client_id
-                )
-            )
-            await connection.execute(
-                sql_delete(vault_oauth_grants).where(
-                    vault_oauth_grants.c.client_id == client_id
-                )
-            )
-            await connection.execute(
-                sql_delete(vault_oauth_clients).where(
-                    vault_oauth_clients.c.client_id == client_id
-                )
-            )
-
     try:
         asyncio.run(seed())
     finally:
         asyncio.run(engine.dispose())
-    _FAMILY_CLEANUP.append(unseed)
+    _SEEDED_FAMILIES.append(client_id)
 
 
-_FAMILY_CLEANUP: list = []
+# What was wired up, not how to remove it. Queuing closures here bound each one
+# to the engine that seeded it -- an engine disposed on the line above -- while
+# the fixture built a second engine per queued item and disposed that one
+# instead. Ids and one engine: the engine that does the deleting is the engine
+# that gets disposed.
+_SEEDED_FAMILIES: list[str] = []
 
 
 @pytest.fixture(autouse=True)
@@ -723,13 +710,30 @@ def drop_seeded_families():
     """Remove any OAuth family a test wired up, whatever it asserted."""
 
     yield
-    while _FAMILY_CLEANUP:
-        remove = _FAMILY_CLEANUP.pop()
-        service, engine = vault_service()
-        try:
-            asyncio.run(remove())
-        finally:
-            asyncio.run(engine.dispose())
+    if not _SEEDED_FAMILIES:
+        return
+
+    client_ids = list(_SEEDED_FAMILIES)
+    _SEEDED_FAMILIES.clear()
+    service, engine = vault_service()
+
+    async def remove() -> None:
+        async with service.transaction() as connection:
+            # Refresh tokens first: they reference the grant, which references
+            # the client.
+            for table in (
+                vault_oauth_refresh_tokens,
+                vault_oauth_grants,
+                vault_oauth_clients,
+            ):
+                await connection.execute(
+                    sql_delete(table).where(table.c.client_id.in_(client_ids))
+                )
+
+    try:
+        asyncio.run(remove())
+    finally:
+        asyncio.run(engine.dispose())
 
 
 def test_authorization_requires_a_credential(client: TestClient) -> None:
