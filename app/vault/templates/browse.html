@@ -10,7 +10,8 @@
 /* Browsing only, from here down. */
 .crumbs { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
 .crumbs .sep { color: var(--muted); }
-.filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.filters { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: end; margin-bottom: 1rem; }
+.field { display: flex; flex-direction: column; gap: 0.15rem; }
 textarea {
   font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.86rem; width: 100%; color: var(--ink); background: var(--bg);
@@ -44,8 +45,18 @@ textarea {
   <div id="app" class="hidden">
     <div id="crumbs" class="crumbs"></div>
     <div class="filters">
-      <input id="filter-tag" placeholder="tag" size="14">
-      <input id="filter-facet" placeholder="facet, e.g. project:hss" size="24">
+      <!-- Labelled, not merely placeheld. A placeholder is not an accessible
+           name, and it disappears exactly when the field has content -- so the
+           one moment a reader most needs to know what "hss" is filtering is
+           the moment the hint is gone. -->
+      <label class="field" for="filter-tag">
+        <span class="small muted">Tag</span>
+        <input id="filter-tag" placeholder="hss" size="14">
+      </label>
+      <label class="field" for="filter-facet">
+        <span class="small muted">Facet</span>
+        <input id="filter-facet" placeholder="project:hss" size="24">
+      </label>
       <button id="apply-filters">Filter</button>
       <button id="clear-filters">Clear</button>
     </div>

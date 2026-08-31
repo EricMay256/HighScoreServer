@@ -329,3 +329,14 @@ def test_a_folder_is_not_listed_twice() -> None:
     assert "FOLDERS.includes(folder)" in page
     assert "FOLDERS = []" in page, "a fresh listing starts with no folders shown"
 
+
+def test_the_filter_fields_carry_labels_rather_than_only_placeholders() -> None:
+    """A placeholder is not an accessible name, and it vanishes when the field
+    has content -- so the moment a reader most needs to know what a value is
+    filtering is the moment the hint disappears."""
+
+    page = _page()
+
+    assert '<label class="field" for="filter-tag">' in page
+    assert '<label class="field" for="filter-facet">' in page
+
