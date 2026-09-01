@@ -202,6 +202,89 @@ def test_proposal_submission_has_its_own_scope(
         _cleanup()
 
 
+def test_batch_review_settles_independent_decisions_in_one_request(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """One refused item must not roll back the successful items beside it."""
+
+    proposer, reviewer, _ = tokens
+    accepted_note = _seed_note()
+    rejected_note = _seed_note()
+    missing_proposal_id = str(uuid4())
+    try:
+        proposal_ids: list[str] = []
+        for note_id, facet in (
+            (accepted_note, "accepted-in-batch"),
+            (rejected_note, "rejected-in-batch"),
+        ):
+            submitted = client.post(
+                "/api/v1/vault/amendment-proposals",
+                headers=_headers(proposer),
+                json={
+                    "target_note_id": note_id,
+                    "base_revision": 1,
+                    "change": {
+                        "kind": "metadata",
+                        "facets": {"project": [facet]},
+                    },
+                    "rationale": "Exercise the bounded batch decision route.",
+                },
+            )
+            assert submitted.status_code == 200, submitted.text
+            proposal_ids.append(submitted.json()["proposal"]["proposal_id"])
+
+        response = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers=_headers(reviewer),
+            json={
+                "decisions": [
+                    {"proposal_id": proposal_ids[0], "decision": "accepted"},
+                    {"proposal_id": proposal_ids[1], "decision": "rejected"},
+                    {"proposal_id": missing_proposal_id, "decision": "accepted"},
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["decided"] == 2
+        assert payload["refused"] == 1
+        by_id = {item["proposal_id"]: item for item in payload["results"]}
+        assert by_id[proposal_ids[0]]["outcome"] == "accepted"
+        assert by_id[proposal_ids[1]]["outcome"] == "rejected"
+        assert by_id[missing_proposal_id] == {
+            "proposal_id": missing_proposal_id,
+            "outcome": None,
+            "status_code": 404,
+            "detail": "Amendment proposal not found",
+        }
+    finally:
+        _cleanup()
+
+
+def test_batch_review_refuses_duplicate_proposal_ids(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    _, reviewer, _ = tokens
+    proposal_id = str(uuid4())
+
+    response = client.post(
+        "/api/v1/vault/amendment-proposals/batch-decisions",
+        headers=_headers(reviewer),
+        json={
+            "decisions": [
+                {"proposal_id": proposal_id, "decision": "accepted"},
+                {"proposal_id": proposal_id, "decision": "rejected"},
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "proposal_id values must be unique" in response.text
+
+
 def test_review_accepts_exact_replacement_and_increments_revision(
     client: TestClient,
     tokens: tuple[str, str, str],

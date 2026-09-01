@@ -51,6 +51,15 @@ CONSOLE_HEADERS: dict[str, str] = {
 }
 
 
+def vault_page(template: str, **context: object) -> HTMLResponse:
+    """Render any first-party vault page with the shared browser policy."""
+
+    return HTMLResponse(
+        render(template, **context),
+        headers=CONSOLE_HEADERS,
+    )
+
+
 def console_page(
     template: str,
     *,
@@ -68,14 +77,11 @@ def console_page(
     storage key, which fails at sign-in rather than at render.
     """
 
-    return HTMLResponse(
-        render(
-            template,
-            api_base=API_BASE,
-            scopes=scopes,
-            console_path=console_path,
-            client_name=client_name,
-            store_prefix=store_prefix,
-        ),
-        headers=CONSOLE_HEADERS,
+    return vault_page(
+        template,
+        api_base=API_BASE,
+        scopes=scopes,
+        console_path=console_path,
+        client_name=client_name,
+        store_prefix=store_prefix,
     )

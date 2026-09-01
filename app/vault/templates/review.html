@@ -25,14 +25,10 @@ label.check { display: flex; gap: 0.4rem; align-items: center; font-size: 0.88re
 </style>
 </head>
 <body>
-<header>
-  <h1>Vault review</h1>
-  <span id="who" class="muted small"></span>
-  <span class="grow"></span>
-  <button id="refresh" class="hidden">Refresh</button>
-  <button id="signin" class="primary hidden">Sign in</button>
-  <button id="signout" class="hidden">Sign out</button>
-</header>
+{% set vault_page = "review" %}
+{% set vault_title = "Review" %}
+{% set vault_session_controls = true %}
+{% include "_vault_header.html" %}
 <main>
   <div id="messages"></div>
   <div id="app" class="hidden">
@@ -269,26 +265,33 @@ function proposalCard(summary, preview) {
     accept.disabled = reject.disabled = true;
   }
 
-  /* Returns whether the decision applied. The bulk loop counts on this: an
-     exception swallowed here once made every refusal look like a success. */
+  const decisionPayload = (decision) => ({
+    decision, decision_note: note.value || null,
+    acknowledge_removals: ack ? ack.checked : false,
+  });
+  const renderDecision = (outcome) => {
+    card.replaceChildren(el("div", "row small muted", "✓ " + outcome + " — " + titleSlot.textContent));
+  };
+  const renderRefusal = (message) => {
+    accept.disabled = reject.disabled = false;
+    detailSlot.appendChild(el("p", "small dangling", "Refused: " + message));
+  };
+
+  /* Returns whether the decision applied. Individual buttons keep their
+     original endpoint; only the explicit bulk action uses the batch route. */
   const decide = async (decision) => {
     if (!loaded) return false;
     accept.disabled = reject.disabled = true;
-    const title = titleSlot.textContent;
     try {
       const out = await api("/amendment-proposals/" + summary.proposal_id + "/decision", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          decision, decision_note: note.value || null,
-          acknowledge_removals: ack ? ack.checked : false,
-        }),
+        body: JSON.stringify(decisionPayload(decision)),
       });
-      card.replaceChildren(el("div", "row small muted", "✓ " + out.outcome + " — " + title));
+      renderDecision(out.outcome);
       return true;
     } catch (err) {
       if (err.sessionEnded) return false;
-      accept.disabled = reject.disabled = false;
-      detailSlot.appendChild(el("p", "small dangling", "Refused: " + err.message));
+      renderRefusal(err.message);
       return false;
     }
   };
@@ -296,6 +299,13 @@ function proposalCard(summary, preview) {
   reject.onclick = () => decide("rejected");
   card.decide = decide;
   card.checkbox = check;
+  card.batchDecision = () => ({
+    proposal_id: summary.proposal_id,
+    ...decisionPayload("accepted"),
+  });
+  card.setDecisionPending = () => { accept.disabled = reject.disabled = true; };
+  card.renderDecision = renderDecision;
+  card.renderRefusal = renderRefusal;
   return card;
 }
 
@@ -342,14 +352,36 @@ async function renderProposals() {
   };
   acceptSelected.onclick = async () => {
     const chosen = cards.filter((c) => c.checkbox && c.checkbox.checked && !c.checkbox.disabled);
+    if (!chosen.length) return;
     acceptSelected.disabled = selectAll.disabled = true;
-    let attempted = 0, accepted = 0, failed = 0;
-    for (const c of chosen) {
-      status.textContent = "deciding " + (++attempted) + " of " + chosen.length + "…";
-      if (await c.decide("accepted")) accepted++; else failed++;
-      /* Stop rather than 401 once per remaining card: the session is gone and
-         every further attempt would end it again and repaint. */
-      if (!TOKEN) break;
+    for (const c of chosen) c.setDecisionPending();
+    status.textContent = "deciding " + chosen.length + "…";
+    let accepted = 0, failed = 0;
+    try {
+      const out = await api("/amendment-proposals/batch-decisions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decisions: chosen.map((c) => c.batchDecision()) }),
+      });
+      const byId = {};
+      for (const result of (out.results || [])) byId[result.proposal_id] = result;
+      for (const c of chosen) {
+        const result = byId[c.dataset.proposalId];
+        if (result && result.outcome) {
+          c.renderDecision(result.outcome);
+          accepted++;
+        } else {
+          const detail = result && result.detail;
+          const reason = typeof detail === "string" ? detail
+            : detail && detail.message ? detail.message
+            : detail ? JSON.stringify(detail) : "No result returned for this proposal";
+          c.renderRefusal(reason);
+          failed++;
+        }
+      }
+    } catch (err) {
+      if (err.sessionEnded) return;
+      for (const c of chosen) c.renderRefusal(err.message);
+      failed = chosen.length;
     }
     /* Counted separately because a refused decision leaves its card in place
        with the reason on it. Reporting the attempt count as the accepted count

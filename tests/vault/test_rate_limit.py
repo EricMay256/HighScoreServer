@@ -185,6 +185,12 @@ def test_the_contribute_limit_diverges_from_the_spec_on_purpose() -> None:
     assert LIMITS["contribute"] == Limit(per_minute=30, burst=20)
 
 
+def test_batch_amendment_decisions_have_one_request_of_headroom() -> None:
+    """The request batches items; its bucket must not also invite a request loop."""
+
+    assert LIMITS["amendment_decide_batch"] == Limit(per_minute=1, burst=1)
+
+
 def test_the_snapshot_limit_is_two_per_hour() -> None:
     # Expressed per-minute for one refill rule, so it is worth asserting the
     # spec's hourly figure survives the conversion.

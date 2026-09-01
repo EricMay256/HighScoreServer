@@ -116,6 +116,11 @@ LIMITS: dict[str, Limit] = {
     "amendment_list": Limit(per_minute=60, burst=20),
     "amendment_read": Limit(per_minute=60, burst=20),
     "amendment_decide": Limit(per_minute=10, burst=5),
+    # One explicit operator action may settle up to fifty independently
+    # reviewed proposals. A separate one-request burst prevents the browser
+    # from spending the single-item bucket once per selected card, while the
+    # one-per-minute sustained rate bounds repeated bulk mutations.
+    "amendment_decide_batch": Limit(per_minute=1, burst=1),
     # Compilation is a librarian loop: one plan, a burst of pages, one finish.
     # Planning is deliberately tight -- it opens a run row every time, and a
     # loop that plans without finishing accumulates `running` runs nobody

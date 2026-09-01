@@ -1031,6 +1031,7 @@ bucket. Exceeding one returns `429` with `Retry-After` in whole seconds.
 | `amendment_list` | 60/min | 20 |
 | `amendment_read` | 60/min | 20 |
 | `amendment_decide` | 10/min | 5 |
+| `amendment_decide_batch` | 1/min | 1 |
 | `update` | 30/min | 20 |
 | `retire` | 10/min | 5 |
 | `review_list` | 60/min | 20 |
@@ -1042,7 +1043,9 @@ bucket. Exceeding one returns `429` with `Retry-After` in whole seconds.
 | `snapshot` | 2/hour | 1 |
 
 `retire`, `review_decide`, and `amendment_decide` have tight decision buckets because they
-destroy, publish, or replace corpus content. `compile_plan` is tighter still in sustained rate
+destroy, publish, or replace corpus content. `amendment_decide_batch` admits one bounded batch
+of at most 50 independently settled proposals per minute so the review console does not spend
+one quota token per selected card. `compile_plan` is tighter still in sustained rate
 because every abandoned plan leaves a running workflow row; page writes retain batch headroom.
 
 The **pre-auth guard** is IP-keyed and charged *before* the credential is looked

@@ -30,6 +30,9 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api_models import (
+    VaultAmendmentBatchDecisionRequest,
+    VaultAmendmentBatchDecisionResponse,
+    VaultAmendmentBatchDecisionResult,
     VaultAmendmentDecisionRequest,
     VaultAmendmentDecisionResponse,
     VaultAmendmentProposalDetail,
@@ -1208,6 +1211,13 @@ async def amendment_decide_quota(
     return credential
 
 
+async def amendment_batch_decide_quota(
+    credential: VaultCredential = Depends(require_review_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "amendment_decide_batch")
+    return credential
+
+
 def _review_service() -> VaultReviewService:
     return VaultReviewService(VaultTransactionService(get_vault_engine()))
 
@@ -1361,6 +1371,128 @@ async def read_amendment_proposal(proposal_id: UUID) -> VaultAmendmentProposalDe
     )
 
 
+def _amendment_decision_error(exc: Exception) -> HTTPException:
+    """Map one service refusal onto the shared HTTP contract."""
+
+    if isinstance(exc, AmendmentProposalNotFound):
+        return HTTPException(status_code=404, detail="Amendment proposal not found")
+    if isinstance(exc, AmendmentProposalAlreadyDecided):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Amendment proposal has already been decided",
+        )
+    if isinstance(exc, AmendmentRemovalAcknowledgementRequired):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    if isinstance(exc, UpdateWouldDuplicate):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(exc),
+                "similars": [
+                    {"note_id": item.note_id, "title": item.title, "score": item.score}
+                    for item in exc.similars
+                ],
+            },
+        )
+    if isinstance(exc, DedupUnavailable):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Amendment acceptance is unavailable: no embedding provider configured",
+        )
+    if isinstance(exc, EmbeddingInputTooLong):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Document exceeds the embedding model input limit",
+        )
+    if isinstance(exc, EmbeddingError):
+        logger.error(
+            "Vault amendment failed to embed",
+            extra={"error_type": type(exc).__name__},
+        )
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Amendment acceptance is temporarily unavailable",
+        )
+    if isinstance(exc, ValueError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        )
+    raise TypeError(f"Unhandled amendment decision error: {type(exc).__name__}")
+
+
+_AMENDMENT_DECISION_ERRORS = (
+    AmendmentProposalNotFound,
+    AmendmentProposalAlreadyDecided,
+    AmendmentRemovalAcknowledgementRequired,
+    UpdateWouldDuplicate,
+    DedupUnavailable,
+    EmbeddingInputTooLong,
+    EmbeddingError,
+    ValueError,
+)
+
+
+@router.post(
+    "/amendment-proposals/batch-decisions",
+    response_model=VaultAmendmentBatchDecisionResponse,
+    summary="Accept or reject a bounded batch of amendment proposals",
+)
+async def decide_amendment_proposal_batch(
+    body: VaultAmendmentBatchDecisionRequest,
+    request: Request,
+    credential: VaultCredential = Depends(amendment_batch_decide_quota),
+) -> VaultAmendmentBatchDecisionResponse:
+    """Settle up to fifty proposals without one quota charge per card.
+
+    Items are independent. Each decision keeps its own transaction and audit
+    event, so a stale, invalid, or concurrently settled proposal is reported
+    beside successful decisions instead of rolling the whole operator action
+    back. The compact response omits target bodies; the console already has the
+    reviewed previews and only needs each outcome.
+    """
+
+    service = _amendment_service()
+    request_id = request.headers.get("X-Request-Id") or uuid4().hex
+    results: list[VaultAmendmentBatchDecisionResult] = []
+
+    for index, item in enumerate(body.decisions):
+        try:
+            outcome = await service.decide(
+                AmendmentDecisionRequest(
+                    proposal_id=item.proposal_id,
+                    state=AmendmentProposalState(item.decision),
+                    principal_id=credential.principal_id,
+                    request_id=f"{request_id}:{index}",
+                    decision_note=item.decision_note,
+                    acknowledge_removals=item.acknowledge_removals,
+                )
+            )
+            results.append(
+                VaultAmendmentBatchDecisionResult(
+                    proposal_id=item.proposal_id,
+                    outcome=outcome.outcome,
+                    status_code=status.HTTP_200_OK,
+                )
+            )
+        except _AMENDMENT_DECISION_ERRORS as exc:
+            problem = _amendment_decision_error(exc)
+            results.append(
+                VaultAmendmentBatchDecisionResult(
+                    proposal_id=item.proposal_id,
+                    status_code=problem.status_code,
+                    detail=problem.detail,
+                )
+            )
+
+    decided = sum(item.outcome is not None for item in results)
+    return VaultAmendmentBatchDecisionResponse(
+        results=results,
+        decided=decided,
+        refused=len(results) - decided,
+    )
+
+
 @router.post(
     "/amendment-proposals/{proposal_id}/decision",
     response_model=VaultAmendmentDecisionResponse,
@@ -1383,53 +1515,8 @@ async def decide_amendment_proposal(
                 acknowledge_removals=body.acknowledge_removals,
             )
         )
-    except AmendmentProposalNotFound as exc:
-        raise HTTPException(status_code=404, detail="Amendment proposal not found") from exc
-    except AmendmentProposalAlreadyDecided as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Amendment proposal has already been decided",
-        ) from exc
-    except AmendmentRemovalAcknowledgementRequired as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        ) from exc
-    except UpdateWouldDuplicate as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": str(exc),
-                "similars": [
-                    {"note_id": item.note_id, "title": item.title, "score": item.score}
-                    for item in exc.similars
-                ],
-            },
-        ) from exc
-    except DedupUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Amendment acceptance is unavailable: no embedding provider configured",
-        ) from exc
-    except EmbeddingInputTooLong as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Document exceeds the embedding model input limit",
-        ) from exc
-    except EmbeddingError as exc:
-        logger.error(
-            "Vault amendment failed to embed",
-            extra={"error_type": type(exc).__name__},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Amendment acceptance is temporarily unavailable",
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(exc),
-        ) from exc
+    except _AMENDMENT_DECISION_ERRORS as exc:
+        raise _amendment_decision_error(exc) from exc
 
     return VaultAmendmentDecisionResponse(
         proposal=amendment_proposal_summary(outcome.proposal),

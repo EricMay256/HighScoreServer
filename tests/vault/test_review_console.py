@@ -224,6 +224,16 @@ def test_bulk_acceptance_counts_refusals_separately() -> None:
     assert "accepted++" in page and "failed++" in page
 
 
+def test_bulk_acceptance_uses_one_bounded_batch_request() -> None:
+    """Selecting many cards must not spend the single-item quota per card."""
+
+    page = _page()
+
+    assert 'api("/amendment-proposals/batch-decisions"' in page
+    assert "decisions: chosen.map" in page
+    assert 'c.decide("accepted")' not in page
+
+
 def test_an_ended_session_repaints_the_sign_in_controls() -> None:
     """Clearing the token without repainting strands the operator.
 
@@ -376,12 +386,13 @@ def test_the_session_ended_marker_is_actually_consumed() -> None:
     )
 
 
-def test_a_bulk_run_stops_when_the_session_ends() -> None:
-    """Otherwise every remaining card 401s, ends the session again, repaints."""
+def test_a_bulk_run_is_one_request_and_propagates_session_expiry() -> None:
+    """One expired batch must repaint once, with no per-card request loop."""
 
     page = _page()
 
-    assert "if (!TOKEN) break;" in page
+    assert 'api("/amendment-proposals/batch-decisions"' in page
+    assert "if (err.sessionEnded) return;" in page
 
 
 def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:
