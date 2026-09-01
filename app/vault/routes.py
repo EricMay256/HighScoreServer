@@ -1480,7 +1480,17 @@ async def decide_amendment_proposal_batch(
                 )
             )
         elif isinstance(outcome, Exception):
-            raise outcome
+            logger.error(
+                "Unexpected vault batch amendment decision failure",
+                extra={"error_type": type(outcome).__name__},
+            )
+            results.append(
+                VaultAmendmentBatchDecisionResult(
+                    proposal_id=item.proposal_id,
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Amendment decision failed unexpectedly",
+                )
+            )
         else:
             results.append(
                 VaultAmendmentBatchDecisionResult(

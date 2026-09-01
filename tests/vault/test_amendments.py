@@ -311,6 +311,48 @@ def test_batch_review_refuses_duplicate_proposal_ids(
     assert "proposal_id values must be unique" in response.text
 
 
+def test_batch_review_reports_an_unexpected_failure_per_item(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One internal failure must not discard other independently settled items."""
+
+    _, reviewer, _ = tokens
+    proposal_id = str(uuid4())
+
+    class UnexpectedFailureService:
+        async def decide_batch(
+            self, requests: tuple[object, ...]
+        ) -> tuple[RuntimeError, ...]:
+            assert len(requests) == 1
+            return (RuntimeError("database driver detail must not reach clients"),)
+
+    monkeypatch.setattr(
+        "app.vault.routes._amendment_service", lambda: UnexpectedFailureService()
+    )
+
+    response = client.post(
+        "/api/v1/vault/amendment-proposals/batch-decisions",
+        headers=_headers(reviewer),
+        json={"decisions": [{"proposal_id": proposal_id, "decision": "accepted"}]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "results": [
+            {
+                "proposal_id": proposal_id,
+                "outcome": None,
+                "status_code": 500,
+                "detail": "Amendment decision failed unexpectedly",
+            }
+        ],
+        "decided": 0,
+        "refused": 1,
+    }
+
+
 def test_batch_review_refuses_content_acceptance_without_blocking_metadata(
     client: TestClient,
     tokens: tuple[str, str, str],

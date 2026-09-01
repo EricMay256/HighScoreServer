@@ -142,6 +142,7 @@ function proposalCard(summary, preview) {
   const check = document.createElement("input");
   check.type = "checkbox";
   check.className = "select";
+  check.disabled = summary.change_kind !== "metadata";
   head.appendChild(check);
   head.appendChild(el("span", "kind", summary.change_kind));
   const titleSlot = el("span", "title grow", summary.target_note_id.slice(0, 8) + "…");
