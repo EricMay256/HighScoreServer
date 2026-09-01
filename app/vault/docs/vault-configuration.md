@@ -1300,6 +1300,17 @@ which would otherwise read `oauth-<uuid4>`.
 | `GET /api/v1/vault/amendment-proposals` | `vault:review` | List pending proposals without their change bodies |
 | `GET /api/v1/vault/amendment-proposals/{proposal_id}` | `vault:review` | Read the stored change, current target, and materialized preview |
 | `POST /api/v1/vault/amendment-proposals/{proposal_id}/decision` | `vault:review` | Accept or reject the exact stored change |
+| `POST /api/v1/vault/amendment-proposals/batch-decisions` | `vault:review` | Settle 1–50 distinct proposals independently |
+
+`POST /api/v1/vault/amendment-proposals/batch-decisions` accepts
+`{"decisions":[{"proposal_id":"...","decision":"accepted"}, ...]}`. Each item has the
+same optional `decision_note` and `acknowledge_removals` fields as the single-decision route.
+The response is always an ordered result per requested proposal, with `outcome` (`accepted`,
+`rejected`, or `stale`) and status 200 for a settled item, or an item-local HTTP-style
+`status_code` and `detail` when it could not be settled. One refused, stale, or permanently
+oversized amendment never rolls back or suppresses the other results. Content amendments share
+one embedding request where possible; a permanent embedding input-limit failure is isolated to
+the responsible item. The route is limited to one batch per principal per minute.
 
 An amendment request carries a discriminated `change`. Use
 `{"kind":"body_diff","body_diff":"..."}` for a compact unified diff against the body.

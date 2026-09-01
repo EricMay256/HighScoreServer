@@ -1,5 +1,6 @@
 """Application-service transaction boundary for vault use cases."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -48,6 +49,7 @@ from .embedding_text import assemble_embedding_text, embedding_text_digest
 from .embeddings import (
     EmbeddingError,
     EmbeddingInputKind,
+    EmbeddingInputTooLong,
     EmbeddingProvider,
     EmbeddingUnavailable,
     EmbeddingVector,
@@ -2079,28 +2081,18 @@ class VaultAmendmentService:
                 for index, _, _ in embeddings:
                     outcomes[index] = provider_error
             else:
-                try:
-                    vectors = await self._provider.embed(
-                        [text for _, _, text in embeddings],
-                        EmbeddingInputKind.DOCUMENT,
-                    )
-                    if len(vectors) != len(embeddings):
-                        raise EmbeddingUnavailable(
-                            "Embedding provider returned an unexpected vector count"
+                for index, request, result in await self._embed_batch_with_isolation(
+                    embeddings
+                ):
+                    if isinstance(result, Exception):
+                        outcomes[index] = result
+                        continue
+                    try:
+                        outcomes[index] = await self._accept(
+                            request, prepared_vector=result
                         )
-                except Exception as exc:
-                    for index, _, _ in embeddings:
+                    except Exception as exc:
                         outcomes[index] = exc
-                else:
-                    for (index, request, _), vector in zip(
-                        embeddings, vectors, strict=True
-                    ):
-                        try:
-                            outcomes[index] = await self._accept(
-                                request, prepared_vector=vector
-                            )
-                        except Exception as exc:
-                            outcomes[index] = exc
 
         if any(outcome is None for outcome in outcomes):
             raise AssertionError("every batch decision must have an outcome")
@@ -2162,6 +2154,50 @@ class VaultAmendmentService:
         ):
             return None
         return embedding_text
+
+    async def _embed_batch_with_isolation(
+        self,
+        embeddings: Sequence[tuple[int, AmendmentDecisionRequest, str]],
+    ) -> tuple[
+        tuple[int, AmendmentDecisionRequest, EmbeddingVector | Exception], ...
+    ]:
+        """Embed one group, splitting only permanent context-limit failures.
+
+        A token-total limit can reject a group whose individual documents are
+        all valid. Bisecting on ``EmbeddingInputTooLong`` discovers that case
+        and leaves only an individually oversized document with the 422,
+        while transport and rate-limit failures remain shared temporary errors.
+        """
+
+        if self._provider is None:
+            raise AssertionError("only configured providers reach batch embedding")
+
+        try:
+            vectors = await self._provider.embed(
+                [text for _, _, text in embeddings],
+                EmbeddingInputKind.DOCUMENT,
+            )
+            if len(vectors) != len(embeddings):
+                raise EmbeddingUnavailable(
+                    "Embedding provider returned an unexpected vector count"
+                )
+        except EmbeddingInputTooLong as exc:
+            if len(embeddings) == 1:
+                index, request, _ = embeddings[0]
+                return ((index, request, exc),)
+            midpoint = len(embeddings) // 2
+            left, right = await asyncio.gather(
+                self._embed_batch_with_isolation(embeddings[:midpoint]),
+                self._embed_batch_with_isolation(embeddings[midpoint:]),
+            )
+            return left + right
+        except Exception as exc:
+            return tuple((index, request, exc) for index, request, _ in embeddings)
+
+        return tuple(
+            (index, request, vector)
+            for (index, request, _), vector in zip(embeddings, vectors, strict=True)
+        )
 
     async def _reject(
         self, request: AmendmentDecisionRequest
