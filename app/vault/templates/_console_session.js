@@ -165,6 +165,10 @@ let PENDING_ERROR = null;
    it is one cheap request to re-ask, and a stale name in localStorage would
    outlive the session it described. */
 let IDENTITY = null;
+/* One authorization attempt owns registration and PKCE state at a time. The
+   promise is shared by every caller so a second trigger cannot overwrite the
+   verifier/state pair while the first redirect is being prepared. */
+let SIGN_IN_ATTEMPT = null;
 
 
 async function metadata() {
@@ -209,7 +213,7 @@ async function clientId() {
   return id;
 }
 
-async function signIn() {
+async function startSignIn() {
   const m = await metadata();
   const id = await clientId();
   const verifier = randomString();
@@ -226,6 +230,19 @@ async function signIn() {
   url.searchParams.set("code_challenge", b64url(digest));
   url.searchParams.set("code_challenge_method", "S256");
   window.location.assign(url.toString());
+}
+
+function signIn() {
+  if (SIGN_IN_ATTEMPT) return SIGN_IN_ATTEMPT;
+  const attempt = startSignIn();
+  SIGN_IN_ATTEMPT = attempt;
+  /* Observe both outcomes so cleanup creates no rejected side-promise. Keep
+     the identity check: a future attempt must not be cleared by an older one. */
+  attempt.then(
+    () => { if (SIGN_IN_ATTEMPT === attempt) SIGN_IN_ATTEMPT = null; },
+    () => { if (SIGN_IN_ATTEMPT === attempt) SIGN_IN_ATTEMPT = null; },
+  );
+  return attempt;
 }
 
 async function completeSignIn(code, state) {
@@ -525,4 +542,3 @@ async function boot() {
     render();
   }
 }
-

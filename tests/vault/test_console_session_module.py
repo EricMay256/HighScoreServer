@@ -100,6 +100,15 @@ def test_the_module_takes_its_storage_and_lock_from_the_prefix() -> None:
     assert 'navigator.locks.request(CFG.storePrefix + ".refresh", work)' in module
 
 
+def test_sign_in_is_guarded_at_the_function_boundary() -> None:
+    """Every present and future caller shares one registration/PKCE attempt."""
+
+    module = _session_module()
+
+    assert "let SIGN_IN_ATTEMPT = null;" in module
+    assert "if (SIGN_IN_ATTEMPT) return SIGN_IN_ATTEMPT;" in module
+
+
 def test_the_legacy_keys_are_derived_from_the_same_prefix() -> None:
     """The upgrade path has to keep matching what the reviewer console wrote.
 

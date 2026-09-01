@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -218,3 +219,43 @@ def test_a_failed_fresh_listing_keeps_the_previous_view(report: dict) -> None:
     assert outcome["cursor"] == "kept-cursor"
     assert outcome["rowVisible"] is True
     assert outcome["loadMoreVisible"] is True
+
+
+def test_preserved_pagination_uses_its_committed_query(report: dict) -> None:
+    """A visible old button must never combine its cursor with new filters."""
+
+    outcome = report["preservedPaginationUsesCommittedQuery"]
+    query = parse_qs(urlparse(outcome["url"]).query)
+
+    assert query["tag"] == ["kept"]
+    assert query["after"] == ["kept-cursor"]
+    assert outcome["query"] == {
+        "prefix": "",
+        "filters": {"tag": "kept", "facet": ""},
+    }
+    assert outcome["rows"] == ["Kept listing", "Appended listing"]
+    assert outcome["cursor"] == "appended-cursor"
+
+
+def test_note_navigation_invalidates_pagination_in_flight(report: dict) -> None:
+    """Leaving the listing prevents a late page from rewriting it behind a note."""
+
+    outcome = report["noteNavigationInvalidatesPagination"]
+
+    assert outcome["rows"] == ["Listing before note"]
+    assert outcome["cursor"] == "before-note-cursor"
+    assert outcome["note"] == "Newer navigation"
+
+
+def test_concurrent_sign_in_calls_share_one_attempt(report: dict) -> None:
+    """Registration and PKCE storage are one single-flight operation."""
+
+    outcome = report["concurrentSignInIsSingleFlight"]
+
+    assert outcome == {
+        "sharedPromise": True,
+        "registrations": 1,
+        "verifierWrites": 1,
+        "stateWrites": 1,
+        "navigations": 1,
+    }

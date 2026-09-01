@@ -89,7 +89,6 @@ textarea {
    would not survive a sign-in anyway. */
 let PREFIX = "";
 let FILTERS = { tag: "", facet: "" };
-let CURSOR = null;
 let ROWS = [];
 /* Folders already shown, so an appended page adds the ones it discovers
    without repeating those already on screen. */
@@ -98,17 +97,21 @@ let FOLDERS = [];
    span edit is resolved against the body the server sent and the revision it
    sent it at -- neither of which the rendered page is the authority on. */
 let NOTE = null;
-/* Responses may arrive out of navigation order. Only the generation that was
-   current when a request started may publish its result. */
+/* A fresh request is only a candidate listing until it succeeds. Pagination
+   remains bound to this last committed query while a replacement is pending
+   or after it fails. */
+let LISTING_REQUEST_GENERATION = 0;
 let LISTING_GENERATION = 0;
+let LISTING_VIEW_GENERATION = 0;
+let COMMITTED_LISTING = null;
 let NOTE_GENERATION = 0;
 
 /* ---------- Listing ---------- */
-function listingParams(cursor) {
+function listingParams(query, cursor) {
   const params = new URLSearchParams();
-  if (PREFIX) params.set("path", PREFIX);
-  if (FILTERS.tag) params.set("tag", FILTERS.tag);
-  if (FILTERS.facet) params.set("facet", FILTERS.facet);
+  if (query.prefix) params.set("path", query.prefix);
+  if (query.filters.tag) params.set("tag", query.filters.tag);
+  if (query.filters.facet) params.set("facet", query.filters.facet);
   params.set("limit", "50");
   if (cursor) params.set("after", cursor);
   return params;
@@ -182,18 +185,29 @@ function noteRow(row) {
   return card;
 }
 
-async function renderListing(append) {
-  const generation = append ? LISTING_GENERATION : ++LISTING_GENERATION;
-  const requestedCursor = append ? CURSOR : null;
+async function renderListing(append, committed = COMMITTED_LISTING) {
+  const viewGeneration = LISTING_VIEW_GENERATION;
+  const requestGeneration = append
+    ? null
+    : ++LISTING_REQUEST_GENERATION;
+  const query = append
+    ? committed && committed.query
+    : { prefix: PREFIX, filters: { ...FILTERS } };
+  const requestedCursor = append && committed ? committed.cursor : null;
+  if (!query) return;
   let page;
   try {
-    page = await api("/notes?" + listingParams(requestedCursor).toString());
+    page = await api("/notes?" + listingParams(query, requestedCursor).toString());
   } catch (err) {
     /* A superseded failure belongs to a view the operator already left. */
-    if (generation !== LISTING_GENERATION) return;
+    if (viewGeneration !== LISTING_VIEW_GENERATION
+        || (!append && requestGeneration !== LISTING_REQUEST_GENERATION)
+        || (append && committed !== COMMITTED_LISTING)) return;
     throw err;
   }
-  if (generation !== LISTING_GENERATION) return;
+  if (viewGeneration !== LISTING_VIEW_GENERATION
+      || (!append && requestGeneration !== LISTING_REQUEST_GENERATION)
+      || (append && committed !== COMMITTED_LISTING)) return;
 
   const panel = $("listing");
   if (!append) {
@@ -203,10 +217,13 @@ async function renderListing(append) {
     $("folders").textContent = "";
     ROWS = [];
     FOLDERS = [];
-    CURSOR = null;
   }
   ROWS = ROWS.concat(page.notes);
-  CURSOR = page.next_cursor;
+  COMMITTED_LISTING = {
+    query,
+    cursor: page.next_cursor,
+    generation: append ? committed.generation : ++LISTING_GENERATION,
+  };
 
   if (!append) crumbs();
   renderFolders(page.notes);
@@ -226,10 +243,11 @@ async function renderListing(append) {
   if (page.has_more) {
     const button = el("button", null, "Load more");
     button.id = "more";
+    const listing = COMMITTED_LISTING;
     button.onclick = async () => {
       button.disabled = true;
       try {
-        await renderListing(true);
+        await renderListing(true, listing);
       } catch (err) {
         showError(err);
       } finally {
@@ -254,7 +272,8 @@ async function openNote(noteId) {
   const generation = ++NOTE_GENERATION;
   /* Opening a note is newer navigation than any listing request still in
      flight. It may not rewrite the preserved listing behind this note. */
-  LISTING_GENERATION += 1;
+  LISTING_REQUEST_GENERATION += 1;
+  LISTING_VIEW_GENERATION += 1;
   /* Fetched before anything is hidden. Switching panels first left a 404, a
      dropped connection or a 500 showing an empty note panel with no Back
      control on it -- the listing gone, nothing in its place, and no way out

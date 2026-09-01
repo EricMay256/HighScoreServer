@@ -437,4 +437,3 @@ def test_cancelling_returns_focus_to_the_control_that_opened_it() -> None:
     page = _page()
 
     assert '$("propose-open").focus();' in page
-

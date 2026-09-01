@@ -148,18 +148,28 @@ byId.set("cfg", cfg);
 
 function storageStub() {
   const items = new Map();
+  const setCalls = [];
   return {
     getItem: (key) => (items.has(key) ? items.get(key) : null),
-    setItem: (key, value) => items.set(key, String(value)),
+    setItem: (key, value) => {
+      setCalls.push({ key, value: String(value) });
+      items.set(key, String(value));
+    },
     removeItem: (key) => items.delete(key),
     clear: () => items.clear(),
+    setCalls,
   };
 }
 
+const navigationCalls = [];
 const globals = {
   document: documentStub,
   window: {
-    location: { origin: "http://localhost:8000", search: "" },
+    location: {
+      origin: "http://localhost:8000",
+      search: "",
+      assign: (url) => navigationCalls.push(url),
+    },
     history: { replaceState() {} },
     getSelection: () => null,
   },
@@ -191,6 +201,7 @@ const exported = `
 return {
   renderListing,
   openNote,
+  signIn,
   proposeForm,
   spanFromLines,
   occurrenceOf,
@@ -198,7 +209,8 @@ return {
   setNote: (note) => { NOTE = note; },
   setIdentity: (identity) => { IDENTITY = identity; },
   browseState: () => ({
-    cursor: CURSOR,
+    cursor: COMMITTED_LISTING ? COMMITTED_LISTING.cursor : null,
+    query: COMMITTED_LISTING ? COMMITTED_LISTING.query : null,
     rows: ROWS.map((row) => row.title),
     note: NOTE ? NOTE.title : null,
   }),
@@ -465,6 +477,7 @@ async function runNavigationCases() {
 
   // 11. Failed pagination remains retryable and keeps accumulated rows.
   {
+    page.setFilters({ tag: "kept", facet: "" });
     fetchHandler = async () => jsonResponse(
       listingPage("Kept listing", "kept-cursor", true),
     );
@@ -497,6 +510,78 @@ async function runNavigationCases() {
         listing,
         (node) => node.tagName === "button" && node.textContent === "Kept listing",
       )),
+    };
+
+    // 13. That preserved button still owns the committed query and cursor.
+    fetchCalls.length = 0;
+    fetchHandler = async () => jsonResponse(
+      listingPage("Appended listing", "appended-cursor", false),
+    );
+    await more.onclick();
+    report.preservedPaginationUsesCommittedQuery = {
+      ...page.browseState(),
+      url: fetchCalls[0] ? fetchCalls[0].url : null,
+    };
+  }
+
+  // 14. Opening a note invalidates pagination already in flight.
+  {
+    page.setFilters({ tag: "before-note", facet: "" });
+    fetchHandler = async () => jsonResponse(
+      listingPage("Listing before note", "before-note-cursor", true),
+    );
+    await page.renderListing(false);
+    const more = find(elementById("listing"), (node) => node.id === "more");
+    const appendResponse = deferredResponse();
+    const noteResponse = deferredResponse();
+    const responses = [appendResponse, noteResponse];
+    fetchHandler = () => responses.shift().promise;
+
+    const appendRequest = more.onclick();
+    const noteRequest = page.openNote("newer-navigation");
+    noteResponse.succeed(noteDetail("Newer navigation"));
+    await noteRequest;
+    appendResponse.succeed(listingPage("Stale appended listing"));
+    await appendRequest;
+    report.noteNavigationInvalidatesPagination = page.browseState();
+  }
+
+  // 15. Concurrent sign-in callers share registration and PKCE state.
+  {
+    const metadataResponse = deferredResponse();
+    fetchCalls.length = 0;
+    navigationCalls.length = 0;
+    globals.sessionStorage.setCalls.length = 0;
+    fetchHandler = (url) => {
+      if (url === "/.well-known/oauth-authorization-server") {
+        return metadataResponse.promise;
+      }
+      if (url === "https://auth.test/register") {
+        return Promise.resolve(jsonResponse({ client_id: "client-1" }));
+      }
+      throw new Error("Unexpected sign-in URL: " + url);
+    };
+
+    const first = page.signIn();
+    const second = page.signIn();
+    metadataResponse.succeed({
+      registration_endpoint: "https://auth.test/register",
+      authorization_endpoint: "https://auth.test/authorize",
+    });
+    await Promise.all([first, second]);
+
+    report.concurrentSignInIsSingleFlight = {
+      sharedPromise: first === second,
+      registrations: fetchCalls.filter(
+        (call) => call.url === "https://auth.test/register",
+      ).length,
+      verifierWrites: globals.sessionStorage.setCalls.filter(
+        (call) => call.key === "vault.browse.pkce",
+      ).length,
+      stateWrites: globals.sessionStorage.setCalls.filter(
+        (call) => call.key === "vault.browse.state",
+      ).length,
+      navigations: navigationCalls.length,
     };
   }
 }
