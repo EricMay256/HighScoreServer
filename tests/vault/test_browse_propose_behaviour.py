@@ -172,3 +172,49 @@ def test_a_partial_line_selection_is_submitted_exactly(report: dict) -> None:
         "replacement_text": "the phrase the operator revised",
         "occurrence": 1,
     }
+
+
+def test_fractional_line_numbers_are_refused(report: dict) -> None:
+    """Fractional indexes make the offset loop and `slice` disagree."""
+
+    outcome = report["fractionalRangeRefuses"]
+
+    assert outcome["submitDisabled"] is True
+    assert outcome["requests"] == 0
+
+
+def test_a_stale_listing_response_cannot_replace_newer_filters(report: dict) -> None:
+    """Rows and their cursor must come from one navigation generation."""
+
+    outcome = report["reversedListingsKeepNewest"]
+
+    assert outcome["rows"] == ["New listing"]
+    assert outcome["cursor"] == "new-cursor"
+
+
+def test_a_stale_note_response_cannot_replace_newer_navigation(report: dict) -> None:
+    """The last note opened remains authoritative when responses reverse."""
+
+    assert report["reversedNotesKeepNewest"]["note"] == "New note"
+
+
+def test_failed_pagination_keeps_the_listing_retryable(report: dict) -> None:
+    """A transient next-page failure must not strand accumulated results."""
+
+    outcome = report["failedPaginationKeepsListing"]
+
+    assert outcome["rows"] == ["Kept listing"]
+    assert outcome["cursor"] == "kept-cursor"
+    assert outcome["rowVisible"] is True
+    assert outcome["retryEnabled"] is True
+
+
+def test_a_failed_fresh_listing_keeps_the_previous_view(report: dict) -> None:
+    """Replacement is committed only after the new page succeeds."""
+
+    outcome = report["failedRefreshKeepsListing"]
+
+    assert outcome["rows"] == ["Kept listing"]
+    assert outcome["cursor"] == "kept-cursor"
+    assert outcome["rowVisible"] is True
+    assert outcome["loadMoreVisible"] is True

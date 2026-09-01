@@ -18,16 +18,17 @@
 const fs = require("fs");
 
 function makeNode(tag) {
+  let ownText = "";
   const node = {
     tagName: tag,
     id: "",
     className: "",
-    textContent: "",
     value: "",
     disabled: false,
     title: "",
     type: "",
     rows: 0,
+    step: "",
     min: "",
     max: "",
     placeholder: "",
@@ -37,6 +38,7 @@ function makeNode(tag) {
     oninput: null,
     style: {},
     dataset: {},
+    parentNode: null,
     classList: {
       add() {},
       remove() {},
@@ -46,21 +48,46 @@ function makeNode(tag) {
       },
     },
     appendChild(child) {
+      child.parentNode = node;
       node.children.push(child);
       return child;
     },
     append(...kids) {
-      kids.forEach((kid) => node.children.push(kid));
+      kids.forEach((kid) => {
+        kid.parentNode = node;
+        node.children.push(kid);
+      });
     },
     replaceChildren(...kids) {
+      node.children.forEach((kid) => { kid.parentNode = null; });
+      kids.forEach((kid) => { kid.parentNode = node; });
       node.children = kids;
     },
-    remove() {},
+    remove() {
+      if (!node.parentNode) return;
+      node.parentNode.children = node.parentNode.children.filter(
+        (child) => child !== node,
+      );
+      node.parentNode = null;
+    },
     focus() {},
     setAttribute() {},
     addEventListener() {},
     dispatchEvent() {},
   };
+  Object.defineProperty(node, "textContent", {
+    get() {
+      if (node.children.length) {
+        return node.children.map((child) => child.textContent).join("");
+      }
+      return ownText;
+    },
+    set(value) {
+      ownText = String(value);
+      node.children.forEach((child) => { child.parentNode = null; });
+      node.children = [];
+    },
+  });
   return node;
 }
 
@@ -68,7 +95,23 @@ function makeNode(tag) {
  * elements it rendered into markup; the harness has no markup, and inventing
  * one node per id is closer to the truth than failing. */
 const byId = new Map();
+function descendantById(node, id) {
+  for (const child of node.children || []) {
+    if (child.id === id) return child;
+    const nested = descendantById(child, id);
+    if (nested) return nested;
+  }
+  return null;
+}
+
 function elementById(id) {
+  for (const root of byId.values()) {
+    const dynamic = descendantById(root, id);
+    if (dynamic) {
+      byId.set(id, dynamic);
+      return dynamic;
+    }
+  }
   if (!byId.has(id)) {
     const node = makeNode("div");
     node.id = id;
@@ -78,6 +121,12 @@ function elementById(id) {
 }
 
 const fetchCalls = [];
+let fetchHandler = async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ proposal: { proposal_id: "proposal-1" } }),
+  text: async () => "",
+});
 const documentStub = {
   getElementById: elementById,
   createElement: makeNode,
@@ -128,12 +177,7 @@ const globals = {
   console,
   fetch: async (url, options) => {
     fetchCalls.push({ url, options });
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ proposal: { proposal_id: "proposal-1" } }),
-      text: async () => "",
-    };
+    return fetchHandler(url, options);
   },
 };
 
@@ -145,11 +189,19 @@ const source = fs
 
 const exported = `
 return {
+  renderListing,
+  openNote,
   proposeForm,
   spanFromLines,
   occurrenceOf,
+  setFilters: (filters) => { FILTERS = filters; },
   setNote: (note) => { NOTE = note; },
   setIdentity: (identity) => { IDENTITY = identity; },
+  browseState: () => ({
+    cursor: CURSOR,
+    rows: ROWS.map((row) => row.title),
+    note: NOTE ? NOTE.title : null,
+  }),
 };
 `;
 
@@ -203,6 +255,68 @@ function retarget(parts, from, to) {
 }
 
 const report = {};
+
+function jsonResponse(payload) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => payload,
+    text: async () => "",
+  };
+}
+
+function failedResponse(message) {
+  return {
+    ok: false,
+    status: 500,
+    json: async () => ({}),
+    text: async () => message,
+  };
+}
+
+function deferredResponse() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return {
+    promise,
+    succeed(payload) { resolve(jsonResponse(payload)); },
+  };
+}
+
+function listingPage(title, cursor = null, hasMore = false) {
+  return {
+    notes: [{
+      note_id: title.toLowerCase().replaceAll(" ", "-"),
+      title,
+      kind: "note",
+      status: "active",
+      vault_path: "Agent/notes/" + title.toLowerCase().replaceAll(" ", "-") + ".md",
+      doc_status: null,
+      summary: null,
+    }],
+    next_cursor: cursor,
+    has_more: hasMore,
+  };
+}
+
+function noteDetail(title) {
+  return {
+    note_id: title.toLowerCase().replaceAll(" ", "-"),
+    title,
+    kind: "note",
+    status: "active",
+    vault_path: "Agent/notes/" + title.toLowerCase().replaceAll(" ", "-") + ".md",
+    content_revision: 1,
+    doc_type: null,
+    doc_status: null,
+    summary: null,
+    tags: [],
+    facets: {},
+    related_ids: [],
+    source_ids: [],
+    body: title + " body",
+  };
+}
 
 // 1. An edited replacement survives re-aiming the range.
 {
@@ -300,4 +414,96 @@ const report = {};
   };
 }
 
-process.stdout.write(JSON.stringify(report, null, 2));
+// 8. Fractional line numbers never construct a span.
+{
+  const parts = openForm();
+  retarget(parts, 1.5, 2);
+  fetchCalls.length = 0;
+  parts.rationale.value = "should not be sent";
+  parts.submit.onclick();
+  report.fractionalRangeRefuses = {
+    submitDisabled: parts.submit.disabled,
+    requests: fetchCalls.length,
+  };
+}
+
+async function runNavigationCases() {
+  // 9. A slower old listing cannot replace a newer filter result.
+  {
+    const oldResponse = deferredResponse();
+    const newResponse = deferredResponse();
+    const responses = [oldResponse, newResponse];
+    fetchHandler = () => responses.shift().promise;
+
+    page.setFilters({ tag: "old", facet: "" });
+    const oldRequest = page.renderListing(false);
+    page.setFilters({ tag: "new", facet: "" });
+    const newRequest = page.renderListing(false);
+
+    newResponse.succeed(listingPage("New listing", "new-cursor"));
+    await newRequest;
+    oldResponse.succeed(listingPage("Old listing", "old-cursor"));
+    await oldRequest;
+    report.reversedListingsKeepNewest = page.browseState();
+  }
+
+  // 10. A slower old note cannot replace the newer note navigation.
+  {
+    const oldResponse = deferredResponse();
+    const newResponse = deferredResponse();
+    const responses = [oldResponse, newResponse];
+    fetchHandler = () => responses.shift().promise;
+
+    const oldRequest = page.openNote("old-note");
+    const newRequest = page.openNote("new-note");
+    newResponse.succeed(noteDetail("New note"));
+    await newRequest;
+    oldResponse.succeed(noteDetail("Old note"));
+    await oldRequest;
+    report.reversedNotesKeepNewest = page.browseState();
+  }
+
+  // 11. Failed pagination remains retryable and keeps accumulated rows.
+  {
+    fetchHandler = async () => jsonResponse(
+      listingPage("Kept listing", "kept-cursor", true),
+    );
+    await page.renderListing(false);
+    const listing = elementById("listing");
+    const more = find(listing, (node) => node.id === "more");
+
+    fetchHandler = async () => failedResponse("temporary pagination failure");
+    await more.onclick();
+    report.failedPaginationKeepsListing = {
+      ...page.browseState(),
+      retryEnabled: more.disabled === false,
+      rowVisible: Boolean(find(
+        listing,
+        (node) => node.tagName === "button" && node.textContent === "Kept listing",
+      )),
+    };
+
+    // 12. A failed fresh request preserves that same listing and control.
+    page.setFilters({ tag: "replacement", facet: "" });
+    try {
+      await page.renderListing(false);
+    } catch (err) {
+      // Expected: this case observes what survived the failed replacement.
+    }
+    report.failedRefreshKeepsListing = {
+      ...page.browseState(),
+      loadMoreVisible: more.parentNode === listing,
+      rowVisible: Boolean(find(
+        listing,
+        (node) => node.tagName === "button" && node.textContent === "Kept listing",
+      )),
+    };
+  }
+}
+
+runNavigationCases()
+  .then(() => process.stdout.write(JSON.stringify(report, null, 2)))
+  .catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });

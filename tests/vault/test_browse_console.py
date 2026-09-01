@@ -319,7 +319,11 @@ def test_opening_a_note_fetches_before_it_hides_the_listing() -> None:
     page = _page()
     lines = page.splitlines()
     start = next(i for i, line in enumerate(lines) if "async function openNote(" in line)
-    body = lines[start : start + 20]
+    end = next(
+        i for i, line in enumerate(lines[start + 1 :], start + 1)
+        if line.startswith("/* ---------- Proposing an edit")
+    )
+    body = lines[start:end]
 
     fetch_at = next(i for i, line in enumerate(body) if 'await api("/notes/"' in line)
     hide_at = next(i for i, line in enumerate(body) if '$("listing").classList.add' in line)
@@ -383,6 +387,9 @@ def test_a_span_can_be_chosen_without_a_mouse() -> None:
     page = _page()
 
     assert "function spanFromLines(from, to)" in page
+    assert "Number.isInteger(from)" in page
+    assert 'fromInput.step = "1"' in page
+    assert 'toInput.step = "1"' in page
     assert 'fromInput.type = "number"' in page
     assert "const span = selectedSpan() || spanFromLines(1, 1);" in page
 
