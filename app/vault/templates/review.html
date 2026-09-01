@@ -340,19 +340,45 @@ async function renderProposals() {
   const selectAll = el("button", null, "Select all metadata");
   const acceptSelected = el("button", "accept", "Accept selected");
   const status = el("span", "small muted", "");
+  // Mirrors MAX_AMENDMENT_BATCH_DECISIONS in api_models.py. Keep the UI
+  // below the API's validated bound so one operator action is never a 422.
+  const maxBatchDecisions = 50;
   bar.append(selectAll, acceptSelected, status);
   panel.appendChild(bar);
 
+  const selectedCards = () => cards.filter(
+    (c) => c.checkbox && c.checkbox.checked && !c.checkbox.disabled
+  );
+  const selectionLimitMessage = "You can select up to " + maxBatchDecisions
+    + " proposals at a time.";
+  for (const c of cards) {
+    c.checkbox.onchange = () => {
+      if (c.checkbox.checked && selectedCards().length > maxBatchDecisions) {
+        c.checkbox.checked = false;
+        status.textContent = selectionLimitMessage;
+      }
+    };
+  }
+
   selectAll.onclick = () => {
+    let selected = selectedCards().length;
     for (const c of cards) {
-      if (!c.checkbox.disabled && c.dataset && c.querySelector(".kind").textContent === "metadata") {
+      if (!c.checkbox.disabled && !c.checkbox.checked && c.dataset
+          && c.querySelector(".kind").textContent === "metadata"
+          && selected < maxBatchDecisions) {
         c.checkbox.checked = true;
+        selected++;
       }
     }
+    if (selected === maxBatchDecisions) status.textContent = selectionLimitMessage;
   };
   acceptSelected.onclick = async () => {
-    const chosen = cards.filter((c) => c.checkbox && c.checkbox.checked && !c.checkbox.disabled);
+    const chosen = selectedCards();
     if (!chosen.length) return;
+    if (chosen.length > maxBatchDecisions) {
+      status.textContent = selectionLimitMessage;
+      return;
+    }
     acceptSelected.disabled = selectAll.disabled = true;
     for (const c of chosen) c.setDecisionPending();
     status.textContent = "deciding " + chosen.length + "…";

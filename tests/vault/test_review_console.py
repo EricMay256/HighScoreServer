@@ -227,13 +227,16 @@ def test_bulk_acceptance_counts_each_decision_outcome_separately() -> None:
 
 
 def test_bulk_acceptance_uses_one_bounded_batch_request() -> None:
-    """Selecting many cards must not spend the single-item quota per card."""
+    """One UI action stays inside the endpoint's bounded batch contract."""
 
     page = _page()
 
     assert 'api("/amendment-proposals/batch-decisions"' in page
     assert "decisions: chosen.map" in page
     assert 'c.decide("accepted")' not in page
+    assert "const maxBatchDecisions = 50;" in page
+    assert "selectionLimitMessage" in page
+    assert "chosen.length > maxBatchDecisions" in page
 
 
 def test_an_ended_session_repaints_the_sign_in_controls() -> None:
