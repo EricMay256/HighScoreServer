@@ -210,18 +210,20 @@ def test_the_console_keeps_and_rotates_its_refresh_token() -> None:
     assert "revocation_endpoint" in page, "signing out should retire the family, not abandon it"
 
 
-def test_bulk_acceptance_counts_refusals_separately() -> None:
+def test_bulk_acceptance_counts_each_decision_outcome_separately() -> None:
     """`decide` returning nothing made every refusal look like a success.
 
     The bulk loop counted attempts, so a run where the API rejected every
-    proposal still reported them all accepted -- and the operator would have
-    had no reason to look at the cards still sitting in the queue.
+    proposal still reported them all accepted. A stale proposal is settled but
+    unapplied, so it must not inflate that accepted total either.
     """
 
     page = _page()
 
     assert "refused " in page
     assert "accepted++" in page and "failed++" in page
+    assert "stale++" in page
+    assert 'result.outcome === "accepted"' in page
 
 
 def test_bulk_acceptance_uses_one_bounded_batch_request() -> None:

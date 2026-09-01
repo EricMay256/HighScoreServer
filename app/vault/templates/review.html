@@ -356,7 +356,7 @@ async function renderProposals() {
     acceptSelected.disabled = selectAll.disabled = true;
     for (const c of chosen) c.setDecisionPending();
     status.textContent = "deciding " + chosen.length + "…";
-    let accepted = 0, failed = 0;
+    let accepted = 0, stale = 0, failed = 0;
     try {
       const out = await api("/amendment-proposals/batch-decisions", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -368,7 +368,8 @@ async function renderProposals() {
         const result = byId[c.dataset.proposalId];
         if (result && result.outcome) {
           c.renderDecision(result.outcome);
-          accepted++;
+          if (result.outcome === "accepted") accepted++;
+          else stale++;
         } else {
           const detail = result && result.detail;
           const reason = typeof detail === "string" ? detail
@@ -386,10 +387,11 @@ async function renderProposals() {
     /* Counted separately because a refused decision leaves its card in place
        with the reason on it. Reporting the attempt count as the accepted count
        would tell the operator the queue is clear when it is not. */
+    const settled = "accepted " + accepted + ", stale " + stale;
     status.textContent = failed
-      ? ("accepted " + accepted + ", refused " + failed
+      ? (settled + ", refused " + failed
          + " — the refused cards are still listed with the reason.")
-      : ("accepted " + accepted + ". Refresh to see what remains.");
+      : (settled + ". Refresh to see what remains.");
     acceptSelected.disabled = selectAll.disabled = false;
   };
 }
