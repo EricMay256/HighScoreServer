@@ -462,7 +462,9 @@ function proposeForm(span) {
      every edit marked the field pristine, so re-aiming the range then
      overwrote the operator's words with the new span -- the one thing the
      flag exists to prevent. */
-  replacement.oninput = () => { pristine = replacement.value === current.expected; };
+  replacement.oninput = () => {
+    pristine = current !== null && replacement.value === current.expected;
+  };
 
   const readRange = () =>
     spanFromLines(Number(fromInput.value), Number(toInput.value));

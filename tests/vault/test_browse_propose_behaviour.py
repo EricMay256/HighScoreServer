@@ -124,6 +124,22 @@ def test_an_impossible_range_refuses_to_submit(report: dict) -> None:
     assert outcome["requests"] == 0, "an invalid range must post nothing"
 
 
+def test_an_edit_made_while_the_range_is_invalid_survives_recovery(
+    report: dict,
+) -> None:
+    """The replacement remains editable while no span is selected.
+
+    An invalid range clears the current span, so the replacement handler must
+    tolerate that nullable state and remember that the operator has typed.
+    Restoring a valid range must not reseed over those words.
+    """
+
+    outcome = report["invalidRangeEditSurvivesRecovery"]
+
+    assert outcome["submitEnabled"] is True
+    assert outcome["replacement"] == "An edit made while the range was invalid."
+
+
 def test_a_valid_range_posts_exactly_what_is_shown(report: dict) -> None:
     """And recovers: a bad range is a state to leave, not a dead end."""
 

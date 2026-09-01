@@ -253,7 +253,20 @@ const report = {};
   };
 }
 
-// 5. A valid range re-enables submission and posts the displayed span.
+// 5. Editing while invalid survives restoring a valid range.
+{
+  const parts = openForm();
+  retarget(parts, 1, 99);
+  parts.replacement.value = "An edit made while the range was invalid.";
+  parts.replacement.oninput();
+  retarget(parts, 2, 2);
+  report.invalidRangeEditSurvivesRecovery = {
+    replacement: parts.replacement.value,
+    submitEnabled: parts.submit.disabled === false,
+  };
+}
+
+// 6. A valid range re-enables submission and posts the displayed span.
 {
   const parts = openForm();
   retarget(parts, 1, 99);
