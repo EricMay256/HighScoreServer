@@ -311,6 +311,51 @@ def test_batch_review_refuses_duplicate_proposal_ids(
     assert "proposal_id values must be unique" in response.text
 
 
+def test_batch_review_embeds_content_acceptances_in_one_provider_call(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    provider: StubEmbeddingProvider,
+) -> None:
+    """The bounded batch must not stack one retry budget per acceptance."""
+
+    proposer, reviewer, _ = tokens
+    note_ids = [_seed_note(), _seed_note()]
+    try:
+        proposal_ids: list[str] = []
+        for index, note_id in enumerate(note_ids):
+            submitted = client.post(
+                "/api/v1/vault/amendment-proposals",
+                headers=_headers(proposer),
+                json=_proposal(note_id, body=f"Amended batch body {index}."),
+            )
+            assert submitted.status_code == 200, submitted.text
+            proposal_ids.append(submitted.json()["proposal"]["proposal_id"])
+
+        response = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers=_headers(reviewer),
+            json={
+                "decisions": [
+                    {
+                        "proposal_id": proposal_id,
+                        "decision": "accepted",
+                        "acknowledge_removals": True,
+                    }
+                    for proposal_id in proposal_ids
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert [item["outcome"] for item in response.json()["results"]] == [
+            "accepted",
+            "accepted",
+        ], response.json()
+        assert provider.calls == 1
+    finally:
+        _cleanup()
+
+
 def test_review_accepts_exact_replacement_and_increments_revision(
     client: TestClient,
     tokens: tuple[str, str, str],

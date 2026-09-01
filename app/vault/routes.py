@@ -1456,32 +1456,37 @@ async def decide_amendment_proposal_batch(
     request_id = request.headers.get("X-Request-Id") or uuid4().hex
     results: list[VaultAmendmentBatchDecisionResult] = []
 
-    for item in body.decisions:
-        try:
-            outcome = await service.decide(
-                AmendmentDecisionRequest(
-                    proposal_id=item.proposal_id,
-                    state=AmendmentProposalState(item.decision),
-                    principal_id=credential.principal_id,
-                    request_id=request_id,
-                    decision_note=item.decision_note,
-                    acknowledge_removals=item.acknowledge_removals,
-                )
-            )
-            results.append(
-                VaultAmendmentBatchDecisionResult(
-                    proposal_id=item.proposal_id,
-                    outcome=outcome.outcome,
-                    status_code=status.HTTP_200_OK,
-                )
-            )
-        except _AMENDMENT_DECISION_ERRORS as exc:
-            problem = _amendment_decision_error(exc)
+    requests = tuple(
+        AmendmentDecisionRequest(
+            proposal_id=item.proposal_id,
+            state=AmendmentProposalState(item.decision),
+            principal_id=credential.principal_id,
+            request_id=request_id,
+            decision_note=item.decision_note,
+            acknowledge_removals=item.acknowledge_removals,
+        )
+        for item in body.decisions
+    )
+    for item, outcome in zip(
+        body.decisions, await service.decide_batch(requests), strict=True
+    ):
+        if isinstance(outcome, _AMENDMENT_DECISION_ERRORS):
+            problem = _amendment_decision_error(outcome)
             results.append(
                 VaultAmendmentBatchDecisionResult(
                     proposal_id=item.proposal_id,
                     status_code=problem.status_code,
                     detail=problem.detail,
+                )
+            )
+        elif isinstance(outcome, Exception):
+            raise outcome
+        else:
+            results.append(
+                VaultAmendmentBatchDecisionResult(
+                    proposal_id=item.proposal_id,
+                    outcome=outcome.outcome,
+                    status_code=status.HTTP_200_OK,
                 )
             )
 
