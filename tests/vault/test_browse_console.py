@@ -392,12 +392,16 @@ def test_both_ways_of_choosing_produce_the_same_kind_of_span() -> None:
 
     Two code paths would be two definitions of what a span is, and only one of
     them would keep matching the stored text.
+
+    Both spellings read the span back out of the line inputs at submit time --
+    see `test_a_valid_range_posts_exactly_what_is_shown`, which asserts the
+    payload rather than the source.
     """
 
     page = _page()
 
-    assert "occurrence: occurrenceOf(NOTE.body, current.expected, current.start)" in page
-    assert "expected_text: current.expected" in page
+    assert "occurrence: occurrenceOf(NOTE.body, span.expected, span.start)" in page
+    assert "expected_text: span.expected" in page
 
 
 def test_a_mouse_selection_seeds_the_line_inputs() -> None:

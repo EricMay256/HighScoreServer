@@ -432,6 +432,13 @@ function proposeForm(span) {
     "Selecting text in the note fills these in; typing line numbers does the "
     + "same thing without a mouse."));
 
+  /* Built before `reaim`, which disables and re-enables Submit. A `const`
+     declared further down would sit in its temporal dead zone -- the same
+     shape as the module-initialisation bug the session module carries a test
+     for -- so the ordering is deliberate rather than incidental. */
+  const submit = el("button", "primary", "Propose");
+  const cancel = el("button", null, "Cancel");
+
   const quoted = el("pre", "excerpt", current.expected);
   form.appendChild(el("div", "small muted", "Replacing this exact text:"));
   form.appendChild(quoted);
@@ -450,11 +457,24 @@ function proposeForm(span) {
      was seeded from. Once the operator has typed, changing the line numbers
      re-aims the edit and keeps their words. */
   let pristine = true;
-  replacement.oninput = () => { pristine = replacement.value !== current.expected; };
+  /* True while the replacement still *is* the span it was seeded from.
+     Written inverted once, which made it mean the opposite of its name:
+     every edit marked the field pristine, so re-aiming the range then
+     overwrote the operator's words with the new span -- the one thing the
+     flag exists to prevent. */
+  replacement.oninput = () => { pristine = replacement.value === current.expected; };
+
+  const readRange = () =>
+    spanFromLines(Number(fromInput.value), Number(toInput.value));
 
   const reaim = () => {
-    const next = spanFromLines(Number(fromInput.value), Number(toInput.value));
+    const next = readRange();
     if (!next) {
+      /* Invalidated, not merely reported. Leaving `current` on the last
+         valid span kept Submit live, and it posted an edit against lines
+         the form had stopped showing as chosen. */
+      current = null;
+      submit.disabled = true;
       quoted.textContent = "";
       quoted.appendChild(el("span", "muted",
         "No such lines. The note has " + lines.length + "."));
@@ -465,6 +485,7 @@ function proposeForm(span) {
       replacement.rows = Math.min(12, next.expected.split("\n").length + 2);
     }
     current = next;
+    submit.disabled = false;
     quoted.textContent = next.expected;
   };
   fromInput.oninput = reaim;
@@ -477,8 +498,6 @@ function proposeForm(span) {
   form.appendChild(rationale);
 
   const actions = el("div", "row");
-  const submit = el("button", "primary", "Propose");
-  const cancel = el("button", null, "Cancel");
   actions.append(submit, cancel);
   form.appendChild(actions);
   form.appendChild(el("div", "small muted",
@@ -490,7 +509,17 @@ function proposeForm(span) {
     $("propose-open").focus();
   };
   submit.onclick = async () => {
-    if (!current.expected.trim()) {
+    /* Read again here, not taken from `current`. The disabled state is set by
+       an input event, and a handler that trusts event state is a handler that
+       submits whatever the last event left behind -- including the previous
+       valid span after the range stopped being valid. */
+    const span = readRange();
+    if (!span) {
+      say("danger", el("div", null,
+        "Those line numbers are outside the note. Choose lines that exist."));
+      return;
+    }
+    if (!span.expected.trim()) {
       say("danger", el("div", null,
         "Those lines are empty. Choose lines with text on them."));
       return;
@@ -512,9 +541,9 @@ function proposeForm(span) {
           base_revision: NOTE.content_revision,
           change: {
             kind: "span",
-            expected_text: current.expected,
+            expected_text: span.expected,
             replacement_text: replacement.value,
-            occurrence: occurrenceOf(NOTE.body, current.expected, current.start),
+            occurrence: occurrenceOf(NOTE.body, span.expected, span.start),
           },
           rationale: rationale.value.trim(),
         }),
