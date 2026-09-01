@@ -40,6 +40,7 @@ from .domain import (
     VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
+    VaultDocumentBrief,
     VaultReviewCase,
     VectorSearchStatus,
 )
@@ -114,6 +115,28 @@ def validate_source_url_intent(
             "source_url to replace the existing URL, or clear_source_url=true "
             "to remove it, not both"
         )
+
+
+class VaultAuthorizationResponse(BaseModel):
+    """What the credential on this request is, in the terms an operator uses.
+
+    Everything here is already known to whoever presented the token, which is
+    why the endpoint requires no scope: it discloses nothing a caller could not
+    derive from the token string and a 403. What it adds is the ``label``,
+    which lives on the authorization rather than in the token and so cannot be
+    read out of it.
+
+    ``label`` is unverified operator text and is display only -- ADR 0040. It
+    is not an identifier: two authorizations may share one, and nothing is
+    resolved by it. ``credential_id`` and ``principal_id`` remain the identity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential_id: str
+    principal_id: str
+    scopes: list[str]
+    label: str | None = None
 
 
 class VaultDocumentContentRequest(BaseModel):
@@ -409,6 +432,49 @@ class VaultBodyDiffChange(BaseModel):
     body_diff: str = Field(min_length=1, max_length=MAX_BODY_DIFF_CHARS)
 
 
+class VaultSpanChange(BaseModel):
+    """A body change named as its old text rather than written as a patch.
+
+    Not a stored kind. The service resolves the span against the note's body
+    under the same lock that checked `base_revision`, writes the canonical
+    unified diff, and stores an ordinary `body_diff` -- so a reviewer reads one
+    artifact whichever way it was authored (ADR 0033).
+
+    It exists over HTTP because a browser cannot honestly produce the
+    alternative: generating a unified diff needs a diff implementation the page
+    would have to hand-roll, and a selection with a replacement is exactly the
+    two texts this carries (ADR 0039).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["span"]
+    expected_text: str = Field(
+        min_length=1,
+        max_length=MAX_BODY_CHARS,
+        description=(
+            "The existing text to replace, copied verbatim -- whitespace "
+            "included -- from the note as fetched."
+        ),
+    )
+    replacement_text: str = Field(
+        max_length=MAX_BODY_CHARS,
+        description=(
+            "What to put in its place. Empty removes the span, which counts "
+            "as a removal at review time."
+        ),
+    )
+    occurrence: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Which match to edit, 1-based, when the text is not unique. Omit "
+            "it to require uniqueness: a span matching more than one place is "
+            "refused rather than guessed at, and so is one matching none."
+        ),
+    )
+
+
 class VaultMetadataUpdateRequest(BaseModel):
     """A metadata-only edit, applied directly by an update-scoped caller.
 
@@ -538,6 +604,19 @@ VaultAmendmentChange = Annotated[
     Field(discriminator="kind"),
 ]
 
+# What a *request* may carry, which is one kind more than a response can return.
+# A span is an authoring form: it is resolved to a body diff before anything is
+# stored, so no proposal ever reads back as one. Two unions rather than a shared
+# one with a kind that never appears in a response -- a reader of the detail
+# model should not have to work out which members are unreachable.
+VaultAmendmentProposedChange = Annotated[
+    VaultReplacementChange
+    | VaultBodyDiffChange
+    | VaultMetadataChange
+    | VaultSpanChange,
+    Field(discriminator="kind"),
+]
+
 
 class VaultAmendmentProposalRequest(BaseModel):
     """An immutable change proposed against one document revision."""
@@ -548,7 +627,7 @@ class VaultAmendmentProposalRequest(BaseModel):
         min_length=1, max_length=MAX_DOCUMENT_ID_CHARS
     )
     base_revision: int = Field(ge=1)
-    change: VaultAmendmentChange
+    change: VaultAmendmentProposedChange
     rationale: str = Field(min_length=1, max_length=2_000)
 
 
@@ -1127,6 +1206,81 @@ class VaultSearchHit(BaseModel):
     )
 
 
+class VaultNoteSummary(BaseModel):
+    """One row of a browse listing: enough to choose a note, and no body.
+
+    The same discipline as ``VaultSearchHit`` -- what earns a field here is
+    *selection* value -- with one deliberate difference. ``vault_path`` was
+    removed from a search hit because a fused ranking is not a place; it is the
+    organising key of a listing, and a browse response without it would name
+    notes the caller cannot locate.
+
+    No snippet. A listing is read by someone who is already looking at a
+    folder, so the title and the path carry most of the meaning, and computing
+    an extract for every row of every page costs more than it tells. A note
+    with no summary is opened, not guessed at.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    title: str
+    vault_path: str = Field(
+        description=(
+            "Vault-root-relative posix path. Also the paging cursor: pass the "
+            "last one back as `after`."
+        )
+    )
+    kind: DocumentKind
+    status: DocumentStatus
+    doc_type: str | None = None
+    doc_status: str | None = None
+    summary: str | None = Field(
+        default=None,
+        description=(
+            "The note's authored precis, when it has one. Null is ordinary "
+            "rather than an error: not every note carries one."
+        ),
+    )
+    updated_at: datetime
+    content_revision: int = Field(
+        ge=1,
+        description=(
+            "Monotonic content version at the time of the listing. Amending a "
+            "note still requires fetching it first -- this is a staleness "
+            "hint, not a substitute for the fetched value."
+        ),
+    )
+
+
+class VaultNoteListResponse(BaseModel):
+    """One ordered page of notes, keyed and paged by ``vault_path``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    notes: list[VaultNoteSummary]
+    has_more: bool = Field(
+        default=False,
+        description=(
+            "Whether another page exists under the same filters. Determined by "
+            "reading one row past the limit, so it is a fact about the corpus "
+            "rather than a guess from a full page."
+        ),
+    )
+    next_cursor: str | None = Field(
+        default=None,
+        description=(
+            "The `vault_path` to pass as `after` for the next page, or null at "
+            "the end. Keyset rather than an offset, so rows inserted behind "
+            "the cursor cannot shift the walk. It is not a snapshot: "
+            "`vault_path` is mutable -- promotion moves a note on purpose -- "
+            "so a row that moves across the cursor between calls can be seen "
+            "twice or not at all. For browsing that is a refresh; for anything "
+            "that must be exact, read the export."
+        ),
+    )
+
+
 class VaultSearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1347,6 +1501,32 @@ def document_detail(document: VaultDocument) -> VaultDocumentDetail:
         source_ids=list(document.source_ids),
         source_url=document.source_url,
         created_at=document.created_at,
+        updated_at=document.updated_at,
+        content_revision=document.content_revision,
+    )
+
+
+def note_summary(document: VaultDocumentBrief) -> VaultNoteSummary:
+    """Project one listing row.
+
+    Beside ``document_detail`` and ``search_hit`` rather than inside the
+    router, for the reason they are: a projection written at a transport is a
+    projection that drifts from the other transports.
+
+    Takes a ``VaultDocumentBrief`` rather than a ``VaultDocument`` so the type
+    says what the query reads. A body cannot be dropped here because there is
+    never one to drop.
+    """
+
+    return VaultNoteSummary(
+        note_id=document.id,
+        title=document.title,
+        vault_path=document.vault_path,
+        kind=document.kind,
+        status=document.status,
+        doc_type=document.doc_type,
+        doc_status=document.doc_status,
+        summary=document.summary,
         updated_at=document.updated_at,
         content_revision=document.content_revision,
     )

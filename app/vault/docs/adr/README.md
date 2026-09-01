@@ -44,6 +44,13 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0033 | [An amendment may name a span; the server writes the diff](0033-an-amendment-may-name-a-span.md) | Accepted (adds a third authoring form to 0028) |
 | 0034 | [Embeddings are document-level, and chunking is deferred against a measured trigger](0034-embeddings-are-document-level-and-chunking-is-deferred.md) | Accepted |
 | 0035 | [A contributor may describe its own recent note](0035-a-contributor-may-describe-its-own-recent-note.md) | Accepted (amends 0028; refines 0032) |
+| 0036 | [Metadata is a change kind of its own](0036-metadata-is-a-change-kind-of-its-own.md) | Accepted (adds a fourth authoring form to 0028) |
+| 0037 | [The review console is an OAuth client, not an operator session](0037-the-review-console-is-an-oauth-client.md) | Accepted |
+| 0038 | [A first-party reviewer authorization](0038-a-first-party-reviewer-authorization.md) | Proposed (deferred; recommends the narrower alternative) |
+| 0039 | [A browse-and-propose console, separate from the reviewer](0039-a-browse-and-propose-console.md) | Accepted (reviewer-side editing deferred) |
+| 0040 | [An authorization carries an operator-assigned label](0040-an-authorization-carries-an-operator-label.md) | Accepted (preserves 0024's amendment) |
+| 0041 | [Human-authored notes in the vault](0041-human-authored-notes-in-the-vault.md) | Deferred |
+| 0042 | [A mutable state store beside the corpus](0042-a-mutable-state-store-beside-the-corpus.md) | Considered, not scheduled |
 
 ## Reserved numbers
 

@@ -7,7 +7,19 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, insert, or_, select, text, update
+from sqlalchemy import (
+    Select,
+    Text,
+    cast,
+    delete,
+    func,
+    insert,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.dialects.postgresql import ARRAY as PostgresArray
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -38,6 +50,7 @@ from .domain import (
     VaultAmendmentProposal,
     VaultCompileRun,
     VaultDocument,
+    VaultDocumentBrief,
     VaultReviewCase,
 )
 from .read_policy import readable_path_predicate
@@ -66,6 +79,24 @@ TOUCH_RESOLUTION = timedelta(seconds=60)
 
 # The public projection of a document. Shared with the retrieval module so the
 # two read paths cannot drift into returning different shapes.
+# What a listing reads, and nothing else. `DOCUMENT_DOMAIN_COLUMNS` below is
+# the full row -- body, frontmatter, provenance, every array -- which a browse
+# page of a hundred notes would pull out of Postgres only to discard. The
+# endpoint's contract is body-free; this is that contract expressed as a query
+# rather than as a projection applied after the fact.
+DOCUMENT_BRIEF_COLUMNS = (
+    vault_documents.c.id,
+    vault_documents.c.kind,
+    vault_documents.c.status,
+    vault_documents.c.vault_path,
+    vault_documents.c.doc_type,
+    vault_documents.c.doc_status,
+    vault_documents.c.title,
+    vault_documents.c.summary,
+    vault_documents.c.content_revision,
+    vault_documents.c.updated_at,
+)
+
 DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.id,
     vault_documents.c.kind,
@@ -177,6 +208,75 @@ def _amendment_proposal_from_row(row: RowMapping) -> VaultAmendmentProposal:
         applied_revision=row["applied_revision"],
         removals_acknowledged=row["removals_acknowledged"],
     )
+
+
+def path_page_statement(
+    columns: Sequence[Any],
+    prefixes: Sequence[str],
+    *,
+    after_vault_path: str | None = None,
+    limit: int = 200,
+    statuses: Sequence[DocumentStatus] | None = None,
+    readable_only: bool = False,
+    tags: Sequence[str] = (),
+    facets: Mapping[str, Sequence[str]] | None = None,
+) -> Select:
+    """One page of documents under some path prefixes, as a statement.
+
+    Written once and given its columns, because two listings that differ
+    only in what they select must not differ in what they select *from*:
+    a browse page and an export walking the same prefixes with different
+    filters or a different order would page differently over the same
+    corpus, and only one of them would be right.
+    """
+
+    statement = (
+        select(*columns)
+        .where(
+            or_(
+                *(
+                    vault_documents.c.vault_path.startswith(
+                        prefix, autoescape=True
+                    )
+                    for prefix in prefixes
+                )
+            )
+        )
+        .order_by(vault_documents.c.vault_path)
+        .limit(limit)
+    )
+    if after_vault_path is not None:
+        statement = statement.where(
+            vault_documents.c.vault_path > after_vault_path
+        )
+    if statuses is not None:
+        statement = statement.where(
+            vault_documents.c.status.in_([status.value for status in statuses])
+        )
+    if readable_only:
+        statement = statement.where(readable_path_predicate())
+    if tags:
+        # `@>` spelled out because `tags` is declared with the generic
+        # `ARRAY` type, whose `.contains()` raises rather than guessing at
+        # a dialect. The cast is what tells Postgres the bound list is
+        # text[]; the operator is the one `idx_vault_documents_tags`
+        # serves.
+        statement = statement.where(
+            vault_documents.c.tags.op("@>", is_comparison=True)(
+                cast(list(dict.fromkeys(tags)), PostgresArray(Text))
+            )
+        )
+    for name, values in (facets or {}).items():
+        # One containment test per facet name rather than one over the
+        # whole map: `{"project": [...], "area": [...]}` as a single `@>`
+        # would also mean "all of these", but building it per name keeps
+        # an empty value list from silently matching everything.
+        if not values:
+            continue
+        statement = statement.where(
+            vault_documents.c.facets.contains({name: list(values)})
+        )
+    return statement
 
 
 class VaultDocumentRepository:
@@ -543,6 +643,10 @@ class VaultDocumentRepository:
         prefixes: Sequence[str],
         after_vault_path: str | None = None,
         limit: int = 200,
+        statuses: Sequence[DocumentStatus] | None = None,
+        readable_only: bool = False,
+        tags: Sequence[str] = (),
+        facets: Mapping[str, Sequence[str]] | None = None,
     ) -> tuple[VaultDocument, ...]:
         """One ordered page of the documents living under any of ``prefixes``.
 
@@ -558,36 +662,75 @@ class VaultDocumentRepository:
         that is the caller reading every page in one REPEATABLE READ
         transaction, which is what `VaultExportService.documents` does.
 
-        Unfiltered by status and by ``ai_read``, for the reason ``get_by_id``
-        gives: which rows a surface may see is that surface's policy. The
-        projection this serves writes files for a human, not answers for an
-        agent.
+        Unfiltered by status and by ``ai_read`` **by default**, for the reason
+        ``get_by_id`` gives: which rows a surface may see is that surface's
+        policy. The projection this method was written for writes files for a
+        human, not answers for an agent, and passing nothing keeps exactly that
+        behaviour.
+
+        ``statuses`` and ``readable_only`` are the same two knobs ``get_by_id``
+        carries, spelled the same way, so a surface applies its policy here
+        rather than filtering a page after the fact -- which would return short
+        pages and a cursor that skips.
+
+        ``tags`` and ``facets`` narrow rather than order, and both are
+        conjunctive: every tag must be present, and every named facet must
+        carry every value asked of it. Both compile to containment (``@>``),
+        which is what ``idx_vault_documents_tags`` and
+        ``idx_vault_documents_facets`` index -- the latter under
+        ``jsonb_path_ops``, which supports containment and nothing else.
         """
 
         if not prefixes:
             return ()
 
-        statement = (
-            select(*self._domain_columns)
-            .where(
-                or_(
-                    *(
-                        vault_documents.c.vault_path.startswith(
-                            prefix, autoescape=True
-                        )
-                        for prefix in prefixes
-                    )
-                )
-            )
-            .order_by(vault_documents.c.vault_path)
-            .limit(limit)
+        statement = path_page_statement(
+            self._domain_columns,
+            prefixes,
+            after_vault_path=after_vault_path,
+            limit=limit,
+            statuses=statuses,
+            readable_only=readable_only,
+            tags=tags,
+            facets=facets,
         )
-        if after_vault_path is not None:
-            statement = statement.where(
-                vault_documents.c.vault_path > after_vault_path
-            )
         result = await connection.execute(statement)
         return tuple(document_from_row(row) for row in result.mappings())
+
+    async def list_briefs_under_path_prefixes(
+        self,
+        connection: AsyncConnection,
+        prefixes: Sequence[str],
+        after_vault_path: str | None = None,
+        limit: int = 200,
+        statuses: Sequence[DocumentStatus] | None = None,
+        readable_only: bool = False,
+        tags: Sequence[str] = (),
+        facets: Mapping[str, Sequence[str]] | None = None,
+    ) -> tuple[VaultDocumentBrief, ...]:
+        """The same page, described rather than fetched whole.
+
+        Same filters, same order, same cursor -- built by the same function, so
+        the two cannot drift into paging differently. What differs is the
+        column list, which is the entire point: a browse page reads ten small
+        fields per row instead of a document each.
+        """
+
+        if not prefixes:
+            return ()
+
+        statement = path_page_statement(
+            DOCUMENT_BRIEF_COLUMNS,
+            prefixes,
+            after_vault_path=after_vault_path,
+            limit=limit,
+            statuses=statuses,
+            readable_only=readable_only,
+            tags=tags,
+            facets=facets,
+        )
+        result = await connection.execute(statement)
+        return tuple(document_brief_from_row(row) for row in result.mappings())
 
     async def vault_paths_under(
         self,
@@ -1289,12 +1432,30 @@ def _registered_client_from_row(row: RowMapping) -> RegisteredOAuthClient:
     )
 
 
+def document_brief_from_row(row: RowMapping) -> VaultDocumentBrief:
+    """Map a `DOCUMENT_BRIEF_COLUMNS` row. Nothing here reads a body."""
+
+    return VaultDocumentBrief(
+        id=row["id"],
+        kind=DocumentKind(row["kind"]),
+        status=DocumentStatus(row["status"]),
+        vault_path=row["vault_path"],
+        doc_type=row["doc_type"],
+        doc_status=row["doc_status"],
+        title=row["title"],
+        summary=row["summary"],
+        content_revision=row["content_revision"],
+        updated_at=row["updated_at"],
+    )
+
+
 def _oauth_grant_from_row(row: RowMapping) -> OAuthGrant:
     return OAuthGrant(
         family_id=row["family_id"],
         client_id=row["client_id"],
         authorized_scopes=tuple(row["authorized_scopes"]),
         entitled_scopes=tuple(row["entitled_scopes"]),
+        label=row["label"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1570,6 +1731,67 @@ class VaultOAuthGrantRepository:
         )
         row = result.mappings().one_or_none()
         return _oauth_grant_from_row(row) if row is not None else None
+
+    async def set_label(
+        self,
+        connection: AsyncConnection,
+        family_id: UUID,
+        label: str | None,
+    ) -> OAuthGrant | None:
+        """Name this authorization, or clear the name.
+
+        Display only. Nothing resolves a family by label -- two of them may
+        share one, which is why the write is a plain assignment with no
+        uniqueness check to make (ADR 0040).
+
+        A blank label is stored as ``NULL`` rather than as an empty string, so
+        clearing has one representation and readers have one absent case. The
+        column's CHECK refuses the empty string outright; normalising here
+        means an operator typing ``--label " "`` clears it instead of being
+        told about a constraint.
+        """
+
+        cleaned = label.strip() if label is not None else None
+        result = await connection.execute(
+            update(vault_oauth_grants)
+            .where(vault_oauth_grants.c.family_id == family_id)
+            .values(label=cleaned or None, updated_at=func.now())
+            .returning(*vault_oauth_grants.c)
+        )
+        row = result.mappings().one_or_none()
+        return _oauth_grant_from_row(row) if row is not None else None
+
+    async def label_for_credential(
+        self,
+        connection: AsyncConnection,
+        credential_id: str,
+    ) -> str | None:
+        """The operator label on the family one access credential belongs to.
+
+        ``None`` for a static credential, which belongs to no family and so has
+        no label to carry -- and ``None`` for an unlabelled family, which is the
+        ordinary state. The caller cannot tell those apart and does not need to:
+        both mean "no name to show".
+
+        Newest refresh row first, matching
+        ``client_and_family_for_credential``. One credential should have exactly
+        one, and neither query depends on it.
+        """
+
+        result = await connection.execute(
+            select(vault_oauth_grants.c.label)
+            .select_from(
+                vault_oauth_refresh_tokens.join(
+                    vault_oauth_grants,
+                    vault_oauth_grants.c.family_id
+                    == vault_oauth_refresh_tokens.c.family_id,
+                )
+            )
+            .where(vault_oauth_refresh_tokens.c.credential_id == credential_id)
+            .order_by(vault_oauth_refresh_tokens.c.created_at.desc())
+            .limit(1)
+        )
+        return result.scalars().one_or_none()
 
     async def adjust_entitlements(
         self,

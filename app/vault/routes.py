@@ -36,6 +36,7 @@ from .api_models import (
     VaultAmendmentProposalRequest,
     VaultAmendmentProposalResponse,
     VaultAmendmentQueueResponse,
+    VaultAuthorizationResponse,
     VaultCompileDeclineRequest,
     VaultCompileDeclineResponse,
     VaultCompilePageRequest,
@@ -49,6 +50,7 @@ from .api_models import (
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
     VaultMetadataUpdateRequest,
+    VaultNoteListResponse,
     VaultReviewCaseResponse,
     VaultReviewDecisionRequest,
     VaultReviewDecisionResponse,
@@ -66,6 +68,7 @@ from .api_models import (
     compile_work_item,
     contribution_response,
     document_detail,
+    note_summary,
     review_case_summary,
     search_response,
 )
@@ -80,6 +83,7 @@ from .domain import (
 )
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError, EmbeddingInputTooLong
+from .facets import FACET_NAMES
 from .principal import (
     VaultAuthError,
     VaultQuotaExceeded,
@@ -88,8 +92,8 @@ from .principal import (
     resolve_credential,
 )
 from .rate_limit import enforce_preauth_ip_limit
-from .read_policy import READABLE_STATUSES
-from .repository import VaultDocumentRepository
+from .read_policy import READABLE_PATH_PREFIXES, READABLE_STATUSES
+from .repository import VaultDocumentRepository, VaultOAuthGrantRepository
 from .service import (
     REQUEST_DIGEST_VERSION,
     AmendmentBaseRevisionMismatch,
@@ -115,6 +119,7 @@ from .service import (
     ReviewCaseNotFound,
     ReviewDecisionRequest,
     SetSummaryRequest,
+    SpanEdit,
     SummaryAlreadyPresent,
     SummaryRejected,
     SummaryStale,
@@ -292,6 +297,57 @@ async def note_quota(
     return credential
 
 
+async def authorization_quota(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Authenticate with no scope requirement, then charge the quota.
+
+    Every other dependency here names a scope, and this one deliberately names
+    none: the question it answers is "what is this credential", which the
+    holder of the credential already knows. A scope would only decide which
+    clients may be told about themselves, and refusing one would leave a
+    console guessing at its own identity rather than reading it.
+    """
+
+    credential = await _authenticated((), credentials)
+    await _enforce_quota(credential, "authorization")
+    return credential
+
+
+@router.get(
+    "/authorization",
+    response_model=VaultAuthorizationResponse,
+    summary="Describe the credential presented on this request",
+)
+async def describe_authorization(
+    credential: VaultCredential = Depends(authorization_quota),
+) -> VaultAuthorizationResponse:
+    """What this credential is, including its authorization's label.
+
+    Exists for the consoles' headers. `oauth-<uuid4>` is exact and unreadable,
+    and the label that fixes it is on the grant family, which a browser holding
+    only an access token cannot see (ADR 0040). Everything else in the response
+    is derivable from the token the caller already holds; the label is not.
+
+    The label is unverified operator text on its way to a browser. It is
+    returned as a JSON string and rendered through `textContent`, never as
+    markup.
+    """
+
+    transactions = VaultTransactionService(get_vault_engine())
+    grants = VaultOAuthGrantRepository()
+
+    async with transactions.transaction() as connection:
+        label = await grants.label_for_credential(connection, credential.id)
+
+    return VaultAuthorizationResponse(
+        credential_id=credential.id,
+        principal_id=credential.principal_id,
+        scopes=list(credential.scopes),
+        label=label,
+    )
+
+
 def _search_service() -> VaultSearchService:
     return VaultSearchService(
         transactions=VaultTransactionService(get_vault_engine()),
@@ -364,6 +420,141 @@ async def get_vault_document(
             detail="Note not found",
         )
     return document_detail(document)
+
+
+async def list_notes_quota(
+    credential: VaultCredential = Depends(require_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "list_notes")
+    return credential
+
+
+# The bound on one page. Fifty rows of fixed-size fields is a few tens of
+# kilobytes -- no bodies, no computed extracts -- so this needs no byte budget
+# of the kind `search_response` carries. It bounds the query, not the prose.
+MAX_NOTE_PAGE = 100
+DEFAULT_NOTE_PAGE = 50
+
+
+def _requested_facets(facet: list[str]) -> dict[str, list[str]]:
+    """Parse `facet=name:value` pairs into the filter the repository takes.
+
+    Repeating a name accumulates: `facet=project:hss&facet=project:b2` asks for
+    a note in both, because every filter here narrows. A caller wanting either
+    runs two requests -- an OR would need a syntax, and a listing that
+    sometimes widens when you add a term is worse than one that cannot.
+
+    Unknown names are refused rather than ignored. `FACET_NAMES` is closed
+    (facets.py), so `projects=hss` is a typo, and answering it with an
+    unfiltered page is answering a question nobody asked.
+
+    Surrounding whitespace is incidental and is dropped. It has to be dropped
+    *before* the checks rather than only inside them: validating `name.strip()`
+    and then filtering on `name` is a parser that disagrees with itself, and it
+    disagreed in both directions -- `facet= project:hss` was an unknown facet,
+    and `facet=project: hss` filtered on a value no note can carry. Whitespace
+    inside a value is left alone; a facet value may legitimately contain a
+    space.
+    """
+
+    requested: dict[str, list[str]] = {}
+    for pair in facet:
+        raw_name, separator, raw_value = pair.partition(":")
+        name, value = raw_name.strip(), raw_value.strip()
+        if not separator or not name or not value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"facet must be 'name:value'; got {pair!r}",
+            )
+        if name not in FACET_NAMES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"Unknown facet {name!r}. Known facets: "
+                    f"{', '.join(sorted(FACET_NAMES))}"
+                ),
+            )
+        requested.setdefault(name, []).append(value)
+    return requested
+
+
+@router.get(
+    "/notes",
+    response_model=VaultNoteListResponse,
+    dependencies=[Depends(list_notes_quota)],
+    summary="List notes by vault path, newest revision state, without bodies",
+)
+async def list_vault_documents(
+    path: str | None = Query(
+        default=None,
+        max_length=1024,
+        description=(
+            "Restrict to one vault path prefix, for example "
+            "'Human/03 Projects/'. Omitted lists everything the read policy "
+            "allows. A prefix outside that policy is not an error and returns "
+            "an empty page: what is readable is governance, not a permission "
+            "this endpoint decides."
+        ),
+    ),
+    tag: list[str] = Query(default=[], description="Every tag must be present."),
+    facet: list[str] = Query(
+        default=[],
+        description=(
+            "Facet filter as 'name:value', repeatable. Every one must match."
+        ),
+    ),
+    after: str | None = Query(
+        default=None,
+        max_length=1024,
+        description="The previous page's `next_cursor`, which is a vault_path.",
+    ),
+    limit: int = Query(default=DEFAULT_NOTE_PAGE, ge=1, le=MAX_NOTE_PAGE),
+) -> VaultNoteListResponse:
+    """Browse the corpus by where notes live rather than by what they match.
+
+    `/search` ranks and `/notes/{id}` fetches; between them there was no way to
+    *look around*, which is why reading the vault as a human meant exporting it
+    to somewhere else first (ADR 0039).
+
+    Ordered by `vault_path` and paged by keyset, because that is the corpus's
+    own order: a listing sorted by relevance to no query would be arbitrary,
+    and one sorted by time would scatter a folder across every page.
+
+    The read policy is applied in the query, not to the page: filtering
+    afterwards would return short pages and a cursor that skips whatever it
+    dropped.
+    """
+
+    prefixes = (path,) if path is not None else READABLE_PATH_PREFIXES
+    facets = _requested_facets(facet)
+
+    transactions = VaultTransactionService(get_vault_engine())
+    documents = VaultDocumentRepository()
+
+    async with transactions.transaction() as connection:
+        # One past the limit, so `has_more` is a fact rather than the guess a
+        # full page would license. Briefs, not documents: this response
+        # publishes no bodies, and reading them out of Postgres to drop them
+        # here would make that a property of the projection rather than of the
+        # query -- a hundred notes' worth of body per page, discarded.
+        page = await documents.list_briefs_under_path_prefixes(
+            connection,
+            prefixes,
+            after_vault_path=after,
+            limit=limit + 1,
+            statuses=READABLE_STATUSES,
+            readable_only=True,
+            tags=tag,
+            facets=facets,
+        )
+
+    has_more = len(page) > limit
+    visible = page[:limit]
+    return VaultNoteListResponse(
+        notes=[note_summary(document) for document in visible],
+        has_more=has_more,
+        next_cursor=visible[-1].vault_path if has_more and visible else None,
+    )
 
 
 async def write_quota(
@@ -503,10 +694,21 @@ async def propose_amendment(
         if body.change.kind == AmendmentProposalKind.REPLACEMENT.value
         else None
     )
+    # A span is an authoring form, not a stored kind: the service resolves it
+    # against the loaded body under the lock that checked `base_revision` and
+    # writes the canonical diff, so it is labelled BODY_DIFF here and the
+    # adapter does no converting of its own (ADR 0033). Same handling as the
+    # MCP tool, deliberately -- the two surfaces must not disagree about what
+    # a span becomes.
+    is_span = body.change.kind == "span"
     proposal_request = AmendmentProposalRequest(
         target_document_id=body.target_note_id,
         base_revision=body.base_revision,
-        change_kind=AmendmentProposalKind(body.change.kind),
+        change_kind=(
+            AmendmentProposalKind.BODY_DIFF
+            if is_span
+            else AmendmentProposalKind(body.change.kind)
+        ),
         rationale=body.rationale,
         principal_id=credential.principal_id,
         request_id=request_id,
@@ -533,6 +735,15 @@ async def propose_amendment(
         body_diff=(
             body.change.body_diff
             if body.change.kind == AmendmentProposalKind.BODY_DIFF.value
+            else None
+        ),
+        span=(
+            SpanEdit(
+                expected_text=body.change.expected_text,
+                replacement_text=body.change.replacement_text,
+                occurrence=body.change.occurrence,
+            )
+            if is_span
             else None
         ),
         metadata=(

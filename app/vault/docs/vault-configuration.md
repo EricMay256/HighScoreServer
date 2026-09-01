@@ -357,10 +357,14 @@ The access token it issues is an ordinary `hssv1_` credential, so it appears in
 `issue_vault_credential list` beside every other one and is revoked the same way.
 Its principal is `oauth-<client_id>` — the server-issued registration id, never the
 client's self-declared name — and that is also what lands in `ContributedBy` on notes
-the client writes. The readable name is on the credential's `display_name`, which is
-what `issue_vault_credential list` shows. A name-derived principal collided across
-separately registered clients that chose the same name, which meant sharing an
-idempotency namespace and a quota; see vault ADR 0024's 2026-08-23 amendment.
+the client writes. The readable name on the credential is `display_name`, taken from the client's
+own declared name at mint time and re-copied on every rotation. An operator who
+wants a name they chose, on the authorization rather than on an hourly copy of
+it, sets a label instead — see
+[naming an OAuth authorization](#naming-an-oauth-authorization). A name-derived
+principal collided across separately registered clients that chose the same
+name, which meant sharing an idempotency namespace and a quota; see vault ADR
+0024's 2026-08-23 amendment.
 
 Google login requests only `openid email`. The callback exchanges the code over
 async HTTPS and validates Google's signature, issuer, audience, expiry, the
@@ -410,6 +414,45 @@ An operator password is chosen by a person, so the work factor is exactly the
 point, and it runs once per authorization rather than once per request. Vault
 ADR 0015 says explicitly not to carry the SHA-256 reasoning across to
 human-chosen passwords; this is where that matters.
+
+### The two consoles
+
+The vault serves two human pages, both gated on `VAULT_PUBLIC_URL` for the same
+reason: each authorizes itself through the OAuth routes above, so without a
+reachable issuer they render and can never sign in.
+
+| Path | Asks for | Needs an operator grant? |
+| --- | --- | --- |
+| `/vault/review` | `vault:read` | Yes — `grant-oauth ... --scopes vault:review`, once per family |
+| `/vault/browse` | `vault:read vault:propose` | No; both are baseline |
+
+Browsing lists notes by path, opens one, and proposes an edit to it: select the
+text to replace, write what should stand in its place, and the page posts a
+span edit. The server locates the span in the stored body and writes the
+canonical diff, so the proposal reaches the reviewer as an ordinary body diff
+and is decided like any other. The page sends an `occurrence` because it knows
+which instance was selected — a span appearing twice is refused for a caller
+who cannot say which one they meant.
+
+The reviewer asks for `vault:read` **alone** deliberately: `vault:review` may be
+granted only to a family holding exactly that, so a page asking for anything
+else makes itself permanently ineligible for the entitlement it exists to use.
+The browse console asks for `vault:propose` before it has anything that
+proposes, because consent fixes a family's `authorized_scopes` — adding the
+scope later means a second authorization and a second family for one page. See
+vault ADR 0037 and ADR 0039.
+
+They are separate registrations with separate credentials, and that separation
+is the point: `vault:review` applies a change and `vault:propose` authors one,
+and ADR 0021 keeps those in different hands. Each console also keeps its own
+browser-storage namespace and refresh lock — sharing one would have two pages
+writing a single session record and presenting each other's refresh tokens,
+which the authorization server reads as a captured credential and answers by
+burning the family.
+
+Both pages hold their OAuth lifecycle in one shared template partial rather
+than a copy each. A change to signing in, renewing, or signing out is therefore
+one edit; a change to what a console *shows* is not.
 
 ### The server tells you when `VAULT_PUBLIC_URL` goes stale
 
@@ -1225,10 +1268,28 @@ export VAULT_API_TOKEN='hssv1_<credential-id>_<secret>'
 Never on a command line: argv is readable by every process on the host. Never in
 a file the agent writes, and never printed.
 
-Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes/{id}`,
+Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes`,
+`GET /api/v1/vault/notes/{id}`,
 `POST /api/v1/vault/contributions`, `PUT /api/v1/vault/notes/{id}`, and
 `DELETE /api/v1/vault/notes/{id}`, plus the amendment workflow below. All take
 `Authorization: Bearer <token>`.
+
+`GET /api/v1/vault/notes` lists notes by `vault_path` for browsing, without
+their bodies: `path` restricts to one prefix, `tag` and `facet` (`name:value`,
+repeatable) narrow conjunctively, and `after` takes the previous page's
+`next_cursor`. It applies the same read policy as `GET /notes/{id}` — flagged
+notes and paths outside `READABLE_PATH_PREFIXES` are absent, and a prefix
+outside that policy returns an empty page rather than an error. Ordered by path
+because that is the corpus's own order; the cursor is keyset, so rows inserted
+behind it cannot shift the walk, but `vault_path` is mutable and a note that
+moves across the cursor between calls can be seen twice or not at all.
+
+`GET /api/v1/vault/authorization` describes the presented credential —
+`credential_id`, `principal_id`, `scopes`, and the authorization's `label`. It
+requires a valid credential and **no scope**: everything but the label is
+derivable from the token the caller already holds, and the label lives on the
+grant family where a token cannot see it. It exists for the consoles' headers,
+which would otherwise read `oauth-<uuid4>`.
 
 | Method and path | Scope | Purpose |
 | --- | --- | --- |
@@ -1242,8 +1303,19 @@ An amendment request carries a discriminated `change`. Use
 Hunks may add, edit, or remove lines but must anchor to exact existing text. The service refuses
 patches over 50,000 characters, 20 hunks, 200 changed lines, or the per-note 25%/20-line budget;
 use `{"kind":"replacement","replacement":{...all content fields...}}` for metadata or
-larger changes. Both forms require the note's current `content_revision` as `base_revision`; a
+larger changes. Every form requires the note's current `content_revision` as `base_revision`; a
 mismatch returns 409 at proposal time and settles stale at review time.
+
+`{"kind":"span","expected_text":"...","replacement_text":"...","occurrence":null}`
+names the old text instead of writing a patch. The server locates the span
+against the body under the same lock that checked `base_revision` and stores
+the canonical unified diff, so **a span is never a stored kind**: the proposal
+reads back as `body_diff` and is reviewed as one. The span must identify
+exactly one place — a text matching nothing or several places is refused with
+422 rather than guessed at; extend `expected_text` or pass a 1-based
+`occurrence`. Prefer it over `body_diff` unless a diff is already in hand,
+which is what makes an inline edit from a browser possible at all (ADR 0033,
+ADR 0039).
 
 `replacement` uses the same complete caller-controlled content shape as `PUT /notes/{id}`;
 omitted optional fields are cleared rather than inherited:
@@ -1361,9 +1433,11 @@ python -m scripts.issue_vault_credential list
 python -m scripts.issue_vault_credential revoke --id <credential-id>
 ```
 
-`list` shows each credential's principal, scopes, creation, expiry, revocation,
-and `last_used_at` — which means "last used", not "last attempted", because it
-is written only on success. A credential that has never been used shows `never`,
+`list` shows each credential's label, principal, scopes, creation, expiry,
+revocation, and `last_used_at` — which means "last used", not "last attempted",
+because it is written only on success. The label column is `-` for anything
+unlabelled, including every static credential: labels belong to OAuth
+authorizations (see [naming an OAuth authorization](#naming-an-oauth-authorization)). A credential that has never been used shows `never`,
 which is how a registration that silently failed becomes visible.
 
 Rotation is revoke-then-issue; there is no re-key, because the secret was never
@@ -1416,6 +1490,31 @@ This is intentionally narrower than granting a client registration. A new
 browser authorization creates a new family and inherits no privileged scopes,
 even when it uses the same registration. Revocation of an entitlement narrows
 the live token and future rotations but leaves the OAuth session active.
+
+#### Naming an OAuth authorization
+
+Every OAuth principal reads as `oauth-<uuid4>`, so `list` shows a column of
+indistinguishable ids. A label puts an operator-chosen name beside one:
+
+```bash
+python -m scripts.issue_vault_credential label --id <credential-id> --label "laptop review console"
+python -m scripts.issue_vault_credential label --id <credential-id> --clear
+```
+
+The label lives on the grant family, so it survives rotation and appears
+against every credential minted in that family. Like the entitlement commands,
+the id is a lookup handle: any credential in the family resolves it, including
+a rotated-away one. Unlike them, a family with no live refresh token is
+labelled without complaint — reading history is the ordinary reason to be
+naming one.
+
+**The label is display text, never identity.** It does not resolve a
+credential, key a quota or an idempotency namespace, or appear as an audit
+principal, and two authorizations may carry the same one; `family_id` is what
+tells them apart. Setting one writes no audit event, because it changes nothing
+a request is allowed to reach. Static credentials have no family and are
+refused — they are named by the `--name` they were issued with. See vault ADR
+0040.
 
 `vault:review` has an additional separation-of-duties guard: it can be granted
 only to a separately authorized family holding `vault:read` alone. The final

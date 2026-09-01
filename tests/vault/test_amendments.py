@@ -61,7 +61,7 @@ def tokens(configure_test_env: None) -> tuple[str, str, str]:
             _drop(credential_id)
 
 
-def _seed_note() -> str:
+def _seed_note(*, body: str = "The original note body.") -> str:
     note_id = f"{PREFIX}{uuid4().hex}"
     transactions, engine = vault_service()
 
@@ -78,7 +78,7 @@ def _seed_note() -> str:
                         status=DocumentStatus.ACTIVE,
                         doc_status="Active",
                         title="Shell transport constraints",
-                        body="The original note body.",
+                        body=body,
                         tags=("shell",),
                         contributed_by=f"agent:{PREFIX}seed",
                         provenance={"fixture": True},
@@ -1232,5 +1232,286 @@ def test_the_queue_reports_a_proposal_whose_base_has_moved(
 
         assert entry["stale"] is True
         assert entry["metadata_preview"] is None
+    finally:
+        _cleanup()
+
+
+# ------------------------------------------------ span edits over HTTP ----
+#
+# The kind reached the MCP adapter and nothing else. A browser cannot honestly
+# author the alternative -- generating a unified diff means a diff
+# implementation the page would have to hand-roll -- and a selection with a
+# replacement is exactly the two texts a span carries. See ADR 0039.
+
+
+# A body with a phrase in it twice, for the cases about ambiguity. The default
+# fixture body has no repeated span, which is what a span edit is *for*; these
+# two tests need the opposite.
+REPEATED_BODY = "The guard runs last.\n\nThe guard runs last.\n"
+
+
+def _span(note_id: str, **overrides: object) -> dict:
+    change: dict = {
+        "kind": "span",
+        "expected_text": "The original note body.",
+        "replacement_text": "The original note body, reworded.",
+    }
+    change.update(overrides)
+    return {
+        "target_note_id": note_id,
+        "base_revision": 1,
+        "change": change,
+        "rationale": "Reword a sentence without writing a patch.",
+    }
+
+
+def _stored_change(note_id: str) -> tuple[str, dict]:
+    transactions, engine = vault_service()
+
+    async def read() -> tuple[str, dict]:
+        try:
+            async with transactions.transaction() as connection:
+                row = (
+                    await connection.execute(
+                        select(
+                            vault_amendment_proposals.c.change_kind,
+                            vault_amendment_proposals.c.change,
+                        ).where(
+                            vault_amendment_proposals.c.target_document_id == note_id
+                        )
+                    )
+                ).mappings().one()
+                return row["change_kind"], dict(row["change"])
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(read())
+
+
+def _proposal_count(note_id: str) -> int:
+    transactions, engine = vault_service()
+
+    async def count() -> int:
+        try:
+            async with transactions.transaction() as connection:
+                return (
+                    await connection.execute(
+                        select(func.count())
+                        .select_from(vault_amendment_proposals)
+                        .where(
+                            vault_amendment_proposals.c.target_document_id == note_id
+                        )
+                    )
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(count())
+
+
+def test_a_span_edit_over_http_is_stored_as_an_ordinary_body_diff(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """The property ADR 0033 rests on, now asserted at the second transport.
+
+    Nothing downstream learns that a span was involved. If HTTP stored
+    something else, the review surface and the removal-acknowledgement rule
+    would have to grow a second case for a change that is meant to be the same
+    artifact.
+    """
+
+    proposer, _, _ = tokens
+    note_id = _seed_note()
+    try:
+        response = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_span(note_id),
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["proposal"]["change_kind"] == "body_diff"
+
+        kind, change = _stored_change(note_id)
+        assert kind == "body_diff"
+        assert set(change) == {"body_diff"}
+        assert change["body_diff"].startswith("--- current-body")
+        assert "-The original note body." in change["body_diff"]
+        assert "+The original note body, reworded." in change["body_diff"]
+    finally:
+        _cleanup()
+
+
+def test_a_span_never_reads_back_as_a_span(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """The request union carries a kind the response union does not.
+
+    A reviewer fetching the proposal sees the diff that will be applied, not
+    the authoring form it arrived in -- which is what makes one review path
+    enough for both.
+    """
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_span(note_id),
+        )
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        detail = client.get(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}",
+            headers=_headers(reviewer),
+        )
+
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["change"]["kind"] == "body_diff"
+    finally:
+        _cleanup()
+
+
+def test_an_ambiguous_span_over_http_is_refused_rather_than_guessed(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """422, and nothing written. Not a silent edit of the first match."""
+
+    proposer, _, _ = tokens
+    note_id = _seed_note(body=REPEATED_BODY)
+    try:
+        response = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_span(
+                note_id,
+                expected_text="The guard runs last.",
+                replacement_text="The guard runs first.",
+            ),
+        )
+
+        assert response.status_code == 422, response.text
+        assert "occurrence" in response.json()["detail"]
+        assert _proposal_count(note_id) == 0, "a refused span must write nothing"
+    finally:
+        _cleanup()
+
+
+def test_occurrence_selects_a_match_over_http(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    proposer, _, _ = tokens
+    note_id = _seed_note(body=REPEATED_BODY)
+    try:
+        response = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_span(
+                note_id,
+                expected_text="The guard runs last.",
+                replacement_text="The guard runs first.",
+                occurrence=2,
+            ),
+        )
+
+        assert response.status_code == 200, response.text
+        _kind, change = _stored_change(note_id)
+        diff = change["body_diff"]
+        assert "+The guard runs first." in diff
+        # The named match and no other: one line changed, not both.
+        assert diff.count("-The guard runs last.") == 1
+    finally:
+        _cleanup()
+
+
+def test_an_absent_span_over_http_is_refused(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """No fuzzy matching at this transport either. Re-fetch and copy again."""
+
+    proposer, _, _ = tokens
+    note_id = _seed_note()
+    try:
+        response = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_span(note_id, expected_text="text that is not in the note"),
+        )
+
+        assert response.status_code == 422, response.text
+        assert "does not appear" in response.json()["detail"]
+    finally:
+        _cleanup()
+
+
+def test_a_stale_base_revision_is_refused_before_the_span_resolves(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """409, and the span is never matched against a body the caller never read.
+
+    The order matters: resolving first would let a span find its text in a
+    revision the caller never saw and report success for an edit against
+    something else.
+    """
+
+    proposer, _, _ = tokens
+    note_id = _seed_note()
+    try:
+        response = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={**_span(note_id), "base_revision": 7},
+        )
+
+        assert response.status_code == 409, response.text
+        assert _proposal_count(note_id) == 0
+    finally:
+        _cleanup()
+
+
+def test_a_span_edit_needs_the_propose_scope(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """A new change kind must not become a new way past the scope split."""
+
+    _, _, reader = tokens
+    note_id = _seed_note()
+    try:
+        response = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(reader),
+            json=_span(note_id),
+        )
+
+        assert response.status_code == 403
+    finally:
+        _cleanup()
+
+
+def test_a_span_carrying_a_body_diff_as_well_is_refused_by_the_schema(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """The change model forbids extras, so two authoring forms cannot arrive
+    together and leave the server to choose between them."""
+
+    proposer, _, _ = tokens
+    note_id = _seed_note()
+    try:
+        response = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_span(note_id, body_diff="--- current-body"),
+        )
+
+        assert response.status_code == 422
     finally:
         _cleanup()

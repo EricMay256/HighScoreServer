@@ -732,6 +732,10 @@ vault_oauth_grants = Table(
         nullable=False,
         server_default=text("'{}'::text[]"),
     ),
+    # Display only, and operator-set. Never identity: the family_id resolves a
+    # credential, keys a quota and names an audit principal, and the label does
+    # none of those. Nullable because unlabelled is ordinary. See ADR 0040.
+    Column("label", Text),
     Column(
         "created_at",
         DateTime(timezone=True),
@@ -743,6 +747,10 @@ vault_oauth_grants = Table(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("now()"),
+    ),
+    CheckConstraint(
+        "label IS NULL OR (btrim(label) <> '' AND length(label) <= 120)",
+        name="vault_oauth_grants_label_shape",
     ),
     CheckConstraint(
         "authorized_scopes <@ ARRAY['vault:read', 'vault:write', "

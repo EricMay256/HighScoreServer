@@ -14,11 +14,13 @@ from app.vault.constants import (
 )
 from app.vault.review_console import (
     API_BASE,
+    CLIENT_NAME,
     CONSOLE_SCOPES,
     REVIEW_PATH,
+    STORE_PREFIX,
     build_vault_review_routes,
 )
-from app.vault.templating import render
+from app.vault.templating import TEMPLATE_DIRECTORY, render
 
 
 def _page() -> str:
@@ -26,8 +28,16 @@ def _page() -> str:
         "review.html",
         api_base=API_BASE,
         scopes=CONSOLE_SCOPES,
-        review_path=REVIEW_PATH,
+        console_path=REVIEW_PATH,
+        client_name=CLIENT_NAME,
+        store_prefix=STORE_PREFIX,
     )
+
+
+def _session_module() -> str:
+    """The shared module as written, before a page includes it."""
+
+    return (TEMPLATE_DIRECTORY / "_console_session.js").read_text(encoding="utf-8")
 
 
 def test_the_console_requests_read_alone() -> None:
@@ -315,8 +325,12 @@ def test_the_legacy_session_storage_format_is_migrated() -> None:
     page = _page()
 
     assert "migrateLegacySession" in page
-    assert 'sessionStorage.getItem("vault.review.client_id")' in page
-    assert 'sessionStorage.getItem("vault.review.refresh")' in page
+    # Composed from the prefix since the session module was shared, so both
+    # halves are asserted: the derivation, and the value that makes it match
+    # what v74 actually wrote.
+    assert STORE_PREFIX == "vault.review"
+    assert 'sessionStorage.getItem(CFG.storePrefix + ".client_id")' in page
+    assert 'sessionStorage.getItem(CFG.storePrefix + ".refresh")' in page
     assert "loadSession() || migrateLegacySession() || {}" in page, (
         "migration must run only when no new record exists, or it would "
         "overwrite a current session with a stale one"
@@ -572,3 +586,108 @@ def test_the_startup_sequence_is_callable_on_its_own() -> None:
 
     assert "async function boot()" in page
     assert "\nboot();" in page, "the named boot must actually be invoked"
+
+
+def test_the_header_prefers_the_label_and_falls_back_to_the_credential_id() -> None:
+    """A name when there is one, the id when there is not.
+
+    The fallback is the whole header before ADR 0040, so losing it would be a
+    regression to a blank header rather than to an unreadable one -- and an
+    unlabelled authorization is the ordinary state, not a failure.
+    """
+
+    page = _page()
+
+    assert "if (IDENTITY && IDENTITY.label) return IDENTITY.label;" in page
+    assert 'return "credential " + (credentialId() || "?");' in page
+
+
+def test_the_label_reaches_the_page_as_text_and_never_as_markup() -> None:
+    """Unverified operator text, rendered by assignment to `textContent`.
+
+    ADR 0040 accepts operator text into the database on the understanding that
+    it is displayed rather than interpreted. That understanding is code, here.
+    """
+
+    page = _page()
+
+    assert 'function paintWho() { $("who").textContent = whoText(); }' in page
+    assert ".innerHTML" not in page, (
+        "the page builds its DOM through textContent; an assignment to "
+        "innerHTML anywhere is a route for operator text to become markup"
+    )
+
+
+def test_the_identity_request_cannot_cost_the_operator_their_queue() -> None:
+    """Awaited, it would put a name in front of the work.
+
+    `loadAll` is the queue. A header lookup that threw inside its `try` would
+    be reported as a failure to load proposals, and one that were awaited would
+    delay them behind a round trip that decorates the page. It is fired without
+    `await` and swallows its own failure, leaving the credential-id fallback.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+    load_all_at = next(
+        i for i, text in enumerate(lines) if "async function loadAll()" in text
+    )
+    body = chr(10).join(lines[load_all_at : load_all_at + 5])
+
+    assert "refreshIdentity();" in body
+    assert "await refreshIdentity()" not in page
+    assert "async function refreshIdentity()" in page
+
+
+def test_a_signed_out_header_says_nothing() -> None:
+    """Sign-out clears the label with the token it described."""
+
+    page = _page()
+
+    assert 'if (!TOKEN) return "";' in page
+    assert page.count("IDENTITY = null;") >= 2, (
+        "both ends of a session -- expiry and sign-out -- have to drop the "
+        "identity, or a signed-out header keeps naming the family that left"
+    )
+
+
+def test_sign_out_sends_the_field_the_revocation_endpoint_requires() -> None:
+    """The console is a public client, and still has to send `client_secret`.
+
+    The SDK's `RevocationRequest` declares it with no default, so a form
+    omitting it is refused with 400 before any token is loaded. That is what
+    every sign-out did until this was fixed: the local session ended, the
+    family did not, and its refresh token stayed valid for thirty days.
+
+    `test_the_console_sign_out_form_is_accepted_by_the_revocation_endpoint`
+    holds the other half of this -- that the endpoint accepts exactly this
+    form.
+    """
+
+    page = _page()
+
+    assert 'client_id: client, client_secret: ""' in page
+    assert "Vault sign-out could not revoke this session:" in page, (
+        "a revocation that fails must say so; this one was silent for months"
+    )
+
+
+def test_a_refresh_after_the_entitlement_lands_shows_the_queue() -> None:
+    """The sequence the console itself instructs, which used to end blank.
+
+    A 403 hides the app panel and prints the `grant-oauth` command. Running it
+    and clicking Refresh calls `loadAll` directly -- never `render` -- so the
+    queue loaded into a panel that was still hidden, and the operator saw an
+    empty page with no message. `render` unhiding it was not enough, because
+    nothing re-rendered.
+    """
+
+    page = _page()
+    lines = page.splitlines()
+    start = next(i for i, line in enumerate(lines) if "async function loadAll()" in line)
+    body = lines[start : start + 14]
+
+    assert any('$("app").classList.remove("hidden")' in line for line in body), (
+        "loadAll must reveal the panel it is about to fill; the 403 path hides "
+        "it and Refresh does not re-render"
+    )
