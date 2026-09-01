@@ -691,4 +691,3 @@ def test_a_refresh_after_the_entitlement_lands_shows_the_queue() -> None:
         "loadAll must reveal the panel it is about to fill; the 403 path hides "
         "it and Refresh does not re-render"
     )
-

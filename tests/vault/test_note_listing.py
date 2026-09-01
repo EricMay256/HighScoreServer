@@ -497,4 +497,3 @@ def test_both_listings_page_by_the_same_rules() -> None:
     )
 
     assert brief[brief.index("FROM"):] == full[full.index("FROM"):]
-
