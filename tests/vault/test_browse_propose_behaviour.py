@@ -155,3 +155,20 @@ def test_a_valid_range_posts_exactly_what_is_shown(report: dict) -> None:
     }
     # The revision the page read, not the newest one.
     assert outcome["body"]["base_revision"] == 4
+
+
+def test_a_partial_line_selection_is_submitted_exactly(report: dict) -> None:
+    """Line inputs describe a selection but must not broaden it implicitly.
+
+    Until the operator edits those inputs, the exact character span selected
+    with the mouse remains authoritative without including surrounding text.
+    """
+
+    change = report["partialLineSelectionStaysExact"]["body"]["change"]
+
+    assert change == {
+        "kind": "span",
+        "expected_text": "the one to reword",
+        "replacement_text": "the phrase the operator revised",
+        "occurrence": 1,
+    }

@@ -391,15 +391,13 @@ def test_both_ways_of_choosing_produce_the_same_kind_of_span() -> None:
     """Line numbers resolve to offsets, which is what a selection resolves to.
 
     Two code paths would be two definitions of what a span is, and only one of
-    them would keep matching the stored text.
-
-    Both spellings read the span back out of the line inputs at submit time --
-    see `test_a_valid_range_posts_exactly_what_is_shown`, which asserts the
-    payload rather than the source.
+    them would keep matching the stored text. `current` preserves the exact
+    mouse span until a line-input handler explicitly replaces it.
     """
 
     page = _page()
 
+    assert "const span = current;" in page
     assert "occurrence: occurrenceOf(NOTE.body, span.expected, span.start)" in page
     assert "expected_text: span.expected" in page
 

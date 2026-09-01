@@ -174,7 +174,7 @@ function find(node, predicate) {
   return null;
 }
 
-function openForm() {
+function openForm(initialSpan = null) {
   page.setNote({
     note_id: "harness-note",
     kind: "note",
@@ -183,7 +183,7 @@ function openForm() {
   });
   page.setIdentity({ scopes: ["vault:read", "vault:propose"] });
 
-  const form = page.proposeForm(page.spanFromLines(1, 1));
+  const form = page.proposeForm(initialSpan || page.spanFromLines(1, 1));
   const byNodeId = (id) => find(form, (node) => node.id === id);
   return {
     form,
@@ -281,6 +281,21 @@ const report = {};
   report.validRangePostsWhatIsShown = {
     submitEnabled: enabledAgain,
     url: posted ? posted.url : null,
+    body: posted ? JSON.parse(posted.options.body) : null,
+  };
+}
+
+// 7. An unretargeted partial-line selection is submitted exactly as selected.
+{
+  const expected = "the one to reword";
+  const parts = openForm({ start: BODY.indexOf(expected), expected });
+  fetchCalls.length = 0;
+  parts.replacement.value = "the phrase the operator revised";
+  parts.replacement.oninput();
+  parts.rationale.value = "Revise only the selected phrase.";
+  parts.submit.onclick();
+  const posted = fetchCalls[0];
+  report.partialLineSelectionStaysExact = {
     body: posted ? JSON.parse(posted.options.body) : null,
   };
 }

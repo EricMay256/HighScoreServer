@@ -511,11 +511,10 @@ function proposeForm(span) {
     $("propose-open").focus();
   };
   submit.onclick = async () => {
-    /* Read again here, not taken from `current`. The disabled state is set by
-       an input event, and a handler that trusts event state is a handler that
-       submits whatever the last event left behind -- including the previous
-       valid span after the range stopped being valid. */
-    const span = readRange();
+    /* `current` preserves an exact mouse selection, including a substring of
+       one line. The line-input handlers replace it when the operator explicitly
+       re-aims the edit, and invalidate it when that range does not exist. */
+    const span = current;
     if (!span) {
       say("danger", el("div", null,
         "Those line numbers are outside the note. Choose lines that exist."));
