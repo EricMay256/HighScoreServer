@@ -1307,10 +1307,11 @@ which would otherwise read `oauth-<uuid4>`.
 same optional `decision_note` and `acknowledge_removals` fields as the single-decision route.
 The response is always an ordered result per requested proposal, with `outcome` (`accepted`,
 `rejected`, or `stale`) and status 200 for a settled item, or an item-local HTTP-style
-`status_code` and `detail` when it could not be settled. One refused, stale, or permanently
-oversized amendment never rolls back or suppresses the other results. Content amendments share
-one embedding request where possible; a permanent embedding input-limit failure is isolated to
-the responsible item. The route is limited to one batch per principal per minute.
+`status_code` and `detail` when it could not be settled. One refused or stale amendment never
+rolls back or suppresses the other results. Accepted batch items must be `metadata` changes,
+whose fields do not affect the embedding; accepting a content amendment returns an item-local
+422 directing the reviewer to the single-decision route. Rejections may settle any proposal
+kind without embedding. The route is limited to one batch per principal per minute.
 
 An amendment request carries a discriminated `change`. Use
 `{"kind":"body_diff","body_diff":"..."}` for a compact unified diff against the body.

@@ -270,6 +270,8 @@ function proposalCard(summary, preview) {
     acknowledge_removals: ack ? ack.checked : false,
   });
   const renderDecision = (outcome) => {
+    check.checked = false;
+    check.disabled = true;
     card.replaceChildren(el("div", "row small muted", "✓ " + outcome + " — " + titleSlot.textContent));
   };
   const renderRefusal = (message) => {

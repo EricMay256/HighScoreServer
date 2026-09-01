@@ -1,6 +1,5 @@
 """Application-service transaction boundary for vault use cases."""
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -49,10 +48,7 @@ from .embedding_text import assemble_embedding_text, embedding_text_digest
 from .embeddings import (
     EmbeddingError,
     EmbeddingInputKind,
-    EmbeddingInputTooLong,
     EmbeddingProvider,
-    EmbeddingUnavailable,
-    EmbeddingVector,
     embed_one,
 )
 from .facets import FacetNameCollision, normalize_facets, validate_facets
@@ -2039,165 +2035,24 @@ class VaultAmendmentService:
     async def decide_batch(
         self, requests: Sequence[AmendmentDecisionRequest]
     ) -> tuple[AmendmentDecisionOutcome | Exception, ...]:
-        """Settle independent decisions with one embedding request when possible.
+        """Settle independent rejections and metadata acceptances.
 
-        Embeddings are prepared before a transaction and checked again under the
-        corpus lock by ``_accept``. This keeps provider I/O out of locks while
-        making the REST batch's maximum fifty accepted content changes one
-        provider request rather than fifty serial retry budgets.
+        The batch route deliberately refuses accepted content amendments: their
+        embedding and corpus-lock work cannot be bounded safely for a request
+        that may carry fifty decisions. The console already selects metadata
+        changes only; a reviewer uses the single-decision route for content.
         """
 
-        outcomes: list[AmendmentDecisionOutcome | Exception | None] = [
-            None
-        ] * len(requests)
-        embeddings: list[tuple[int, AmendmentDecisionRequest, str]] = []
-
-        for index, request in enumerate(requests):
-            if request.state is not AmendmentProposalState.ACCEPTED:
-                try:
-                    outcomes[index] = await self.decide(request)
-                except Exception as exc:
-                    outcomes[index] = exc
-                continue
-
+        outcomes: list[AmendmentDecisionOutcome | Exception] = []
+        for request in requests:
             try:
-                embedding_text = await self._batch_embedding_text(request)
-            except Exception as exc:
-                outcomes[index] = exc
-            else:
-                if embedding_text is None:
-                    try:
-                        outcomes[index] = await self._accept(request)
-                    except Exception as exc:
-                        outcomes[index] = exc
+                if request.state is AmendmentProposalState.ACCEPTED:
+                    outcomes.append(await self._accept(request, batch_only=True))
                 else:
-                    embeddings.append((index, request, embedding_text))
-
-        if embeddings:
-            if self._provider is None:
-                provider_error = DedupUnavailable(
-                    "No embedding provider is configured; refusing to write without dedup"
-                )
-                for index, _, _ in embeddings:
-                    outcomes[index] = provider_error
-            else:
-                for index, request, result in await self._embed_batch_with_isolation(
-                    embeddings
-                ):
-                    if isinstance(result, Exception):
-                        outcomes[index] = result
-                        continue
-                    try:
-                        outcomes[index] = await self._accept(
-                            request, prepared_vector=result
-                        )
-                    except Exception as exc:
-                        outcomes[index] = exc
-
-        if any(outcome is None for outcome in outcomes):
-            raise AssertionError("every batch decision must have an outcome")
-        return tuple(outcome for outcome in outcomes if outcome is not None)
-
-    async def _batch_embedding_text(
-        self, request: AmendmentDecisionRequest
-    ) -> str | None:
-        """Return text that needs embedding, or ``None`` for a local decision."""
-
-        proposals = VaultAmendmentProposalRepository()
-        documents = VaultDocumentRepository()
-        embeddings = VaultDocumentEmbeddingRepository()
-
-        async with self._transactions.transaction() as connection:
-            proposal = await proposals.get(connection, request.proposal_id)
-            if proposal is None:
-                raise AmendmentProposalNotFound(str(request.proposal_id))
-            if proposal.state is not AmendmentProposalState.PENDING:
-                raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
-            target = await documents.get_by_id(connection, proposal.target_document_id)
-            if target is None or target.content_revision != proposal.target_revision:
-                return None
-            stored = (
-                await embeddings.get(connection, target.id, self._provider.profile_id)
-                if self._provider is not None
-                else None
-            )
-
-        update_request = self._update_request(
-            proposal,
-            target,
-            principal_id=request.principal_id,
-            request_id=request.request_id,
-        )
-        candidate = VaultDocumentUpdateService._build_candidate(target, update_request)
-        body_summary = summarize_body_change(target.body, candidate.body)
-        if (
-            body_summary.requires_removal_acknowledgement
-            and not request.acknowledge_removals
-        ):
-            raise AmendmentRemovalAcknowledgementRequired(
-                "acceptance removes existing lines; set acknowledge_removals=true "
-                "after reviewing the removal summary"
-            )
-        if proposal.change_kind is AmendmentProposalKind.METADATA:
-            return None
-        if self._provider is None:
-            raise DedupUnavailable(
-                "No embedding provider is configured; refusing to write without dedup"
-            )
-        errors = validate(candidate) + validate_facets(candidate.facets)
-        if errors:
-            raise ValueError("; ".join(errors))
-
-        embedding_text = assemble_embedding_text(candidate)
-        if stored is not None and stored.text_sha256 == embedding_text_digest(
-            embedding_text
-        ):
-            return None
-        return embedding_text
-
-    async def _embed_batch_with_isolation(
-        self,
-        embeddings: Sequence[tuple[int, AmendmentDecisionRequest, str]],
-    ) -> tuple[
-        tuple[int, AmendmentDecisionRequest, EmbeddingVector | Exception], ...
-    ]:
-        """Embed one group, splitting only permanent context-limit failures.
-
-        A token-total limit can reject a group whose individual documents are
-        all valid. Bisecting on ``EmbeddingInputTooLong`` discovers that case
-        and leaves only an individually oversized document with the 422,
-        while transport and rate-limit failures remain shared temporary errors.
-        """
-
-        if self._provider is None:
-            raise AssertionError("only configured providers reach batch embedding")
-
-        try:
-            vectors = await self._provider.embed(
-                [text for _, _, text in embeddings],
-                EmbeddingInputKind.DOCUMENT,
-            )
-            if len(vectors) != len(embeddings):
-                raise EmbeddingUnavailable(
-                    "Embedding provider returned an unexpected vector count"
-                )
-        except EmbeddingInputTooLong as exc:
-            if len(embeddings) == 1:
-                index, request, _ = embeddings[0]
-                return ((index, request, exc),)
-            midpoint = len(embeddings) // 2
-            left, right = await asyncio.gather(
-                self._embed_batch_with_isolation(embeddings[:midpoint]),
-                self._embed_batch_with_isolation(embeddings[midpoint:]),
-            )
-            return left + right
-        except Exception as exc:
-            return tuple((index, request, exc) for index, request, _ in embeddings)
-
-        return tuple(
-            (index, request, vector)
-            for (index, request, _), vector in zip(embeddings, vectors, strict=True)
-        )
+                    outcomes.append(await self.decide(request))
+            except Exception as exc:
+                outcomes.append(exc)
+        return tuple(outcomes)
 
     async def _reject(
         self, request: AmendmentDecisionRequest
@@ -2230,7 +2085,7 @@ class VaultAmendmentService:
         self,
         request: AmendmentDecisionRequest,
         *,
-        prepared_vector: EmbeddingVector | None = None,
+        batch_only: bool = False,
     ) -> AmendmentDecisionOutcome:
         proposals = VaultAmendmentProposalRepository()
         documents = VaultDocumentRepository()
@@ -2299,6 +2154,12 @@ class VaultAmendmentService:
                 candidate=candidate,
             )
 
+        if batch_only:
+            raise ValueError(
+                "Batch decisions can accept metadata changes only; use the "
+                "single-decision route for content amendments"
+            )
+
         if self._provider is None:
             raise DedupUnavailable(
                 "No embedding provider is configured; refusing to write without dedup"
@@ -2311,15 +2172,9 @@ class VaultAmendmentService:
         text_digest = embedding_text_digest(embedding_text)
         re_embed = stored is None or stored.text_sha256 != text_digest
         vector = (
-            prepared_vector
-            if prepared_vector is not None
-            else (
-                await embed_one(
-                    self._provider, embedding_text, EmbeddingInputKind.DOCUMENT
-                )
-                if re_embed
-                else stored.vector
-            )
+            await embed_one(self._provider, embedding_text, EmbeddingInputKind.DOCUMENT)
+            if re_embed
+            else stored.vector
         )
 
         async with self._transactions.transaction() as connection:

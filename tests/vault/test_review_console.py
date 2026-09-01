@@ -224,6 +224,8 @@ def test_bulk_acceptance_counts_each_decision_outcome_separately() -> None:
     assert "accepted++" in page and "failed++" in page
     assert "stale++" in page
     assert 'result.outcome === "accepted"' in page
+    assert "check.checked = false;" in page
+    assert "check.disabled = true;" in page
 
 
 def test_bulk_acceptance_uses_one_bounded_batch_request() -> None:

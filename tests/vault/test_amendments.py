@@ -311,73 +311,35 @@ def test_batch_review_refuses_duplicate_proposal_ids(
     assert "proposal_id values must be unique" in response.text
 
 
-def test_batch_review_embeds_content_acceptances_in_one_provider_call(
+def test_batch_review_refuses_content_acceptance_without_blocking_metadata(
     client: TestClient,
     tokens: tuple[str, str, str],
     provider: StubEmbeddingProvider,
 ) -> None:
-    """The bounded batch must not stack one retry budget per acceptance."""
+    """The bounded batch is safe for metadata without embedding content."""
 
     proposer, reviewer, _ = tokens
     note_ids = [_seed_note(), _seed_note()]
     try:
-        proposal_ids: list[str] = []
-        for index, note_id in enumerate(note_ids):
-            submitted = client.post(
-                "/api/v1/vault/amendment-proposals",
-                headers=_headers(proposer),
-                json=_proposal(note_id, body=f"Amended batch body {index}."),
-            )
-            assert submitted.status_code == 200, submitted.text
-            proposal_ids.append(submitted.json()["proposal"]["proposal_id"])
-
-        response = client.post(
-            "/api/v1/vault/amendment-proposals/batch-decisions",
-            headers=_headers(reviewer),
+        content = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_ids[0], body="Amended content body."),
+        )
+        metadata = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
             json={
-                "decisions": [
-                    {
-                        "proposal_id": proposal_id,
-                        "decision": "accepted",
-                        "acknowledge_removals": True,
-                    }
-                    for proposal_id in proposal_ids
-                ]
+                "target_note_id": note_ids[1],
+                "base_revision": 1,
+                "change": {"kind": "metadata", "facets": {"area": ["review"]}},
+                "rationale": "Exercise the non-embedding batch path.",
             },
         )
-
-        assert response.status_code == 200, response.text
-        assert [item["outcome"] for item in response.json()["results"]] == [
-            "accepted",
-            "accepted",
-        ], response.json()
-        assert provider.calls == 1
-    finally:
-        _cleanup()
-
-
-def test_batch_review_isolates_an_oversized_embedding_input(
-    client: TestClient,
-    tokens: tuple[str, str, str],
-    provider: StubEmbeddingProvider,
-) -> None:
-    """A 422 for one proposed body must not prevent a valid neighbor settling."""
-
-    proposer, reviewer, _ = tokens
-    provider.reject_input_over_chars = 300
-    note_ids = [_seed_note(), _seed_note()]
-    try:
-        proposal_ids: list[str] = []
-        for body, note_id in zip(
-            ("A valid batch amendment.", "x" * 500), note_ids, strict=True
-        ):
-            submitted = client.post(
-                "/api/v1/vault/amendment-proposals",
-                headers=_headers(proposer),
-                json=_proposal(note_id, body=body),
-            )
-            assert submitted.status_code == 200, submitted.text
-            proposal_ids.append(submitted.json()["proposal"]["proposal_id"])
+        assert content.status_code == 200, content.text
+        assert metadata.status_code == 200, metadata.text
+        content_id = content.json()["proposal"]["proposal_id"]
+        metadata_id = metadata.json()["proposal"]["proposal_id"]
 
         response = client.post(
             "/api/v1/vault/amendment-proposals/batch-decisions",
@@ -385,24 +347,28 @@ def test_batch_review_isolates_an_oversized_embedding_input(
             json={
                 "decisions": [
                     {
-                        "proposal_id": proposal_id,
+                        "proposal_id": content_id,
                         "decision": "accepted",
                         "acknowledge_removals": True,
-                    }
-                    for proposal_id in proposal_ids
+                    },
+                    {"proposal_id": metadata_id, "decision": "accepted"},
                 ]
             },
         )
 
         assert response.status_code == 200, response.text
         results = response.json()["results"]
-        assert results[0]["outcome"] == "accepted"
-        assert results[1] == {
-            "proposal_id": proposal_ids[1],
+        assert results[0] == {
+            "proposal_id": content_id,
             "outcome": None,
             "status_code": 422,
-            "detail": "Document exceeds the embedding model input limit",
+            "detail": (
+                "Batch decisions can accept metadata changes only; use the "
+                "single-decision route for content amendments"
+            ),
         }
+        assert results[1]["outcome"] == "accepted"
+        assert provider.calls == 0
     finally:
         _cleanup()
 
