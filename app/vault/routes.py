@@ -1456,14 +1456,14 @@ async def decide_amendment_proposal_batch(
     request_id = request.headers.get("X-Request-Id") or uuid4().hex
     results: list[VaultAmendmentBatchDecisionResult] = []
 
-    for index, item in enumerate(body.decisions):
+    for item in body.decisions:
         try:
             outcome = await service.decide(
                 AmendmentDecisionRequest(
                     proposal_id=item.proposal_id,
                     state=AmendmentProposalState(item.decision),
                     principal_id=credential.principal_id,
-                    request_id=f"{request_id}:{index}",
+                    request_id=request_id,
                     decision_note=item.decision_note,
                     acknowledge_removals=item.acknowledge_removals,
                 )

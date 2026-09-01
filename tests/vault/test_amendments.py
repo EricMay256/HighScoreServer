@@ -236,7 +236,10 @@ def test_batch_review_settles_independent_decisions_in_one_request(
 
         response = client.post(
             "/api/v1/vault/amendment-proposals/batch-decisions",
-            headers=_headers(reviewer),
+            headers={
+                **_headers(reviewer),
+                "X-Request-Id": "batch-amendment-audit-correlation",
+            },
             json={
                 "decisions": [
                     {"proposal_id": proposal_ids[0], "decision": "accepted"},
@@ -259,6 +262,29 @@ def test_batch_review_settles_independent_decisions_in_one_request(
             "status_code": 404,
             "detail": "Amendment proposal not found",
         }
+
+        transactions, engine = vault_service()
+
+        async def decision_audit_events() -> list[tuple[str, str]]:
+            try:
+                async with transactions.transaction() as connection:
+                    result = await connection.execute(
+                        select(
+                            vault_audit_events.c.target_id,
+                            vault_audit_events.c.request_id,
+                        ).where(
+                            vault_audit_events.c.operation
+                            == "vault.amendment.review",
+                            vault_audit_events.c.target_id.in_(proposal_ids),
+                        )
+                    )
+                    return [(str(row[0]), str(row[1])) for row in result.all()]
+            finally:
+                await engine.dispose()
+
+        assert dict(asyncio.run(decision_audit_events())) == dict.fromkeys(
+            proposal_ids, "batch-amendment-audit-correlation"
+        )
     finally:
         _cleanup()
 
