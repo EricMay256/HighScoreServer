@@ -1311,7 +1311,10 @@ The response is always an ordered result per requested proposal, with `outcome` 
 rolls back or suppresses the other results. Accepted batch items must be `metadata` changes,
 whose fields do not affect the embedding; accepting a content amendment returns an item-local
 422 directing the reviewer to the single-decision route. Rejections may settle any proposal
-kind without embedding. The route is limited to one batch per principal per minute.
+kind without embedding. The route is limited to one batch per principal per minute **per
+worker**. The current Procfile starts two Gunicorn workers, so the effective deployment ceiling
+is two batches (up to 100 decisions) per principal per minute until the quota uses shared
+storage.
 
 An amendment request carries a discriminated `change`. Use
 `{"kind":"body_diff","body_diff":"..."}` for a compact unified diff against the body.
