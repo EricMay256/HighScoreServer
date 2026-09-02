@@ -27,16 +27,20 @@ line-length = 88
 #   RET  redundant control flow after return
 #   UP   syntax now available on the pinned Python
 #
-# Deliberately NOT enabled, with the count each would add today:
-#   E501 (116) line length -- only 6 of them are in app/vault/; the backlog is
-#        legacy leaderboard modules and is worth its own pass, not a gate.
-#   S    (627) bandit -- overwhelmingly assert-in-tests.
-#   ARG  (110) unused arguments -- FastAPI dependencies and pytest fixtures are
-#        unused by construction.
-#   SIM   (29) -- 24 are SIM117, which would merge `async with` blocks that are
-#        clearer nested.
-#   T20   (37) print -- scripts/ exists to print.
-#   N      (6) -- all N818, and the embedding exception names are deliberate.
+# Deliberately NOT enabled. Counts are `ruff check --select <rule> .` over the
+# whole tree, measured 2026-09-02 -- state the date, because the previous set
+# was off by up to 8x and nothing said so. They are context for the decision,
+# not a gate; re-measure before quoting one.
+#   E501   (196) line length -- 27 in app/vault/, the rest legacy leaderboard
+#          and test modules. Worth its own pass, not a gate.
+#   S    (2,647) bandit -- overwhelmingly assert-in-tests.
+#   ARG    (247) unused arguments -- FastAPI dependencies and pytest fixtures
+#          are unused by construction.
+#   SIM     (34) -- 23 are SIM117, which would merge `async with` blocks that
+#          are clearer nested.
+#   T20    (313) print -- scripts/ exists to print.
+#   N       (34) -- 32 are N818, and the embedding exception names are
+#          deliberate; the other two are one N802 and one N811.
 select = ["E4", "E7", "E9", "F", "W", "I", "B", "C4", "RET", "UP"]
 
 ignore = [
