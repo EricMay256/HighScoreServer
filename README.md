@@ -919,6 +919,18 @@ section is the summary.
     120 seconds). This is a freshness issue, not a correctness one — stale data
     is still valid data, just older than it should be.
 
+- **The SPA keeps its tokens in `localStorage`.** `leaderboard-frontend/src/auth/store.ts`
+  stores both the access and the refresh token there, which is standard for a
+  SPA of this shape and consistent with the Unity client's `PlayerPrefs`. The
+  cost is explicit: any XSS on the page can read the refresh token, and a
+  refresh token is the durable half — it survives the access token's hour and
+  can mint new pairs until it is revoked. Accepted here because the page
+  renders no user-supplied HTML and loads no third-party scripts, so the XSS
+  surface is small; the alternative is an httpOnly refresh cookie, which needs
+  a CSRF story and a same-site deployment the `/app` mount already satisfies.
+  **Trigger for revisiting:** any feature that renders user-supplied content
+  in the SPA, or a third-party script on the page.
+
 - **Three scenarios are deliberately untested.** Each was considered and
   deferred with a specific reason, not missed:
   - **Guest-retry exhaustion.** The guest account creation loop retries on
