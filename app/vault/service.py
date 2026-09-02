@@ -389,7 +389,7 @@ class ContributionRequest:
 
 
 async def _summary_still_repairable(
-connection: AsyncConnection,
+    connection: AsyncConnection,
     *,
     document_id: str | None,
     contributed_by: str,
