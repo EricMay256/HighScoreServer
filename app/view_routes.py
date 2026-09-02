@@ -24,9 +24,17 @@ def home_view(request: Request) -> HTMLResponse:
     )
 
 @router.get("/leaderboard", response_class=HTMLResponse)
-async def leaderboard_view(request: Request, game_mode: str = "classic") -> HTMLResponse:
+async def leaderboard_view(
+    request: Request, game_mode: str | None = None
+) -> HTMLResponse:
     """
     Renders the leaderboard page for a given game mode.
+
+    With no `game_mode` the first configured mode is used. The default used to
+    be the literal "classic" while every link in the templates pointed at
+    "blitz", so the page a visitor landed on depended on which of the two names
+    the database happened to carry.
+
     Falls back to an empty list on DB error rather than raising — this is a
     view, not an API endpoint, so a full 500 page would be worse UX.
     """
@@ -44,6 +52,9 @@ async def leaderboard_view(request: Request, game_mode: str = "classic") -> HTML
                 rows = await cur.fetchall()
                 game_modes = [r[0] for r in rows]
                 mode_map = {r[0]: {"sort_order": r[1], "label": r[2]} for r in rows}
+
+                if game_mode is None:
+                    game_mode = game_modes[0] if game_modes else ""
 
                 config = mode_map.get(game_mode)
                 if config:
@@ -83,6 +94,10 @@ async def leaderboard_view(request: Request, game_mode: str = "classic") -> HTML
     except Exception as e:
         logger.error("DB error in leaderboard_view: %s", e)
         error = "Could not load scores. Please try again later."
+
+    # The query that would have named a default is the one that failed.
+    if game_mode is None:
+        game_mode = ""
 
     return templates.TemplateResponse(
         request=request,

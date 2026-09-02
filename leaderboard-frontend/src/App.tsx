@@ -1,7 +1,8 @@
 // src/App.tsx
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "./auth/store";
-import { logout } from "./api/client";
+import { getGameModes, logout } from "./api/client";
 import Leaderboard from "./components/Leaderboard";
 import AuthPanel from "./components/AuthPanel";
 import SubmitPanel from "./components/SubmitPanel";
@@ -18,7 +19,18 @@ export default function App() {
   // Leaderboard (which displays scores for it) and SubmitPanel (which
   // submits to it) stay in sync — submitting a score always targets the
   // mode the user is currently viewing, which is what players expect.
-  const [gameMode, setGameMode] = useState<string>("blitz");
+  //
+  // Null until the user picks one, then the server's first mode. Nothing here
+  // names a mode: the initial state used to be the literal "blitz", so any
+  // database without a mode of that name opened on an empty board. Shares
+  // ModeTabs' query key, so deriving it costs no extra request.
+  const { data: modes } = useQuery({
+    queryKey: ["gameModes"],
+    queryFn: getGameModes,
+    staleTime: 5 * 60_000,
+  });
+  const [selectedMode, setSelectedMode] = useState<string | null>(null);
+  const gameMode = selectedMode ?? modes?.[0]?.name ?? "";
 
   const handleLogout = async () => {
     // logout() clears tokens in its finally block even if the network call
@@ -35,8 +47,8 @@ export default function App() {
           <a href="/" className="site-nav-link">
             Home
           </a>
-          <a href="/leaderboard?game_mode=blitz" className="site-nav-link">
-            Classic
+          <a href="/leaderboard" className="site-nav-link">
+            Leaderboard
           </a>
           {auth.isAuthenticated && (
             <>
@@ -62,7 +74,7 @@ export default function App() {
             margin: "0 auto",
           }}
         >
-          <Leaderboard gameMode={gameMode} onGameModeChange={setGameMode} />
+          <Leaderboard gameMode={gameMode} onGameModeChange={setSelectedMode} />
 
           <aside style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
             {auth.isAuthenticated ? (

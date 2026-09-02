@@ -34,12 +34,16 @@ export default function Leaderboard({ gameMode, onGameModeChange }: LeaderboardP
   } = useQuery({
     queryKey: ["scores", gameMode, period],
     queryFn: () => getScores(gameMode, period),
+    // Empty until the mode list resolves, and /scores requires a mode.
+    enabled: gameMode !== "",
   });
 
   return (
     <div className="lb-container">
       <div className="lb-header">
-        <h1 className="lb-title">{gameMode.toUpperCase()} MODE</h1>
+        <h1 className="lb-title">
+          {gameMode ? `${gameMode.toUpperCase()} MODE` : "LEADERBOARD"}
+        </h1>
         <p className="lb-subtitle">Top scores</p>
       </div>
 
@@ -51,7 +55,9 @@ export default function Leaderboard({ gameMode, onGameModeChange }: LeaderboardP
 
       <PeriodTabs selected={period} onChange={setPeriod} />
 
-      {isLoading && (
+      {/* An empty gameMode means the mode list has not resolved yet, which is
+          still loading from the reader's point of view. */}
+      {(isLoading || gameMode === "") && (
         <div className="lb-loading">
           <div className="lb-spinner" />
           Loading scores…
