@@ -1,3 +1,4 @@
+import hmac
 import os
 
 from fastapi import Depends, Header, HTTPException, status
@@ -12,7 +13,10 @@ async def require_api_key(x_api_key: str = Header(...)) -> None:
     expected = os.environ.get("API_KEY")
     if not expected:
         raise RuntimeError("API_KEY environment variable not set")
-    if x_api_key != expected:
+    # Constant-time, matching the vault's auth.secret_matches. A timing attack
+    # across Heroku's router is impractical; comparing secrets with == is the
+    # kind of thing that stops being harmless once the code is copied.
+    if not hmac.compare_digest(x_api_key.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
