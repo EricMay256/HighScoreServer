@@ -31,7 +31,10 @@ MANIFEST
 venv/
 env/
 ENV/
-.python-version
+
+# .python-version is deliberately tracked, not ignored: Heroku's buildpack
+# reads it as the runtime pin. Point a local pyenv elsewhere with
+# PYENV_VERSION rather than editing it.
 
 # Testing / coverage
 .pytest_cache/

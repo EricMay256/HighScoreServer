@@ -1,11 +1,12 @@
 # Configuration for Python tooling. Heroku build manifests
-# (requirements.txt, runtime.txt, Procfile) are intentionally kept separate —
-# the buildpack reads those, not this file.
+# (requirements.txt, .python-version, Procfile) are intentionally kept
+# separate — the buildpack reads those, not this file.
 
 [tool.ruff]
 # There is no [project] table, so ruff cannot infer the Python version from
 # requires-python and has to be told. This MUST be the oldest interpreter the
-# code runs on -- CI and Heroku are 3.12 -- not whatever is installed locally.
+# code runs on -- CI and Heroku are both pinned to 3.12, the latter by
+# .python-version -- not whatever is installed locally.
 # Setting it to a newer version makes ruff "modernize" code into syntax the
 # real runtime rejects: UP037 stripped the quotes from three forward
 # references, which 3.14 tolerates (PEP 649 defers annotation evaluation) and

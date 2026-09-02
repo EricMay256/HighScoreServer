@@ -809,6 +809,7 @@ HighScoreServer/
 ├── requirements.txt
 ├── requirements-dev.txt
 ├── Procfile                  # web (gunicorn) and release (scripts/release.sh) phases
+├── .python-version           # 3.12 — the interpreter CI tests and Heroku builds
 ├── wsgi.py
 └── .env.example
 ```
