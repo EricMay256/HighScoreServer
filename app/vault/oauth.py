@@ -749,6 +749,15 @@ class VaultAuthorizationProvider(
         this one.
         """
 
+        # This *writes* the requested baseline scopes to the grant, so a
+        # refresh asking for fewer narrows the family permanently rather than
+        # just this credential. One-way, because the SDK requires a refresh
+        # request's scopes to be a subset of the presented token's: a family
+        # that narrows once cannot widen again without a new authorization.
+        # Deliberate -- the grant row is the authoritative record and must not
+        # disagree with what the family can do -- and recorded in ADR 0029's
+        # 2026-09-02 amendment, because "narrow for one call" is a reasonable
+        # thing to assume and is not what this does.
         authorized = sorted(set(scopes) & set(OAUTH_BASELINE_SCOPES))
         grant = await self._grants.set_authorized_scopes(
             connection,
