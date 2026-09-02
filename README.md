@@ -972,6 +972,17 @@ section is the summary.
   modeling games as a first-class schema concept (a `game` column on 
   `game_modes`) becomes the better answer. Deferred until that decision is 
   forced.
+- **Three deprecation warnings are filtered, and Python 3.16 removes what
+  they warn about.** `pyproject.toml`'s `filterwarnings` silences
+  `asyncio.set_event_loop_policy` / `WindowsSelectorEventLoopPolicy` (needed by
+  `run_dev.py` and `tests/conftest.py`, because uvicorn and anyio build the
+  loop before the app can choose one) and slowapi 0.1.9's use of
+  `asyncio.iscoroutinefunction`. Nothing to do on 3.12 or 3.14, and the
+  `scripts/` already use `loop_factory` instead. **Trigger for revisiting:**
+  raising `.python-version` toward 3.16, or a slowapi release that drops the
+  call. A filter that outlives its removal date turns into a silent failure
+  at the version boundary, which is why the date is recorded here rather than
+  only in the filter's own comment.
 - **The Procfile's Gunicorn worker class is deprecated.**
   `uvicorn.workers.UvicornWorker` has been deprecated since uvicorn 0.30 in
   favour of the separate `uvicorn-worker` package. It is still shipped in the
