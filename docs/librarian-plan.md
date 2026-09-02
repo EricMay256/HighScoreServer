@@ -1,8 +1,11 @@
-# Handoff: proposal revision and librarian console
+# Plan: proposal revision and the librarian console
 
 Date: 2026-09-02
 
-Status: planning complete enough to draft ADRs; no implementation has started.
+Status (2026-09-02): Phase 0 is done — vault ADR 0044 (proposal lineage) is Accepted
+and ADR 0043 (the librarian workflow) is Proposed, awaiting acceptance. No
+implementation of Phases 1–8 has started. This file was `docs/HANDOFF-2026-09-02.md`;
+it is the detailed plan behind the librarian entries in `docs/NEXT-STEPS.md`.
 
 ## Objective
 
@@ -84,7 +87,7 @@ Initial recommendation:
 - Derive `revised_by` through the reverse relationship rather than storing two columns that can disagree.
 - Add an amendment-specific `superseded` state later only if queueing, reporting, or review semantics prove that `rejected` plus machine-readable lineage is inadequate.
 
-Whether `revises_proposal_id` should be a self-foreign-key or an unconstrained durable correlation is an ADR decision. A foreign key gives stronger lineage integrity; a correlation ID matches the vault's preference for history that can outlive its subject.
+**Settled by ADR 0044:** `revises_proposal_id` is an unconstrained durable correlation, not a self-foreign-key, and the predecessor settles as a new amendment-specific `superseded` state rather than `rejected` plus lineage. The recommendation above is kept as the reasoning the ADR weighed.
 
 ### Existing revision and workflow primitives must be reused
 
@@ -119,7 +122,7 @@ Proposed placement:
 - `vault:librarian-run`: narrow external-runner scope for claiming and returning draft work.
 - `vault:compile`: remains a privileged operator entitlement used by the human approval path, not by the model.
 
-This placement must be confirmed in the authorization ADR before migration work.
+ADR 0043 records this placement; it takes effect when that ADR is accepted.
 
 ### Documentation drift found during the audit
 
@@ -144,9 +147,9 @@ This placement must be confirmed in the authorization ADR before migration work.
 - There is at most one in-flight invocation per session.
 - No hidden chain-of-thought is stored. Persist user-visible messages, concise tool summaries, decisions, evidence, errors, provider identifiers, usage, and cost.
 
-## Phase 0 - Record the architecture
+## Phase 0 - Record the architecture (done 2026-09-02)
 
-Add two Nygard ADRs under `app/vault/docs/adr/`:
+Two Nygard ADRs were added under `app/vault/docs/adr/` — 0043 (Proposed) and 0044 (Accepted):
 
 1. Librarian runs are persisted drafts and only humans commit them.
    - Dual-runner architecture.
@@ -445,14 +448,14 @@ Verification includes focused service/repository tests, browser behavior tests, 
 - Web search by the librarian; the first release works from governed vault content.
 - Additional external model providers beyond the first OpenAI adapter and planned Anthropic adapter.
 
-## Open decisions before implementation
+## Decisions
 
-1. Should `revises_proposal_id` be a self-foreign-key or a non-FK durable correlation?
-2. Is `rejected` plus linked successor sufficient for the predecessor, or does amendment-specific `superseded` have proven UI/reporting value?
-3. Does `vault:librarian` belong in baseline authorized scopes, while `vault:librarian-run` remains a separately issued runner capability?
-4. Are invocation rows retained indefinitely for accounting/audit, or summarized and pruned after a defined period?
-5. Which provider/model pair is acceptable for the first sub-$5 API experiment after checking current prices?
+1. `revises_proposal_id` — **settled (ADR 0044):** a non-FK durable correlation.
+2. Predecessor state — **settled (ADR 0044):** an amendment-specific `superseded` state, distinct from generic rejection.
+3. Scope placement — **recorded (ADR 0043, Proposed):** `vault:librarian` in the OAuth baseline for a principal operating its own sessions; `vault:librarian-run` a separately issued runner capability; `vault:compile` stays a human-held entitlement.
+4. Invocation retention — **recorded (ADR 0043):** retained permanently for the initial interactive workflow; a pruning script needs its own ADR and a dry-run-first design.
+5. **Open:** which provider/model pair is acceptable for the first sub-$5 API experiment, checked against current official prices at implementation time.
 
 ## Next action
 
-Draft the two ADRs in Phase 0 and resolve the five open decisions with the user before writing migrations. The proposal-lineage ADR and implementation can then proceed independently of the generative runner.
+Phase 1. ADR 0044 is Accepted, so the proposal-lineage migration and the review-page flow can proceed now, independently of the generative runner. Phases 2 onward wait on ADR 0043 being accepted.

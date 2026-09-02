@@ -1,3 +1,8 @@
+> **Archived 2026-09-02.** A historical handoff, kept for its reasoning. It is not
+> maintained: every fact below describes the state on the date it was written and
+> may since have changed. The current picture is in [`docs/NEXT-STEPS.md`](../NEXT-STEPS.md)
+> and [`docs/HANDOFF.md`](../HANDOFF.md).
+
 # Handoff — metadata model and the edge graph
 
 A decision brief, not a task list. Six decisions about tags, facets, and relations that are
