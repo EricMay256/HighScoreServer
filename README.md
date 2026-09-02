@@ -972,3 +972,12 @@ section is the summary.
   modeling games as a first-class schema concept (a `game` column on 
   `game_modes`) becomes the better answer. Deferred until that decision is 
   forced.
+- **The Procfile's Gunicorn worker class is deprecated.**
+  `uvicorn.workers.UvicornWorker` has been deprecated since uvicorn 0.30 in
+  favour of the separate `uvicorn-worker` package. It is still shipped in the
+  pinned 0.42, so nothing is broken and the switch was deliberately not made
+  in the 2026-09-02 review pass — it would add a production dependency to fix
+  a warning. **Trigger for revisiting:** any uvicorn upgrade. Check the
+  release notes for the worker's removal before bumping the pin; the change
+  is `pip install uvicorn-worker` (pinned like everything else) and
+  `-k uvicorn_worker.UvicornWorker` in the `Procfile`.
