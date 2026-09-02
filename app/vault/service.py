@@ -2097,6 +2097,14 @@ class VaultAmendmentService:
                 raise AmendmentProposalNotFound(str(request.proposal_id))
             if proposal.state is not AmendmentProposalState.PENDING:
                 raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+            if (
+                batch_only
+                and proposal.change_kind is not AmendmentProposalKind.METADATA
+            ):
+                raise ValueError(
+                    "Batch decisions can accept metadata changes only; use the "
+                    "single-decision route for content amendments"
+                )
             target = await documents.get_by_id(
                 connection, proposal.target_document_id
             )
@@ -2152,12 +2160,6 @@ class VaultAmendmentService:
                 proposal=proposal,
                 target=target,
                 candidate=candidate,
-            )
-
-        if batch_only:
-            raise ValueError(
-                "Batch decisions can accept metadata changes only; use the "
-                "single-decision route for content amendments"
             )
 
         if self._provider is None:

@@ -415,6 +415,95 @@ def test_batch_review_refuses_content_acceptance_without_blocking_metadata(
         _cleanup()
 
 
+def test_batch_review_refuses_stale_content_without_settling_it(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batch's content guard precedes the stale-proposal settlement path."""
+
+    proposer, reviewer, _ = tokens
+    monkeypatch.setattr("app.vault.routes.get_embedding_provider", lambda: None)
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_id, body="A now-stale replacement."),
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        transactions, engine = vault_service()
+
+        async def concurrent_edit() -> None:
+            try:
+                async with transactions.transaction() as connection:
+                    await connection.execute(
+                        update(vault_documents)
+                        .where(vault_documents.c.id == note_id)
+                        .values(
+                            body="A newer edit that must survive.",
+                            content_revision=vault_documents.c.content_revision + 1,
+                            updated_at=func.now(),
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(concurrent_edit())
+
+        batch = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers=_headers(reviewer),
+            json={"decisions": [{"proposal_id": proposal_id, "decision": "accepted"}]},
+        )
+        assert batch.status_code == 200, batch.text
+        assert batch.json()["results"][0]["status_code"] == 422
+
+        single = client.post(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+        assert single.status_code == 200, single.text
+        assert single.json()["outcome"] == "stale"
+    finally:
+        _cleanup()
+
+
+def test_batch_review_refuses_content_before_removal_acknowledgement(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """A content batch is refused before its removal summary is evaluated."""
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_id),
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        batch = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers=_headers(reviewer),
+            json={"decisions": [{"proposal_id": proposal_id, "decision": "accepted"}]},
+        )
+        assert batch.status_code == 200, batch.text
+        result = batch.json()["results"][0]
+        assert result["status_code"] == 422
+        assert result["detail"] == (
+            "Batch decisions can accept metadata changes only; use the "
+            "single-decision route for content amendments"
+        )
+    finally:
+        _cleanup()
+
+
 def test_review_accepts_exact_replacement_and_increments_revision(
     client: TestClient,
     tokens: tuple[str, str, str],
