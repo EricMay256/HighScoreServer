@@ -27,6 +27,7 @@ Create Date: 2026-05-30
 """
 from alembic import op
 
+
 # revision identifiers, used by Alembic.
 revision = "0001_baseline"
 down_revision = None

@@ -25,6 +25,7 @@ Create Date: 2026-06-07
 """
 from alembic import op
 
+
 # revision identifiers, used by Alembic.
 revision = "0003_max_score_claimed_tier"
 down_revision = "0002_runs_cumulative_validation"

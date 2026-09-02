@@ -21,6 +21,7 @@ Create Date: 2026-05-31
 """
 from alembic import op
 
+
 # revision identifiers, used by Alembic.
 revision = "0002_runs_cumulative_validation"
 down_revision = "0001_baseline"

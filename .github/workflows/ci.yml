@@ -131,5 +131,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # The whole tree. Keep in sync with scripts/lint.sh and scripts/lint.ps1.
       - name: Ruff lint
-        run: ruff check app/ tests/ scripts/
+        run: ruff check .
