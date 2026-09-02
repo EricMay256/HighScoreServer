@@ -194,9 +194,10 @@ async def latest_scores(
                     )
                 rows = await cur.fetchall()
     except Exception as e:
+        logger.error("Latest scores error: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         ) from e
 
     if rows:
