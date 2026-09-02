@@ -437,8 +437,23 @@ async function signOut() {
 
 /* `hssv1_<credential-id>_<secret>`. The console shows the id so the operator
    can name this exact family when granting the entitlement -- otherwise the
-   command below is a scavenger hunt through `issue_vault_credential list`. */
-const credentialId = () => (TOKEN && TOKEN.split("_").length >= 3) ? TOKEN.split("_")[1] : null;
+   command below is a scavenger hunt through `issue_vault_credential list`.
+
+   `GET /authorization` states the id outright, so prefer it and parse only
+   until it has loaded. The parse splits from the *right*, as the server and
+   AGENTS.md do: a credential id may contain `_` while the secret is hex, so
+   the last `_` is the unambiguous separator. Splitting from the left works on
+   every id minted today and stops working the first time one carries an
+   underscore -- silently, on the string the operator is told to copy. */
+function credentialId() {
+  if (IDENTITY && IDENTITY.credential_id) return IDENTITY.credential_id;
+  if (!TOKEN) return null;
+  const cut = TOKEN.lastIndexOf("_");
+  if (cut < 0) return null;
+  const head = TOKEN.slice(0, cut);
+  const sep = head.indexOf("_");
+  return sep < 0 ? null : head.slice(sep + 1) || null;
+}
 
 /* The label in place of the id, once there is one. `oauth-<uuid4>` and a hex
    credential id are exact and unreadable; the label is the operator's own name

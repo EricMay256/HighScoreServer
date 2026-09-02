@@ -672,6 +672,25 @@ def test_the_header_prefers_the_label_and_falls_back_to_the_credential_id() -> N
     assert 'return "credential " + (credentialId() || "?");' in page
 
 
+def test_the_credential_id_is_asked_for_before_it_is_parsed() -> None:
+    """`GET /authorization` states the id; the token only implies it.
+
+    The console parsed `TOKEN.split("_")[1]`, a left split, while the server
+    and the package's AGENTS.md split from the right because a credential id
+    may contain `_` and the secret is hex. Every id minted today is hex too,
+    so the left split works -- and would stop working silently, on the exact
+    string the operator is told to copy into the entitlement command.
+    """
+
+    page = _page()
+
+    assert "if (IDENTITY && IDENTITY.credential_id) return IDENTITY.credential_id;" in page
+    assert 'TOKEN.lastIndexOf("_")' in page, (
+        "the fallback parse must split from the right, as the server does"
+    )
+    assert 'TOKEN.split("_")[1]' not in page
+
+
 def test_the_label_reaches_the_page_as_text_and_never_as_markup() -> None:
     """Unverified operator text, rendered by assignment to `textContent`.
 
