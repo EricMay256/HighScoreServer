@@ -75,6 +75,9 @@ flowchart LR
   simultaneously.
 - **Rate limiting** — write endpoints and auth routes are rate limited per
   client IP via slowapi, tuned to reflect their relative abuse potential.
+  Limits are per route and nothing is limited globally: each limited endpoint
+  carries its own `@limiter.limit`, so an unlimited route is unlimited by
+  omission rather than covered by a default.
   The deployed configuration uses in-process memory storage; the limiter
   also falls through to memory if a configured Redis is unreachable, so a
   Redis blip degrades rate limiting rather than taking the API down. Both
