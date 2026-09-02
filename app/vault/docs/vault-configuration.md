@@ -22,6 +22,36 @@ This document records variable names and operator commands only. Never paste
 real database URLs, tokens, note content, exports, or embedding vectors into
 this file, source control, CI logs, or build artifacts.
 
+## Proposed librarian configuration (not implemented)
+
+Vault ADR 0043 proposes an interactive librarian workflow that remains inside
+the vault package. These names are design records only: current code does not
+read them, and operators must not set them expecting a feature to start.
+
+```text
+VAULT_LIBRARIAN_RUNNER=external_mcp
+
+# Optional, separately budgeted provider runner for new sessions only.
+VAULT_LIBRARIAN_RUNNER=provider_api
+VAULT_LIBRARIAN_PROVIDER=openai
+VAULT_LIBRARIAN_MODEL=<explicit-model-id>
+VAULT_LIBRARIAN_API_KEY=<server-side-secret>
+```
+
+The default under the proposal is `external_mcp`: the website queues bounded
+work and an externally invoked agent completes it through the scope-filtered MCP
+surface. A provider API runner is optional; it must use a dedicated billing
+boundary and enforce a hard application ceiling of USD $5 per calendar month.
+Sessions snapshot runner, provider, and model, so changing these values affects
+new sessions only. No scheduler, worker, queue, or additional Heroku process is
+introduced.
+
+The proposed scopes are `vault:librarian` for a principal operating its own
+sessions and `vault:librarian-run` for the externally invoked runner. The latter
+does not imply contribute, review, update, delete, or compile. Scope placement
+is pending ADR approval; adding either scope requires coordinated OAuth
+constraints, grants, refresh tokens, CLI behavior, and schema-drift tests.
+
 ## Phase 1 behavior
 
 The persistence foundation is feature-gated. `VAULT_ENABLED=false` leaves the

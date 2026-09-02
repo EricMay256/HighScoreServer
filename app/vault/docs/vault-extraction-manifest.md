@@ -10,7 +10,7 @@ durable than removability comments scattered across modules, which go stale sile
 
 | Path | Destination | Note |
 | ---- | ----------- | ---- |
-| `app/vault/` | package root | Intra-package imports are already relative, so this is a directory move, not a rewrite. `tests/vault/test_boundaries.py` enforces the property. |
+| `app/vault/` | package root | Intra-package imports are already relative, so this is a directory move, not a rewrite. This includes the proposed librarian workflow, runners, console, and MCP adapter; `tests/vault/test_boundaries.py` enforces the property. |
 | `app/vault/AGENTS.md` | package root | Already inside the package; needs no edit. |
 | `app/vault/docs/` | package docs | Architecture, configuration runbook, extraction manifest, and the vault ADR lineage. |
 | `app/vault/templates/` | package assets | Built 2026-08-21 (vault ADR 0024): `login.html`, the operator login and consent page. The first non-documentation asset in the package. Deliberately the vault's own rather than HSS's root `templates/`, with its own environment in `templating.py`: a page extending the host's `base.html` would not move with the package, and `test_boundaries.py` could not catch it because it scans imports rather than templates. |
@@ -40,7 +40,7 @@ easy to overlook:
 
 | Path | Note |
 | ---- | ---- |
-| `vault_migrations/` | The vault Alembic lineage, versioned in `vault.vault_alembic_version`. Historical revisions import only `vault_migrations.helpers`, a stable migration-owned module. Repoint `env.py` from `app.vault.settings` to the extracted runtime settings module. |
+| `vault_migrations/` | The vault Alembic lineage, versioned in `vault.vault_alembic_version`, including the proposed amendment-lineage and librarian-workflow schema revisions. Historical revisions import only `vault_migrations.helpers`, a stable migration-owned module. Repoint `env.py` from `app.vault.settings` to the extracted runtime settings module. |
 | `alembic-vault.ini` | Points at `vault_migrations/`. |
 | `scripts/seed_vault_demo.py` | Onboarding fixture loader. Lives in the host's `scripts/` by convention and imports `app.env` and `app.vault.*` absolutely; both imports need repointing on the move. |
 | `scripts/measure_embedding_latency.py` | Provider latency measurement for the retry-budget decision. Same convention and the same absolute imports to repoint. |

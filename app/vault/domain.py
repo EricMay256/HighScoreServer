@@ -532,10 +532,10 @@ class VaultCompileRun:
     that produced it, with ``ON DELETE RESTRICT``, so a run cannot be deleted
     out from under its pages (ADR 0019, migration 0008).
 
-    ``input_frontier`` and ``output_frontier`` record how far the note corpus
-    had advanced when the run started and finished. The next run compares
-    against the output frontier to find notes written since, which is what
-    makes an incremental plan possible without diffing the whole corpus.
+    ``input_frontier`` and ``output_frontier`` are historical provenance for
+    the run. Incremental planning does not compare against them: per-document
+    state, including ``compile_declined_at``, distinguishes a note that was
+    considered and declined from one that was never offered.
     """
 
     id: UUID

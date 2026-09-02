@@ -51,6 +51,8 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0040 | [An authorization carries an operator-assigned label](0040-an-authorization-carries-an-operator-label.md) | Accepted (preserves 0024's amendment) |
 | 0041 | [Human-authored notes in the vault](0041-human-authored-notes-in-the-vault.md) | Deferred |
 | 0042 | [A mutable state store beside the corpus](0042-a-mutable-state-store-beside-the-corpus.md) | Considered, not scheduled |
+| 0043 | [Librarian runs are persisted drafts, and only humans commit them](0043-librarian-runs-are-persisted-drafts-and-only-humans-commit-them.md) | Proposed |
+| 0044 | [Tweaking a proposal creates a linked successor](0044-tweaking-a-proposal-creates-a-linked-successor.md) | Accepted |
 
 ## Reserved numbers
 
