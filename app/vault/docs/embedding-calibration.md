@@ -156,7 +156,7 @@ comparison is not confounded by provider drift since the import.
 section previously carried. Dropping tags lowered the floor by only 0.0109 while lowering the
 ceiling by 0.0242, because the reference pairs' overlapping-but-not-identical tags are real
 signal for *restatement*, which is exactly what the ceiling measures. Tags help the true-positive
-side more than they hurt the false-positive side. Decision 1 in `HANDOFF-METADATA.md` is settled:
+side more than they hurt the false-positive side. Decision 1 in `docs/archive/HANDOFF-2026-08-13-metadata.md` is settled:
 tags stay in the embedding text, and they were never the blocker.
 
 **The floor moved from 0.7406 to 0.8318, and the bands now genuinely overlap** rather than merely

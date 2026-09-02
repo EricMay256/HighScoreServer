@@ -1,22 +1,22 @@
 # Vault configuration and Heroku operations
 
-**Status:** Phase 1 persistence-foundation runbook
+**Status:** operator runbook for the deployed vault
 
 **Initial topology:** one Essential-0 PostgreSQL database, `public` and `vault`
 schemas
 
 **Contains secrets:** no
 
-**Nothing in this document has been applied. Re-verified on 2026-08-16:
-`VAULT_ENABLED` is unset on `high-score-server`, and a read-only catalog query
-returns NULL for `to_regclass('vault.vault_agent_credentials')`, so the vault
-credential schema has never been deployed.**
-Read every command here as a plan, not as a description of the running app. The
-vault ships dark by design — `VAULT_ENABLED` defaults to false, so no routes are
-registered, no engine is created, and `scripts/release.sh` skips the vault
-migration lineage — which is why the code can merge to `main` well before any of
-this is configured. Confirm the real state with `heroku config --app
-high-score-server` before acting on anything below.
+**The vault has run enabled in production since August 2026** —
+`VAULT_ENABLED=true` on `high-score-server`, the vault lineage applied by the
+release phase, `VAULT_PUBLIC_URL` and an operator identity method set; last
+recorded 2026-08-28 in `docs/NEXT-STEPS.md`. Paragraphs written before
+enablement still read as a plan in places; where one says "will" or "not yet
+applied", it describes that earlier state. `VAULT_ENABLED` still defaults to
+false, so a fresh deployment ships dark — no routes, no engine, and
+`scripts/release.sh` skips the vault lineage — until the flag is set. Confirm
+the real state with `heroku config --app high-score-server` before acting on
+anything below.
 
 This document records variable names and operator commands only. Never paste
 real database URLs, tokens, note content, exports, or embedding vectors into
@@ -738,7 +738,9 @@ you did not ask:
 heroku run "python -m alembic -c alembic-vault.ini current" --app <app>
 ```
 
-A vault revision reads `00NN_<name>`, currently `0017_oauth_entitlements`.
+A vault revision reads `00NN_<name>`; the head of `dev` is `0019_oauth_grant_label`,
+and production was last recorded at `0017_oauth_entitlements` (2026-08-28) — the two
+above it ship with the next merge.
 If you see `0004_auth_identities`, you checked the leaderboard lineage.
 
 ### Which database a script is about to touch
@@ -1756,7 +1758,7 @@ surfaces have very different budgets:
 | Channel | Size today | When a client pays for it |
 | --- | --- | --- |
 | Server `instructions` | ~500 chars (~125 tokens) | Session start, in **every** session with the vault registered — including every session that never touches it. Resident for the whole session |
-| Tool descriptions | ~7,300 chars across 14 tools | Deferred under tool search until the agent reaches for a tool, then resident. Also scope-filtered, so a read-only credential ever only materializes `vault_search` and `vault_get_note` — about 830 chars |
+| Tool descriptions | ~7,300 chars across 14 tools when measured on 2026-08-28; 18 are registered today and the figure has not been re-measured | Deferred under tool search until the agent reaches for a tool, then resident. Also scope-filtered, so a read-only credential ever only materializes `vault_search` and `vault_get_note` — about 830 chars |
 | `SKILL.md` body | ~10,000 chars | Only on invoke, then resident |
 | `references/*.md` | ~13,300 chars | Only when the body sends the agent there |
 
@@ -1774,7 +1776,7 @@ which has not touched a tool yet, which is precisely why it has to stay small.
 Volatile per-tool detail — parameter semantics, failure modes, what a `flagged`
 result means — belongs in the tool descriptions, which are deferred and
 scope-filtered and therefore nearly as cheap as the skill. The one thing tool
-descriptions cannot amortize is guidance spanning all 14 tools: that has to be
+descriptions cannot amortize is guidance spanning all 18 tools: that has to be
 repeated per tool or pushed up into `instructions`, and if it is large enough
 that neither is acceptable, it belongs in the skill and is subject to everything
 below.

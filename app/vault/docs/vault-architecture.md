@@ -1,6 +1,8 @@
 # Vault architecture and integration
 
-**Status:** implementation plan
+**Status:** implemented and deployed. "Deferred decisions" at the end is the live
+section; the staging hierarchy and implementation sequence are kept as the record of
+the plan they were.
 
 **Runtime owner:** HighScoreServer
 
@@ -131,11 +133,17 @@ tests/
 alembic-vault.ini            dedicated vault migration lineage
 ```
 
-The tree above is an inventory, not a target diagram. `export.py` does not
-exist; a consistent export/projector snapshot remains a planned surface, to be
-added to this inventory only when an implementation lands. `mcp.py` landed on
-2026-08-16 — the MCP adapter over the same services, mounted at
-`/api/v1/vault/mcp`. See ADR 0021.
+The tree above is the original inventory and is now abbreviated. Modules that
+landed after it was drawn: `mcp.py` (the MCP adapter, ADR 0021, mounted at
+`/api/v1/vault/mcp/`); `export.py` (the markdown projection, ADR 0022);
+`oauth.py`, `oauth_routes.py`, `google_oidc.py` and `passwords.py` (the
+authorization server, ADR 0024); `principal.py` and `rate_limit.py`
+(credential resolution and the two rate-limit layers); `body_diff.py`,
+`wikilinks.py`, `snippet.py`, `facets.py`, `origin.py`, `calibration.py` and
+`read_policy.py`; and the three human pages under `templates/`, served by
+`landing_page.py`, `review_console.py` and `browse_console.py` (ADRs 0037,
+0039). Operator tooling lives in `scripts/` at the repository root; the
+extraction manifest lists each script.
 
 Documentation lives under the package rather than in the host repository's `docs/`, so
 extraction moves it automatically. `vault_migrations/` and `alembic-vault.ini` sit at the
@@ -287,9 +295,10 @@ traffic need not move.
 
 ## Connections and transactions
 
-The current Procfile runs two Gunicorn workers. Each worker owns a legacy psycopg pool whose
-configured maximum is 10, so the current theoretical application maximum is already 20
-leaderboard connections. The vault adds one SQLAlchemy `AsyncEngine` pool per worker.
+The current Procfile runs two Gunicorn workers. Each worker owns the leaderboard's psycopg
+pool (`HSS_DB_POOL_MAX_SIZE`, default 4 since 2026-08-14 — it was a hardcoded 10 until the
+vault forced the arithmetic), so the leaderboard's own ceiling is 8 connections. The vault
+adds one SQLAlchemy `AsyncEngine` pool of `VAULT_DB_POOL_SIZE` (default 2) per worker.
 
 Before choosing a vault pool size or deploying either topology, obtain the actual connection
 limit of each target Postgres plan and prove:

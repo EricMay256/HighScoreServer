@@ -98,7 +98,9 @@ async client (as the Redis cache does) — never call it directly on the event l
 
 ## Scope guardrails for current work
 
-See `docs/specs.md` for the validated-runs / cumulative-scoring spec, and ADR 0015 plus migration `0004_auth_identities` for external identities. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); SQLAlchemy ORM; converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs; additional external providers beyond Steam unless requested.
+See `docs/specs.md` for the validated-runs / cumulative-scoring spec, and ADR 0015 plus migration `0004_auth_identities` for external identities. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); SQLAlchemy ORM; converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); password reset; React integration of runs; additional external providers beyond Steam unless requested.
+
+`docs/NEXT-STEPS.md` is the consolidated roadmap across both bounded contexts; `docs/HANDOFF.md` is the start-here for a session; `docs/archive/` holds the historical handoffs.
 
 <!-- BEGIN vault-context — delete this block when app/vault/ is extracted -->
 ### `app/vault/`

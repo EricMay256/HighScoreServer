@@ -27,7 +27,7 @@ flowchart LR
     subgraph Heroku["Heroku (single dyno, 2 gunicorn workers)"]
         API["FastAPI<br/>leaderboard + auth + Jinja2 + SPA"]
         Cache["In-process TTL cache<br/>(cachetools)"]
-        Vault["app/vault/<br/>gated by VAULT_ENABLED<br/>(off in production)"]
+        Vault["app/vault/<br/>gated by VAULT_ENABLED"]
         Postgres[("PostgreSQL<br/>public + vault schemas")]
     end
     Sentry["Sentry<br/>(error monitoring)"]
@@ -55,12 +55,14 @@ flowchart LR
     class Vault gated
 ```
 
-> **The vault is deployed but dark.** `VAULT_ENABLED` defaults to false, so in the
-> running app there are no vault routes, no vault engine, and no vault schema —
-> the dashed path above does not exist in production today. See
-> [Deployment](#deployment).
+> **The vault is feature-gated.** `VAULT_ENABLED` defaults to false, so a fresh
+> deployment publishes no vault routes, no vault engine, and no vault schema. The
+> production app has run with it enabled since August 2026: the dashed paths above
+> exist there because the flag is set, not by default. See
+> [Deployment configuration](#deployment-configuration) and the
+> [vault runbook](app/vault/docs/vault-configuration.md).
 
-> **Cache backend.** The deployed configuration uses an in-process TTL cache (`CACHE_BACKEND=memory`). Redis is opt-in using the same cache interface and can be re-enabled by provisioning the Heroku Redis add-on and setting `CACHE_BACKEND=redis` — no code changes required. At a single dyno with a single worker, the two backends are behaviorally equivalent, so the add-on was removed to reduce cost with no side-effects.
+> **Cache backend.** The deployed configuration uses an in-process TTL cache (`CACHE_BACKEND=memory`). Redis is opt-in using the same cache interface and can be re-enabled by provisioning the Heroku Redis add-on and setting `CACHE_BACKEND=redis` — no code changes required. At a single dyno the only difference is that cache and limiter state are per Gunicorn worker rather than shared (see [Known Limitations](#known-limitations)), which was judged acceptable, so the add-on was removed to reduce cost.
 
 
 ## Features
@@ -323,44 +325,39 @@ to a slug whose graph predates an applied revision.
 > [Deployment](#deployment)).
 
 
-## Deployment
+## Deployment configuration
 
 Only three variables are required at boot — `DATABASE_URL`, `API_KEY`, and
 `JWT_SECRET` (`REQUIRED_ENV_VARS` in `app/env.py`). Everything else has a
 default, which is what makes the section below possible rather than dangerous.
 
-### Configuration added since the last merge to `main` is not set on Heroku
+### What each optional group does when unset
 
-Twenty-three variables have been added to `.env.example` since `main`, covering
-the connection budget, Steam authentication, and the vault. **None of them are
-configured on the app.** That is deliberate and safe — nothing new is
-boot-required, so a merge deploys without touching config — but it has three
-consequences worth knowing before the merge rather than after.
+Everything beyond the three required variables has a default, so a deployment
+boots without any of it. `.env.example` documents every variable and the
+connection-budget arithmetic; the vault runbook carries the `heroku config:set`
+blocks. Three groups are worth knowing about.
 
-**1. The HSS connection pool shrinks, with no config change.** `main` hardcodes
-`max_size=10` per worker; the pool is now configurable and defaults to **4**.
-Across two workers that is 20 connections → 8. This is a fix rather than a
-regression: at 10 per worker the app was allocating the entire 20-connection
-Essential-0 limit, leaving nothing for the release dyno or for `heroku pg:psql`
-during an incident. But it is a real reduction in per-worker concurrency, and it
-is the one change here that takes effect silently. Set `HSS_DB_POOL_MAX_SIZE`
-explicitly if 4 proves tight — and recalculate the budget in `.env.example` if
-you do, because the vault's share is sized against it.
+**The connection budget.** `HSS_DB_POOL_MAX_SIZE` defaults to **4** per worker
+(it was a hardcoded 10 until 2026-08-14). Across two workers that is 8
+leaderboard connections, leaving room for the vault's 2 per worker, the release
+dyno, and an operator session inside the 20-connection Essential-0 limit. Raise
+it only after recalculating the budget in `.env.example`, because the vault's
+share is sized against it.
 
-**2. Steam authentication stays unavailable.** `STEAM_WEB_API_KEY`,
-`STEAM_APP_ID`, and `STEAM_AUTH_IDENTITY` are read lazily, so the endpoints
-raise `SteamAuthConfigError` when called and nothing else is affected.
-`STEAM_WEB_API_KEY` is a publisher key: Heroku config only, never a tracked file.
+**Steam authentication.** `STEAM_WEB_API_KEY`, `STEAM_APP_ID`, and
+`STEAM_AUTH_IDENTITY` are read lazily, so with none of them set the two Steam
+endpoints answer `503` and nothing else is affected. `STEAM_WEB_API_KEY` is a
+publisher key: Heroku config only, never a tracked file.
 
-**3. The vault ships dark, and that is the intended first release.**
-`VAULT_ENABLED` defaults to false, so no vault routes are registered, no vault
-OpenAPI schema is published, no vault engine is created, and the release phase
-skips the vault migration lineage entirely. Every `VAULT_*` variable is inert
-until the flag is set. Enabling it is a separate, reviewed change — see
-[`app/vault/docs/vault-configuration.md`](app/vault/docs/vault-configuration.md),
-which carries the `heroku config:set` block and the connection-budget arithmetic.
+**The vault.** `VAULT_ENABLED` defaults to false: no vault routes, no vault
+OpenAPI schema, no vault engine, and the release phase skips the vault
+migration lineage. Every `VAULT_*` variable is inert until the flag is set. The
+production app runs with it enabled; enabling it elsewhere is the reviewed
+procedure in
+[`app/vault/docs/vault-configuration.md`](app/vault/docs/vault-configuration.md).
 
-Verify the current state before a release rather than trusting this list:
+Verify the live state before a release rather than trusting any document:
 
 ```bash
 heroku config --app high-score-server
@@ -633,6 +630,8 @@ decisions the client has to make, and the enum is more explicit than a return co
 | POST | `/logout` | Public | Revoke refresh token |
 | POST | `/rename` | Bearer | Rename the authenticated user |
 | POST | `/claim` | Bearer | Upgrade guest account to claimed |
+| POST | `/steam/login` | Public | Validate a Steam session ticket server-side; resolve or create the linked account |
+| POST | `/steam/link` | Bearer | Attach a validated Steam identity to the current account (upgrades a guest in place) |
 
 `/rename` returns **409** on username collision — the `users.username` UNIQUE
 constraint is enforced at the DB layer and surfaced as a clean error rather
@@ -644,6 +643,7 @@ than a 500.
 |---|---|---|---|
 | GET | `/scores` | Public | Fetch leaderboard for a game mode and `period` |
 | POST | `/scores` | Bearer | Submit a score |
+| POST | `/runs` | Bearer | Submit a validated run; the server computes the canonical score (see `docs/specs.md`) |
 | GET | `/latest` | Public | Fetch recently submitted scores, optionally filtered by game mode |
 | GET | `/game_modes` | Public | List all registered game modes |
 | POST | `/game_modes` | API Key | Create or update a game mode (Operator Action) |
@@ -762,10 +762,17 @@ HighScoreServer/
 │   ├── db.py                 # psycopg3 async connection pool
 │   ├── cache.py              # Pluggable cache interface (in-process TTL default, Redis optional)
 │   ├── dependencies.py       # Auth dependencies (require_user, require_api_key)
-│   └── env.py                # Environment variable loading and validation
+│   ├── auth_identities.py    # users ↔ auth_identities resolution (ubear, Steam)
+│   ├── steam_auth.py         # Server-side Steam ticket validation
+│   ├── validation.py         # Tiered run validator
+│   ├── limiter.py            # slowapi limiter (per client IP)
+│   ├── spa_routes.py         # React SPA mount at /app
+│   ├── env.py                # Environment variable loading and validation
+│   └── vault/                # Knowledge-vault bounded context — its own AGENTS.md, docs/ and ADRs
 ├── migrations/               # Alembic raw-SQL migrations (source of truth for schema)
 │   ├── env.py                # Reads DATABASE_URL; no ORM models, no autogenerate
 │   └── versions/             # Revisions (0001_baseline, 0002_…)
+├── vault_migrations/         # The vault's own Alembic lineage (alembic-vault.ini)
 ├── db/
 │   ├── schema.sql            # Bootstrap snapshot for orientation — NOT the source of truth
 │   ├── seed.sql              # Local development seed data
@@ -773,7 +780,10 @@ HighScoreServer/
 ├── scripts/
 │   ├── prune_guests.py            # Removes score/run-less guest accounts older than GUEST_PRUNE_DAYS
 │   ├── prune_refresh_tokens.py    # Removes expired refresh tokens
-│   └── prune_idempotency_keys.py  # Removes cumulative dedup markers older than IDEMPOTENCY_PRUNE_DAYS
+│   ├── prune_idempotency_keys.py  # Removes cumulative dedup markers older than IDEMPOTENCY_PRUNE_DAYS
+│   ├── release.sh                 # Heroku release phase: both Alembic lineages
+│   ├── lint.sh / lint.ps1         # ruff, in the CI scope
+│   └── *vault*.py, measure_*.py   # Vault operator tooling — see app/vault/docs/vault-extraction-manifest.md
 ├── templates/
 │   ├── base.html             # Base template
 │   ├── home.html             # Home page
@@ -791,11 +801,14 @@ HighScoreServer/
 │   ├── test_api_runs.py              # Validated runs, cross-routing 409s, read enrichment
 │   ├── test_validation.py            # Tiered validator units
 │   ├── test_prune_guests.py          # Integration tests for guest pruning
-│   └── test_prune_idempotency_keys.py # Integration tests for idempotency-key pruning
+│   ├── test_prune_idempotency_keys.py # Integration tests for idempotency-key pruning
+│   ├── test_auth_identities.py, test_steam_auth.py, test_migration_000N.py, …
+│   └── vault/                # The vault suite — ownership per app/vault/docs/vault-extraction-manifest.md
 ├── alembic.ini
+├── alembic-vault.ini
 ├── requirements.txt
-├── Procfile
-├── runtime.txt
+├── requirements-dev.txt
+├── Procfile                  # web (gunicorn) and release (scripts/release.sh) phases
 ├── wsgi.py
 └── .env.example
 ```
@@ -817,10 +830,11 @@ git push heroku main
 ```
 
 The schema is **not** applied by hand on deploy. The `Procfile`'s
-`release: alembic upgrade head` phase runs on every release: on the first deploy
-it builds the whole schema against the fresh Postgres add-on, and on later
-deploys it applies any pending revisions. A failed migration aborts the release.
-See [Database & migrations](#database--migrations).
+`release: bash scripts/release.sh` phase runs on every release: on the first
+deploy it builds the whole leaderboard schema against the fresh Postgres add-on,
+on later deploys it applies any pending revisions, and it runs the vault lineage
+only when `VAULT_ENABLED=true`. A failed migration aborts the release. See
+[Database & migrations](#database--migrations).
 
 ### Scheduled cleanup
 
@@ -867,14 +881,18 @@ section is the summary.
   checked at decode time; insertion points are marked in the codebase with
   `# DENYLIST HOOK` comments. See [ADR 0006](docs/adr/0006-jwt-plus-opaque-refresh-tokens.md)
   for the full reasoning.
-- **Rate limiting and cache invalidation are per-process.** Both share a root
-  cause: the in-process storage chosen in [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md)
-  is correct at single-process scale but degrades the moment a second worker
-  appears. **Trigger for revisiting:** any move beyond single-process deployment
-  (second dyno, second uvicorn worker, background job process). The mitigation
-  is already in place — setting `CACHE_BACKEND=redis` and provisioning the
-  Heroku Redis add-on flips both subsystems to Redis-backed storage in one
-  config change.
+- **Rate limiting and cache invalidation are per-process, and the app runs two
+  processes.** Both share a root cause: the in-process storage chosen in
+  [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md) is exact at
+  single-process scale and degrades with each additional worker. The `Procfile`
+  runs two Gunicorn workers, so this is the live state rather than a future one:
+  every per-IP limit is effectively twice its stated value, and a score
+  submission served by one worker leaves the other's cached leaderboard until
+  its 120s TTL. Accepted at current traffic. **Trigger for revisiting:** a
+  second dyno, a background process, or traffic where doubled limits or two
+  minutes of staleness matter. The mitigation is already in place — setting
+  `CACHE_BACKEND=redis` and provisioning the Heroku Redis add-on flips both
+  subsystems to Redis-backed storage in one config change.
 
   - **Rate limits** currently use slowapi's in-process memory storage. At
     single-dyno, single-worker scale this is correct, but the moment the process
@@ -922,11 +940,13 @@ section is the summary.
     revisiting:** clients that need stable feed pagination through high
     insert rates, or any move toward >100-entry leaderboards where the
     offset-counting cost matters.
-  - **Filtering /latest doesn't impact total count.** The total
-    score count will reflect all values rather than the results
-    that fit the filter. Identified as non-vital edge case,
-    revisit trigger is a client that seeks paginated latest
-    scores against a filtered set of game modes.
+  - **`/latest`'s `total_count` is only filtered on non-empty pages.** The
+    windowed count respects a `game_modes` filter, but the fallback count used
+    when an `offset` lands past the last row does not, so a client paging a
+    filtered feed can read an unfiltered total on its final, empty page. A
+    non-vital edge case; the fix is to pass the filter into the fallback count.
+    Revisit trigger: a client that pages `/latest` against a filtered set of
+    game modes.
 
 
 ## Known Future Considerations

@@ -149,11 +149,13 @@ LIMITS: dict[str, Limit] = {
 # to unlimit production by accident, and this is a considered grant to one
 # named principal rather than a knob.
 #
-# 'importer' is that principal by documented convention -- HANDOFF requires the
-# importer run under it because vault_write_requests is keyed
-# (principal_id, idempotency_key), so a different name silently bypasses the
-# only duplicate guard. That requirement is what makes the name safe to key on
-# here.
+# 'importer' is that principal by documented convention -- the 2026-08-16
+# handoff (now under docs/archive/) required the importer to run under it,
+# because vault_write_requests is keyed (principal_id, idempotency_key) and a
+# different name silently bypasses the only duplicate guard. The runbook's
+# corpus-migration procedure has since moved to a fresh principal per
+# re-import, so this override applies only when that principal is literally
+# named 'importer'; a differently named one runs at the base quota.
 #
 # Read operations are untouched. Import writes; it does not search.
 PRINCIPAL_LIMITS: dict[str, dict[str, Limit]] = {

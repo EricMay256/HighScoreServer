@@ -389,7 +389,7 @@ async def run_tag_counterfactual(show: int) -> int:
     elif not without_bands.separated:
         print(
             "Removing tags does NOT open a usable band. Tags are not the "
-            "blocker, decision 1 in HANDOFF-METADATA.md is settled against "
+            "blocker, decision 1 in docs/archive/HANDOFF-2026-08-13-metadata.md is settled against "
             "removing them, and flag_at stays 1.0."
         )
 
