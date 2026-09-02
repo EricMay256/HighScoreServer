@@ -66,7 +66,11 @@ async def list_game_modes(request: Request, response: Response) -> list[GameMode
                 )
                 rows = await cur.fetchall()
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Game mode listing error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     return [
         GameModeConfig(
@@ -111,7 +115,11 @@ async def create_game_mode(config: GameModeCreate) -> GameModeConfig:
                 row = await cur.fetchone()
             # connection context manager commits on clean exit
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Game mode creation error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     return GameModeConfig(
         name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3],
@@ -295,7 +303,11 @@ async def get_scores(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Score listing error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     # total_count from the window function is only present on returned rows.
     # If the page is empty (offset past end, or no scores at all), fall back
@@ -432,7 +444,11 @@ async def submit_score(
             detail=f"Invalid game mode: {submission.game_mode}",
         ) from None
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Score submission error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     await _invalidate_score_caches(submission.game_mode)
 
@@ -611,7 +627,11 @@ async def submit_run(
             detail="Duplicate run submission",
         ) from None
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Run submission error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     if prior_status is not None:
         return await _existing_run_response(prior_status, user_id, submission.game_mode)
