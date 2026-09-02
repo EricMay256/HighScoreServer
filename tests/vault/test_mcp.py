@@ -469,6 +469,60 @@ def test_setting_promotion_status_over_mcp_moves_the_note(
     )
 
 
+def test_both_adapters_accept_exactly_the_same_limits(
+    client: TestClient,
+) -> None:
+    """The limit bound is declared, so a generated client can see it.
+
+    MCP enforced 1..50 with a runtime check while HTTP declared it as
+    `Query(ge=1, le=50)`. Both refused the same values, but only one said so
+    in its schema -- a client generated from the tool list could not tell 0 or
+    500 was out of range until it tried. `query` declares its bound for exactly
+    that reason; `limit` now does too, which also makes the runtime check
+    redundant rather than merely duplicated.
+    """
+
+    credential_id, token = _issue((VaultScope.READ,))
+    try:
+        for limit, accepted in ((1, True), (50, True), (0, False), (51, False)):
+            payload = _rpc(
+                client,
+                token,
+                "tools/call",
+                {"name": "vault_search", "arguments": {"query": "q", "limit": limit}},
+            )
+            mcp_refused = payload["result"].get("isError", False)
+
+            http = client.get(
+                "/api/v1/vault/search",
+                params={"q": "q", "limit": limit},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            http_refused = http.status_code == 422
+
+            assert mcp_refused is not accepted, f"MCP disagreed at {limit}"
+            assert http_refused is not accepted, f"HTTP disagreed at {limit}"
+    finally:
+        _drop(credential_id)
+
+
+def test_the_search_limit_bound_reaches_the_tool_schema(
+    client: TestClient,
+) -> None:
+    """Declaring it is the point; a client must be able to read it."""
+
+    credential_id, token = _issue((VaultScope.READ,))
+    try:
+        payload = _rpc(client, token, "tools/list", {})
+        tools = {tool["name"]: tool for tool in payload["result"]["tools"]}
+        schema = tools["vault_search"]["inputSchema"]["properties"]["limit"]
+    finally:
+        _drop(credential_id)
+
+    assert schema["minimum"] == 1
+    assert schema["maximum"] == 50
+
+
 def test_both_adapters_accept_exactly_the_same_query_lengths(
     client: TestClient,
 ) -> None:
