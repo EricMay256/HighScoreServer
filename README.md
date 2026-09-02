@@ -98,6 +98,15 @@ flowchart LR
   per-mode tabs, rank, percentile, and medal highlights for the top three, plus a
   React/TanStack Query SPA at `/app` served from the same origin. The Jinja2
   views remain the canonical no-JavaScript path rather than a fallback.
+
+  Neither client names a default mode. `/leaderboard` with no `?game_mode=`, and
+  the SPA before the user picks a tab, both show **the first row of
+  `/game_modes`** — which is ordered by `name`, so in practice the
+  alphabetically first configured mode. That is the whole rule: there is no
+  `is_default` column and no hardcoded name, so **adding a mode whose name sorts
+  earlier changes the landing page.** If that matters, the fix is a deliberate
+  ordering column rather than a name in a template — which is what the previous
+  arrangement was, and it pointed at a mode the seed did not create.
 - **Unity C# client** — maintained in its own repository,
   [hss-unity](https://github.com/EricMay256/hss-unity): coroutine-based API
   calls, typed response models, and an `ApiResult<T>` wrapper that surfaces

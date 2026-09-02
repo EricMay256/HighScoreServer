@@ -29,6 +29,23 @@ def test_the_leaderboard_view_defaults_to_the_first_configured_mode(client):
     assert default_page.text == explicit.text
 
 
+def test_the_landing_mode_is_the_alphabetically_first_one(client):
+    """The rule the README states, and the reason it is worth stating.
+
+    Neither client names a default any more; both take the first row of
+    /game_modes, which is ordered by `name`. So the landing page is decided by
+    alphabetical order, and adding a mode whose name sorts earlier moves it.
+    That is an acceptable rule but not an obvious one -- if `ORDER BY name`
+    changes, the documentation is wrong and this fails.
+    """
+
+    modes = [mode["name"] for mode in client.get("/api/leaderboard/game_modes").json()]
+
+    assert modes, "the rule is only meaningful with modes configured"
+    assert modes == sorted(modes), "/game_modes is documented as ordered by name"
+    assert modes[0] == min(modes)
+
+
 def test_the_templates_name_no_game_mode(client):
     """The nav must not hardcode a mode the deployment may not have.
 
