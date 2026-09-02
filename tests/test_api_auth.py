@@ -459,7 +459,60 @@ def test_rename_happy_path(client):
         json={"username": new_name},
         headers=bearer(tokens["access_token"]),
     )
-    assert response.status_code == 204
+    assert response.status_code == 200
+
+
+def test_rename_returns_a_token_carrying_the_new_username(client):
+    """The access token carries `username`, so a rename must reissue it.
+
+    /rename used to return 204, leaving every client showing the old name
+    until the access token expired and a refresh happened to mint a new one.
+    """
+
+    tokens = register(client)
+    new_name = f"renamed_{secrets.token_hex(4)}"
+
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": new_name},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert decode_token(body["access_token"])["username"] == new_name
+    assert body["refresh_token"] != tokens["refresh_token"]
+    # The reissued refresh token is usable, so the client is not left holding
+    # a pair whose halves disagree.
+    refreshed = client.post(
+        "/api/auth/refresh", json={"refresh_token": body["refresh_token"]}
+    )
+    assert refreshed.status_code == 200
+    assert decode_token(refreshed.json()["access_token"])["username"] == new_name
+
+
+def test_rename_preserves_guest_status_in_the_reissued_token(client):
+    """Renaming is not a claim: `is_guest` must survive the reissue.
+
+    The new token is built from the row the UPDATE returns rather than from
+    the old token's claims, so this pins that the row's `is_guest` is what
+    reaches it -- a rename that silently promoted a guest would hand out
+    access to guest-gated modes.
+    """
+
+    tokens = guest(client)
+    new_name = f"renamed_guest_{secrets.token_hex(4)}"
+
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": new_name},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    claims = decode_token(response.json()["access_token"])
+    assert claims["username"] == new_name
+    assert claims["is_guest"] is True
 
 
 def test_rename_taken_username_returns_409(client):
@@ -490,7 +543,7 @@ def test_guest_can_rename(client):
         json={"username": new_name},
         headers=bearer(tokens["access_token"]),
     )
-    assert response.status_code == 204
+    assert response.status_code == 200
 
 
 def test_rename_to_guest_username_returns_409(client):

@@ -229,12 +229,17 @@ export async function logout(): Promise<void> {
   }
 }
 
-export function rename(body: RenameRequest): Promise<void> {
-  return request<void>("/api/auth/rename", {
+export async function rename(body: RenameRequest): Promise<TokenResponse> {
+  // Stores the reissued pair, like claim(): the access token carries the
+  // username claim the UI reads, so keeping the old one would show the old
+  // name until the next refresh.
+  const tokens = await request<TokenResponse>("/api/auth/rename", {
     method: "POST",
     body,
     auth: true,
   });
+  setTokens(tokens.access_token, tokens.refresh_token);
+  return tokens;
 }
 
 export async function claim(body: ClaimRequest): Promise<TokenResponse> {

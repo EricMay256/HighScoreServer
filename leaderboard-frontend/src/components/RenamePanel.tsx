@@ -2,19 +2,17 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { rename, ApiError } from "../api/client";
+import type { TokenResponse } from "../api/types";
 import { useAuth } from "../auth/store";
 
 export default function RenamePanel() {
   const auth = useAuth();
   const [username, setUsername] = useState("");
 
-  // Rename does NOT return new tokens — the existing JWT keeps its old
-  // username claim until it expires (~60 min) and the next refresh issues
-  // a fresh one. This means useAuth().username will lag behind the actual
-  // server state until that refresh happens. Acceptable for portfolio
-  // scope; the alternative is having /api/auth/rename return a new token
-  // pair, which is a server-side change worth considering as a TODO.
-  const mutation = useMutation<void, ApiError, void>({
+  // rename() stores the reissued token pair, so useAuth().username updates
+  // as soon as the mutation settles. It used to return nothing, leaving the
+  // JWT's username claim stale for up to an hour until the next refresh.
+  const mutation = useMutation<TokenResponse, ApiError, void>({
     mutationFn: () => rename({ username }),
     onSuccess: () => setUsername(""),
   });

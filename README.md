@@ -628,7 +628,7 @@ decisions the client has to make, and the enum is more explicit than a return co
 | POST | `/login` | Public | Login, returns tokens |
 | POST | `/refresh` | Public | Rotate refresh token, returns new tokens |
 | POST | `/logout` | Public | Revoke refresh token |
-| POST | `/rename` | Bearer | Rename the authenticated user |
+| POST | `/rename` | Bearer | Rename the authenticated user, returns new tokens |
 | POST | `/claim` | Bearer | Upgrade guest account to claimed |
 | POST | `/steam/login` | Public | Validate a Steam session ticket server-side; resolve or create the linked account |
 | POST | `/steam/link` | Bearer | Attach a validated Steam identity to the current account (upgrades a guest in place) |
@@ -636,6 +636,14 @@ decisions the client has to make, and the enum is more explicit than a return co
 `/rename` returns **409** on username collision — the `users.username` UNIQUE
 constraint is enforced at the DB layer and surfaced as a clean error rather
 than a 500.
+
+> **Changed 2026-09-02:** `/rename` previously returned **204 No Content**. It
+> now returns **200** with a `TokenResponse`, because the access token carries
+> `username` as a claim and a rename that reissued nothing left clients showing
+> the old name until the token expired. This mirrors `/claim`, which reissues
+> after changing `is_guest`. Clients that only check for success are
+> unaffected; a client asserting specifically on `204` needs updating, and the
+> reissued refresh token should be stored in place of the old one.
 
 ### Leaderboard — `/api/leaderboard`
 

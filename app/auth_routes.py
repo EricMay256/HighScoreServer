@@ -307,11 +307,19 @@ async def logout(body: RefreshRequest) -> None:
     await revoke_refresh_token(body.refresh_token)
 
 
-@router.post("/rename", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/rename", response_model=TokenResponse)
 async def rename(
     body:    RenameRequest,
     payload: dict = Depends(require_user),
-) -> None:
+) -> TokenResponse:
+    """
+    Changes the username and issues fresh tokens reflecting it.
+
+    The access token carries `username` as a claim, so a rename that returned
+    no tokens left every client showing the old name until the token happened
+    to expire and refresh. Mirrors /claim, which reissues for the same reason
+    after changing `is_guest`.
+    """
     user_id      = int(payload["sub"])
     new_username = body.username
 
@@ -319,9 +327,13 @@ async def rename(
         async with get_pool().connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "UPDATE users SET username = %s WHERE id = %s",
+                    """
+                    UPDATE users SET username = %s WHERE id = %s
+                    RETURNING username, is_guest
+                    """,
                     (new_username, user_id),
                 )
+                row = await cur.fetchone()
     except Exception as e:
         if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
@@ -333,6 +345,14 @@ async def rename(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error",
         ) from e
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    return TokenResponse(
+        access_token=create_access_token(user_id, row[0], is_guest=row[1]),
+        refresh_token=await create_refresh_token(user_id),
+    )
 
 
 @router.post("/claim", response_model=TokenResponse)
