@@ -941,13 +941,6 @@ section is the summary.
     revisiting:** clients that need stable feed pagination through high
     insert rates, or any move toward >100-entry leaderboards where the
     offset-counting cost matters.
-  - **`/latest`'s `total_count` is only filtered on non-empty pages.** The
-    windowed count respects a `game_modes` filter, but the fallback count used
-    when an `offset` lands past the last row does not, so a client paging a
-    filtered feed can read an unfiltered total on its final, empty page. A
-    non-vital edge case; the fix is to pass the filter into the fallback count.
-    Revisit trigger: a client that pages `/latest` against a filtered set of
-    game modes.
 
 
 ## Known Future Considerations

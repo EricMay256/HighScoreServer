@@ -158,10 +158,10 @@ async def latest_scores(
     try:
         async with get_pool().connection() as conn:
             async with conn.cursor() as cur:
-                # COUNT(*) OVER () gives total scores across the whole table.
-                # Unlike /scores this isn't filtered to a mode/period — the "latest"
-                # feed is global. Worth knowing if the table grows large; the count
-                # is cheap on indexed columns but not free.
+                # COUNT(*) OVER () counts the rows this query selects, so it
+                # already respects both the 'alltime' period and any game_modes
+                # filter. _count_latest_scores must repeat those predicates.
+                # Cheap on indexed columns, but not free as the table grows.
                 # validation_tier read straight off scores (denormalized) — no join.
                 if game_modes:
                     await cur.execute(
@@ -203,7 +203,7 @@ async def latest_scores(
     if rows:
         total_count = rows[0][6]
     elif offset > 0:
-        total_count = await _count_all_scores()
+        total_count = await _count_latest_scores(game_modes)
     else:
         total_count = 0
 
@@ -721,12 +721,27 @@ async def _count_scores(game_mode: str, period: str, period_start) -> int:
             )
             return (await cur.fetchone())[0]
 
-async def _count_all_scores() -> int:
-    """Total row count for the scores table. Used by the /latest endpoint
-    to report total_count when a paginated request lands on an empty page."""
+async def _count_latest_scores(game_modes: list[str] | None) -> int:
+    """Count the rows /latest pages over, for when a request lands past the end.
+
+    Must mirror that query's WHERE clause exactly, or the fallback disagrees
+    with the COUNT(*) OVER () the same endpoint returns on a non-empty page.
+    It previously counted the whole table: every period bucket, and every mode
+    regardless of the filter."""
     async with get_pool().connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT COUNT(*) FROM scores")
+            if game_modes:
+                await cur.execute(
+                    """
+                    SELECT COUNT(*) FROM scores
+                    WHERE game_mode = ANY(%s) AND period = 'alltime'
+                    """,
+                    (game_modes,),
+                )
+            else:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM scores WHERE period = 'alltime'"
+                )
             return (await cur.fetchone())[0]
 
 async def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime") -> ScoreResponse | None:
