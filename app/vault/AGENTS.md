@@ -723,16 +723,20 @@ be edited when it does.
 - **A principal may be granted a wider quota, in code and never in configuration.**
   `PRINCIPAL_LIMITS` widens named operations for a named principal; `limit_for` is
   the single lookup and still raises on an operation `LIMITS` does not register, so
-  an override cannot invent one. Today it grants `importer` bulk headroom on
-  `contribute` and `update` only -- import writes, it does not search -- because the
-  shared limits describe an interactive agent and at 30/min a 500-note corpus takes
-  over four hours. Keying on the name is safe because the write ledger is keyed
-  `(principal_id, idempotency_key)`, so a differently named principal bypasses the
-  duplicate guard whatever its quota; the original rule is in the host repository's
-  `docs/archive/HANDOFF-2026-08-16.md`. The runbook's corpus-migration procedure now
-  issues a fresh principal per re-import, so the override applies only when that
-  principal is literally named `importer`. Do not move this to an environment variable: a quota a
-  deployment can widen is a way to unlimit production by accident.
+  an override cannot invent one. **It ships empty as of 2026-09-02.** It held one
+  entry, granting `importer` bulk headroom on `contribute` and `update` -- import
+  writes, it does not search -- because the shared limits describe an interactive
+  agent and at 30/min a 500-note corpus takes over four hours. That principal no
+  longer runs, and the entry had also stopped matching: the runbook's
+  corpus-migration procedure moved to a fresh principal per re-import while the
+  override keyed on the literal name. Removed rather than widened to a prefix,
+  because a quota grant with no workload behind it is a standing exception nobody
+  is watching. Re-adding one is a deliberate edit here, in code -- do not move this
+  to an environment variable, since a quota a deployment can widen is a way to
+  unlimit production by accident. A returning bulk job also needs a *stable*
+  principal name: the write ledger is keyed `(principal_id, idempotency_key)`, so a
+  differently named principal bypasses the duplicate guard whatever its quota. The
+  original rule is in the host repository's `docs/archive/HANDOFF-2026-08-16.md`.
 - **Unknown quota operations fail closed.** Every route operation must be registered in
   `LIMITS`; a typo or new operation without a deliberate quota is a programming error, not an
   unlimited bucket.

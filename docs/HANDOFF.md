@@ -75,17 +75,17 @@ the two shells, and the worktree filesystem rule.
   `MSYS_NO_PATHCONV=1`.
 - **PowerShell `Set-Content -Encoding utf8` writes a BOM** on 5.1; a token read
   back from such a file carries three junk bytes into the header.
-  `requirements-dev.txt` is UTF-16 today for a related reason (see the review).
+  `requirements-dev.txt` was UTF-16 for a related reason; it is UTF-8 as of
+  2026-09-02, and the dev tooling no longer ships in `requirements.txt`.
 - **`ruff format` is not part of this project.** Format only the lines you add.
 - **Alembic revision ids must fit `varchar(32)`**; the failure lands after the
   DDL has run.
 - **Never pipe a check you intend to trust** — `${PIPESTATUS[0]}`.
-- **The `importer` principal name is load-bearing** for the widened quota in
-  `PRINCIPAL_LIMITS`, and the write ledger is keyed
-  `(principal_id, idempotency_key)`, so a differently named principal bypasses
-  the duplicate guard. The runbook's corpus-migration procedure now issues a
-  fresh principal per re-import on purpose; such a principal runs at the base
-  quota unless it is literally named `importer`.
+- **`PRINCIPAL_LIMITS` is empty as of 2026-09-02.** It held the `importer`
+  grant; that principal no longer runs, so every principal is on the base
+  quota. If a bulk job returns, the name is still load-bearing for a second
+  reason: the write ledger is keyed `(principal_id, idempotency_key)`, so a
+  differently named principal bypasses the duplicate guard whatever its quota.
 - **`heroku run` claims flags meant for your script** — quote the whole remote
   command. **`heroku pg:psql` is broken on this Windows install** — the
   runbook's psycopg one-liner goes around it. **`alembic current` needs
