@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Vault</title>
+<style>
+{% include "_console_style.css" %}
+
+/* Landing only, from here down. */
+.hero { max-width: 48rem; padding: 2.2rem 0 1.4rem; }
+.hero h2 {
+  max-width: 42rem; margin: 0 0 0.65rem; font-size: clamp(1.8rem, 4vw, 3rem);
+  line-height: 1.08; letter-spacing: -0.035em;
+}
+.hero p { max-width: 42rem; font-size: 1.05rem; color: var(--muted); }
+.page-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 0.8rem; margin: 0.6rem 0 2rem;
+}
+.page-card { display: flex; flex-direction: column; gap: 0.45rem; margin: 0; }
+.page-card p { margin: 0; color: var(--muted); }
+.page-card a { align-self: flex-start; margin-top: auto; padding-top: 0.45rem; }
+.content-summary { border-top: 1px solid var(--line); padding-top: 1.4rem; }
+.content-list { display: grid; gap: 0.8rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+.content-list h3 { margin: 0 0 0.2rem; font-size: 0.95rem; }
+.content-list p { margin: 0; color: var(--muted); }
+</style>
+</head>
+<body>
+{% set vault_page = "home" %}
+{% set vault_title = "Home" %}
+{% set vault_session_controls = false %}
+{% include "_vault_header.html" %}
+<main>
+  <section class="hero" aria-labelledby="vault-heading">
+    <div class="chip">Durable operational knowledge</div>
+    <h2 id="vault-heading">Read what the team knows. Govern what changes.</h2>
+    <p>
+      The vault holds focused notes and compiled wiki pages for reusable technical
+      and operational knowledge. Content stays readable to agents while proposed
+      changes and possible duplicates wait for an explicit review.
+    </p>
+  </section>
+
+  <section class="page-grid" aria-label="Vault tools">
+    <article class="card page-card">
+      <div class="chip">Read and propose</div>
+      <h2>Browse the corpus</h2>
+      <p>
+        Walk the vault by folder, filter by tags or facets, open notes and wiki
+        pages, and propose precise edits without changing published content.
+      </p>
+      <a class="action-link" href="/vault/browse">Open Browse <span aria-hidden="true">→</span></a>
+    </article>
+    <article class="card page-card">
+      <div class="chip">Adjudicate</div>
+      <h2>Review changes</h2>
+      <p>
+        Decide amendment proposals and near-duplicate cases from a separately
+        entitled reviewer session. Accepted decisions update or publish content.
+      </p>
+      <a class="action-link" href="/vault/review">Open Review <span aria-hidden="true">→</span></a>
+    </article>
+  </section>
+
+  <section class="content-summary" aria-labelledby="content-heading">
+    <h2 id="content-heading">What lives here</h2>
+    <div class="content-list">
+      <div>
+        <h3>Notes</h3>
+        <p>Focused claims, lessons, decisions, and techniques kept small enough to retrieve well.</p>
+      </div>
+      <div>
+        <h3>Wiki pages</h3>
+        <p>Longer synthesis compiled from source notes, with provenance back to what informed it.</p>
+      </div>
+      <div>
+        <h3>Review queues</h3>
+        <p>Inert amendment proposals and flagged near-duplicates awaiting a bounded human decision.</p>
+      </div>
+    </div>
+  </section>
+</main>
+</body>
+</html>

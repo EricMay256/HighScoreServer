@@ -1,0 +1,19 @@
+<header class="vault-header">
+  <a class="vault-brand" href="/vault">Knowledge Vault</a>
+  <span class="vault-divider" aria-hidden="true">/</span>
+  <h1>{{ vault_title }}</h1>
+  <nav class="vault-nav" aria-label="Vault pages">
+    <a href="/vault"{% if vault_page == "home" %} aria-current="page"{% endif %}>Home</a>
+    <a href="/vault/browse"{% if vault_page == "browse" %} aria-current="page"{% endif %}>Browse</a>
+    <a href="/vault/review"{% if vault_page == "review" %} aria-current="page"{% endif %}>Review</a>
+  </nav>
+  <span class="grow"></span>
+{% if vault_session_controls %}
+  <div class="vault-session">
+    <span id="who" class="muted small"></span>
+    <button id="refresh" class="hidden">Refresh</button>
+    <button id="signin" class="primary hidden">Sign in</button>
+    <button id="signout" class="hidden">Sign out</button>
+  </div>
+{% endif %}
+</header>

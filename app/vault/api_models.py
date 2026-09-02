@@ -59,6 +59,7 @@ MAX_BODY_CHARS = 100_000
 MAX_RATIONALE_CHARS = 2_000
 MAX_DOCUMENT_ID_CHARS = 256
 MAX_EDGE_IDS = 50
+MAX_AMENDMENT_BATCH_DECISIONS = 50
 
 
 def validate_edge_ids(ids: list[str]) -> list[str]:
@@ -814,6 +815,51 @@ class VaultAmendmentDecisionResponse(BaseModel):
     proposal: VaultAmendmentProposalSummary
     outcome: Literal["accepted", "rejected", "stale"]
     target: "VaultDocumentDetail | None" = None
+
+
+class VaultAmendmentBatchDecisionItem(VaultAmendmentDecisionRequest):
+    """One independently settled decision in a bounded batch."""
+
+    proposal_id: UUID
+
+
+class VaultAmendmentBatchDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decisions: list[VaultAmendmentBatchDecisionItem] = Field(
+        min_length=1,
+        max_length=MAX_AMENDMENT_BATCH_DECISIONS,
+    )
+
+    @model_validator(mode="after")
+    def proposal_ids_are_unique(self) -> "VaultAmendmentBatchDecisionRequest":
+        proposal_ids = [item.proposal_id for item in self.decisions]
+        if len(set(proposal_ids)) != len(proposal_ids):
+            raise ValueError("proposal_id values must be unique within a batch")
+        return self
+
+
+class VaultAmendmentBatchDecisionResult(BaseModel):
+    """The compact result of one batch item.
+
+    Batch decisions are intentionally independent: a stale or concurrently
+    settled proposal does not roll back decisions that already succeeded.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: UUID
+    outcome: Literal["accepted", "rejected", "stale"] | None = None
+    status_code: int
+    detail: str | dict[str, Any] | None = None
+
+
+class VaultAmendmentBatchDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[VaultAmendmentBatchDecisionResult]
+    decided: int
+    refused: int
 
 
 class VaultContributionResponse(BaseModel):

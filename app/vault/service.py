@@ -2032,6 +2032,28 @@ class VaultAmendmentService:
             return await self._reject(request)
         return await self._accept(request)
 
+    async def decide_batch(
+        self, requests: Sequence[AmendmentDecisionRequest]
+    ) -> tuple[AmendmentDecisionOutcome | Exception, ...]:
+        """Settle independent rejections and metadata acceptances.
+
+        The batch route deliberately refuses accepted content amendments: their
+        embedding and corpus-lock work cannot be bounded safely for a request
+        that may carry fifty decisions. The console already selects metadata
+        changes only; a reviewer uses the single-decision route for content.
+        """
+
+        outcomes: list[AmendmentDecisionOutcome | Exception] = []
+        for request in requests:
+            try:
+                if request.state is AmendmentProposalState.ACCEPTED:
+                    outcomes.append(await self._accept(request, batch_only=True))
+                else:
+                    outcomes.append(await self.decide(request))
+            except Exception as exc:
+                outcomes.append(exc)
+        return tuple(outcomes)
+
     async def _reject(
         self, request: AmendmentDecisionRequest
     ) -> AmendmentDecisionOutcome:
@@ -2060,7 +2082,10 @@ class VaultAmendmentService:
             return AmendmentDecisionOutcome(decided, "rejected", target)
 
     async def _accept(
-        self, request: AmendmentDecisionRequest
+        self,
+        request: AmendmentDecisionRequest,
+        *,
+        batch_only: bool = False,
     ) -> AmendmentDecisionOutcome:
         proposals = VaultAmendmentProposalRepository()
         documents = VaultDocumentRepository()
@@ -2072,6 +2097,14 @@ class VaultAmendmentService:
                 raise AmendmentProposalNotFound(str(request.proposal_id))
             if proposal.state is not AmendmentProposalState.PENDING:
                 raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
+            if (
+                batch_only
+                and proposal.change_kind is not AmendmentProposalKind.METADATA
+            ):
+                raise ValueError(
+                    "Batch decisions can accept metadata changes only; use the "
+                    "single-decision route for content amendments"
+                )
             target = await documents.get_by_id(
                 connection, proposal.target_document_id
             )
@@ -2141,9 +2174,7 @@ class VaultAmendmentService:
         text_digest = embedding_text_digest(embedding_text)
         re_embed = stored is None or stored.text_sha256 != text_digest
         vector = (
-            await embed_one(
-                self._provider, embedding_text, EmbeddingInputKind.DOCUMENT
-            )
+            await embed_one(self._provider, embedding_text, EmbeddingInputKind.DOCUMENT)
             if re_embed
             else stored.vector
         )

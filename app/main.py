@@ -225,6 +225,7 @@ def create_app() -> FastAPI:
         public_url = (os.environ.get("VAULT_PUBLIC_URL") or "").rstrip("/")
         if public_url:
             from app.vault.browse_console import build_vault_browse_routes
+            from app.vault.landing_page import build_vault_landing_routes
             from app.vault.oauth_routes import build_vault_oauth_routes
             from app.vault.review_console import build_vault_review_routes
 
@@ -234,10 +235,12 @@ def create_app() -> FastAPI:
                     mcp_url=f"{public_url}/api/v1/vault/mcp",
                 )
             )
-            # Both consoles authorize themselves through the routes above, so
-            # they are gated on the same variable: without a reachable issuer
-            # they could render but never sign in. See vault ADR 0037 for the
-            # reviewer and ADR 0039 for the browser.
+            # The landing page points to both consoles, which authorize
+            # themselves through the routes above. All three are gated on the
+            # same variable: without a reachable issuer the landing page would
+            # advertise consoles that can render but never sign in. See vault
+            # ADR 0037 for the reviewer and ADR 0039 for the browser.
+            app.router.routes.extend(build_vault_landing_routes())
             app.router.routes.extend(build_vault_review_routes())
             app.router.routes.extend(build_vault_browse_routes())
     # 5. SPA assets mount — MUST come before the SPA catch-all router below.

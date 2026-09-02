@@ -202,6 +202,308 @@ def test_proposal_submission_has_its_own_scope(
         _cleanup()
 
 
+def test_batch_review_settles_independent_decisions_in_one_request(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    """One refused item must not roll back the successful items beside it."""
+
+    proposer, reviewer, _ = tokens
+    accepted_note = _seed_note()
+    rejected_note = _seed_note()
+    missing_proposal_id = str(uuid4())
+    try:
+        proposal_ids: list[str] = []
+        for note_id, facet in (
+            (accepted_note, "accepted-in-batch"),
+            (rejected_note, "rejected-in-batch"),
+        ):
+            submitted = client.post(
+                "/api/v1/vault/amendment-proposals",
+                headers=_headers(proposer),
+                json={
+                    "target_note_id": note_id,
+                    "base_revision": 1,
+                    "change": {
+                        "kind": "metadata",
+                        "facets": {"project": [facet]},
+                    },
+                    "rationale": "Exercise the bounded batch decision route.",
+                },
+            )
+            assert submitted.status_code == 200, submitted.text
+            proposal_ids.append(submitted.json()["proposal"]["proposal_id"])
+
+        response = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers={
+                **_headers(reviewer),
+                "X-Request-Id": "batch-amendment-audit-correlation",
+            },
+            json={
+                "decisions": [
+                    {"proposal_id": proposal_ids[0], "decision": "accepted"},
+                    {"proposal_id": proposal_ids[1], "decision": "rejected"},
+                    {"proposal_id": missing_proposal_id, "decision": "accepted"},
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["decided"] == 2
+        assert payload["refused"] == 1
+        by_id = {item["proposal_id"]: item for item in payload["results"]}
+        assert by_id[proposal_ids[0]]["outcome"] == "accepted"
+        assert by_id[proposal_ids[1]]["outcome"] == "rejected"
+        assert by_id[missing_proposal_id] == {
+            "proposal_id": missing_proposal_id,
+            "outcome": None,
+            "status_code": 404,
+            "detail": "Amendment proposal not found",
+        }
+
+        transactions, engine = vault_service()
+
+        async def decision_audit_events() -> list[tuple[str, str]]:
+            try:
+                async with transactions.transaction() as connection:
+                    result = await connection.execute(
+                        select(
+                            vault_audit_events.c.target_id,
+                            vault_audit_events.c.request_id,
+                        ).where(
+                            vault_audit_events.c.operation
+                            == "vault.amendment.review",
+                            vault_audit_events.c.target_id.in_(proposal_ids),
+                        )
+                    )
+                    return [(str(row[0]), str(row[1])) for row in result.all()]
+            finally:
+                await engine.dispose()
+
+        assert dict(asyncio.run(decision_audit_events())) == dict.fromkeys(
+            proposal_ids, "batch-amendment-audit-correlation"
+        )
+    finally:
+        _cleanup()
+
+
+def test_batch_review_refuses_duplicate_proposal_ids(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+) -> None:
+    _, reviewer, _ = tokens
+    proposal_id = str(uuid4())
+
+    response = client.post(
+        "/api/v1/vault/amendment-proposals/batch-decisions",
+        headers=_headers(reviewer),
+        json={
+            "decisions": [
+                {"proposal_id": proposal_id, "decision": "accepted"},
+                {"proposal_id": proposal_id, "decision": "rejected"},
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "proposal_id values must be unique" in response.text
+
+
+def test_batch_review_reports_an_unexpected_failure_per_item(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One internal failure must not discard other independently settled items."""
+
+    _, reviewer, _ = tokens
+    proposal_id = str(uuid4())
+
+    class UnexpectedFailureService:
+        async def decide_batch(
+            self, requests: tuple[object, ...]
+        ) -> tuple[RuntimeError, ...]:
+            assert len(requests) == 1
+            return (RuntimeError("database driver detail must not reach clients"),)
+
+    monkeypatch.setattr(
+        "app.vault.routes._amendment_service", lambda: UnexpectedFailureService()
+    )
+
+    response = client.post(
+        "/api/v1/vault/amendment-proposals/batch-decisions",
+        headers=_headers(reviewer),
+        json={"decisions": [{"proposal_id": proposal_id, "decision": "accepted"}]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "results": [
+            {
+                "proposal_id": proposal_id,
+                "outcome": None,
+                "status_code": 500,
+                "detail": "Amendment decision failed unexpectedly",
+            }
+        ],
+        "decided": 0,
+        "refused": 1,
+    }
+
+
+def test_batch_review_refuses_content_acceptance_without_blocking_metadata(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    provider: StubEmbeddingProvider,
+) -> None:
+    """The bounded batch is safe for metadata without embedding content."""
+
+    proposer, reviewer, _ = tokens
+    note_ids = [_seed_note(), _seed_note()]
+    try:
+        content = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_ids[0], body="Amended content body."),
+        )
+        metadata = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json={
+                "target_note_id": note_ids[1],
+                "base_revision": 1,
+                "change": {"kind": "metadata", "facets": {"area": ["review"]}},
+                "rationale": "Exercise the non-embedding batch path.",
+            },
+        )
+        assert content.status_code == 200, content.text
+        assert metadata.status_code == 200, metadata.text
+        content_id = content.json()["proposal"]["proposal_id"]
+        metadata_id = metadata.json()["proposal"]["proposal_id"]
+
+        response = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers=_headers(reviewer),
+            json={
+                "decisions": [
+                    {
+                        "proposal_id": content_id,
+                        "decision": "accepted",
+                        "acknowledge_removals": True,
+                    },
+                    {"proposal_id": metadata_id, "decision": "accepted"},
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        results = response.json()["results"]
+        assert results[0] == {
+            "proposal_id": content_id,
+            "outcome": None,
+            "status_code": 422,
+            "detail": (
+                "Batch decisions can accept metadata changes only; use the "
+                "single-decision route for content amendments"
+            ),
+        }
+        assert results[1]["outcome"] == "accepted"
+        assert provider.calls == 0
+    finally:
+        _cleanup()
+
+
+def test_batch_review_refuses_stale_content_without_settling_it(
+    client: TestClient,
+    tokens: tuple[str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batch's content guard precedes the stale-proposal settlement path."""
+
+    proposer, reviewer, _ = tokens
+    monkeypatch.setattr("app.vault.routes.get_embedding_provider", lambda: None)
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_id, body="A now-stale replacement."),
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        transactions, engine = vault_service()
+
+        async def concurrent_edit() -> None:
+            try:
+                async with transactions.transaction() as connection:
+                    await connection.execute(
+                        update(vault_documents)
+                        .where(vault_documents.c.id == note_id)
+                        .values(
+                            body="A newer edit that must survive.",
+                            content_revision=vault_documents.c.content_revision + 1,
+                            updated_at=func.now(),
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+        asyncio.run(concurrent_edit())
+
+        batch = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers=_headers(reviewer),
+            json={"decisions": [{"proposal_id": proposal_id, "decision": "accepted"}]},
+        )
+        assert batch.status_code == 200, batch.text
+        assert batch.json()["results"][0]["status_code"] == 422
+
+        single = client.post(
+            f"/api/v1/vault/amendment-proposals/{proposal_id}/decision",
+            headers=_headers(reviewer),
+            json={"decision": "accepted"},
+        )
+        assert single.status_code == 200, single.text
+        assert single.json()["outcome"] == "stale"
+    finally:
+        _cleanup()
+
+
+def test_batch_review_refuses_content_before_removal_acknowledgement(
+    client: TestClient, tokens: tuple[str, str, str]
+) -> None:
+    """A content batch is refused before its removal summary is evaluated."""
+
+    proposer, reviewer, _ = tokens
+    note_id = _seed_note()
+    try:
+        submitted = client.post(
+            "/api/v1/vault/amendment-proposals",
+            headers=_headers(proposer),
+            json=_proposal(note_id),
+        )
+        assert submitted.status_code == 200, submitted.text
+        proposal_id = submitted.json()["proposal"]["proposal_id"]
+
+        batch = client.post(
+            "/api/v1/vault/amendment-proposals/batch-decisions",
+            headers=_headers(reviewer),
+            json={"decisions": [{"proposal_id": proposal_id, "decision": "accepted"}]},
+        )
+        assert batch.status_code == 200, batch.text
+        result = batch.json()["results"][0]
+        assert result["status_code"] == 422
+        assert result["detail"] == (
+            "Batch decisions can accept metadata changes only; use the "
+            "single-decision route for content amendments"
+        )
+    finally:
+        _cleanup()
+
+
 def test_review_accepts_exact_replacement_and_increments_revision(
     client: TestClient,
     tokens: tuple[str, str, str],

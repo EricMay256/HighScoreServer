@@ -210,18 +210,36 @@ def test_the_console_keeps_and_rotates_its_refresh_token() -> None:
     assert "revocation_endpoint" in page, "signing out should retire the family, not abandon it"
 
 
-def test_bulk_acceptance_counts_refusals_separately() -> None:
+def test_bulk_acceptance_counts_each_decision_outcome_separately() -> None:
     """`decide` returning nothing made every refusal look like a success.
 
     The bulk loop counted attempts, so a run where the API rejected every
-    proposal still reported them all accepted -- and the operator would have
-    had no reason to look at the cards still sitting in the queue.
+    proposal still reported them all accepted. A stale proposal is settled but
+    unapplied, so it must not inflate that accepted total either.
     """
 
     page = _page()
 
     assert "refused " in page
     assert "accepted++" in page and "failed++" in page
+    assert "stale++" in page
+    assert 'result.outcome === "accepted"' in page
+    assert "check.checked = false;" in page
+    assert "check.disabled = true;" in page
+    assert 'check.disabled = summary.change_kind !== "metadata";' in page
+
+
+def test_bulk_acceptance_uses_one_bounded_batch_request() -> None:
+    """One UI action stays inside the endpoint's bounded batch contract."""
+
+    page = _page()
+
+    assert 'api("/amendment-proposals/batch-decisions"' in page
+    assert "decisions: chosen.map" in page
+    assert 'c.decide("accepted")' not in page
+    assert "const maxBatchDecisions = 50;" in page
+    assert "selectionLimitMessage" in page
+    assert "chosen.length > maxBatchDecisions" in page
 
 
 def test_an_ended_session_repaints_the_sign_in_controls() -> None:
@@ -376,12 +394,13 @@ def test_the_session_ended_marker_is_actually_consumed() -> None:
     )
 
 
-def test_a_bulk_run_stops_when_the_session_ends() -> None:
-    """Otherwise every remaining card 401s, ends the session again, repaints."""
+def test_a_bulk_run_is_one_request_and_propagates_session_expiry() -> None:
+    """One expired batch must repaint once, with no per-card request loop."""
 
     page = _page()
 
-    assert "if (!TOKEN) break;" in page
+    assert 'api("/amendment-proposals/batch-decisions"' in page
+    assert "if (err.sessionEnded) return;" in page
 
 
 def test_every_catch_around_an_api_call_propagates_session_expiry() -> None:

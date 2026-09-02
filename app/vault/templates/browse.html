@@ -39,14 +39,10 @@ textarea {
 </style>
 </head>
 <body>
-<header>
-  <h1>Vault browse</h1>
-  <span id="who" class="muted small"></span>
-  <span class="grow"></span>
-  <button id="refresh" class="hidden">Refresh</button>
-  <button id="signin" class="primary hidden">Sign in</button>
-  <button id="signout" class="hidden">Sign out</button>
-</header>
+{% set vault_page = "browse" %}
+{% set vault_title = "Browse" %}
+{% set vault_session_controls = true %}
+{% include "_vault_header.html" %}
 <main>
   <div id="messages"></div>
   <div id="app" class="hidden">

@@ -1031,6 +1031,7 @@ bucket. Exceeding one returns `429` with `Retry-After` in whole seconds.
 | `amendment_list` | 60/min | 20 |
 | `amendment_read` | 60/min | 20 |
 | `amendment_decide` | 10/min | 5 |
+| `amendment_decide_batch` | 1/min | 1 |
 | `update` | 30/min | 20 |
 | `retire` | 10/min | 5 |
 | `review_list` | 60/min | 20 |
@@ -1042,7 +1043,9 @@ bucket. Exceeding one returns `429` with `Retry-After` in whole seconds.
 | `snapshot` | 2/hour | 1 |
 
 `retire`, `review_decide`, and `amendment_decide` have tight decision buckets because they
-destroy, publish, or replace corpus content. `compile_plan` is tighter still in sustained rate
+destroy, publish, or replace corpus content. `amendment_decide_batch` admits one bounded batch
+of at most 50 independently settled proposals per minute so the review console does not spend
+one quota token per selected card. `compile_plan` is tighter still in sustained rate
 because every abandoned plan leaves a running workflow row; page writes retain batch headroom.
 
 The **pre-auth guard** is IP-keyed and charged *before* the credential is looked
@@ -1297,6 +1300,21 @@ which would otherwise read `oauth-<uuid4>`.
 | `GET /api/v1/vault/amendment-proposals` | `vault:review` | List pending proposals without their change bodies |
 | `GET /api/v1/vault/amendment-proposals/{proposal_id}` | `vault:review` | Read the stored change, current target, and materialized preview |
 | `POST /api/v1/vault/amendment-proposals/{proposal_id}/decision` | `vault:review` | Accept or reject the exact stored change |
+| `POST /api/v1/vault/amendment-proposals/batch-decisions` | `vault:review` | Settle 1–50 distinct proposals independently |
+
+`POST /api/v1/vault/amendment-proposals/batch-decisions` accepts
+`{"decisions":[{"proposal_id":"...","decision":"accepted"}, ...]}`. Each item has the
+same optional `decision_note` and `acknowledge_removals` fields as the single-decision route.
+The response is always an ordered result per requested proposal, with `outcome` (`accepted`,
+`rejected`, or `stale`) and status 200 for a settled item, or an item-local HTTP-style
+`status_code` and `detail` when it could not be settled. One refused or stale amendment never
+rolls back or suppresses the other results. Accepted batch items must be `metadata` changes,
+whose fields do not affect the embedding; accepting a content amendment returns an item-local
+422 directing the reviewer to the single-decision route. Rejections may settle any proposal
+kind without embedding. The route is limited to one batch per principal per minute **per
+worker**. The current Procfile starts two Gunicorn workers, so the effective deployment ceiling
+is two batches (up to 100 decisions) per principal per minute until the quota uses shared
+storage.
 
 An amendment request carries a discriminated `change`. Use
 `{"kind":"body_diff","body_diff":"..."}` for a compact unified diff against the body.

@@ -12,7 +12,7 @@ from app.vault import review_console as review
 from app.vault.templating import TEMPLATE_DIRECTORY, render
 
 
-CONSOLE_TEMPLATES = ("review.html", "browse.html")
+VAULT_TEMPLATES = ("landing.html", "review.html", "browse.html")
 
 
 def _template(name: str) -> str:
@@ -25,6 +25,7 @@ def _shared() -> str:
 
 def _pages() -> dict[str, str]:
     return {
+        "landing.html": render("landing.html"),
         "review.html": render(
             "review.html",
             api_base=review.API_BASE,
@@ -44,12 +45,12 @@ def _pages() -> dict[str, str]:
     }
 
 
-@pytest.mark.parametrize("template", CONSOLE_TEMPLATES)
+@pytest.mark.parametrize("template", VAULT_TEMPLATES)
 def test_every_console_includes_the_shared_stylesheet(template: str) -> None:
     assert '{% include "_console_style.css" %}' in _template(template)
 
 
-@pytest.mark.parametrize("template", CONSOLE_TEMPLATES)
+@pytest.mark.parametrize("template", VAULT_TEMPLATES)
 def test_no_console_defines_the_palette_itself(template: str) -> None:
     """The tokens live in one file, so changing one changes both consoles.
 
@@ -66,7 +67,7 @@ def test_no_console_defines_the_palette_itself(template: str) -> None:
         )
 
 
-@pytest.mark.parametrize("template", CONSOLE_TEMPLATES)
+@pytest.mark.parametrize("template", VAULT_TEMPLATES)
 def test_the_shared_rules_reach_the_rendered_page(template: str) -> None:
     """Included, not merely referenced."""
 
