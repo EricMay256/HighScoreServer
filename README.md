@@ -906,18 +906,19 @@ section is the summary.
   `CACHE_BACKEND=redis` and provisioning the Heroku Redis add-on flips both
   subsystems to Redis-backed storage in one config change.
 
-  - **Rate limits** currently use slowapi's in-process memory storage. At
-    single-dyno, single-worker scale this is correct, but the moment the process
-    count increases the documented limit silently weakens to N× its stated
-    value: an attacker who gets load-balanced across N workers can make N times
-    the allowed requests, with no visible symptom until someone tries to abuse
-    it.
+  - **Rate limits** use slowapi's in-process memory storage, so each worker
+    counts its own requests. With the Procfile's two workers a documented limit
+    is effectively doubled: an attacker load-balanced across both can make
+    twice the allowed requests, with no visible symptom until someone tries to
+    abuse it. This is the more serious of the two, because it is a security
+    property weakening rather than a freshness one — and it scales with the
+    worker count, so raising `-w` widens it further.
 
   - **Cache invalidation** is local to each process. A score submission served
-    by process A invalidates process A's cache keys, but process B will continue
-    serving stale leaderboard data until its own copy expires by TTL (currently
-    120 seconds). This is a freshness issue, not a correctness one — stale data
-    is still valid data, just older than it should be.
+    by worker A invalidates worker A's cache keys, and worker B keeps serving
+    its own stale leaderboard until that copy expires by TTL (currently 120
+    seconds). A freshness issue rather than a correctness one — stale data is
+    still valid data, just older than it should be.
 
 - **The SPA keeps its tokens in `localStorage`.** `leaderboard-frontend/src/auth/store.ts`
   stores both the access and the refresh token there, which is standard for a
