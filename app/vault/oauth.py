@@ -60,7 +60,7 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from sqlalchemy import text as sql_text
 
-from .auth import TOKEN_PREFIX, hash_secret, parse_token
+from .auth import TOKEN_PREFIX, hash_secret, parse_token, secret_matches
 from .constants import (
     ACCESS_TOKEN_TTL_SECONDS,
     OAUTH_BASELINE_SCOPES,
@@ -600,7 +600,9 @@ class VaultAuthorizationProvider(
             )
         if owner is None:
             return None
-        if credential.secret_sha256 != hash_secret(parsed.secret):
+        # secret_matches, not `!=`: this path serves the SDK's /revoke, and the
+        # rest of the resource server already compares digests in constant time.
+        if not secret_matches(credential, parsed.secret):
             return None
         if not credential.is_active():
             return None
