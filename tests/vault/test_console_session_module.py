@@ -11,6 +11,8 @@ the page includes the module instead of restating it, and the module carries no
 console-specific literal that a second console would have to edit out.
 """
 
+import re
+
 import pytest
 
 from app.vault.review_console import (
@@ -55,8 +57,11 @@ def test_the_module_is_included_into_the_page_script_not_beside_it() -> None:
 
     template = _review_template()
     include_at = template.index('{% include "_console_session.js" %}')
-    opener = template.rindex("<script>", 0, include_at)
-    between = template[opener + len("<script>") : include_at]
+    # Matched rather than searched for literally: the tag carries a CSP nonce
+    # attribute, so `<script>` no longer appears verbatim.
+    openers = list(re.finditer(r"(?m)^<script\b[^>]*>", template[:include_at]))
+    assert openers, "no script tag opens before the include"
+    between = template[openers[-1].end() : include_at]
 
     assert between.strip() == '"use strict";'
     assert "</script>" not in between, (

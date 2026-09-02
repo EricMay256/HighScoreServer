@@ -20,6 +20,8 @@ grant. Those are decisions, not configuration, and they belong beside the
 console they describe.
 """
 
+import secrets
+
 from starlette.responses import HTMLResponse
 
 from .templating import render
@@ -34,29 +36,65 @@ API_BASE = "/api/v1/vault"
 # bodies written by agents, an operator's label -- through `textContent`, and
 # this is the second layer under that: no third-party script, no framing, no
 # form posting anywhere, and nothing cached.
+#
+# The CSP is not here because it carries a per-response nonce; see `_csp`.
 CONSOLE_HEADERS: dict[str, str] = {
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": (
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+# 16 bytes, which is comfortably above the 128 bits CSP asks for.
+_NONCE_BYTES = 16
+
+
+def _csp(nonce: str) -> str:
+    """The console policy, bound to one response's script nonce.
+
+    `script-src` names a nonce rather than 'unsafe-inline'. The pages inline
+    their script, so *something* has to permit it, and 'unsafe-inline' permits
+    every inline script including one an injection manages to introduce --
+    which is the case the directive exists for. A nonce permits exactly the
+    blocks this render emitted.
+
+    Defence in depth, not a fix for a known hole: the consoles build their DOM
+    with `textContent` and never interpolate corpus text into markup. This is
+    the layer under that, for the same reason the header set exists at all.
+
+    A per-response nonce is only safe because these responses are `no-store`.
+    A cached page would serve a nonce its header no longer names, and the page
+    would silently stop working.
+
+    `style-src` deliberately keeps 'unsafe-inline'. A nonce there would not
+    help: CSP ignores 'unsafe-inline' entirely once a nonce is present in a
+    directive, and that would break the `style="..."` attributes in the
+    markup, which nonces cannot cover.
+    """
+
+    return (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
+        f"script-src 'self' 'nonce-{nonce}'; "
         "style-src 'self' 'unsafe-inline'; "
         "connect-src 'self'; "
         "img-src 'self' data:; "
         "frame-ancestors 'none'; "
         "base-uri 'none'; "
         "form-action 'none'"
-    ),
-    "Referrer-Policy": "no-referrer",
-    "Cache-Control": "no-store",
-}
+    )
 
 
 def vault_page(template: str, **context: object) -> HTMLResponse:
-    """Render any first-party vault page with the shared browser policy."""
+    """Render any first-party vault page with the shared browser policy.
 
+    Every template gets `csp_nonce`, whether or not it has a script to put it
+    on -- a page that grows one should not also have to discover that it needs
+    plumbing to make it run.
+    """
+
+    nonce = secrets.token_urlsafe(_NONCE_BYTES)
     return HTMLResponse(
-        render(template, **context),
-        headers=CONSOLE_HEADERS,
+        render(template, csp_nonce=nonce, **context),
+        headers={**CONSOLE_HEADERS, "Content-Security-Policy": _csp(nonce)},
     )
 
 

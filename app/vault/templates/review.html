@@ -41,10 +41,10 @@ label.check { display: flex; gap: 0.4rem; align-items: center; font-size: 0.88re
   </div>
 </main>
 
-<script id="cfg" type="application/json">{{ {"apiBase": api_base, "scopes": scopes,
+<script id="cfg" type="application/json" nonce="{{ csp_nonce }}">{{ {"apiBase": api_base, "scopes": scopes,
   "consolePath": console_path, "clientName": client_name,
   "storePrefix": store_prefix} | tojson }}</script>
-<script>
+<script nonce="{{ csp_nonce }}">
 "use strict";
 {% include "_console_session.js" %}
 

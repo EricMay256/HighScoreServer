@@ -9,6 +9,8 @@ family holding `vault:read` alone, so a console that could do both would be a
 console that could do neither properly.
 """
 
+import re
+
 import pytest
 from starlette.routing import Route
 
@@ -108,11 +110,20 @@ def test_the_route_is_registered_at_the_documented_path() -> None:
     assert routes[0].methods == {"GET", "HEAD"}
 
 
+def _console_response():
+    return console_page(
+        "browse.html",
+        console_path=browse.BROWSE_PATH,
+        scopes=browse.CONSOLE_SCOPES,
+        client_name=browse.CLIENT_NAME,
+        store_prefix=browse.STORE_PREFIX,
+    )
+
+
 @pytest.mark.parametrize(
     "header",
     [
         "X-Frame-Options",
-        "Content-Security-Policy",
         "Referrer-Policy",
         "Cache-Control",
     ],
@@ -122,17 +133,65 @@ def test_the_console_sets_its_protective_headers(header: str) -> None:
 
     A second copy of this policy is a policy that drifts, and it drifts
     silently: the weaker page keeps working.
+
+    The CSP is not in this list because it carries a per-response nonce and so
+    is not a constant; the two tests below cover it.
     """
 
-    response = console_page(
-        "browse.html",
-        console_path=browse.BROWSE_PATH,
-        scopes=browse.CONSOLE_SCOPES,
-        client_name=browse.CLIENT_NAME,
-        store_prefix=browse.STORE_PREFIX,
+    assert _console_response().headers[header] == CONSOLE_HEADERS[header]
+
+
+def test_inline_script_is_allowed_by_nonce_and_not_by_unsafe_inline() -> None:
+    """'unsafe-inline' permits an injected inline script; a nonce does not.
+
+    The pages inline their script, so something has to permit it. Whichever it
+    is applies to *every* inline script the document ends up containing, which
+    is precisely the case the directive exists to govern -- so it is the nonce,
+    which names only the blocks this render emitted.
+
+    Defence in depth. The consoles build their DOM with `textContent` and never
+    interpolate corpus text into markup, so there is no known injection this
+    closes.
+    """
+
+    response = _console_response()
+    csp = response.headers["Content-Security-Policy"]
+    script_src = next(
+        part.strip() for part in csp.split(";") if part.strip().startswith("script-src")
     )
 
-    assert response.headers[header] == CONSOLE_HEADERS[header]
+    assert "'unsafe-inline'" not in script_src
+    assert "'nonce-" in script_src
+
+    # Every inline script in the page must carry that exact nonce, or the page
+    # is served broken rather than served insecure.
+    #
+    # Line-anchored: every real script tag in these templates starts a line,
+    # and `_console_session.js` mentions "<script>" in a comment that is inside
+    # a script body rather than opening one.
+    nonce = script_src.split("'nonce-", 1)[1].split("'", 1)[0]
+    tags = re.findall(r"(?m)^<script\b[^>]*>", response.body.decode())
+
+    assert len(tags) >= 2, "expected the config block and the page script"
+    for tag in tags:
+        assert f'nonce="{nonce}"' in tag, f"inline script without the nonce: {tag}"
+
+
+def test_the_script_nonce_is_fresh_on_every_response() -> None:
+    """A reused nonce is 'unsafe-inline' with extra steps.
+
+    Safe to vary per response only because these pages are `no-store`: a
+    cached body would carry a nonce its header no longer names and would
+    silently stop running.
+    """
+
+    first = _console_response()
+    second = _console_response()
+
+    assert first.headers["Content-Security-Policy"] != (
+        second.headers["Content-Security-Policy"]
+    )
+    assert CONSOLE_HEADERS["Cache-Control"] == "no-store"
 
 
 def test_the_console_loads_no_third_party_assets() -> None:
