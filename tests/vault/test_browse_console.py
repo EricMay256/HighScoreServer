@@ -177,6 +177,27 @@ def test_inline_script_is_allowed_by_nonce_and_not_by_unsafe_inline() -> None:
         assert f'nonce="{nonce}"' in tag, f"inline script without the nonce: {tag}"
 
 
+def test_the_script_nonce_stays_inside_the_unambiguous_alphabet() -> None:
+    """Hex, which is a strict subset of what CSP's grammar accepts.
+
+    CSP3's `base64-value` is
+    `1*( ALPHA / DIGIT / "+" / "/" / "-" / "_" )*2( "=" )`, so the base64url
+    characters a `token_urlsafe` nonce can contain were never out of spec.
+    Hex simply cannot raise the question, and the nonce is machine-generated
+    with no other constraint on its shape, so there is nothing to trade away.
+
+    Pinned because the reason is not visible from the call: `token_urlsafe`
+    reads like the obvious choice for a header value.
+    """
+
+    csp = _console_response().headers["Content-Security-Policy"]
+    nonce = csp.split("'nonce-", 1)[1].split("'", 1)[0]
+
+    assert re.fullmatch(r"[0-9a-f]+", nonce), nonce
+    # 16 bytes of entropy, per _NONCE_BYTES.
+    assert len(nonce) == 32
+
+
 def test_the_script_nonce_is_fresh_on_every_response() -> None:
     """A reused nonce is 'unsafe-inline' with extra steps.
 

@@ -45,6 +45,13 @@ CONSOLE_HEADERS: dict[str, str] = {
 }
 
 # 16 bytes, which is comfortably above the 128 bits CSP asks for.
+#
+# Emitted as hex rather than `token_urlsafe`. Both are valid: CSP3's
+# `base64-value` production is
+#   1*( ALPHA / DIGIT / "+" / "/" / "-" / "_" )*2( "=" )
+# which admits the base64url alphabet explicitly, so `-` and `_` were never
+# out of spec. Hex is a strict subset of that set, so it cannot raise the
+# question at all -- which is the only reason to prefer it here.
 _NONCE_BYTES = 16
 
 
@@ -91,7 +98,7 @@ def vault_page(template: str, **context: object) -> HTMLResponse:
     plumbing to make it run.
     """
 
-    nonce = secrets.token_urlsafe(_NONCE_BYTES)
+    nonce = secrets.token_hex(_NONCE_BYTES)
     return HTMLResponse(
         render(template, csp_nonce=nonce, **context),
         headers={**CONSOLE_HEADERS, "Content-Security-Policy": _csp(nonce)},
