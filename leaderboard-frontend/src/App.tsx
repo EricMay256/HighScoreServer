@@ -31,7 +31,19 @@ export default function App() {
     staleTime: 5 * 60_000,
   });
   const [selectedMode, setSelectedMode] = useState<string | null>(null);
-  const gameMode = selectedMode ?? modes?.[0]?.name ?? "";
+
+  // The user's pick wins only while it still exists. A refetch can drop the
+  // selected mode -- an operator retires one, or the list simply changes --
+  // and preferring `selectedMode` unconditionally then left the app pointing
+  // at a mode the server no longer has: no tab active, a scores request the
+  // API rejects, and SubmitPanel posting to it. Falling back to the first
+  // available mode is the same rule that chooses the initial one.
+  const available = modes ?? [];
+  const selectionIsLive =
+    selectedMode !== null && available.some((mode) => mode.name === selectedMode);
+  const gameMode = selectionIsLive
+    ? (selectedMode as string)
+    : (available[0]?.name ?? "");
 
   // An empty gameMode has three causes and they are not interchangeable, so
   // Leaderboard is told which rather than left to assume the hopeful one.
