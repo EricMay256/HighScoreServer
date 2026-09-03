@@ -26,23 +26,26 @@ Historical handoffs are under [`archive/`](archive/README.md).
   pages), all active; `VAULT_ENABLED`, `VAULT_PUBLIC_URL` and an operator
   identity method set; contributions arriving under per-session OAuth
   principals.
-- **Suite:** 1,172 test functions, about seven minutes on this machine against
-  a local PostgreSQL 17 with pgvector. Never run two pytest processes against
-  the test database at once.
-- **Lint:** `ruff check app/ tests/ scripts/` is clean.
+- **Suite:** 1,373 tests, about seven minutes on this machine against a local
+  PostgreSQL 17 with pgvector. Never run two pytest processes against the test
+  database at once.
+- **Lint:** `ruff check .` is clean. The gate is the whole tree as of
+  2026-09-02 — the old `app/ tests/ scripts/` scope left `migrations/`,
+  `run_dev.py` and `wsgi.py` unlinted.
 
 ## 1. Immediate
 
 1. **Merge `dev` into `main`.** Fast-forward, two migrations in range (above).
    Documentation on a non-default branch is documentation nobody reads, and
    GitHub shows `main`.
-2. **Work through the 2026-09-02 code review** —
-   [`code-review-2026-09-02.md`](code-review-2026-09-02.md). First: stop echoing
-   internal exception text on `500` responses; pin the Python runtime for
-   Heroku with a `.python-version`; re-encode `requirements-dev.txt` as UTF-8 and
-   move the dev tools out of the production install; regenerate the SPA's API
-   types; stop the review console fetching every evidence note while rendering
-   the queue.
+2. **Verify the Heroku deployment.** The one thing the 2026-09-02 review could
+   not check and nothing since has. Two facts are load-bearing and unknown:
+   which Python the buildpack resolves now that `.python-version` pins 3.12
+   (`Using Python 3.x` in the build log — if it was resolving something newer,
+   the next deploy is a downgrade), and which game modes exist, because no
+   client hardcodes one any more and the landing page is now the
+   alphabetically first. Also re-check `heroku config` and the applied vault
+   lineage head; the production facts above are from 2026-08-28.
 3. **Backfill note summaries.** 67 of 80 production notes lacked one on
    2026-08-28. `summary` joins the embedding text and is the search preview
    (ADR 0031), so an unsummarized note is measurably harder to find.
@@ -162,8 +165,11 @@ The largest remaining vault feature. The plan is
 - **Validated runs, deferred pieces** ([`specs.md`](specs.md)): a `min_score`
   floor, a max-duration bound (needs typed action semantics), tier-3
   deterministic replay, React integration of `/runs`.
-- **Rename should reissue tokens.** The JWT's `username` claim lags a rename
-  until the next refresh; the SPA carries the TODO.
+- **Rename's remaining client work.** `/rename` reissues tokens as of
+  2026-09-02, and the SPA and Unity client store them. The C++ client needed a
+  separate fix — it sent the wrong field name and had never worked against a
+  real server. Left: the Unreal client does not implement rename at all, and
+  the Unity change is untested against a real editor build.
 - **Cursor pagination for `/latest`** if a client ever needs stable feed paging
   under inserts.
 
@@ -171,11 +177,9 @@ The largest remaining vault feature. The plan is
 
 - **Split the test suite by domain** (`tests/vault` against the rest) so
   feedback rounds on leaderboard work skip the seven-minute run.
-- **Widen the lint scope** to `migrations/`, `run_dev.py` and `wsgi.py` after
-  one `ruff check --fix` pass (nine import-order and newline findings today),
-  keeping `scripts/lint.*` and the CI step in step.
-- **An `E501` pass.** 202 findings across the CI scope; `pyproject.toml` still
-  says 116. Worth its own change, not a gate.
+- **An `E501` pass.** 196 findings across the tree, 27 of them in
+  `app/vault/`; `pyproject.toml` records that count and the date it was taken.
+  Worth its own change, not a gate.
 - **`UP042`**: rewrite the `(str, Enum)` classes as `StrEnum` deliberately, with
   tests — `str()` semantics differ on shipped API fields.
 - **Procfile worker class.** `uvicorn.workers.UvicornWorker` is deprecated in
