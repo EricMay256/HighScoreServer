@@ -34,6 +34,18 @@ export function setTokens(access: string, refresh: string): void {
   emit();
 }
 
+/**
+ * Replace the access token, leaving the refresh token in place.
+ *
+ * For an operation that changes what the access token claims without ending
+ * the session — `/rename`, which returns no refresh token because it does not
+ * invalidate the one the caller already holds.
+ */
+export function setAccessToken(access: string): void {
+  localStorage.setItem(ACCESS_KEY, access);
+  emit();
+}
+
 export function clearTokens(): void {
   localStorage.removeItem(ACCESS_KEY);
   localStorage.removeItem(REFRESH_KEY);

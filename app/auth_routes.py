@@ -66,6 +66,17 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type:    str = "bearer"
 
+class AccessTokenResponse(BaseModel):
+    """A replacement access token, with the caller's refresh token untouched.
+
+    For an operation that invalidates what the *access* token says but leaves
+    the session itself alone. Minting a refresh token here would be a second
+    live credential the caller never asked for and cannot be told to discard,
+    because the old one keeps working -- see /rename.
+    """
+    access_token: str
+    token_type:   str = "bearer"
+
 
 async def token_response_for_user(user: AuthenticatedUser) -> TokenResponse:
     return TokenResponse(
@@ -307,18 +318,37 @@ async def logout(body: RefreshRequest) -> None:
     await revoke_refresh_token(body.refresh_token)
 
 
-@router.post("/rename", response_model=TokenResponse)
+@router.post(
+    "/rename",
+    response_model=AccessTokenResponse,
+    responses=rate_limited_responses("10 per minute"),
+)
+@limiter.limit("10/minute")
 async def rename(
-    body:    RenameRequest,
-    payload: dict = Depends(require_user),
-) -> TokenResponse:
+    request:  Request,
+    response: Response,
+    body:     RenameRequest,
+    payload:  dict = Depends(require_user),
+) -> AccessTokenResponse:
     """
-    Changes the username and issues fresh tokens reflecting it.
+    Changes the username and returns a replacement access token.
 
     The access token carries `username` as a claim, so a rename that returned
-    no tokens left every client showing the old name until the token happened
-    to expire and refresh. Mirrors /claim, which reissues for the same reason
-    after changing `is_guest`.
+    nothing left every client showing the old name until the token expired and
+    a refresh happened to mint a new one.
+
+    **The access token only.** The refresh token is opaque and carries no
+    username, so a rename does not invalidate it and there is nothing to
+    replace. Minting one anyway -- which this did until 2026-09-03, by copying
+    /claim -- left the previous credential valid for its full lifetime and
+    added a row per rename, so a client renaming in a loop grew
+    `refresh_tokens` without bound and accumulated live credentials nobody
+    could enumerate a reason for. /claim gets away with the same shape because
+    it can only succeed once per account; rename has no such limit.
+
+    Rate limited like its sibling auth routes, which it should have been from
+    the start: it takes a write lock on a `users` row and was the only one
+    without a bucket.
     """
     user_id      = int(payload["sub"])
     new_username = body.username
@@ -349,9 +379,8 @@ async def rename(
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    return TokenResponse(
+    return AccessTokenResponse(
         access_token=create_access_token(user_id, row[0], is_guest=row[1]),
-        refresh_token=await create_refresh_token(user_id),
     )
 
 

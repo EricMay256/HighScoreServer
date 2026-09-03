@@ -640,7 +640,7 @@ decisions the client has to make, and the enum is more explicit than a return co
 | POST | `/login` | Public | Login, returns tokens |
 | POST | `/refresh` | Public | Rotate refresh token, returns new tokens |
 | POST | `/logout` | Public | Revoke refresh token |
-| POST | `/rename` | Bearer | Rename the authenticated user, returns new tokens |
+| POST | `/rename` | Bearer | Rename the authenticated user, returns a new access token |
 | POST | `/claim` | Bearer | Upgrade guest account to claimed |
 | POST | `/steam/login` | Public | Validate a Steam session ticket server-side; resolve or create the linked account |
 | POST | `/steam/link` | Bearer | Attach a validated Steam identity to the current account (upgrades a guest in place) |
@@ -650,12 +650,19 @@ constraint is enforced at the DB layer and surfaced as a clean error rather
 than a 500.
 
 > **Changed 2026-09-02:** `/rename` previously returned **204 No Content**. It
-> now returns **200** with a `TokenResponse`, because the access token carries
+> now returns **200** with an `AccessTokenResponse` — `access_token` and
+> `token_type`, and no refresh token — because the access token carries
 > `username` as a claim and a rename that reissued nothing left clients showing
-> the old name until the token expired. This mirrors `/claim`, which reissues
-> after changing `is_guest`. Clients that only check for success are
-> unaffected; a client asserting specifically on `204` needs updating, and the
-> reissued refresh token should be stored in place of the old one.
+> the old name until the token expired. Store the new access token in place of
+> the old one; a client asserting specifically on `204` needs updating, and one
+> that only checks for success is unaffected.
+>
+> **The refresh token is deliberately untouched.** A rename does not invalidate
+> it — it is opaque and carries no username — so there is nothing to replace.
+> Returning a full `TokenResponse` here (as this briefly did on 2026-09-02, by
+> copying `/claim`) minted a second live credential per rename while leaving
+> the first valid, growing `refresh_tokens` without bound. `/claim` returns a
+> full pair and is safe from that only because it can succeed once per account.
 
 ### Leaderboard — `/api/leaderboard`
 

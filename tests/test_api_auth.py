@@ -481,14 +481,68 @@ def test_rename_returns_a_token_carrying_the_new_username(client: TestClient) ->
     assert response.status_code == 200
     body = response.json()
     assert decode_token(body["access_token"])["username"] == new_name
-    assert body["refresh_token"] != tokens["refresh_token"]
-    # The reissued refresh token is usable, so the client is not left holding
-    # a pair whose halves disagree.
+    # The access token only. A refresh token carries no username, so a rename
+    # does not invalidate it and there is nothing here to replace.
+    assert "refresh_token" not in body
+
+    # The caller's existing refresh token still works and still belongs to the
+    # same account, so the pair it now holds does not disagree with itself.
     refreshed = client.post(
-        "/api/auth/refresh", json={"refresh_token": body["refresh_token"]}
+        "/api/auth/refresh", json={"refresh_token": tokens["refresh_token"]}
     )
     assert refreshed.status_code == 200
     assert decode_token(refreshed.json()["access_token"])["username"] == new_name
+
+
+def test_renaming_repeatedly_mints_no_extra_refresh_tokens(
+    client: TestClient,
+) -> None:
+    """Rename used to add a live credential every time it was called.
+
+    It returned a full TokenResponse, minting a refresh token through
+    `create_refresh_token`, which inserts without revoking anything. The
+    previous token stayed valid for its full lifetime, so five renames left
+    six usable credentials and five surplus rows -- unbounded, because nothing
+    limits how often a client may rename.
+
+    /claim has the same shape and is safe from it only because it can succeed
+    once per account.
+    """
+
+    tokens = register(client)
+    user_id = int(decode_token(tokens["access_token"])["sub"])
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = %s", (user_id,)
+            )
+            before = cur.fetchone()[0]
+    finally:
+        conn.close()
+
+    access = tokens["access_token"]
+    for index in range(3):
+        response = client.post(
+            "/api/auth/rename",
+            json={"username": f"norotate_{secrets.token_hex(4)}_{index}"},
+            headers=bearer(access),
+        )
+        assert response.status_code == 200
+        access = response.json()["access_token"]
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = %s", (user_id,)
+            )
+            after = cur.fetchone()[0]
+    finally:
+        conn.close()
+
+    assert after == before, "a rename minted a refresh token nobody asked for"
 
 
 def test_rename_preserves_guest_status_in_the_reissued_token(client: TestClient) -> None:

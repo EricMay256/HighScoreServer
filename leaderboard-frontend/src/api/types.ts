@@ -72,6 +72,17 @@ export interface TokenResponse {
   token_type: string; // "bearer"
 }
 
+/**
+ * A replacement access token, leaving the refresh token alone.
+ *
+ * `/rename` returns this: renaming changes what the access token *says* but
+ * does not invalidate the session, so there is no refresh token to replace.
+ */
+export interface AccessTokenResponse {
+  access_token: string;
+  token_type: string; // "bearer"
+}
+
 export interface RegisterRequest {
   username: string;
   email: string;
