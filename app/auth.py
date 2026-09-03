@@ -53,11 +53,26 @@ def _secret() -> str:
     return secret
 
 
-def create_access_token(user_id: int, username: str, is_guest: bool) -> str:
+def create_access_token(
+    user_id: int,
+    username: str,
+    is_guest: bool,
+    expires_at: datetime | None = None,
+) -> str:
     """
     Issues a signed JWT access token.
 
     Payload carries: sub (user_id), username, exp.
+
+    `expires_at` reissues at a deadline already set rather than granting a
+    fresh one, and exists for routes that correct a *claim* on a token the
+    caller already holds. /rename is the case: it is authorized by an access
+    token and may be called repeatedly, so minting a full hour each time would
+    let any still-valid token renew itself forever. The refresh token would
+    stop being what bounds a session, and revoking it would stop ending one.
+
+    Granting a fresh hour is correct when the caller proved something new --
+    credentials, or a refresh token. That is the default.
 
     # DENYLIST HOOK: add a jti claim here when implementing revocation.
     # jti = str(uuid.uuid4())
@@ -69,7 +84,9 @@ def create_access_token(user_id: int, username: str, is_guest: bool) -> str:
         "sub": str(user_id),
         "username": username,
         "is_guest": is_guest,
-        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        "exp": expires_at
+        if expires_at is not None
+        else now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         "iat": now,
     }
     return jwt.encode(payload, _secret(), algorithm="HS256")

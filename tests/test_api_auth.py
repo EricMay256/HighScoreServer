@@ -1,6 +1,7 @@
 import os
 import secrets
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -9,6 +10,7 @@ from httpx import Response
 from jose import jwt
 
 from app import auth_routes
+from app.auth import create_access_token
 from app.auth_identities import NATIVE_AUTH_PROVIDER
 from app.limiter import limiter
 from app.steam_auth import (
@@ -919,3 +921,51 @@ def test_rename_survives_an_unavailable_cache(client: TestClient) -> None:
     )
 
     assert response.status_code == 200
+
+
+def test_rename_never_extends_the_access_token(client: TestClient) -> None:
+    """A repeatable reissue must not renew the session it was authorized by.
+
+    /rename is authorized by an access token and may be called as often as its
+    bucket allows. `create_access_token` sets `exp` an hour out, so returning a
+    default-lifetime token let any still-valid one mint a successor with a
+    fresh hour -- indefinitely, and a stolen token equally, long after the
+    refresh token it descended from had expired or been revoked. The refresh
+    token would stop being what bounds a session.
+
+    The reissue exists to correct the `username` claim. It carries the deadline
+    it was given.
+    """
+
+    tokens = register(client)
+    claims = decode_token(tokens["access_token"])
+
+    # Deliberately not the token `register` handed back. Its `exp` is an hour
+    # out, and so is a freshly minted one, so within the same second the two
+    # are equal and the assertion holds whether or not the deadline is carried
+    # forward -- which is exactly how the first version of this test passed
+    # against the bug. A five-minute deadline cannot be confused with a fresh
+    # hour.
+    access = create_access_token(
+        int(claims["sub"]),
+        claims["username"],
+        is_guest=claims["is_guest"],
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    original_exp = decode_token(access)["exp"]
+    fresh_hour = int((datetime.now(UTC) + timedelta(minutes=60)).timestamp())
+    assert original_exp < fresh_hour - 60, "the fixture must be distinguishable"
+
+    for index in range(3):
+        reply = client.post(
+            "/api/auth/rename",
+            json={"username": f"noextend_{secrets.token_hex(4)}_{index}"},
+            headers=bearer(access),
+        )
+        assert reply.status_code == 200
+        access = reply.json()["access_token"]
+
+        reissued = decode_token(access)
+        assert reissued["exp"] == original_exp, (
+            f"rename {index} moved the expiry: {reissued['exp']} != {original_exp}"
+        )

@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
@@ -414,8 +415,19 @@ async def rename(
     # on an operation that happens approximately never.
     await _invalidate_leaderboard_caches()
 
+    # The presented token's own deadline, carried forward rather than renewed.
+    # This route is authorized by an access token and may be called as often
+    # as the bucket allows, so minting a fresh hour each time would let any
+    # still-valid token renew itself indefinitely -- a stolen one included,
+    # long after the refresh token it came from was revoked or expired. The
+    # reissue exists to correct the `username` claim, not to extend a session.
     return AccessTokenResponse(
-        access_token=create_access_token(user_id, row[0], is_guest=row[1]),
+        access_token=create_access_token(
+            user_id,
+            row[0],
+            is_guest=row[1],
+            expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
+        ),
     )
 
 
