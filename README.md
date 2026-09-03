@@ -211,8 +211,15 @@ not a return to 10.
 python -m venv .venv
 .venv\Scripts\Activate.ps1  # Windows PowerShell
 source .venv/bin/activate   # macOS/Linux
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+> `requirements-dev.txt`, not `requirements.txt`. It pulls in the runtime
+> manifest with `-r` and adds pytest, Ruff and coverage, which live only there
+> — `requirements.txt` is what the production slug installs and carries no
+> test or lint tooling. Installing it alone leaves `pytest` and
+> `ruff check .` unavailable, which are the commands the rest of this README
+> and CI both use.
 
 2. Copy the example environment file and fill in your values:
 ```bash
@@ -833,8 +840,8 @@ HighScoreServer/
 │   └── vault/                # The vault suite — ownership per app/vault/docs/vault-extraction-manifest.md
 ├── alembic.ini
 ├── alembic-vault.ini
-├── requirements.txt
-├── requirements-dev.txt
+├── requirements.txt          # runtime only — this is what the slug installs
+├── requirements-dev.txt      # -r the above, plus pytest/Ruff/coverage
 ├── Procfile                  # web (gunicorn) and release (scripts/release.sh) phases
 ├── .python-version           # 3.12 — the interpreter CI tests and Heroku builds
 ├── wsgi.py
