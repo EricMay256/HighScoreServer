@@ -181,7 +181,7 @@ Implement this independently of model integration.
 3. Reviewer selects and edits a span.
 4. The page previews the adjusted result and canonical diff against the current target note.
 5. The complementary proposer credential files a new immutable proposal with `revises_proposal_id`.
-6. After successor creation succeeds, the reviewer credential rejects the predecessor with a replacement decision note.
+6. After successor creation succeeds, the reviewer credential settles the predecessor as `superseded`, with a decision note naming the successor — not `rejected`. See the ADR 0044 note above: this file's earlier recommendation of `rejected` plus lineage is the reasoning the ADR weighed, not the outcome.
 7. The successor remains pending for an explicit review decision.
 
 The current repository does not yet implement the complementary proposer credential on the review page; ADR 0039 explicitly deferred reviewer-side editing. Phase 1 must add that browser flow rather than assume it exists.

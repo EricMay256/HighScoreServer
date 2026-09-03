@@ -57,8 +57,10 @@ database transaction:
 
 1. The proposer credential files the successor against the unchanged target
    revision with `revises_proposal_id` and an application-owned idempotency key.
-2. Only after that succeeds, the reviewer credential rejects the predecessor
-   with its replacement decision note.
+2. Only after that succeeds, the reviewer credential settles the predecessor as
+   `superseded`, with a decision note naming the successor. Not `rejected`:
+   the distinction is the point of the new state, and an implementer following
+   this step literally would build the transition the decision above rules out.
 
 If filing fails, the predecessor remains pending. If the successor is filed but
 settlement fails, the review page exposes a recoverable "successor filed; finish
