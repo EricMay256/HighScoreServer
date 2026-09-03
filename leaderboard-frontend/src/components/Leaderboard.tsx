@@ -10,9 +10,15 @@ import ScoresTable from "./ScoresTable";
 interface LeaderboardProps {
   gameMode: string;
   onGameModeChange: (mode: string) => void;
+  /** The game-mode list could not be fetched, so no mode will ever arrive. */
+  modesFailed: boolean;
 }
 
-export default function Leaderboard({ gameMode, onGameModeChange }: LeaderboardProps) {
+export default function Leaderboard({
+  gameMode,
+  onGameModeChange,
+  modesFailed,
+}: LeaderboardProps) {
   // Period stays local — only Leaderboard cares about it. If SubmitPanel
   // ever needs to know which period the user is viewing (it doesn't, since
   // submissions go to all periods server-side via the snapshot upsert),
@@ -55,9 +61,17 @@ export default function Leaderboard({ gameMode, onGameModeChange }: LeaderboardP
 
       <PeriodTabs selected={period} onChange={setPeriod} />
 
-      {/* An empty gameMode means the mode list has not resolved yet, which is
-          still loading from the reader's point of view. */}
-      {(isLoading || gameMode === "") && (
+      {/* No mode and no prospect of one: the mode list failed, so waiting is
+          not what is happening and a spinner would say so forever. */}
+      {gameMode === "" && modesFailed && (
+        <div className="lb-error" role="alert">
+          ⚠ Could not load game modes. Reload to try again.
+        </div>
+      )}
+
+      {/* An empty gameMode that still might resolve is, from the reader's
+          point of view, loading. */}
+      {(isLoading || (gameMode === "" && !modesFailed)) && (
         <div className="lb-loading">
           <div className="lb-spinner" />
           Loading scores…

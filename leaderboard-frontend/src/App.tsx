@@ -24,7 +24,11 @@ export default function App() {
   // names a mode: the initial state used to be the literal "blitz", so any
   // database without a mode of that name opened on an empty board. Shares
   // ModeTabs' query key, so deriving it costs no extra request.
-  const { data: modes } = useQuery({
+  //
+  // The error state is carried down rather than discarded: if this query
+  // fails there is no mode, so an empty gameMode means either "still loading"
+  // or "cannot load", and only Leaderboard can tell the reader which.
+  const { data: modes, isError: modesFailed } = useQuery({
     queryKey: ["gameModes"],
     queryFn: getGameModes,
     staleTime: 5 * 60_000,
@@ -74,7 +78,11 @@ export default function App() {
             margin: "0 auto",
           }}
         >
-          <Leaderboard gameMode={gameMode} onGameModeChange={setSelectedMode} />
+          <Leaderboard
+            gameMode={gameMode}
+            onGameModeChange={setSelectedMode}
+            modesFailed={modesFailed}
+          />
 
           <aside style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
             {auth.isAuthenticated ? (
