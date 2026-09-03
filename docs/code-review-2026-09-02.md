@@ -262,7 +262,8 @@ deadline.
 
 - Consolidated `docs/NEXT-STEPS.md`; rewrote `docs/HANDOFF.md` as a start-here;
   archived five historical handoffs under `docs/archive/` with banners and an
-  index; renamed the librarian handoff to `docs/librarian-plan.md` and recorded
+  index; renamed the librarian handoff to `librarian-plan.md` (moved to
+  `app/vault/docs/` on 2026-09-03, being vault documentation) and recorded
   that Phase 0 is done.
 - README: the vault is no longer described as dark in production; the stale
   "configuration since the last merge" section was replaced; the duplicate

@@ -60,7 +60,7 @@ Historical handoffs are under [`archive/`](archive/README.md).
 ## 2. The librarian and proposal revision
 
 The largest remaining vault feature. The plan is
-[`librarian-plan.md`](librarian-plan.md); the decisions are vault ADR 0044
+[`librarian-plan.md`](../app/vault/docs/librarian-plan.md); the decisions are vault ADR 0044
 (Accepted, unimplemented) and ADR 0043 (Proposed).
 
 1. **Phase 1 — proposal lineage (ADR 0044).** One Alembic revision on the vault

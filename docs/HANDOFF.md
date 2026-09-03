@@ -26,7 +26,7 @@ them.
 
 - **The librarian and proposal revision.** Vault ADR 0044 is Accepted and
   unimplemented; ADR 0043 is Proposed. The plan is
-  [`librarian-plan.md`](librarian-plan.md).
+  [`librarian-plan.md`](../app/vault/docs/librarian-plan.md).
 - **The 2026-09-02 code review** —
   [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — is **done**. Every
   finding is addressed on `dev`, one commit each; the document is kept as the
