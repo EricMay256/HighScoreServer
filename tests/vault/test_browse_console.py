@@ -549,9 +549,38 @@ def test_edge_resolution_is_one_request_for_the_whole_note() -> None:
     page = _page()
 
     assert "new Set([...detail.related_ids, ...detail.source_ids])" in page
-    # Resolution happens before the panel is painted, so the note does not
-    # render and then rearrange itself.
-    assert page.index("resolveEdges(") < page.index('const panel = $("note");')
+
+
+def test_edge_resolution_does_not_gate_showing_the_note() -> None:
+    """The note is what the reader asked for; the labels are enrichment.
+
+    The lookup was awaited before the panel was painted, so that the note
+    would not appear and then rearrange itself. But `api` has no timeout, so a
+    stalled /notes/edges made the note itself invisible for as long as the
+    request hung -- an optional request holding the primary content hostage.
+
+    The panel is now painted with the ids in place and the names filled in
+    afterwards, guarded by the generation counter so a stale note's edges
+    cannot be written into whatever the reader navigated to instead.
+    """
+
+    page = _page()
+
+    # Anchored past the panel, because `resolveEdges(ids)` also matches the
+    # function's own definition earlier in the file -- which is how the
+    # assertion this replaced came to pass on a coincidence.
+    panel_at = page.index('const panel = $("note");')
+    after_panel = page[panel_at:]
+
+    assert ".then((resolution) => {" in after_panel, (
+        "resolution is kicked off after the panel is painted"
+    )
+    # Not awaited -- that is the whole point.
+    assert "await resolveEdges(" not in page
+    assert "resolving…" in page, "the sections say what they are waiting for"
+    # The late write is generation-guarded.
+    resolve_at = panel_at + after_panel.index(".then((resolution) => {")
+    assert "if (generation !== NOTE_GENERATION) return;" in page[resolve_at:]
 
 
 def test_an_unresolvable_edge_is_shown_but_not_linked() -> None:

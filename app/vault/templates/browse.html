@@ -361,14 +361,6 @@ async function openNote(noteId) {
   }
   if (generation !== NOTE_GENERATION) return;
 
-  /* Before anything is painted, for the same reason the detail is: the panel
-     must not appear and then rearrange itself. Cheap to wait for -- one
-     request, and none at all for a note with no edges. */
-  const resolvedEdges = await resolveEdges(
-    Array.from(new Set([...detail.related_ids, ...detail.source_ids]))
-  );
-  if (generation !== NOTE_GENERATION) return;
-
   const panel = $("note");
   panel.textContent = "";
   panel.classList.remove("hidden");
@@ -415,11 +407,25 @@ async function openNote(noteId) {
   for (const [name, values] of Object.entries(detail.facets || {})) {
     panel.appendChild(el("div", "small muted", name + ": " + values.join(", ")));
   }
-  if (detail.related_ids.length) {
-    panel.appendChild(edgeList("related", detail.related_ids, resolvedEdges));
-  }
-  if (detail.source_ids.length) {
-    panel.appendChild(edgeList("sources", detail.source_ids, resolvedEdges));
+  /* Placeholders now, names later. The edge lookup used to be awaited before
+     the panel was painted, on the reasoning that a note should not appear and
+     then rearrange itself -- but `api` has no timeout, so a stalled
+     /notes/edges left the note itself invisible for as long as the request
+     hung. The note is the thing the reader asked for; the names on its edges
+     are an enrichment, and an enrichment must not gate it.
+
+     The ids are already known and are what the note actually holds, so the
+     sections are not empty while resolving -- only unlabelled. */
+  const edgeSlots = [];
+  for (const [label, ids] of [
+    ["related", detail.related_ids],
+    ["sources", detail.source_ids],
+  ]) {
+    if (!ids.length) continue;
+    const slot = el("div");
+    slot.appendChild(el("div", "small muted", label + ": resolving…"));
+    panel.appendChild(slot);
+    edgeSlots.push({ label, ids, slot });
   }
 
   /* The body as it is written: markdown source, not rendered. Rendering it
@@ -430,6 +436,28 @@ async function openNote(noteId) {
   const body = el("pre", "body", detail.body);
   body.id = "note-body";
   panel.appendChild(body);
+
+  /* Deliberately not awaited: the note is on screen by now, and this only
+     fills in labels. The generation check is what makes that safe -- a reader
+     who has already navigated on must not have a stale note's edges written
+     into whatever they are looking at instead. */
+  if (edgeSlots.length) {
+    const ids = Array.from(
+      new Set([...detail.related_ids, ...detail.source_ids])
+    );
+    resolveEdges(ids)
+      .then((resolution) => {
+        if (generation !== NOTE_GENERATION) return;
+        for (const { label, ids: edgeIds, slot } of edgeSlots) {
+          slot.replaceChildren(edgeList(label, edgeIds, resolution));
+        }
+      })
+      .catch((err) => {
+        /* `resolveEdges` reports its own failures and rethrows only a dead
+           session, which has already repainted the page. Nothing to add. */
+        if (!err || !err.sessionEnded) showError(err);
+      });
+  }
 }
 
 /* ---------- Proposing an edit to the open note ----------
