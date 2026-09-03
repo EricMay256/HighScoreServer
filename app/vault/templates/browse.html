@@ -288,6 +288,10 @@ async function resolveEdges(ids) {
   }
 }
 
+/* The resolution object before the lookup answers. Shared and never mutated:
+   `edgeList` only reads it. */
+const PENDING_EDGES = { edges: new Map(), failed: false, pending: true };
+
 /* An edge the caller could not resolve is shown as its bare id and is not a
    link, which is the honest rendering: there is an edge, and it points at
    something you cannot open. Three different situations arrive here as one --
@@ -310,10 +314,13 @@ function edgeList(label, ids, resolution) {
          sighted mouse user who hovered it. */
       unresolved += 1;
       wrap.appendChild(el("span", "mono muted", id));
-      /* Not "unresolved" when the lookup itself failed: nothing was learned
-         about this id, so saying anything about it would be invention. */
+      /* Three different things, and only one of them is a statement about the
+         corpus. Pending means the answer has not arrived; failed means it
+         never will for this attempt; neither says anything about the note. */
       wrap.appendChild(el("span", "muted",
-        resolution.failed ? " (not looked up)" : " (unresolved)"));
+        resolution.pending ? " (resolving…)"
+          : resolution.failed ? " (not looked up)"
+            : " (unresolved)"));
       return;
     }
     const link = el("button", "link", edge.slug);
@@ -324,7 +331,10 @@ function edgeList(label, ids, resolution) {
     link.onclick = () => openNote(edge.note_id).catch(showError);
     wrap.appendChild(link);
   });
-  if (resolution.failed) {
+  if (resolution.pending) {
+    /* No explanation yet -- there is nothing to explain until the lookup
+       answers, and a paragraph that appears and then vanishes is noise. */
+  } else if (resolution.failed) {
     /* A statement about this request, not about the corpus. The ids are still
        shown -- they are what the note actually holds -- but nothing claims to
        know what they point at. */
@@ -423,7 +433,12 @@ async function openNote(noteId) {
   ]) {
     if (!ids.length) continue;
     const slot = el("div");
-    slot.appendChild(el("div", "small muted", label + ": resolving…"));
+    /* The same renderer, in its pending state, so the ids are on screen from
+       the first paint. A placeholder reading only "related: resolving…" would
+       hide the one thing the note actually holds -- and hide it for exactly
+       as long as the lookup stalls, which is the failure this whole
+       arrangement exists to avoid. */
+    slot.appendChild(edgeList(label, ids, PENDING_EDGES));
     panel.appendChild(slot);
     edgeSlots.push({ label, ids, slot });
   }

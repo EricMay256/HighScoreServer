@@ -578,6 +578,9 @@ def test_edge_resolution_does_not_gate_showing_the_note() -> None:
     # Not awaited -- that is the whole point.
     assert "await resolveEdges(" not in page
     assert "resolving…" in page, "the sections say what they are waiting for"
+    # Rendered through edgeList in its pending state, which is what puts the
+    # ids on screen -- see the test below.
+    assert "edgeList(label, ids, PENDING_EDGES)" in page
     # The late write is generation-guarded.
     resolve_at = panel_at + after_panel.index(".then((resolution) => {")
     assert "if (generation !== NOTE_GENERATION) return;" in page[resolve_at:]
@@ -638,3 +641,36 @@ def test_a_failed_edge_lookup_is_not_reported_as_corpus_state() -> None:
     assert '" (not looked up)"' in page
     assert "could not be looked up just now" in page
     assert "This says nothing about whether the notes exist" in page
+
+
+def test_edges_show_their_ids_while_the_lookup_is_pending() -> None:
+    """A stalled lookup must not hide what the note actually holds.
+
+    The placeholder was `label + ": resolving…"` and nothing else, so the ids
+    -- the one part already known, fetched with the note itself -- stayed
+    hidden for exactly as long as the lookup hung. That is the failure the
+    non-blocking render exists to prevent, reintroduced one level down: the
+    note appeared promptly and its edges did not.
+
+    The pending state now goes through `edgeList`, so the same rendering path
+    serves all three cases and the ids are on screen from the first paint.
+    What differs is only the marker beside each one.
+    """
+
+    page = _page()
+
+    assert "const PENDING_EDGES = { edges: new Map(), failed: false, pending: true };" in page
+    assert 'resolution.pending ? " (resolving…)"' in page
+
+    # One renderer, three markers, and every branch keeps the id itself.
+    marker_at = page.index('resolution.pending ? " (resolving…)"')
+    id_at = page.index('el("span", "mono muted", id)')
+    assert id_at < marker_at, (
+        "the id is appended before the marker, so no state can omit it"
+    )
+
+    # Nothing claims anything about the corpus while the answer is outstanding.
+    pending_branch = page.index("if (resolution.pending) {")
+    failed_branch = page.index("} else if (resolution.failed) {")
+    between = page[pending_branch:failed_branch]
+    assert "retired" not in between and "could not be looked up" not in between
