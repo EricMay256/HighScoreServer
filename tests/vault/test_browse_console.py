@@ -12,6 +12,7 @@ console that could do neither properly.
 import re
 
 import pytest
+from starlette.responses import HTMLResponse
 from starlette.routing import Route
 
 from app.vault import browse_console as browse
@@ -110,7 +111,7 @@ def test_the_route_is_registered_at_the_documented_path() -> None:
     assert routes[0].methods == {"GET", "HEAD"}
 
 
-def _console_response():
+def _console_response() -> HTMLResponse:
     return console_page(
         "browse.html",
         console_path=browse.BROWSE_PATH,

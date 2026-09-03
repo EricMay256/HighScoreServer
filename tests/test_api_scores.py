@@ -682,8 +682,8 @@ def test_latest_filters_to_requested_modes_only(client, classic_mode, speedrun_m
     assert returned_modes <= {classic_mode, speedrun_mode}
 
 def test_latest_total_count_on_an_empty_page_respects_the_filter(
-    client, classic_mode, speedrun_mode
-):
+    client: TestClient, classic_mode: str, speedrun_mode: str
+) -> None:
     """The fallback count must agree with the windowed one.
 
     When `offset` lands past the last row there is no row to read

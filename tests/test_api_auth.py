@@ -462,7 +462,7 @@ def test_rename_happy_path(client):
     assert response.status_code == 200
 
 
-def test_rename_returns_a_token_carrying_the_new_username(client):
+def test_rename_returns_a_token_carrying_the_new_username(client: TestClient) -> None:
     """The access token carries `username`, so a rename must reissue it.
 
     /rename used to return 204, leaving every client showing the old name
@@ -491,7 +491,7 @@ def test_rename_returns_a_token_carrying_the_new_username(client):
     assert decode_token(refreshed.json()["access_token"])["username"] == new_name
 
 
-def test_rename_preserves_guest_status_in_the_reissued_token(client):
+def test_rename_preserves_guest_status_in_the_reissued_token(client: TestClient) -> None:
     """Renaming is not a claim: `is_guest` must survive the reissue.
 
     The new token is built from the row the UPDATE returns rather than from

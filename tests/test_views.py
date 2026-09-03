@@ -4,8 +4,12 @@ These are the pages at `/` and `/leaderboard`, separate from the React SPA at
 `/app`. Only the parts with a decision behind them are pinned here.
 """
 
+from fastapi.testclient import TestClient
 
-def test_the_leaderboard_view_defaults_to_the_first_configured_mode(client):
+
+def test_the_leaderboard_view_defaults_to_the_first_configured_mode(
+    client: TestClient,
+) -> None:
     """A visitor with no `?game_mode=` must land on a mode that exists.
 
     The default was the literal "classic" while every link in the templates
@@ -29,7 +33,7 @@ def test_the_leaderboard_view_defaults_to_the_first_configured_mode(client):
     assert default_page.text == explicit.text
 
 
-def test_the_landing_mode_is_the_alphabetically_first_one(client):
+def test_the_landing_mode_is_the_alphabetically_first_one(client: TestClient) -> None:
     """The rule the README states, and the reason it is worth stating.
 
     Neither client names a default any more; both take the first row of
@@ -46,7 +50,7 @@ def test_the_landing_mode_is_the_alphabetically_first_one(client):
     assert modes[0] == min(modes)
 
 
-def test_the_templates_name_no_game_mode(client):
+def test_the_templates_name_no_game_mode(client: TestClient) -> None:
     """The nav must not hardcode a mode the deployment may not have.
 
     `/leaderboard?game_mode=blitz` appeared in both templates under the label
