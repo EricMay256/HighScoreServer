@@ -3,10 +3,12 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 from jose import jwt
 
+from app import auth_routes
 from app.auth_identities import NATIVE_AUTH_PROVIDER
 from app.steam_auth import (
     SteamAuthConfigError,
@@ -750,3 +752,65 @@ def test_claimed_account_can_submit_to_requires_auth_mode(client):
         headers=bearer(claimed_tokens["access_token"]),
     )
     assert response.status_code == 201
+
+
+def test_replaying_a_guest_token_after_claiming_does_not_hash(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim path must not pay bcrypt to discover there is nothing to do.
+
+    A successful claim does not revoke the guest token that authorized it, and
+    the JWT's `is_guest` claim stays true for the rest of its hour. The handler
+    trusted that claim, hashed the password, and only then learned from the
+    UPDATE that the account was already claimed -- so replaying one token drove
+    an unbounded number of bcrypt rounds, each occupying an executor thread,
+    on a route with no rate limit.
+
+    Hashing is the amplifier, so hashing is what this asserts on: the replay
+    must be refused without calling it.
+    """
+
+    calls: list[str] = []
+    original = auth_routes.hash_password
+
+    async def counting_hash(plain: str) -> str:
+        calls.append(plain)
+        return await original(plain)
+
+    monkeypatch.setattr(auth_routes, "hash_password", counting_hash)
+
+    tokens = guest(client)
+    body = {
+        "email": f"replay_{secrets.token_hex(4)}@example.com",
+        "password": "testpassword123",
+    }
+
+    first = client.post("/api/auth/claim", json=body, headers=bearer(tokens["access_token"]))
+    assert first.status_code == 200
+    assert len(calls) == 1, "the real claim should hash exactly once"
+
+    # Same token, still carrying is_guest=true, now naming a claimed account.
+    for _ in range(3):
+        replay = client.post(
+            "/api/auth/claim",
+            json={**body, "email": f"replay_{secrets.token_hex(4)}@example.com"},
+            headers=bearer(tokens["access_token"]),
+        )
+        assert replay.status_code == 400
+        assert replay.json()["detail"] == "Account is already claimed"
+
+    assert len(calls) == 1, "a replayed guest token reached bcrypt"
+
+
+def test_claim_documents_a_rate_limit(client: TestClient) -> None:
+    """The ordering fix removes the amplification; the bucket bounds the rest.
+
+    Asserted through the OpenAPI schema because the suite runs with
+    RATE_LIMITER_ENABLED=false, so no request here can be refused. What this
+    catches is the decorator being dropped, which is the way the limit would
+    actually go missing.
+    """
+
+    schema = client.get("/openapi.json").json()
+
+    assert "429" in schema["paths"]["/api/auth/claim"]["post"]["responses"]

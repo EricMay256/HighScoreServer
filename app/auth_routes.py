@@ -347,8 +347,12 @@ async def rename(
     it can only succeed once per account; rename has no such limit.
 
     Rate limited like its sibling auth routes, which it should have been from
-    the start: it takes a write lock on a `users` row and was the only one
-    without a bucket.
+    the start: it takes a write lock on a `users` row.
+
+    It was not "the only auth route without a bucket", as this said until
+    2026-09-03. `/refresh` and `/logout` are still unlimited. Neither hashes a
+    password, so neither is the CPU amplifier `/claim` was, but they are not
+    limited and nothing here should be read as saying they are.
     """
     user_id      = int(payload["sub"])
     new_username = body.username
@@ -384,18 +388,63 @@ async def rename(
     )
 
 
-@router.post("/claim", response_model=TokenResponse)
+@router.post(
+    "/claim",
+    response_model=TokenResponse,
+    responses=rate_limited_responses("5 per minute"),
+)
+@limiter.limit("5/minute")
 async def claim(
-    body:    ClaimRequest,
-    payload: dict = Depends(require_user),
+    request:  Request,
+    response: Response,
+    body:     ClaimRequest,
+    payload:  dict = Depends(require_user),
 ) -> TokenResponse:
     """
     Upgrades a guest account to a claimed account by attaching
     email and password. Issues fresh tokens reflecting is_guest=False.
+
+    Rate limited, and the account state is read before the password is
+    hashed. Both matter here specifically: bcrypt is deliberately expensive
+    and runs on a worker thread, so an unlimited route that hashes before
+    checking anything is a CPU amplifier for whoever holds a token.
     """
     user_id = int(payload["sub"])
 
+    # The token's own claim, which is up to an hour stale and -- because a
+    # successful claim does not revoke the guest token that authorized it --
+    # keeps saying `is_guest` long after the account stopped being one.
     if not payload.get("is_guest"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account is already claimed",
+        )
+
+    # So ask the database before doing the expensive part. Without this, a
+    # replayed guest token reached `hash_password` on every attempt for the
+    # life of the token, each one occupying an executor thread, and only then
+    # learned from the UPDATE that there was nothing to claim.
+    #
+    # An early exit, not the correctness guard: the UPDATE below keeps its own
+    # `AND is_guest = TRUE`, which is what actually settles a race between two
+    # concurrent claims. This only avoids paying bcrypt to find out.
+    try:
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT is_guest FROM users WHERE id = %s", (user_id,)
+                )
+                current = await cur.fetchone()
+    except Exception as e:
+        logger.error("Claim precheck error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
+
+    if current is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if not current[0]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Account is already claimed",
