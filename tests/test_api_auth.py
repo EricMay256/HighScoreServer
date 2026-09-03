@@ -10,6 +10,7 @@ from jose import jwt
 
 from app import auth_routes
 from app.auth_identities import NATIVE_AUTH_PROVIDER
+from app.limiter import limiter
 from app.steam_auth import (
     SteamAuthConfigError,
     SteamAuthInvalidTicket,
@@ -802,18 +803,50 @@ def test_replaying_a_guest_token_after_claiming_does_not_hash(
     assert len(calls) == 1, "a replayed guest token reached bcrypt"
 
 
-def test_claim_documents_a_rate_limit(client: TestClient) -> None:
-    """The ordering fix removes the amplification; the bucket bounds the rest.
+def test_claim_is_actually_refused_once_its_bucket_empties(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enforcement, not documentation.
 
-    Asserted through the OpenAPI schema because the suite runs with
-    RATE_LIMITER_ENABLED=false, so no request here can be refused. What this
-    catches is the decorator being dropped, which is the way the limit would
-    actually go missing.
+    This replaces an assertion on the OpenAPI 429, which was declared by hand
+    in `responses=` and therefore survived removing `@limiter.limit` entirely
+    -- verified: the route kept its documented 429 while enforcing nothing.
+    A test that passes with the protection deleted is worse than no test.
+
+    The suite disables the limiter globally, so this enables it for one test
+    and resets the buckets either side. The guest is created first, while the
+    limiter is still off, because /guest has a 5/minute bucket of its own and
+    would otherwise spend part of what is being measured.
+
+    Requests 1-5 are charged: one real claim, then replays that the state
+    check refuses. The sixth is refused by the bucket instead.
     """
 
-    schema = client.get("/openapi.json").json()
+    tokens = guest(client)
+    body = {
+        "email": f"bucket_{secrets.token_hex(4)}@example.com",
+        "password": "testpassword123",
+    }
 
-    assert "429" in schema["paths"]["/api/auth/claim"]["post"]["responses"]
+    limiter.reset()
+    monkeypatch.setattr(limiter, "enabled", True)
+    try:
+        statuses = []
+        for _ in range(6):
+            reply = client.post(
+                "/api/auth/claim",
+                json={**body, "email": f"bucket_{secrets.token_hex(4)}@example.com"},
+                headers=bearer(tokens["access_token"]),
+            )
+            statuses.append(reply.status_code)
+    finally:
+        limiter.reset()
+
+    assert statuses[0] == 200, "the first claim should succeed"
+    assert statuses[1:5] == [400, 400, 400, 400], (
+        f"replays should be refused on state, not the bucket: {statuses}"
+    )
+    assert statuses[5] == 429, f"the sixth request should exhaust the bucket: {statuses}"
 
 
 def test_rename_invalidates_the_leaderboard_cache(
