@@ -75,9 +75,14 @@ flowchart LR
   simultaneously.
 - **Rate limiting** — write endpoints and auth routes are rate limited per
   client IP via slowapi, tuned to reflect their relative abuse potential.
-  Limits are per route and nothing is limited globally: each limited endpoint
-  carries its own `@limiter.limit`, so an unlimited route is unlimited by
-  omission rather than covered by a default.
+  **On the leaderboard routes** limits are per route and nothing is global:
+  each limited endpoint carries its own `@limiter.limit`, so an unlimited route
+  is unlimited by omission rather than covered by a default.
+  The vault is the deliberate exception — its router attaches an IP-keyed
+  pre-auth guard as a router-level dependency, so every vault route is covered
+  before it authenticates, which is the only ordering in which a guard on an
+  endpoint that queries credentials protects anything. That is in addition to
+  the per-principal quota, not instead of it.
   The deployed configuration uses in-process memory storage; the limiter
   also falls through to memory if a configured Redis is unreachable, so a
   Redis blip degrades rate limiting rather than taking the API down. Both
