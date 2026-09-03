@@ -566,4 +566,24 @@ def test_an_unresolvable_edge_is_shown_but_not_linked() -> None:
     page = _page()
 
     assert 'el("span", "mono muted", id)' in page
-    assert "This id resolves to no note you can open." in page
+    assert "An unresolved id names no note you can open" in page
+
+
+def test_an_unresolvable_edge_says_so_in_text_not_a_tooltip() -> None:
+    """Colour and a `title` are not available to every reader.
+
+    The marker was a `title` on a non-focusable `<span>`, with muted colour as
+    the only visible cue. A keyboard user cannot reach that tooltip, a screen
+    reader treats it inconsistently, and colour alone is not a distinction --
+    so the one signal that an id is *not* a link reached only a sighted mouse
+    user who happened to hover it.
+
+    It is now text: a per-id marker saying which, and one explanation saying
+    what it means.
+    """
+
+    page = _page()
+
+    assert '" (unresolved)"' in page
+    # The dangling span must carry no tooltip standing in for that text.
+    assert "dangling.title" not in page

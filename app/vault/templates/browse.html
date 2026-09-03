@@ -290,13 +290,19 @@ async function resolveEdges(ids) {
 function edgeList(label, ids, resolved) {
   const wrap = el("div", "small");
   wrap.appendChild(el("span", "muted", label + ": "));
+  let unresolved = 0;
   ids.forEach((id, index) => {
     if (index > 0) wrap.appendChild(document.createTextNode(", "));
     const edge = resolved.get(id);
     if (!edge) {
-      const dangling = el("span", "mono muted", id);
-      dangling.title = "This id resolves to no note you can open.";
-      wrap.appendChild(dangling);
+      /* The marker is text, not a tooltip and not the muted colour. A `title`
+         on a span is unreachable by keyboard and unreliable to a screen
+         reader, and colour alone is not a distinction -- so the one thing
+         that says "this is not a link" would have been available only to a
+         sighted mouse user who hovered it. */
+      unresolved += 1;
+      wrap.appendChild(el("span", "mono muted", id));
+      wrap.appendChild(el("span", "muted", " (unresolved)"));
       return;
     }
     const link = el("button", "link", edge.slug);
@@ -307,6 +313,13 @@ function edgeList(label, ids, resolved) {
     link.onclick = () => openNote(edge.note_id).catch(showError);
     wrap.appendChild(link);
   });
+  if (unresolved) {
+    /* Said once rather than per id: what "unresolved" means, in the place a
+       reader meets it, without needing to hover anything. */
+    wrap.appendChild(el("div", "small muted",
+      "An unresolved id names no note you can open — it may have been "
+      + "retired, or it may be outside what this credential may read."));
+  }
   return wrap;
 }
 
