@@ -21,6 +21,7 @@ from app.auth_identities import (
     attach_auth_identity_to_user,
     resolve_auth_identity_login,
 )
+from app.cache import get_cache
 from app.db import get_pool
 from app.dependencies import require_user
 from app.limiter import limiter, rate_limited_responses
@@ -318,6 +319,26 @@ async def logout(body: RefreshRequest) -> None:
     await revoke_refresh_token(body.refresh_token)
 
 
+async def _invalidate_leaderboard_caches() -> None:
+    """Drop every cached leaderboard read after a username changes.
+
+    Imported rather than duplicated: `CACHE_KEY_PREFIX` is the leaderboard's
+    own statement of how it keys its cache, and a second copy here would drift
+    the moment either side changed. leaderboard_routes does not import this
+    module, so the direction is safe.
+
+    Best effort, like the leaderboard's own invalidation: a cache that cannot
+    be cleared is a stale name for two minutes, not a failed rename.
+    """
+
+    from app.leaderboard_routes import CACHE_KEY_PREFIX
+
+    try:
+        await get_cache().delete_prefix(CACHE_KEY_PREFIX)
+    except Exception as e:
+        logger.warning("Leaderboard cache invalidation failed after rename: %s", e)
+
+
 @router.post(
     "/rename",
     response_model=AccessTokenResponse,
@@ -382,6 +403,16 @@ async def rename(
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Leaderboard rows carry the username, and the cached ones carry the old
+    # one. Without this the header updates from the new token immediately while
+    # the board underneath keeps showing the previous name for up to the 120s
+    # TTL -- the same page disagreeing with itself about who the reader is.
+    #
+    # The whole namespace, not this user's modes: a rename does not say which
+    # boards they appear on, and finding out costs a query to save a cache fill
+    # on an operation that happens approximately never.
+    await _invalidate_leaderboard_caches()
 
     return AccessTokenResponse(
         access_token=create_access_token(user_id, row[0], is_guest=row[1]),

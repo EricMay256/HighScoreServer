@@ -814,3 +814,56 @@ def test_claim_documents_a_rate_limit(client: TestClient) -> None:
     schema = client.get("/openapi.json").json()
 
     assert "429" in schema["paths"]["/api/auth/claim"]["post"]["responses"]
+
+
+def test_rename_invalidates_the_leaderboard_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leaderboard rows carry the username, and cached ones carry the old one.
+
+    Without this the header updates from the new token immediately while the
+    board underneath keeps the previous name for the 120s TTL -- one page
+    disagreeing with itself about who the reader is.
+
+    The whole `leaderboard:` namespace rather than this user's modes: a rename
+    does not say which boards they appear on, and rename is rare enough that
+    refilling the cache costs less than the query to find out.
+    """
+
+    deleted: list[str] = []
+
+    class RecordingCache:
+        async def delete_prefix(self, prefix: str) -> int:
+            deleted.append(prefix)
+            return 0
+
+    monkeypatch.setattr(auth_routes, "get_cache", lambda: RecordingCache())
+
+    tokens = register(client)
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": f"cachebust_{secrets.token_hex(4)}"},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    assert deleted == ["leaderboard:"]
+
+
+def test_rename_survives_an_unavailable_cache(client: TestClient) -> None:
+    """Invalidation is best effort; a dead cache is a stale name, not a 500.
+
+    The suite runs with `get_cache` raising, so every other rename test already
+    exercises this path -- but that is incidental, and this states it, because
+    the failure it guards against is a rename that reports failure after having
+    already renamed the user.
+    """
+
+    tokens = register(client)
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": f"nocache_{secrets.token_hex(4)}"},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
