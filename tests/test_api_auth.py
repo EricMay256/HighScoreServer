@@ -803,6 +803,11 @@ def test_replaying_a_guest_token_after_claiming_does_not_hash(
     assert len(calls) == 1, "a replayed guest token reached bcrypt"
 
 
+# The /claim bucket, and a burst comfortably past twice it -- see the test.
+CLAIM_LIMIT_PER_MINUTE = 5
+ATTEMPTS = 12
+
+
 def test_claim_is_actually_refused_once_its_bucket_empties(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -818,8 +823,13 @@ def test_claim_is_actually_refused_once_its_bucket_empties(
     limiter is still off, because /guest has a 5/minute bucket of its own and
     would otherwise spend part of what is being measured.
 
-    Requests 1-5 are charged: one real claim, then replays that the state
-    check refuses. The sixth is refused by the bucket instead.
+    The burst is deliberately more than twice the limit. slowapi's default
+    storage is a fixed window, so a burst that straddles a minute boundary
+    gets a fresh allowance partway through -- which made an exact
+    "the sixth request is refused" assertion flake once in a full-suite run.
+    With more than 2x the limit in under a second, one boundary can fall
+    anywhere and still leave one side of it over the limit, so a refusal is
+    guaranteed without the test knowing where the boundary is.
     """
 
     tokens = guest(client)
@@ -832,7 +842,7 @@ def test_claim_is_actually_refused_once_its_bucket_empties(
     monkeypatch.setattr(limiter, "enabled", True)
     try:
         statuses = []
-        for _ in range(6):
+        for _ in range(ATTEMPTS):
             reply = client.post(
                 "/api/auth/claim",
                 json={**body, "email": f"bucket_{secrets.token_hex(4)}@example.com"},
@@ -842,11 +852,20 @@ def test_claim_is_actually_refused_once_its_bucket_empties(
     finally:
         limiter.reset()
 
-    assert statuses[0] == 200, "the first claim should succeed"
-    assert statuses[1:5] == [400, 400, 400, 400], (
-        f"replays should be refused on state, not the bucket: {statuses}"
+    assert statuses[0] == 200, f"the first claim should succeed: {statuses}"
+    assert 429 in statuses, f"the bucket never refused anything: {statuses}"
+
+    # Refused by the bucket only after it had let the limit through, so this
+    # also catches a limit set far tighter than intended.
+    first_refusal = statuses.index(429)
+    assert first_refusal >= CLAIM_LIMIT_PER_MINUTE, (
+        f"refused after only {first_refusal} requests: {statuses}"
     )
-    assert statuses[5] == 429, f"the sixth request should exhaust the bucket: {statuses}"
+    # Everything before it was refused on account state, not by the bucket --
+    # the two guards are distinct and this says which did the work.
+    assert set(statuses[1:first_refusal]) <= {400}, (
+        f"expected state refusals before the bucket engaged: {statuses}"
+    )
 
 
 def test_rename_invalidates_the_leaderboard_cache(
