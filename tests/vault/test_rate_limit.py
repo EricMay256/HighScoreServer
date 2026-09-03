@@ -428,7 +428,7 @@ def test_an_overridden_bucket_is_pruned_on_its_own_refill_time() -> None:
 
     Such a bucket becomes prunable sooner. Retaining it longer was never a
     correctness bug, but pruning on the effective quota is what makes that a
-    property of the code instead of of the constants.
+    property of the code instead of the constants.
 
     Injected rather than read from PRINCIPAL_LIMITS, which ships empty since
     the importer's grant was removed. The sibling test above covers the
