@@ -214,6 +214,17 @@ frontend's runs `npm install` a second time. It works, but it is not what a
 reviewer expects. Move the tooling to `devDependencies` (Heroku's Node buildpack
 installs them) and keep one `heroku-postbuild`.
 
+> **Corrected 2026-09-03. The parenthetical above is wrong and following it
+> breaks the build.** The buildpack installs dev dependencies for *its own*
+> root install, not for the nested `npm ci` that the root `heroku-postbuild`
+> runs inside `leaderboard-frontend/`. Heroku builds with `NODE_ENV=production`,
+> under which `npm ci` omits `devDependencies` — verified on a clean
+> `node_modules`, where neither `vite` nor `tsc` was installed and the build
+> had nothing to run.
+>
+> Moving the tooling is still right; it needs `npm ci --include=dev` in the
+> root build script, which is what shipped.
+
 ### F3. Tokens live in `localStorage` — Low, informational
 
 `leaderboard-frontend/src/auth/store.ts`. Standard for a portfolio SPA and
