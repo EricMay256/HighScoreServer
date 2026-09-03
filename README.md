@@ -85,9 +85,12 @@ flowchart LR
   the per-principal quota, not instead of it.
   The deployed configuration uses in-process memory storage; the limiter
   also falls through to memory if a configured Redis is unreachable, so a
-  Redis blip degrades rate limiting rather than taking the API down. Both
-  backends are driven by `CACHE_BACKEND` — flipping the cache and the
-  limiter to Redis is a single config change (see [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md)).
+  Redis blip degrades rate limiting rather than taking the API down. The
+  leaderboard's cache and limiter are both driven by `CACHE_BACKEND`, so
+  flipping those two to Redis is a single config change (see
+  [ADR 0007](docs/adr/0007-in-process-cache-over-redis.md)). The vault's
+  limiting is not: its pre-auth guard takes `VAULT_RATE_LIMIT_STORAGE_URI`
+  and its per-principal quota is in-process regardless.
 - **Flexible sort order** — game modes are individually configured as highest-score
   or lowest-score wins. The same API and client code handles both — a speedrun mode
   and a points mode are treated symmetrically.
@@ -930,9 +933,17 @@ section is the summary.
   submission served by one worker leaves the other's cached leaderboard until
   its 120s TTL. Accepted at current traffic. **Trigger for revisiting:** a
   second dyno, a background process, or traffic where doubled limits or two
-  minutes of staleness matter. The mitigation is already in place — setting
-  `CACHE_BACKEND=redis` and provisioning the Heroku Redis add-on flips both
-  subsystems to Redis-backed storage in one config change.
+  minutes of staleness matter. The mitigation is already in place for **the
+  leaderboard's** two subsystems — setting `CACHE_BACKEND=redis` and
+  provisioning the Heroku Redis add-on flips its cache and its slowapi limiter
+  to Redis-backed storage in one config change.
+
+  **It does not flip the vault**, whose limiting is independent in both
+  layers: the pre-auth guard reads its own `VAULT_RATE_LIMIT_STORAGE_URI`, and
+  the per-principal `TokenBucketLimiter` keeps its buckets in process with no
+  shared-storage option at all. An operator who sets `CACHE_BACKEND=redis`
+  and assumes every limit is now shared would be wrong about the half of the
+  app that holds the corpus.
 
   - **Rate limits** use slowapi's in-process memory storage, so each worker
     counts its own requests. With the Procfile's two workers a documented limit
