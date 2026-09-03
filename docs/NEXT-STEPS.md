@@ -38,14 +38,18 @@ Historical handoffs are under [`archive/`](archive/README.md).
 1. **Merge `dev` into `main`.** Fast-forward, two migrations in range (above).
    Documentation on a non-default branch is documentation nobody reads, and
    GitHub shows `main`.
-2. **Verify the Heroku deployment.** The one thing the 2026-09-02 review could
-   not check and nothing since has. Two facts are load-bearing and unknown:
-   which Python the buildpack resolves now that `.python-version` pins 3.12
-   (`Using Python 3.x` in the build log — if it was resolving something newer,
-   the next deploy is a downgrade), and which game modes exist, because no
-   client hardcodes one any more and the landing page is now the
-   alphabetically first. Also re-check `heroku config` and the applied vault
-   lineage head; the production facts above are from 2026-08-28.
+2. **Settle the production game-mode list.** Nothing hardcodes a mode any
+   more, so `/leaderboard` and the SPA both land on the first row of
+   `/game_modes`, ordered by `name` — the alphabetically first configured mode
+   *is* the landing page. `blitz` is expected to sort first and unused modes
+   are to be pruned, but neither has been confirmed against the deployment.
+   Worth doing before the merge, because the failure is silent: a stale or
+   test mode sorting earlier makes it the front page and nothing errors.
+
+   The buildpack's interpreter was the other half of this item and is settled
+   — 3.12, matching the pin. Still unchecked from the same visit: `heroku
+   config` and the applied vault lineage head; the production facts above are
+   from 2026-08-28.
 3. **Backfill note summaries.** 67 of 80 production notes lacked one on
    2026-08-28. `summary` joins the embedding text and is the search preview
    (ADR 0031), so an unsummarized note is measurably harder to find.
