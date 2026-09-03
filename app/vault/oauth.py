@@ -593,18 +593,26 @@ class VaultAuthorizationProvider(
             return None
         async with self._transactions_for().transaction() as connection:
             credential = await self._credentials.get(connection, parsed.credential_id)
-            if credential is None:
+            # Compared before anything branches on whether the id was found.
+            # `secret_matches` runs against a dummy hash when the credential is
+            # None, and that only equalizes a miss with a hit if the miss
+            # actually reaches it -- returning early on the lookup, which this
+            # did until 2026-09-03, left precisely the timing difference the
+            # dummy hash exists to remove. It also meant an id that *did* exist
+            # took a second query before any comparison, so the two cases were
+            # separated twice over.
+            matched = secret_matches(credential, parsed.secret)
+            if credential is None or not matched:
                 return None
+            if not credential.is_active():
+                return None
+            # Only now, with the secret proven, does the ownership lookup run.
+            # It is the one place the query count differs, and reaching it
+            # requires holding the secret rather than guessing an id.
             owner = await self._refresh.client_and_family_for_credential(
                 connection, parsed.credential_id
             )
         if owner is None:
-            return None
-        # secret_matches, not `!=`: this path serves the SDK's /revoke, and the
-        # rest of the resource server already compares digests in constant time.
-        if not secret_matches(credential, parsed.secret):
-            return None
-        if not credential.is_active():
             return None
         client_id, _family_id = owner
         return AccessToken(
