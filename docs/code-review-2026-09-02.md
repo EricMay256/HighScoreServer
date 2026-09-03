@@ -246,6 +246,12 @@ containing `3.12` and update the README tree. **Confirm what the buildpack
 reports at build time** (`Using Python 3.x` in the build log) before assuming
 3.12; this review did not query Heroku.
 
+> **Confirmed 2026-09-03: the buildpack was already resolving 3.12.** So the
+> pin records what production was doing rather than changing it, and the
+> downgrade this finding warned about does not apply. `pyproject.toml`'s
+> `target-version = "py312"` reasoning — that the deployed interpreter is the
+> oldest the code runs on — holds as written.
+
 ### O2. `requirements-dev.txt` is UTF-16, and `requirements.txt` carries the dev tools — Medium, S
 
 `requirements-dev.txt` is UTF-16 LE with a BOM (`cat` shows
@@ -326,6 +332,9 @@ strict applier before it is stored.
 - Targeted rerun of the eleven affected modules on the recovered database:
   **207 passed in 63s**. Combined with the first run, every test in the suite
   has passed once.
-- Not verified: anything about the Heroku deployment — config vars, the
-  running Python version, the applied migration head. Those are stated only as
-  the documents last recorded them.
+- Not verified by this pass: anything about the Heroku deployment — config
+  vars, the running Python version, the applied migration head. Those are
+  stated only as the documents last recorded them.
+- Since verified, 2026-09-03: the buildpack resolves **Python 3.12**, matching
+  the pin added for O1. Config vars and the applied migration head remain
+  unchecked.

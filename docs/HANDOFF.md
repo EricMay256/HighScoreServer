@@ -17,8 +17,10 @@ their reasoning, none of them current.
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
 | Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
 
-Production facts are as the documents last recorded them. Nothing in the
-2026-09-02 pass queried Heroku. Verify with `heroku config` and
+Production facts are as the documents last recorded them, with one exception:
+the buildpack's interpreter was checked on 2026-09-03 and is **Python 3.12**,
+matching `.python-version`. Config vars and the applied migration head were
+not. Verify those with `heroku config` and
 `heroku run "python -m alembic -c alembic-vault.ini current"` before relying on
 them.
 
@@ -34,9 +36,10 @@ them.
   wrong and are corrected in the commits that cite them (L1 missed a sixth
   site, and L6's README fix left two sub-bullets contradicting it).
 
-  What it could not check, and still nobody has: the Heroku deployment. The
-  Python version the buildpack resolves and the production game-mode list are
-  both unverified.
+  What it could not check was the Heroku deployment. The buildpack's Python
+  version has since been confirmed as 3.12 — the pin matches what production
+  was already doing. Still unconfirmed: the production game-mode list, which
+  now decides the landing page (see NEXT-STEPS §1).
 - **The `dev` → `main` merge** is overdue. See NEXT-STEPS §1.
 
 ## What August settled, so nobody re-litigates it
