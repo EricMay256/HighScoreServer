@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "./auth/store";
 import { getGameModes, logout } from "./api/client";
 import Leaderboard from "./components/Leaderboard";
+import type { ModeAvailability } from "./components/Leaderboard";
 import AuthPanel from "./components/AuthPanel";
 import SubmitPanel from "./components/SubmitPanel";
 import RenamePanel from "./components/RenamePanel";
@@ -24,10 +25,6 @@ export default function App() {
   // names a mode: the initial state used to be the literal "blitz", so any
   // database without a mode of that name opened on an empty board. Shares
   // ModeTabs' query key, so deriving it costs no extra request.
-  //
-  // The error state is carried down rather than discarded: if this query
-  // fails there is no mode, so an empty gameMode means either "still loading"
-  // or "cannot load", and only Leaderboard can tell the reader which.
   const { data: modes, isError: modesFailed } = useQuery({
     queryKey: ["gameModes"],
     queryFn: getGameModes,
@@ -35,6 +32,20 @@ export default function App() {
   });
   const [selectedMode, setSelectedMode] = useState<string | null>(null);
   const gameMode = selectedMode ?? modes?.[0]?.name ?? "";
+
+  // An empty gameMode has three causes and they are not interchangeable, so
+  // Leaderboard is told which rather than left to assume the hopeful one.
+  // "none" is a real reachable state, not a defensive branch: the baseline
+  // migration creates `game_modes` empty and seeding is a separate step, so a
+  // freshly migrated database resolves this query successfully to [].
+  const modeAvailability: ModeAvailability =
+    gameMode !== ""
+      ? "ready"
+      : modesFailed
+        ? "failed"
+        : modes !== undefined
+          ? "none"
+          : "loading";
 
   const handleLogout = async () => {
     // logout() clears tokens in its finally block even if the network call
@@ -81,7 +92,7 @@ export default function App() {
           <Leaderboard
             gameMode={gameMode}
             onGameModeChange={setSelectedMode}
-            modesFailed={modesFailed}
+            modeAvailability={modeAvailability}
           />
 
           <aside style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>

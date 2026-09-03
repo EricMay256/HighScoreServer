@@ -7,17 +7,25 @@ import ModeTabs from "./ModeTabs";
 import PeriodTabs from "./PeriodTabs";
 import ScoresTable from "./ScoresTable";
 
+/**
+ * Why there is no active game mode, when there isn't one.
+ *
+ * `loading` may still resolve; `failed` and `none` will not, and they are
+ * different problems — one is the server being unreachable, the other is a
+ * database nobody has seeded.
+ */
+export type ModeAvailability = "loading" | "ready" | "failed" | "none";
+
 interface LeaderboardProps {
   gameMode: string;
   onGameModeChange: (mode: string) => void;
-  /** The game-mode list could not be fetched, so no mode will ever arrive. */
-  modesFailed: boolean;
+  modeAvailability: ModeAvailability;
 }
 
 export default function Leaderboard({
   gameMode,
   onGameModeChange,
-  modesFailed,
+  modeAvailability,
 }: LeaderboardProps) {
   // Period stays local — only Leaderboard cares about it. If SubmitPanel
   // ever needs to know which period the user is viewing (it doesn't, since
@@ -61,17 +69,22 @@ export default function Leaderboard({
 
       <PeriodTabs selected={period} onChange={setPeriod} />
 
-      {/* No mode and no prospect of one: the mode list failed, so waiting is
-          not what is happening and a spinner would say so forever. */}
-      {gameMode === "" && modesFailed && (
+      {/* Neither of these will resolve on their own, so a spinner would sit
+          there indefinitely claiming otherwise. They are told apart because
+          the reader can act on one of them and not the other. */}
+      {modeAvailability === "failed" && (
         <div className="lb-error" role="alert">
           ⚠ Could not load game modes. Reload to try again.
         </div>
       )}
 
-      {/* An empty gameMode that still might resolve is, from the reader's
-          point of view, loading. */}
-      {(isLoading || (gameMode === "" && !modesFailed)) && (
+      {modeAvailability === "none" && (
+        <div className="lb-error" role="alert">
+          No game modes are configured on this server yet.
+        </div>
+      )}
+
+      {(isLoading || modeAvailability === "loading") && (
         <div className="lb-loading">
           <div className="lb-spinner" />
           Loading scores…
