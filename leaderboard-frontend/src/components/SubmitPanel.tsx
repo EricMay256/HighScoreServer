@@ -26,17 +26,27 @@ export default function SubmitPanel({ gameMode }: SubmitPanelProps) {
     },
   });
 
+  // An empty gameMode means the mode list has not resolved yet. Submitting
+  // then posts game_mode: "", which the server rejects with a 422 whose body
+  // is a raw Pydantic error array — a validation message about a field the
+  // user never filled in. The mode is not the user's to supply, so the button
+  // waits rather than reporting their score as invalid.
+  const modeReady = gameMode !== "";
+
   const handleSubmit = () => {
+    if (!modeReady) return;
     const parsed = Number(scoreInput);
     if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return;
     mutation.mutate(parsed);
   };
 
-  const disabled = mutation.isPending || scoreInput.trim() === "";
+  const disabled = mutation.isPending || scoreInput.trim() === "" || !modeReady;
 
   return (
     <div className="submit-panel">
-      <h2 className="submit-title">Submit Score · {gameMode}</h2>
+      <h2 className="submit-title">
+        {modeReady ? `Submit Score · ${gameMode}` : "Submit Score"}
+      </h2>
 
       <div className="submit-form">
         <div className="form-row">
