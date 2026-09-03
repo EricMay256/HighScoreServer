@@ -11,11 +11,11 @@ their reasoning, none of them current.
 
 | | |
 | --- | --- |
-| Branches | `dev` at `e8634b2`, 94 commits ahead of `main`; `main` is an ancestor, so the merge is a fast-forward |
+| Branches | `dev` at `5ec112b`, 126 commits ahead of `main`; `main` is an ancestor, so the merge is a fast-forward |
 | Migrations on `dev` but not `main` | vault `0018_metadata_amendments` and `0019_oauth_grant_label`; none on the leaderboard lineage |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
-| Suite | 1,172 test functions, about seven minutes; `ruff check app/ tests/ scripts/` clean |
+| Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
 
 Production facts are as the documents last recorded them. Nothing in the
 2026-09-02 pass queried Heroku. Verify with `heroku config` and
@@ -28,9 +28,15 @@ them.
   unimplemented; ADR 0043 is Proposed. The plan is
   [`librarian-plan.md`](librarian-plan.md).
 - **The 2026-09-02 code review** —
-  [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — lists findings
-  with fixes. The documentation fixes were applied in the same pass; the code
-  fixes were not.
+  [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — is **done**. Every
+  finding is addressed on `dev`, one commit each; the document is kept as the
+  record of what was found and why, not as a to-do list. Two of its claims were
+  wrong and are corrected in the commits that cite them (L1 missed a sixth
+  site, and L6's README fix left two sub-bullets contradicting it).
+
+  What it could not check, and still nobody has: the Heroku deployment. The
+  Python version the buildpack resolves and the production game-mode list are
+  both unverified.
 - **The `dev` → `main` merge** is overdue. See NEXT-STEPS §1.
 
 ## What August settled, so nobody re-litigates it
