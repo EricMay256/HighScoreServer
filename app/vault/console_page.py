@@ -44,7 +44,10 @@ CONSOLE_HEADERS: dict[str, str] = {
     "Cache-Control": "no-store",
 }
 
-# 16 bytes, which is comfortably above the 128 bits CSP asks for.
+# 16 bytes, so 128 bits of entropy, from a CSPRNG and never reused.
+#
+# Stated as the figure rather than as clearing a bar: the CSP3 text sets no
+# minimum entropy for a nonce, so there is nothing here to be "above".
 #
 # Emitted as hex rather than `token_urlsafe`. Both are valid: CSP3's
 # `base64-value` production is
