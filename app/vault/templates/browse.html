@@ -258,7 +258,13 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
 
 /* ---------- One note ---------- */
 
-/* Resolve a note's edges to names in one request.
+/* Must not exceed the server's MAX_EDGE_IDS -- `/notes/edges` answers 422 for
+   a longer list, and the console would then resolve nothing for exactly the
+   notes with the most edges. `tests/vault/test_browse_console.py` asserts the
+   two agree, since they live in different files and nothing else would say. */
+const EDGE_LOOKUP_BATCH = 100;
+
+/* Resolve a note's edges to names, in as few requests as the bound allows.
 
    `related_ids` and `source_ids` hold ids and stay that way in storage
    (ADR 0025), so showing them to a person is a lookup. One request for every
@@ -275,17 +281,33 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
    presented as fact about the corpus, and the reader has no way to tell. */
 async function resolveEdges(ids) {
   if (!ids.length) return { edges: new Map(), failed: false };
-  const query = ids.map((id) => "id=" + encodeURIComponent(id)).join("&");
-  try {
-    const payload = await api("/notes/edges?" + query);
-    return {
-      edges: new Map((payload.edges || []).map((edge) => [edge.note_id, edge])),
-      failed: false,
-    };
-  } catch (err) {
-    if (err.sessionEnded) throw err;
-    return { edges: new Map(), failed: true };
+  const edges = new Map();
+  let failed = false;
+  /* Batched, because /notes/edges refuses more than EDGE_LOOKUP_BATCH ids and
+     nothing bounds how many a note may hold: a compiled wiki page's
+     `source_ids` has a minimum and no maximum, so a page synthesized from a
+     few hundred notes is valid and ordinary. Sending the union in one request
+     made exactly those pages -- the most connected ones -- come back 422, and
+     every label on them read "not looked up".
+
+     Sequential rather than parallel: the note is already on screen, so this
+     costs patience rather than usability, and firing a page's worth of
+     requests at once is how a burst quota gets spent for no benefit. */
+  for (let start = 0; start < ids.length; start += EDGE_LOOKUP_BATCH) {
+    const batch = ids.slice(start, start + EDGE_LOOKUP_BATCH);
+    const query = batch.map((id) => "id=" + encodeURIComponent(id)).join("&");
+    try {
+      const payload = await api("/notes/edges?" + query);
+      for (const edge of payload.edges || []) edges.set(edge.note_id, edge);
+    } catch (err) {
+      if (err.sessionEnded) throw err;
+      /* One failed batch does not discard the ones that answered. The ids it
+         covered stay unresolved and are marked as not looked up, which is
+         what they are. */
+      failed = true;
+    }
   }
+  return { edges, failed };
 }
 
 /* The resolution object before the lookup answers. Shared and never mutated:

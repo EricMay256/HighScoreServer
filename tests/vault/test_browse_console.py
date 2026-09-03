@@ -22,7 +22,12 @@ from app.vault.constants import (
     OAUTH_BASELINE_SCOPES,
     OAUTH_OPERATOR_ENTITLEMENT_SCOPES,
 )
+from app.vault.routes import MAX_EDGE_IDS
 from app.vault.templating import render
+
+
+# The console's own constant, restated so the assertion names both sides.
+EDGE_LOOKUP_BATCH_IN_CONSOLE = 100
 
 
 def _page() -> str:
@@ -637,7 +642,8 @@ def test_a_failed_edge_lookup_is_not_reported_as_corpus_state() -> None:
 
     page = _page()
 
-    assert "failed: true" in page, "a failed lookup must be distinguishable"
+    assert "failed = true;" in page, "a failed lookup must be distinguishable"
+    assert "return { edges, failed };" in page
     assert '" (not looked up)"' in page
     assert "could not be looked up just now" in page
     assert "This says nothing about whether the notes exist" in page
@@ -674,3 +680,50 @@ def test_edges_show_their_ids_while_the_lookup_is_pending() -> None:
     failed_branch = page.index("} else if (resolution.failed) {")
     between = page[pending_branch:failed_branch]
     assert "retired" not in between and "could not be looked up" not in between
+
+
+def test_the_console_batches_edge_lookups_within_the_endpoint_bound() -> None:
+    """A page may hold more edges than one request may name.
+
+    `VaultCompilePageRequest.source_ids` has a minimum and no maximum, so a
+    wiki page synthesized from a few hundred notes is valid and ordinary.
+    /notes/edges refuses more than MAX_EDGE_IDS, and the console sent the whole
+    union in one request -- so exactly the most connected pages came back 422
+    and rendered every label as "not looked up".
+
+    The batch size lives in a template and the bound lives in routes.py, with
+    nothing between them to notice a change; this is that something. Lowering
+    MAX_EDGE_IDS without lowering the batch would break the console silently,
+    and only for large pages.
+    """
+
+    page = _page()
+
+    assert "const EDGE_LOOKUP_BATCH = 100;" in page
+    assert EDGE_LOOKUP_BATCH_IN_CONSOLE <= MAX_EDGE_IDS, (
+        f"the console batches {EDGE_LOOKUP_BATCH_IN_CONSOLE} ids into an "
+        f"endpoint that accepts {MAX_EDGE_IDS}"
+    )
+    # The loop, not a single request.
+    assert "for (let start = 0; start < ids.length; start += EDGE_LOOKUP_BATCH)" in page
+    assert "ids.slice(start, start + EDGE_LOOKUP_BATCH)" in page
+
+
+def test_one_failed_edge_batch_does_not_discard_the_others() -> None:
+    """Batching introduces partial failure, which has an honest rendering.
+
+    A batch that fails leaves its ids unresolved and marked "not looked up",
+    while the ids other batches answered for keep their links. Resetting the
+    whole map on one failure would throw away work that succeeded and call
+    resolvable edges unresolvable.
+    """
+
+    page = _page()
+
+    resolve_at = page.index("async function resolveEdges(ids)")
+    body = page[resolve_at : page.index("\n}", resolve_at)]
+
+    assert "failed = true;" in body, "a failed batch is recorded"
+    assert "edges = new Map()" not in body.split("const edges = new Map();", 1)[1], (
+        "a failed batch must not reset what other batches resolved"
+    )
