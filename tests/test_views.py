@@ -4,7 +4,13 @@ These are the pages at `/` and `/leaderboard`, separate from the React SPA at
 `/app`. Only the parts with a decision behind them are pinned here.
 """
 
+import re
+from pathlib import Path
+
 from fastapi.testclient import TestClient
+
+
+TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 
 
 def test_the_leaderboard_view_defaults_to_the_first_configured_mode(
@@ -50,15 +56,45 @@ def test_the_landing_mode_is_the_alphabetically_first_one(client: TestClient) ->
     assert modes[0] == min(modes)
 
 
-def test_the_templates_name_no_game_mode(client: TestClient) -> None:
+def test_the_nav_templates_name_no_game_mode() -> None:
     """The nav must not hardcode a mode the deployment may not have.
 
     `/leaderboard?game_mode=blitz` appeared in both templates under the label
     "Classic", naming a mode absent from the seed. Linking to the bare route
     lets the view pick a mode that is actually configured.
+
+    Asserted against the template source and against *any* mode, not against
+    the string "blitz": a test that only rejects the one name that went wrong
+    is passed by writing a different one, which is the same bug with a new
+    literal. These two files carry the site nav and have no reason to name a
+    mode at all.
     """
 
-    for path in ("/", "/leaderboard"):
-        page = client.get(path)
-        assert page.status_code == 200
-        assert "game_mode=blitz" not in page.text
+    for name in ("base.html", "home.html"):
+        source = (TEMPLATES / name).read_text(encoding="utf-8")
+        assert "game_mode" not in source, (
+            f"{name} names a game mode; the nav should link to /leaderboard "
+            "and let the view choose a configured one"
+        )
+
+
+def test_every_rendered_mode_link_names_a_configured_mode(
+    client: TestClient,
+) -> None:
+    """The leaderboard's own tabs may carry `game_mode=` -- they are the tabs.
+
+    What must hold is that every one comes from the mode list rather than
+    from a literal in the template, so this checks the rendered values against
+    what /game_modes actually returns. A hardcoded tab would name something
+    absent from that list.
+    """
+
+    modes = {mode["name"] for mode in client.get("/api/leaderboard/game_modes").json()}
+    assert modes, "the assertion is only meaningful with modes configured"
+
+    page = client.get("/leaderboard")
+    assert page.status_code == 200
+
+    linked = set(re.findall(r"game_mode=([^\"&\s]+)", page.text))
+    assert linked, "the leaderboard renders mode tabs"
+    assert linked <= modes, f"tabs name modes that do not exist: {linked - modes}"
