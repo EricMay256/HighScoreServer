@@ -266,18 +266,25 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
    title is what exhausted the review console's `get_note` quota rendering a
    queue, and this is the same shape.
 
-   Never fatal. If the lookup fails the note still opens and its edges render
-   as bare ids, which is what an unresolvable edge renders as anyway -- a
-   degraded label is not worth losing the note over. */
+   Never fatal: the note opens whatever this returns. But a failed lookup is
+   reported as a failure rather than folded into an empty result. Returning
+   `new Map()` on error made every edge indistinguishable from one the corpus
+   genuinely cannot resolve, so a 429 -- readily reached, the bucket is 20 --
+   or a 503 or a dropped request rendered as "this note is retired or you may
+   not read it" about every edge at once. That is infrastructure trouble
+   presented as fact about the corpus, and the reader has no way to tell. */
 async function resolveEdges(ids) {
-  if (!ids.length) return new Map();
+  if (!ids.length) return { edges: new Map(), failed: false };
   const query = ids.map((id) => "id=" + encodeURIComponent(id)).join("&");
   try {
     const payload = await api("/notes/edges?" + query);
-    return new Map((payload.edges || []).map((edge) => [edge.note_id, edge]));
+    return {
+      edges: new Map((payload.edges || []).map((edge) => [edge.note_id, edge])),
+      failed: false,
+    };
   } catch (err) {
     if (err.sessionEnded) throw err;
-    return new Map();
+    return { edges: new Map(), failed: true };
   }
 }
 
@@ -287,7 +294,8 @@ async function resolveEdges(ids) {
    no such note, one the read policy withholds, one that is flagged -- and the
    endpoint declines to tell them apart on purpose, since doing so would
    confirm that an id exists. */
-function edgeList(label, ids, resolved) {
+function edgeList(label, ids, resolution) {
+  const resolved = resolution.edges;
   const wrap = el("div", "small");
   wrap.appendChild(el("span", "muted", label + ": "));
   let unresolved = 0;
@@ -302,7 +310,10 @@ function edgeList(label, ids, resolved) {
          sighted mouse user who hovered it. */
       unresolved += 1;
       wrap.appendChild(el("span", "mono muted", id));
-      wrap.appendChild(el("span", "muted", " (unresolved)"));
+      /* Not "unresolved" when the lookup itself failed: nothing was learned
+         about this id, so saying anything about it would be invention. */
+      wrap.appendChild(el("span", "muted",
+        resolution.failed ? " (not looked up)" : " (unresolved)"));
       return;
     }
     const link = el("button", "link", edge.slug);
@@ -313,7 +324,15 @@ function edgeList(label, ids, resolved) {
     link.onclick = () => openNote(edge.note_id).catch(showError);
     wrap.appendChild(link);
   });
-  if (unresolved) {
+  if (resolution.failed) {
+    /* A statement about this request, not about the corpus. The ids are still
+       shown -- they are what the note actually holds -- but nothing claims to
+       know what they point at. */
+    wrap.appendChild(el("div", "small warn",
+      "⚠ These ids could not be looked up just now, so they are shown as "
+      + "stored. This says nothing about whether the notes exist — retry to "
+      + "resolve them."));
+  } else if (unresolved) {
     /* Said once rather than per id: what "unresolved" means, in the place a
        reader meets it, without needing to hover anything. */
     wrap.appendChild(el("div", "small muted",

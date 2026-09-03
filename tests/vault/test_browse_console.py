@@ -587,3 +587,25 @@ def test_an_unresolvable_edge_says_so_in_text_not_a_tooltip() -> None:
     assert '" (unresolved)"' in page
     # The dangling span must carry no tooltip standing in for that text.
     assert "dangling.title" not in page
+
+
+def test_a_failed_edge_lookup_is_not_reported_as_corpus_state() -> None:
+    """A 429 is not evidence that a note was retired.
+
+    resolveEdges swallowed every non-authentication failure into an empty map,
+    so a rate-limited, unavailable or dropped request rendered identically to
+    ids the corpus genuinely cannot resolve -- and the list then told the
+    reader those notes may have been retired or may be unreadable. That is an
+    infrastructure failure restated as fact about the corpus, and it is easy
+    to reach: the resolve_edges bucket bursts at 20.
+
+    The lookup now reports its own failure, the ids are shown as stored, and
+    nothing claims to know what they point at.
+    """
+
+    page = _page()
+
+    assert "failed: true" in page, "a failed lookup must be distinguishable"
+    assert '" (not looked up)"' in page
+    assert "could not be looked up just now" in page
+    assert "This says nothing about whether the notes exist" in page
