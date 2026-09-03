@@ -91,6 +91,20 @@ and its consequences section already describes the degradation.
 refresh; `RenamePanel.tsx` carries the TODO. Returning a fresh `TokenResponse`
 from `/rename` is the small server-side change.
 
+> **Corrected 2026-09-03. Do not follow the recommendation above.** Returning a
+> full `TokenResponse` is what was implemented first, and it was wrong:
+> `create_refresh_token` inserts without revoking and `/rename` accepts no
+> refresh token to rotate, so every rename minted a second live credential and
+> left the first valid. Measured at five renames: 1 refresh-token row became 6,
+> with the original still accepted by `/refresh`, and nothing bounded it.
+>
+> A refresh token is opaque and carries no username, so a rename does not
+> invalidate it and there is nothing to reissue. The shipped contract is
+> `AccessTokenResponse` — the access token alone, with the caller's refresh
+> token untouched. `/claim` returns a full pair and is safe from this only
+> because it can succeed once per account, which is what made it a misleading
+> model to copy.
+
 ## Vault
 
 ### V1. The review console fetches every evidence note while rendering the cases queue — Medium, M
