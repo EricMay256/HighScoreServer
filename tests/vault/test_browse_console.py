@@ -518,3 +518,52 @@ def test_cancelling_returns_focus_to_the_control_that_opened_it() -> None:
     page = _page()
 
     assert '$("propose-open").focus();' in page
+
+
+def test_edges_are_links_that_name_notes_by_slug() -> None:
+    """A hex uuid is not a name, and ADR 0025 says a human never sees one.
+
+    Edges are stored as ids and stay that way, so the console resolving them
+    is the boundary that ADR describes -- the same one the export crosses when
+    it writes `[[slug]]`. The label is the slug rather than the title because
+    that is what a wikilink carries, so a link here and a link in the exported
+    tree name a note identically.
+    """
+
+    page = _page()
+
+    assert "/notes/edges?" in page, "edges must be resolved in bulk"
+    assert "edge.slug" in page
+    assert "openNote(edge.note_id)" in page, "a resolved edge must be clickable"
+
+
+def test_edge_resolution_is_one_request_for_the_whole_note() -> None:
+    """Not one per edge, which is the bug this pattern already caused once.
+
+    The review console fetched every evidence note while painting its queue
+    and exhausted the `get_note` burst doing it. A note with five edges is the
+    same shape, so the ids are gathered and resolved together -- deduplicated
+    across `related_ids` and `source_ids`, which commonly overlap.
+    """
+
+    page = _page()
+
+    assert "new Set([...detail.related_ids, ...detail.source_ids])" in page
+    # Resolution happens before the panel is painted, so the note does not
+    # render and then rearrange itself.
+    assert page.index("resolveEdges(") < page.index('const panel = $("note");')
+
+
+def test_an_unresolvable_edge_is_shown_but_not_linked() -> None:
+    """It is an edge that points somewhere the reader cannot go.
+
+    Three situations arrive as one -- no such note, withheld by the read
+    policy, flagged -- because the endpoint declines to distinguish them, and
+    saying which would confirm the id exists. Showing the bare id is honest;
+    hiding it would make the note look less connected than it is.
+    """
+
+    page = _page()
+
+    assert 'el("span", "mono muted", id)' in page
+    assert "This id resolves to no note you can open." in page

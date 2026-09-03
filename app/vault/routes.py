@@ -17,6 +17,7 @@ leaderboard ``API_KEY`` are not vault credentials.
 """
 
 import logging
+from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -56,6 +57,7 @@ from .api_models import (
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
     VaultMetadataUpdateRequest,
+    VaultNoteEdgeResponse,
     VaultNoteListResponse,
     VaultReviewCaseResponse,
     VaultReviewDecisionRequest,
@@ -74,6 +76,7 @@ from .api_models import (
     compile_work_item,
     contribution_response,
     document_detail,
+    note_edge,
     note_summary,
     review_case_summary,
     search_response,
@@ -400,6 +403,62 @@ async def search_vault(
     )
 
 
+# The bound on one edge-resolution request. A note's `related_ids` plus
+# `source_ids` is a handful in practice; this is the ceiling on one query, not
+# a target. Same shape of bound as MAX_NOTE_PAGE and for the same reason.
+MAX_EDGE_IDS = 100
+async def resolve_edges_quota(
+    credential: VaultCredential = Depends(require_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "resolve_edges")
+    return credential
+
+
+@router.get(
+    "/notes/edges",
+    response_model=VaultNoteEdgeResponse,
+    dependencies=[Depends(resolve_edges_quota)],
+    summary="Resolve note IDs to the names a link can carry",
+)
+async def resolve_vault_edges(
+    id: Annotated[list[str], Query(max_length=MAX_EDGE_IDS)] = [],  # noqa: B006
+) -> VaultNoteEdgeResponse:
+    """Turn `related_ids` / `source_ids` into something a human can read.
+
+    Edges are stored as ids and stay that way (ADR 0025); a name becomes an id
+    at the boundary and never the reverse in storage. So a surface that shows
+    edges to a person has to resolve them, and the only alternatives to this
+    are worse: fetching each note is what exhausted the review console's
+    `get_note` quota while rendering a queue, and putting resolved edges on
+    `VaultDocumentDetail` would grow every agent's `vault_get_note` payload
+    with names no agent uses.
+
+    **Ids that do not resolve are simply absent from the response**, and that
+    covers three different situations on purpose: no such document, one the
+    read policy excludes, and one whose status is not readable. Distinguishing
+    them would confirm that an id exists, which is the disclosure this
+    endpoint's filter exists to prevent. The caller renders the bare id, which
+    is honest -- there is an edge, and it points at nothing you can open.
+
+    Discloses nothing a `vault:read` holder could not already fetch one id at
+    a time; it is the same content in one request instead of N.
+    """
+
+    transactions = VaultTransactionService(get_vault_engine())
+    documents = VaultDocumentRepository()
+
+    async with transactions.transaction() as connection:
+        briefs = await documents.list_briefs_by_ids(
+            connection,
+            id,
+            statuses=READABLE_STATUSES,
+        )
+
+    return VaultNoteEdgeResponse(
+        edges=[note_edge(document) for document in briefs]
+    )
+
+
 @router.get(
     "/notes/{note_id}",
     response_model=VaultDocumentDetail,
@@ -433,6 +492,7 @@ async def list_notes_quota(
 ) -> VaultCredential:
     await _enforce_quota(credential, "list_notes")
     return credential
+
 
 
 # The bound on one page. Fifty rows of fixed-size fields is a few tens of

@@ -497,3 +497,121 @@ def test_both_listings_page_by_the_same_rules() -> None:
     )
 
     assert brief[brief.index("FROM"):] == full[full.index("FROM"):]
+
+
+# ── Edge resolution ─────────────────────────────────────────────────────────
+
+
+def _edges(client: TestClient, token: str, ids: list[str]) -> dict:
+    response = client.get(
+        "/api/v1/vault/notes/edges",
+        headers={"Authorization": f"Bearer {token}"},
+        params=[("id", note_id) for note_id in ids],
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_edges_resolve_to_the_slug_a_wikilink_would_carry(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """`related_ids` hold ids; a person reading them needs the name.
+
+    ADR 0025 keeps edges as ids inside the system, so a surface that shows
+    them to a human has to resolve them. The slug is the leaf of `vault_path`,
+    which is what the export writes as `[[slug]]` -- so a link in the console
+    and a link in the exported tree name the same note identically.
+    """
+
+    payload = _edges(client, read_only_token, [corpus["alpha"]])
+
+    assert len(payload["edges"]) == 1
+    edge = payload["edges"][0]
+    assert edge["note_id"] == corpus["alpha"]
+    assert edge["title"] == "Listing fixture alpha"
+    # The vault_path is Human/03 Projects/alpha-<run>.md, so the slug is its
+    # stem -- never the uuid, and never the full path.
+    assert edge["slug"].startswith("alpha-")
+    assert "/" not in edge["slug"]
+    assert not edge["slug"].endswith(".md")
+
+
+def test_edge_resolution_withholds_what_the_read_policy_withholds(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Resolving an id to a title says the note exists and what it is called.
+
+    That is the disclosure `find_similar` already filters for, so this filters
+    the same way. Archived resolves -- retired history a reference may still
+    legitimately point at, exactly as fetch-by-id treats it. Flagged and
+    out-of-policy do not, and neither is reported as a distinct outcome: an
+    absent id covers "no such note" and "not yours to read" alike, because
+    telling them apart confirms the id exists.
+    """
+
+    requested = [corpus[name] for name in ("alpha", "delta", "epsilon", "zeta")]
+    payload = _edges(client, read_only_token, requested)
+
+    resolved = {edge["note_id"] for edge in payload["edges"]}
+    assert corpus["alpha"] in resolved
+    assert corpus["delta"] in resolved, "archived is readable and must resolve"
+    assert corpus["epsilon"] not in resolved, "flagged must not resolve"
+    assert corpus["zeta"] not in resolved, "outside the read policy must not resolve"
+
+
+def test_an_unresolvable_edge_is_absent_rather_than_an_error(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """A dangling edge is ordinary, not a failure.
+
+    `related_ids` carry no existence check on purpose (ADR 0030), so an id
+    naming nothing is a state the corpus is expected to be in. The caller
+    renders the bare id; a 404 here would make one dead edge break the whole
+    resolution for a note.
+    """
+
+    payload = _edges(
+        client, read_only_token, [corpus["alpha"], "no-such-document-at-all"]
+    )
+
+    assert [edge["note_id"] for edge in payload["edges"]] == [corpus["alpha"]]
+
+
+def test_edge_resolution_requires_the_read_scope(client: TestClient) -> None:
+    credential_id, token = _issue(scopes=(VaultScope.PROPOSE,))
+    try:
+        response = client.get(
+            "/api/v1/vault/notes/edges",
+            headers={"Authorization": f"Bearer {token}"},
+            params=[("id", "anything")],
+        )
+    finally:
+        _drop(credential_id)
+
+    assert response.status_code == 403
+
+
+def test_edge_resolution_does_not_collide_with_fetch_by_id(
+    client: TestClient,
+    read_only_token: str,
+) -> None:
+    """`/notes/edges` is declared before `/notes/{note_id}`, and must stay so.
+
+    Route order is what stops FastAPI reading "edges" as a note id. If the two
+    are ever reordered this returns 404 from the fetch handler instead, which
+    is why the assertion is on the shape rather than merely on the status.
+    """
+
+    response = client.get(
+        "/api/v1/vault/notes/edges",
+        headers={"Authorization": f"Bearer {read_only_token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"edges": []}

@@ -47,7 +47,7 @@ from .domain import (
 from .facets import normalize_facets
 from .search import SearchResult
 from .snippet import lead_snippet
-from .wikilinks import looks_like_a_name
+from .wikilinks import looks_like_a_name, slug_of
 
 
 # The transport bounds the write path accepts, named because more than one
@@ -1299,6 +1299,44 @@ class VaultNoteSummary(BaseModel):
     )
 
 
+class VaultNoteEdge(BaseModel):
+    """One resolved edge: an id, and the two ways a person refers to it.
+
+    Deliberately smaller than ``VaultNoteSummary``. This answers "what is this
+    id called", which a link label needs; it is not a listing row and must not
+    become one by accretion, or every surface showing edges pays a listing's
+    weight to draw a few link texts.
+
+    ``slug`` rather than ``vault_path`` because the slug is what a wikilink
+    carries (ADR 0022's amendment, and what the export writes), and because a
+    path is a location the caller has no use for here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    title: str
+    slug: str = Field(
+        description=(
+            "The leaf of `vault_path`, which is the title's slug -- the name a "
+            "`[[wikilink]]` to this note carries."
+        ),
+    )
+
+
+class VaultNoteEdgeResponse(BaseModel):
+    """Every requested id the caller may read, in no meaningful order.
+
+    An id that resolved to nothing readable is absent rather than reported: see
+    the endpoint, where that is a disclosure decision rather than a shape one.
+    The caller holds the ids it asked for and indexes this by `note_id`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    edges: list[VaultNoteEdge]
+
+
 class VaultNoteListResponse(BaseModel):
     """One ordered page of notes, keyed and paged by ``vault_path``."""
 
@@ -1575,6 +1613,22 @@ def note_summary(document: VaultDocumentBrief) -> VaultNoteSummary:
         summary=document.summary,
         updated_at=document.updated_at,
         content_revision=document.content_revision,
+    )
+
+
+def note_edge(document: VaultDocumentBrief) -> VaultNoteEdge:
+    """Project one resolved edge.
+
+    Beside the other projections for the reason they are all here: a projection
+    written at a transport drifts from the other transports. `slug_of` is the
+    same helper the export renders `[[slug]]` with, so a link in the console
+    and a link in the exported tree name a note identically.
+    """
+
+    return VaultNoteEdge(
+        note_id=document.id,
+        title=document.title,
+        slug=slug_of(document.vault_path),
     )
 
 

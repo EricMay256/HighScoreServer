@@ -732,6 +732,44 @@ class VaultDocumentRepository:
         result = await connection.execute(statement)
         return tuple(document_brief_from_row(row) for row in result.mappings())
 
+    async def list_briefs_by_ids(
+        self,
+        connection: AsyncConnection,
+        document_ids: Sequence[str],
+        statuses: Sequence[DocumentStatus] | None = None,
+    ) -> tuple[VaultDocumentBrief, ...]:
+        """Briefs for a known set of ids, for resolving edges to names.
+
+        `related_ids` and `source_ids` hold ids, and ADR 0025 keeps them that
+        way inside the system -- a name becomes an id at the boundary, never
+        the reverse in storage. Turning them back into something a human reads
+        is therefore a lookup, and doing it one id at a time is what made the
+        review console exhaust its own `get_note` quota rendering a queue.
+
+        Always filtered by the read policy. Resolving an id to a title says
+        that a document exists and what it is called, which is the disclosure
+        `find_similar` already applies this predicate for; an id the caller may
+        not read simply does not come back, and the caller renders the bare id.
+
+        Order is not meaningful and duplicates collapse: the caller holds the
+        requested order and indexes the result by id.
+        """
+
+        if not document_ids:
+            return ()
+
+        statement = (
+            select(*DOCUMENT_BRIEF_COLUMNS)
+            .where(vault_documents.c.id.in_(list(dict.fromkeys(document_ids))))
+            .where(readable_path_predicate())
+        )
+        if statuses is not None:
+            statement = statement.where(
+                vault_documents.c.status.in_([status.value for status in statuses])
+            )
+        result = await connection.execute(statement)
+        return tuple(document_brief_from_row(row) for row in result.mappings())
+
     async def vault_paths_under(
         self,
         connection: AsyncConnection,

@@ -89,6 +89,13 @@ LIMITS: dict[str, Limit] = {
     # pause. Priced between search and get_note -- one indexed query with no
     # embedding call, but a page of rows rather than one.
     "list_notes": Limit(per_minute=60, burst=20),
+    # Resolving a note's edges to names. One request per note opened, no body
+    # and no embedding -- cheaper than a listing, which reads a whole page of
+    # rows. Priced with browsing rather than with get_note because that is the
+    # rhythm it follows: a human clicking through linked notes, one lookup per
+    # click. Its own bucket so walking a link graph cannot starve the listing
+    # that got the reader there.
+    "resolve_edges": Limit(per_minute=60, burst=20),
     "contribute": Limit(per_minute=30, burst=20),
     # Proposals persist untrusted workflow state but do not embed or mutate the
     # corpus. A distinct bucket matches the distinct OAuth capability.

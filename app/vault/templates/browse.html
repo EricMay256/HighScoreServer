@@ -257,10 +257,56 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
 }
 
 /* ---------- One note ---------- */
-function edgeList(label, ids) {
+
+/* Resolve a note's edges to names in one request.
+
+   `related_ids` and `source_ids` hold ids and stay that way in storage
+   (ADR 0025), so showing them to a person is a lookup. One request for every
+   edge of the note rather than one per edge: fetching each note to read its
+   title is what exhausted the review console's `get_note` quota rendering a
+   queue, and this is the same shape.
+
+   Never fatal. If the lookup fails the note still opens and its edges render
+   as bare ids, which is what an unresolvable edge renders as anyway -- a
+   degraded label is not worth losing the note over. */
+async function resolveEdges(ids) {
+  if (!ids.length) return new Map();
+  const query = ids.map((id) => "id=" + encodeURIComponent(id)).join("&");
+  try {
+    const payload = await api("/notes/edges?" + query);
+    return new Map((payload.edges || []).map((edge) => [edge.note_id, edge]));
+  } catch (err) {
+    if (err.sessionEnded) throw err;
+    return new Map();
+  }
+}
+
+/* An edge the caller could not resolve is shown as its bare id and is not a
+   link, which is the honest rendering: there is an edge, and it points at
+   something you cannot open. Three different situations arrive here as one --
+   no such note, one the read policy withholds, one that is flagged -- and the
+   endpoint declines to tell them apart on purpose, since doing so would
+   confirm that an id exists. */
+function edgeList(label, ids, resolved) {
   const wrap = el("div", "small");
   wrap.appendChild(el("span", "muted", label + ": "));
-  wrap.appendChild(el("span", "mono", ids.join(", ")));
+  ids.forEach((id, index) => {
+    if (index > 0) wrap.appendChild(document.createTextNode(", "));
+    const edge = resolved.get(id);
+    if (!edge) {
+      const dangling = el("span", "mono muted", id);
+      dangling.title = "This id resolves to no note you can open.";
+      wrap.appendChild(dangling);
+      return;
+    }
+    const link = el("button", "link", edge.slug);
+    /* The title is what the slug is a slug *of*, and the slug is what a
+       `[[wikilink]]` to this note carries -- so the label matches the exported
+       tree and the tooltip says which note it means. */
+    link.title = edge.title;
+    link.onclick = () => openNote(edge.note_id).catch(showError);
+    wrap.appendChild(link);
+  });
   return wrap;
 }
 
@@ -281,6 +327,14 @@ async function openNote(noteId) {
     if (generation !== NOTE_GENERATION) return;
     throw err;
   }
+  if (generation !== NOTE_GENERATION) return;
+
+  /* Before anything is painted, for the same reason the detail is: the panel
+     must not appear and then rearrange itself. Cheap to wait for -- one
+     request, and none at all for a note with no edges. */
+  const resolvedEdges = await resolveEdges(
+    Array.from(new Set([...detail.related_ids, ...detail.source_ids]))
+  );
   if (generation !== NOTE_GENERATION) return;
 
   const panel = $("note");
@@ -329,8 +383,12 @@ async function openNote(noteId) {
   for (const [name, values] of Object.entries(detail.facets || {})) {
     panel.appendChild(el("div", "small muted", name + ": " + values.join(", ")));
   }
-  if (detail.related_ids.length) panel.appendChild(edgeList("related", detail.related_ids));
-  if (detail.source_ids.length) panel.appendChild(edgeList("sources", detail.source_ids));
+  if (detail.related_ids.length) {
+    panel.appendChild(edgeList("related", detail.related_ids, resolvedEdges));
+  }
+  if (detail.source_ids.length) {
+    panel.appendChild(edgeList("sources", detail.source_ids, resolvedEdges));
+  }
 
   /* The body as it is written: markdown source, not rendered. Rendering it
      would mean a markdown implementation the page cannot fetch under its own
