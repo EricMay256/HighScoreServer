@@ -25,6 +25,16 @@ textarea {
   border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 0.6rem;
   margin: 0.5rem 0;
 }
+/* One edge per line, under the label that heads them. A note's edges are a
+   list of things to go and read, and read down the page they can be scanned;
+   run together they were a paragraph of slugs.
+
+   Each edge carries its own trailing comma *inside* its item. That is what it
+   was for when these ran inline -- a separator that is a node between items is
+   a separator a line break can strand on a line of its own -- and it still is:
+   the comma stays on the line of the edge it follows. */
+.edges { display: flex; flex-direction: column; align-items: start; gap: 0.1rem; }
+.edge { min-width: 0; padding-left: 0.9rem; }
 /* The span being replaced, quoted back so the operator can see exactly what
    the server will be asked to match. */
 .excerpt { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -350,11 +360,17 @@ const PENDING_EDGES = { edges: new Map(), lookedUp: new Set(), pending: true };
 function edgeList(label, ids, resolution) {
   const resolved = resolution.edges;
   const wrap = el("div", "small");
-  wrap.appendChild(el("span", "muted", label + ": "));
+  /* The edges themselves go in their own list; the explanations below stay
+     block-level siblings of it, which is why this is not one container. */
+  const list = el("div", "edges");
+  list.appendChild(el("span", "muted", label + ":"));
   let unresolved = 0;
   let unexamined = 0;
   ids.forEach((id, index) => {
-    if (index > 0) wrap.appendChild(document.createTextNode(", "));
+    /* One item per edge, holding the edge and its separator. The separator is
+       trailing rather than leading on purpose: a comma belongs to the edge it
+       follows, and an item is what a line of this list is made of. */
+    const item = el("span", "edge");
     const edge = resolved.get(id);
     if (!edge) {
       /* The marker is text, not a tooltip and not the muted colour. A `title`
@@ -370,21 +386,24 @@ function edgeList(label, ids, resolution) {
       const examined = !resolution.pending && resolution.lookedUp.has(id);
       if (examined) unresolved += 1;
       else if (!resolution.pending) unexamined += 1;
-      wrap.appendChild(el("span", "mono muted", id));
-      wrap.appendChild(el("span", "muted",
+      item.appendChild(el("span", "mono muted", id));
+      item.appendChild(el("span", "muted",
         resolution.pending ? " (resolving…)"
           : examined ? " (unresolved)"
             : " (not looked up)"));
-      return;
+    } else {
+      const link = el("button", "link", edge.slug);
+      /* The title is what the slug is a slug *of*, and the slug is what a
+         `[[wikilink]]` to this note carries -- so the label matches the
+         exported tree and the tooltip says which note it means. */
+      link.title = edge.title;
+      link.onclick = () => openNote(edge.note_id).catch(showError);
+      item.appendChild(link);
     }
-    const link = el("button", "link", edge.slug);
-    /* The title is what the slug is a slug *of*, and the slug is what a
-       `[[wikilink]]` to this note carries -- so the label matches the exported
-       tree and the tooltip says which note it means. */
-    link.title = edge.title;
-    link.onclick = () => openNote(edge.note_id).catch(showError);
-    wrap.appendChild(link);
+    if (index < ids.length - 1) item.appendChild(el("span", "muted", ","));
+    list.appendChild(item);
   });
+  wrap.appendChild(list);
   /* Not `else if`: a note can have both, and each line explains only the
      marker it belongs to. Saying only one of them would leave the other
      marker unexplained on the same screen. */

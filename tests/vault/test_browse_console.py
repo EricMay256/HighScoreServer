@@ -543,6 +543,37 @@ def test_edges_are_links_that_name_notes_by_slug() -> None:
     assert "openNote(edge.note_id)" in page, "a resolved edge must be clickable"
 
 
+def test_an_edge_gets_a_line_and_its_separator_stays_on_it() -> None:
+    """One edge per line, and no line that is only a comma.
+
+    The list was a run of inline content -- a link, a ", " text node, a link --
+    which a browser may break between an inline-block button and the text after
+    it. That stranded a comma at the head of a line, separating nothing from
+    nothing. It also read as a paragraph of slugs rather than as a list of
+    things to go and read.
+
+    So the edges stack one per line, and the separator lives *inside* the item
+    it follows rather than between two of them: a separator that is its own
+    node is a separator a layout can put on a line by itself.
+    """
+
+    page = _page()
+
+    assert 'const item = el("span", "edge");' in page
+    assert (
+        'if (index < ids.length - 1) item.appendChild(el("span", "muted", ","));'
+        in page
+    ), "the separator is trailing, and inside the item it belongs to"
+    assert 'document.createTextNode(", ")' not in page, (
+        "a separator between two items is one that can land on its own line"
+    )
+    assert ".edges { display: flex; flex-direction: column;" in page, (
+        "the edges stack; they do not flow"
+    )
+    # The label heads its own line, so it carries no trailing space.
+    assert 'el("span", "muted", label + ":")' in page
+
+
 def test_edge_resolution_is_one_request_for_the_whole_note() -> None:
     """Not one per edge, which is the bug this pattern already caused once.
 
