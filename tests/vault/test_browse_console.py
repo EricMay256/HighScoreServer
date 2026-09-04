@@ -526,6 +526,33 @@ def test_cancelling_returns_focus_to_the_control_that_opened_it() -> None:
     assert '$("propose-open").focus();' in page
 
 
+def test_the_notes_controls_stay_in_reach_while_it_is_read() -> None:
+    """Both of a note's actions used to live only at the top of it.
+
+    A note body has no bound on its length, so reading one means scrolling --
+    and going back to the listing, or proposing an edit to what you just read,
+    then meant scrolling back up and afterwards finding your place again. The
+    action bar is sticky, so the note scrolls under it instead.
+
+    It offsets by a measured header height rather than a constant, because the
+    shared header wraps onto a second row on a narrow viewport: a guessed value
+    hides the bar under the header when it is too small and leaves a gap the
+    note shows through when it is too large.
+    """
+
+    page = _page()
+
+    assert 'el("div", "row note-actions")' in page
+    assert "position: sticky; top: var(--header-h, 3.7rem);" in page
+    assert 'header.getBoundingClientRect().height' in page
+    assert "new ResizeObserver(publish).observe(header);" in page
+    # Called, not only defined: measured before the first paint rather
+    # than only when something later resizes.
+    assert page.count("trackHeaderHeight()") == 2
+    # Opaque, or the note would read through the bar it scrolls under.
+    assert "background: var(--bg); border-bottom: 1px solid var(--line);" in page
+
+
 def test_edges_are_links_that_name_notes_by_slug() -> None:
     """A hex uuid is not a name, and ADR 0025 says a human never sees one.
 

@@ -25,6 +25,23 @@ textarea {
   border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 0.6rem;
   margin: 0.5rem 0;
 }
+/* The way out of a note and the way to propose an edit to it, kept in reach
+   at whatever depth the reader has scrolled to. A note body is the one thing
+   on this page with no bound on its length, and both controls used to sit only
+   at the top of it -- so acting on a note meant scrolling back up and then
+   finding your place again.
+
+   It sticks below the page header rather than under it: `--header-h` is
+   measured (see `trackHeaderHeight`) because the header wraps on a narrow
+   viewport, and the fallback is its unwrapped height, which is what a first
+   paint or a browser without ResizeObserver gets. Opaque, because the note
+   scrolls underneath it. The negative margins let the bar span the full width
+   of `main` while its buttons stay on the text's left edge. */
+.note-actions {
+  position: sticky; top: var(--header-h, 3.7rem); z-index: 4;
+  margin: 0 -1.25rem 0.5rem; padding: 0.55rem 1.25rem;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
 /* One edge per line, under the label that heads them. A note's edges are a
    list of things to go and read, and read down the page they can be scanned;
    run together they were a paragraph of slugs.
@@ -451,7 +468,7 @@ async function openNote(noteId) {
   $("listing").classList.add("hidden");
   NOTE = detail;
 
-  const actions = el("div", "row");
+  const actions = el("div", "row note-actions");
   const back = el("button", null, "Back to listing");
   back.onclick = () => {
     NOTE_GENERATION += 1;
@@ -854,6 +871,29 @@ function startPropose() {
 
 
 /* ---------- Shell ---------- */
+/* Publishes the page header's height as `--header-h`, which is what the note's
+   sticky action bar offsets itself by. It cannot be a constant: the header
+   wraps its nav and session controls onto a second row on a narrow viewport,
+   and a guessed value is wrong in both directions -- too small hides the bar
+   under the header, too large leaves a gap the note scrolls through.
+
+   Re-measured on resize rather than only at load, because the wrap happens
+   while the window is being resized and on an orientation change. Guarded:
+   the CSS fallback covers a browser without ResizeObserver, and the page test
+   harness has no real header to find. */
+function trackHeaderHeight() {
+  const header = document.querySelector("header");
+  if (!header) return;
+  const publish = () => {
+    document.documentElement.style.setProperty(
+      "--header-h", header.getBoundingClientRect().height + "px");
+  };
+  publish();
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(publish).observe(header);
+  }
+}
+
 function showError(err) {
   if (err.sessionEnded) return;
   if (err.forbidden) {
@@ -916,6 +956,10 @@ $("clear-filters").onclick = () => {
   FILTERS = { tag: "", facet: "" };
   loadAll();
 };
+
+/* Before `boot`, so the sticky offset is right for the first thing painted --
+   and before the note panel can exist, which is what reads the variable. */
+trackHeaderHeight();
 
 /* Last, because `boot` renders and `render` reaches every handler above. */
 boot();
