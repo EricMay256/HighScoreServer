@@ -264,6 +264,13 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
    two agree, since they live in different files and nothing else would say. */
 const EDGE_LOOKUP_BATCH = 100;
 
+/* The most requests one note may spend resolving its edges. The quota bursts
+   at 20, and nothing bounds a compiled page's `source_ids`, so a large enough
+   page could drain the whole allowance and leave the reader's next click
+   rate-limited. Half the burst keeps that headroom; ids past it are honestly
+   marked "not looked up", because they were not. */
+const EDGE_LOOKUP_MAX_BATCHES = 10;
+
 /* Resolve a note's edges to names, in as few requests as the bound allows.
 
    `related_ids` and `source_ids` hold ids and stay that way in storage
@@ -279,7 +286,7 @@ const EDGE_LOOKUP_BATCH = 100;
    or a 503 or a dropped request rendered as "this note is retired or you may
    not read it" about every edge at once. That is infrastructure trouble
    presented as fact about the corpus, and the reader has no way to tell. */
-async function resolveEdges(ids) {
+async function resolveEdges(ids, stillWanted) {
   if (!ids.length) return { edges: new Map(), lookedUp: new Set() };
   const edges = new Map();
   /* Which ids a batch actually answered for, rather than one flag for the
@@ -298,7 +305,16 @@ async function resolveEdges(ids) {
      Sequential rather than parallel: the note is already on screen, so this
      costs patience rather than usability, and firing a page's worth of
      requests at once is how a burst quota gets spent for no benefit. */
+  let batches = 0;
   for (let start = 0; start < ids.length; start += EDGE_LOOKUP_BATCH) {
+    /* Checked before each request rather than once at the end. The loop
+       outlives the note that started it: a reader who opens a large page and
+       clicks away had every remaining batch still sent, spending their quota
+       on labels for a panel nobody is looking at and delaying the lookups for
+       the note they actually opened. */
+    if (stillWanted && !stillWanted()) break;
+    if (batches >= EDGE_LOOKUP_MAX_BATCHES) break;
+    batches += 1;
     const batch = ids.slice(start, start + EDGE_LOOKUP_BATCH);
     try {
       /* A POST body, not a query string. Ids are capped in count and not in
@@ -499,7 +515,7 @@ async function openNote(noteId) {
     const ids = Array.from(
       new Set([...detail.related_ids, ...detail.source_ids])
     );
-    resolveEdges(ids)
+    resolveEdges(ids, () => generation === NOTE_GENERATION)
       .then((resolution) => {
         if (generation !== NOTE_GENERATION) return;
         for (const { label, ids: edgeIds, slot } of edgeSlots) {

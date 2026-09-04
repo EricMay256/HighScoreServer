@@ -723,7 +723,7 @@ def test_one_failed_edge_batch_does_not_discard_the_others() -> None:
 
     page = _page()
 
-    resolve_at = page.index("async function resolveEdges(ids)")
+    resolve_at = page.index("async function resolveEdges(ids, stillWanted)")
     body = page[resolve_at : page.index("\n}", resolve_at)]
 
     assert "edges = new Map()" not in body.split("const edges = new Map();", 1)[1], (
@@ -756,3 +756,45 @@ def test_a_dangling_edge_is_not_relabelled_by_another_batch_failing() -> None:
     assert "} else if (unresolved)" not in page, (
         "the explanations must not exclude one another"
     )
+
+
+def test_edge_resolution_stops_when_the_reader_navigates_away() -> None:
+    """The loop outlives the note that started it unless it is told not to.
+
+    Generation was checked once, after every batch had already been sent. A
+    reader who opened a large page and clicked away had the rest of its
+    batches issued anyway -- spending their own quota on labels for a panel
+    nobody is looking at, and delaying the lookups for the note they actually
+    opened.
+
+    Checked before each request instead, so navigating away stops the loop
+    rather than merely discarding its result.
+    """
+
+    page = _page()
+
+    assert "if (stillWanted && !stillWanted()) break;" in page
+    assert "resolveEdges(ids, () => generation === NOTE_GENERATION)" in page
+
+    # Before the request, not after it: the point is not to send it.
+    resolve_at = page.index("async function resolveEdges(ids, stillWanted)")
+    body = page[resolve_at : page.index("\n}", resolve_at)]
+    assert body.index("stillWanted()") < body.index("await api(")
+
+
+def test_one_note_cannot_drain_the_edge_lookup_burst() -> None:
+    """Nothing bounds how many edges a compiled page may declare.
+
+    `VaultCompilePageRequest.source_ids` has no maximum, and the resolve_edges
+    bucket bursts at 20 -- so a large enough page could spend the reader's
+    whole allowance on one note and leave their next click rate-limited.
+
+    The cap is half the burst, which keeps that headroom. Ids past it are
+    marked "not looked up", which is exactly what they are: the honest
+    rendering already existed, so bounding the work needed no new vocabulary.
+    """
+
+    page = _page()
+
+    assert "const EDGE_LOOKUP_MAX_BATCHES = 10;" in page
+    assert "if (batches >= EDGE_LOOKUP_MAX_BATCHES) break;" in page
