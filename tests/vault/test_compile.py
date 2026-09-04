@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import delete, select, text, update
 
-from app.vault.api_models import VaultCompilePageRequest
+from app.vault.api_models import MAX_PAGE_EDGE_IDS, VaultCompilePageRequest
 from app.vault.auth import VaultScope
 from app.vault.domain import (
     DocumentKind,
@@ -1212,18 +1212,30 @@ def test_a_compiled_page_obeys_the_shared_edge_id_rule() -> None:
     assert ok.related_ids == ["def456"]
 
 
-def test_a_compiled_page_is_not_capped_at_the_note_edge_limit() -> None:
-    """The validator is shared; the cardinality bound deliberately is not.
+def test_a_compiled_page_is_capped_where_the_console_can_still_read_it() -> None:
+    """Not the note limit, and not unbounded either.
 
-    Notes cap `related_ids`/`source_ids` at 50. A page is synthesized *from*
-    notes and may legitimately cite many more, so inheriting that number by
-    copying the line above would refuse valid pages. If a bound belongs here
-    it is a separate decision about what a page may cite, and this records
-    that none was made rather than leaving the absence ambiguous.
+    Notes cap their own edges at 50; a page is synthesized *from* notes and
+    may cite many more, so inheriting that number would refuse valid pages.
+    But unbounded was worse than either. The browse console resolves the union
+    of both lists in batches and stops after ten of them, so ids past its
+    thousandth were unreachable *permanently* -- a retry restarts at the first
+    id and never requests the tail -- while the page offered "retry to resolve
+    them".
+
+    So the bound comes from the other end: two lists of MAX_PAGE_EDGE_IDS are
+    exactly what the console can resolve. Anything the server accepts, the
+    console can read. `test_browse_console.py` asserts that arithmetic, since
+    the two halves live in different files.
     """
 
-    many = [f"{index:032x}" for index in range(120)]
+    at_the_cap = [f"{index:032x}" for index in range(MAX_PAGE_EDGE_IDS)]
 
-    page = VaultCompilePageRequest(title="t", body="b", source_ids=many)
+    page = VaultCompilePageRequest(title="t", body="b", source_ids=at_the_cap)
+    assert len(page.source_ids) == MAX_PAGE_EDGE_IDS
 
-    assert len(page.source_ids) == 120
+    for field in ("source_ids", "related_ids"):
+        payload = {"title": "t", "body": "b", "source_ids": ["seed"]}
+        payload[field] = [f"{index:032x}" for index in range(MAX_PAGE_EDGE_IDS + 1)]
+        with pytest.raises(ValidationError, match=field):
+            VaultCompilePageRequest(**payload)

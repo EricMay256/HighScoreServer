@@ -17,7 +17,7 @@ from starlette.routing import Route
 
 from app.vault import browse_console as browse
 from app.vault import review_console as review
-from app.vault.api_models import MAX_EDGE_LOOKUP_IDS
+from app.vault.api_models import MAX_EDGE_LOOKUP_IDS, MAX_PAGE_EDGE_IDS
 from app.vault.console_page import CONSOLE_HEADERS, console_page
 from app.vault.constants import (
     OAUTH_BASELINE_SCOPES,
@@ -28,6 +28,7 @@ from app.vault.templating import render
 
 # The console's own constant, restated so the assertion names both sides.
 EDGE_LOOKUP_BATCH_IN_CONSOLE = 100
+EDGE_LOOKUP_MAX_BATCHES_IN_CONSOLE = 10
 
 
 def _page() -> str:
@@ -797,4 +798,57 @@ def test_one_note_cannot_drain_the_edge_lookup_burst() -> None:
     page = _page()
 
     assert "const EDGE_LOOKUP_MAX_BATCHES = 10;" in page
+    assert "if (batches >= EDGE_LOOKUP_MAX_BATCHES) break;" in page
+
+
+def test_the_console_can_resolve_every_edge_a_page_may_declare() -> None:
+    """The arithmetic that makes truncation unreachable rather than hidden.
+
+    The console batches by EDGE_LOOKUP_BATCH and stops after
+    EDGE_LOOKUP_MAX_BATCHES, so its capacity is the product. It resolves the
+    *union* of `source_ids` and `related_ids`, so a page can present twice
+    MAX_PAGE_EDGE_IDS.
+
+    While the page contract was unbounded, ids past that capacity could never
+    be resolved at all: a retry restarts at the first id, so the tail was
+    never requested, and the console still said "retry to resolve them". The
+    cap exists so that promise is true -- anything the server accepts, the
+    console can read.
+
+    These three numbers live in two files with no import between them, which
+    is why this asserts rather than trusts.
+    """
+
+    page = _page()
+
+    assert f"const EDGE_LOOKUP_BATCH = {EDGE_LOOKUP_BATCH_IN_CONSOLE};" in page
+    assert f"const EDGE_LOOKUP_MAX_BATCHES = {EDGE_LOOKUP_MAX_BATCHES_IN_CONSOLE};" in page
+
+    capacity = EDGE_LOOKUP_BATCH_IN_CONSOLE * EDGE_LOOKUP_MAX_BATCHES_IN_CONSOLE
+    largest_union = 2 * MAX_PAGE_EDGE_IDS
+
+    assert capacity >= largest_union, (
+        f"a page may declare {largest_union} unique edges and the console "
+        f"resolves at most {capacity}; the tail would be permanently "
+        "unreachable while the page offers a retry"
+    )
+
+
+def test_the_retry_wording_is_only_used_where_retrying_can_work() -> None:
+    """"Retry" must not be offered for something a retry cannot reach.
+
+    Unexamined ids are transient by construction now: the only ways to leave
+    one unresolved are a failed batch and navigating away, both of which a
+    reopen re-attempts from the first id. Truncation was the exception, and it
+    is gone -- the page cap is sized to the console's capacity.
+    """
+
+    page = _page()
+
+    # Split across two JS string literals in the source, so match the halves
+    # rather than the sentence -- the naive contiguous assertion fails on
+    # formatting rather than on meaning.
+    assert "retry to " in page and "resolve them." in page
+    # The cap that made the claim false is now unreachable for any accepted
+    # page; see the capacity assertion above.
     assert "if (batches >= EDGE_LOOKUP_MAX_BATCHES) break;" in page

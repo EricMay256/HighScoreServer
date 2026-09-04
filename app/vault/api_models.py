@@ -67,6 +67,20 @@ MAX_EDGE_IDS = 50
 # per-note cap because a compiled page may cite more sources than a note
 # may declare edges, and the console batches to this size.
 MAX_EDGE_LOOKUP_IDS = 100
+
+# The cap on each edge list of a compiled page. Chosen from the other end: the
+# browse console resolves the *union* of `source_ids` and `related_ids`, in
+# batches of MAX_EDGE_LOOKUP_IDS, and stops after ten of them to leave the
+# reader quota for their next click. Two lists of this size are exactly that
+# thousand, so anything the server accepts, the console can resolve.
+#
+# Left unbounded, ids past the console's thousandth were unreachable forever:
+# a retry restarts at the first id, so the tail was never requested, while the
+# page said "retry to resolve them". A number nobody can reach beats a promise
+# nobody can keep. It is generous against the corpus it governs -- notes cap
+# their own edges at 50, and a page citing 500 sources would have to cite five
+# times every document that exists.
+MAX_PAGE_EDGE_IDS = 500
 MAX_AMENDMENT_BATCH_DECISIONS = 50
 
 
@@ -2002,6 +2016,7 @@ class VaultCompilePageRequest(BaseModel):
     body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     source_ids: list[str] = Field(
         min_length=1,
+        max_length=MAX_PAGE_EDGE_IDS,
         description=(
             "The notes this page was synthesized from. Validated: unlike a "
             "note's related_ids, provenance naming something that does not "
@@ -2010,7 +2025,9 @@ class VaultCompilePageRequest(BaseModel):
     )
     summary: str | None = Field(default=None, max_length=2_000)
     tags: list[str] = Field(default_factory=list)
-    related_ids: list[str] = Field(default_factory=list)
+    related_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_PAGE_EDGE_IDS
+    )
     page_id: str | None = Field(
         default=None,
         description=(
