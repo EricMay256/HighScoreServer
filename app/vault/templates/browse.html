@@ -280,9 +280,14 @@ const EDGE_LOOKUP_BATCH = 100;
    not read it" about every edge at once. That is infrastructure trouble
    presented as fact about the corpus, and the reader has no way to tell. */
 async function resolveEdges(ids) {
-  if (!ids.length) return { edges: new Map(), failed: false };
+  if (!ids.length) return { edges: new Map(), lookedUp: new Set() };
   const edges = new Map();
-  let failed = false;
+  /* Which ids a batch actually answered for, rather than one flag for the
+     whole run. A single `failed` boolean made every unresolved id read "not
+     looked up" as soon as any batch failed -- so a genuinely dangling edge in
+     a batch that succeeded was reported as unexamined. That is the same false
+     statement the flag was added to prevent, pointing the other way. */
+  const lookedUp = new Set();
   /* Batched, because /notes/edges refuses more than EDGE_LOOKUP_BATCH ids and
      nothing bounds how many a note may hold: a compiled wiki page's
      `source_ids` has a minimum and no maximum, so a page synthesized from a
@@ -305,20 +310,20 @@ async function resolveEdges(ids) {
         body: JSON.stringify({ ids: batch }),
       });
       for (const edge of payload.edges || []) edges.set(edge.note_id, edge);
+      for (const id of batch) lookedUp.add(id);
     } catch (err) {
       if (err.sessionEnded) throw err;
-      /* One failed batch does not discard the ones that answered. The ids it
-         covered stay unresolved and are marked as not looked up, which is
-         what they are. */
-      failed = true;
+      /* One failed batch does not discard the ones that answered, and does
+         not claim anything about their ids either: this batch's ids simply
+         never enter `lookedUp`. */
     }
   }
-  return { edges, failed };
+  return { edges, lookedUp };
 }
 
 /* The resolution object before the lookup answers. Shared and never mutated:
    `edgeList` only reads it. */
-const PENDING_EDGES = { edges: new Map(), failed: false, pending: true };
+const PENDING_EDGES = { edges: new Map(), lookedUp: new Set(), pending: true };
 
 /* An edge the caller could not resolve is shown as its bare id and is not a
    link, which is the honest rendering: there is an edge, and it points at
@@ -331,6 +336,7 @@ function edgeList(label, ids, resolution) {
   const wrap = el("div", "small");
   wrap.appendChild(el("span", "muted", label + ": "));
   let unresolved = 0;
+  let unexamined = 0;
   ids.forEach((id, index) => {
     if (index > 0) wrap.appendChild(document.createTextNode(", "));
     const edge = resolved.get(id);
@@ -340,15 +346,19 @@ function edgeList(label, ids, resolution) {
          reader, and colour alone is not a distinction -- so the one thing
          that says "this is not a link" would have been available only to a
          sighted mouse user who hovered it. */
-      unresolved += 1;
+      /* Decided per id, because within one note both can be true: a batch
+         that answered may contain a genuinely dangling edge while another
+         batch never returned. Only the first is a statement about the corpus.
+         Pending means no answer yet; unexamined means none was obtained for
+         this id; neither says anything about the note it names. */
+      const examined = !resolution.pending && resolution.lookedUp.has(id);
+      if (examined) unresolved += 1;
+      else if (!resolution.pending) unexamined += 1;
       wrap.appendChild(el("span", "mono muted", id));
-      /* Three different things, and only one of them is a statement about the
-         corpus. Pending means the answer has not arrived; failed means it
-         never will for this attempt; neither says anything about the note. */
       wrap.appendChild(el("span", "muted",
         resolution.pending ? " (resolving…)"
-          : resolution.failed ? " (not looked up)"
-            : " (unresolved)"));
+          : examined ? " (unresolved)"
+            : " (not looked up)"));
       return;
     }
     const link = el("button", "link", edge.slug);
@@ -359,18 +369,19 @@ function edgeList(label, ids, resolution) {
     link.onclick = () => openNote(edge.note_id).catch(showError);
     wrap.appendChild(link);
   });
-  if (resolution.pending) {
-    /* No explanation yet -- there is nothing to explain until the lookup
-       answers, and a paragraph that appears and then vanishes is noise. */
-  } else if (resolution.failed) {
-    /* A statement about this request, not about the corpus. The ids are still
-       shown -- they are what the note actually holds -- but nothing claims to
-       know what they point at. */
+  /* Not `else if`: a note can have both, and each line explains only the
+     marker it belongs to. Saying only one of them would leave the other
+     marker unexplained on the same screen. */
+  if (!resolution.pending && unexamined) {
+    /* A statement about this request, not about the corpus. Those ids are
+       still shown -- they are what the note actually holds -- but nothing
+       claims to know what they point at. */
     wrap.appendChild(el("div", "small warn",
-      "⚠ These ids could not be looked up just now, so they are shown as "
-      + "stored. This says nothing about whether the notes exist — retry to "
+      "⚠ Some ids could not be looked up just now and are shown as stored. "
+      + "That says nothing about whether those notes exist — retry to "
       + "resolve them."));
-  } else if (unresolved) {
+  }
+  if (!resolution.pending && unresolved) {
     /* Said once rather than per id: what "unresolved" means, in the place a
        reader meets it, without needing to hover anything. */
     wrap.appendChild(el("div", "small muted",

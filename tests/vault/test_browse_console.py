@@ -642,11 +642,14 @@ def test_a_failed_edge_lookup_is_not_reported_as_corpus_state() -> None:
 
     page = _page()
 
-    assert "failed = true;" in page, "a failed lookup must be distinguishable"
-    assert "return { edges, failed };" in page
+    assert "const lookedUp = new Set();" in page, (
+        "a failed lookup must be distinguishable, per id"
+    )
+    assert "return { edges, lookedUp };" in page
     assert '" (not looked up)"' in page
     assert "could not be looked up just now" in page
-    assert "This says nothing about whether the notes exist" in page
+    assert '" (not looked up)"' in page
+    assert "That says nothing about whether those notes exist" in page
 
 
 def test_edges_show_their_ids_while_the_lookup_is_pending() -> None:
@@ -665,7 +668,7 @@ def test_edges_show_their_ids_while_the_lookup_is_pending() -> None:
 
     page = _page()
 
-    assert "const PENDING_EDGES = { edges: new Map(), failed: false, pending: true };" in page
+    assert "const PENDING_EDGES = { edges: new Map(), lookedUp: new Set(), pending: true };" in page
     assert 'resolution.pending ? " (resolving…)"' in page
 
     # One renderer, three markers, and every branch keeps the id itself.
@@ -676,10 +679,10 @@ def test_edges_show_their_ids_while_the_lookup_is_pending() -> None:
     )
 
     # Nothing claims anything about the corpus while the answer is outstanding.
-    pending_branch = page.index("if (resolution.pending) {")
-    failed_branch = page.index("} else if (resolution.failed) {")
-    between = page[pending_branch:failed_branch]
-    assert "retired" not in between and "could not be looked up" not in between
+    # Nothing is claimed about the corpus while the answer is outstanding:
+    # both trailing explanations are gated on the lookup having finished.
+    assert "if (!resolution.pending && unexamined) {" in page
+    assert "if (!resolution.pending && unresolved) {" in page
 
 
 def test_the_console_batches_edge_lookups_within_the_endpoint_bound() -> None:
@@ -723,7 +726,33 @@ def test_one_failed_edge_batch_does_not_discard_the_others() -> None:
     resolve_at = page.index("async function resolveEdges(ids)")
     body = page[resolve_at : page.index("\n}", resolve_at)]
 
-    assert "failed = true;" in body, "a failed batch is recorded"
     assert "edges = new Map()" not in body.split("const edges = new Map();", 1)[1], (
         "a failed batch must not reset what other batches resolved"
+    )
+
+
+def test_a_dangling_edge_is_not_relabelled_by_another_batch_failing() -> None:
+    """Within one note, both outcomes can be true at once.
+
+    A single `failed` flag for the whole run meant that as soon as any batch
+    failed, every unresolved id read "not looked up" -- including ids from a
+    batch that answered, whose edges genuinely dangle. That is the same false
+    statement the flag was introduced to prevent, pointing the other way: it
+    reported an examined edge as unexamined.
+
+    The distinction is per id, so a note can legitimately show a link, an
+    "(unresolved)" and a "(not looked up)" side by side, with the explanation
+    for each marker that is actually present.
+    """
+
+    page = _page()
+
+    assert "const examined = !resolution.pending && resolution.lookedUp.has(id);" in page
+    assert "examined ? \" (unresolved)\"" in page
+    # Both trailing lines are independent `if`s, not an either/or chain: a
+    # note with both kinds of unresolved id needs both explanations.
+    assert "if (!resolution.pending && unexamined) {" in page
+    assert "if (!resolution.pending && unresolved) {" in page
+    assert "} else if (unresolved)" not in page, (
+        "the explanations must not exclude one another"
     )
