@@ -32,13 +32,43 @@ import json
 from typing import Final
 
 
-__all__ = ["InvalidCursor", "PATH_SORT", "decode_cursor", "encode_cursor"]
+__all__ = [
+    "MAX_CURSOR_CHARS",
+    "PATH_SORT",
+    "InvalidCursor",
+    "decode_cursor",
+    "encode_cursor",
+]
 
 
 # The default walk, and in phase 1 the only one. Named rather than spelled
 # inline so the token's contents and the request's parameter cannot disagree
 # by a typo; ADR 0045's later phases replace it with a `NoteSort` enum.
 PATH_SORT: Final = "path"
+
+# The bound `after` is validated against. It exists so a caller pasting a book
+# into the parameter is refused before anything decodes it -- not to be tight.
+#
+# It has to clear the longest cursor this endpoint can *issue*, which is the
+# bug review found here: the bound was 1024, sized for the vault_path a cursor
+# used to be, while the token wrapping that path is half as long again. A
+# corpus with paths near the limit would have been handed cursors it then
+# refused.
+#
+# `vault_documents_vault_path_format` caps a path at 1024 characters. A
+# character costs at most six bytes once JSON escaping and UTF-8 are both
+# allowed for, the rest of the payload is under a hundred, and base64 adds a
+# third -- which lands under 10240 with room to spare. A real vault path is
+# tens of characters and its cursor is around a hundred.
+#
+# The id is not bounded by the schema (`vault_documents_id_nonempty` checks
+# only that it is not blank) and is minted as 32 hex characters. A deliberately
+# pathological id could therefore still exceed this, and the failure direction
+# is then a refusal rather than a wrong page.
+#
+# `test_listing_cursor` pins this against the path limit, because that 1024
+# lives in a CHECK constraint with no import between it and here.
+MAX_CURSOR_CHARS: Final = 10240
 
 
 class InvalidCursor(Exception):
@@ -60,7 +90,13 @@ def encode_cursor(sort: str, key: str, note_id: str) -> str:
     """
 
     payload = json.dumps(
-        {"s": sort, "k": key, "i": note_id}, separators=(",", ":")
+        {"s": sort, "k": key, "i": note_id},
+        separators=(",", ":"),
+        # The payload is base64'd as UTF-8, so escaping non-ASCII into ASCII
+        # escapes first would spend six bytes a character to say what two or
+        # three already said -- and a vault path may hold any of them. Left on
+        # by default, an accented path inflated its cursor sixfold.
+        ensure_ascii=False,
     )
     return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
 
@@ -91,7 +127,16 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
         raise InvalidCursor("cursor is not a valid token")
 
     carried, key, note_id = payload.get("s"), payload.get("k"), payload.get("i")
-    if not isinstance(key, str) or not isinstance(note_id, str):
+    # The sort is checked for shape here and for agreement below, and those are
+    # different failures. A token carrying no sort at all is malformed, not a
+    # cursor belonging to some other order -- reporting it as the latter told
+    # the caller their cursor "belongs to the None order", which names nothing
+    # they can act on.
+    if (
+        not isinstance(carried, str)
+        or not isinstance(key, str)
+        or not isinstance(note_id, str)
+    ):
         raise InvalidCursor("cursor is not a valid token")
     if carried != sort:
         raise InvalidCursor(

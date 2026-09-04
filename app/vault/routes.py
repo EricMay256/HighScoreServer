@@ -83,7 +83,13 @@ from .api_models import (
 )
 from .auth import VaultCredential, VaultScope
 from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
-from .cursors import PATH_SORT, InvalidCursor, decode_cursor, encode_cursor
+from .cursors import (
+    MAX_CURSOR_CHARS,
+    PATH_SORT,
+    InvalidCursor,
+    decode_cursor,
+    encode_cursor,
+)
 from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
@@ -596,7 +602,9 @@ async def list_vault_documents(
     ),
     after: str | None = Query(
         default=None,
-        max_length=1024,
+        # Not 1024, which was the vault_path's bound and would refuse a cursor
+        # this endpoint had just issued for a long path. See MAX_CURSOR_CHARS.
+        max_length=MAX_CURSOR_CHARS,
         description=(
             "The previous page's `next_cursor`, passed back verbatim. Opaque: "
             "it names a position in one ordered walk, and is not a vault_path, "

@@ -12,11 +12,18 @@ import json
 import pytest
 
 from app.vault.cursors import (
+    MAX_CURSOR_CHARS,
     PATH_SORT,
     InvalidCursor,
     decode_cursor,
     encode_cursor,
 )
+
+
+# `vault_documents_vault_path_format`. Restated rather than imported: it lives
+# in a CHECK constraint as SQL text, and the point of the test below is that
+# nothing connects the two automatically.
+VAULT_PATH_MAX_CHARS = 1024
 
 
 @pytest.mark.parametrize(
@@ -50,6 +57,66 @@ def test_a_cursor_needs_no_escaping_in_a_query_string() -> None:
     )
 
 
+def _token(payload: object) -> str:
+    raw = json.dumps(payload).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+@pytest.mark.parametrize(
+    ("label", "character"),
+    [
+        ("ascii", "a"),
+        # Two bytes as UTF-8, six if escaped into ASCII first.
+        ("accented", "é"),
+        # Four bytes as UTF-8, and one character to the CHECK constraint.
+        ("astral", "😀"),
+        # The worst the encoder can produce: escaped whatever else is set.
+        ("control", ""),
+    ],
+)
+def test_the_bound_covers_the_longest_cursor_this_corpus_can_issue(
+    label: str, character: str
+) -> None:
+    """`after`'s bound must never refuse what `/notes` just handed out.
+
+    It did, until review caught it: the bound was 1024 because that is what a
+    vault_path may measure, and a cursor is the path plus JSON plus base64 --
+    half as long again for ASCII, and far worse before `ensure_ascii` was
+    turned off. A corpus with paths near the limit would have been issued
+    cursors this endpoint then rejected, and paging would have stopped dead at
+    exactly the deepest paths.
+
+    Two numbers in two files with nothing between them, so the arithmetic is
+    asserted rather than trusted.
+    """
+
+    worst = encode_cursor(
+        PATH_SORT, character * VAULT_PATH_MAX_CHARS, "f" * 32
+    )
+
+    assert len(worst) <= MAX_CURSOR_CHARS, (
+        f"a {label} path at the {VAULT_PATH_MAX_CHARS}-character limit encodes "
+        f"to {len(worst)} characters, past the {MAX_CURSOR_CHARS} `after` will "
+        "accept"
+    )
+
+
+def test_a_cursor_with_no_sort_is_malformed_rather_than_foreign() -> None:
+    """Two different failures that shared one message.
+
+    A token carrying no sort is not a cursor from another order; it is not a
+    cursor. Reported as the latter it read "cursor belongs to the None order",
+    which names nothing a caller can do anything about.
+    """
+
+    for payload in ({"k": "a", "i": "b"}, {"s": 7, "k": "a", "i": "b"}):
+        with pytest.raises(InvalidCursor) as refusal:
+            decode_cursor(_token(payload), sort=PATH_SORT)
+
+        assert "not a valid token" in str(refusal.value)
+        assert "order" not in str(refusal.value)
+
+
 def test_a_cursor_from_another_order_is_refused() -> None:
     """A position is a position *in an order*; the same row sits somewhere
     different in each one. Re-seating the cursor would resume at an unrelated
@@ -62,11 +129,6 @@ def test_a_cursor_from_another_order_is_refused() -> None:
 
     assert "'updated'" in str(refusal.value)
     assert "start the listing again" in str(refusal.value)
-
-
-def _token(payload: object) -> str:
-    raw = json.dumps(payload).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 @pytest.mark.parametrize(
