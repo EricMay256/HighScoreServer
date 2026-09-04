@@ -78,6 +78,33 @@ def test_the_shared_rules_reach_the_rendered_page(template: str) -> None:
     assert ".chip, .kind {" in page
 
 
+def test_every_console_leaves_room_below_its_last_line() -> None:
+    """A page that ends flush with the viewport looks like a truncated one.
+
+    Nothing distinguishes "this is the last line" from "the rest did not fit",
+    so a reader scrolls to find out and a client rendering the page cannot tell
+    at all. Blank space below the content answers that before it is asked,
+    which is why the bottom padding is much deeper than the other three sides
+    rather than uniform.
+    """
+
+    shared = _shared()
+
+    rule = next(
+        line for line in shared.splitlines() if line.startswith("main {")
+    )
+    padding = rule.split("padding:")[1].split(";")[0].split()
+
+    assert len(padding) == 3, (
+        "main's padding must name a bottom of its own, not one shorthand value"
+    )
+    bottom = float(padding[2].removesuffix("rem"))
+    top = float(padding[0].removesuffix("rem"))
+    assert bottom >= 4 and bottom > top * 2, (
+        f"the page ends {padding[2]} above the fold, which reads as truncation"
+    )
+
+
 def test_the_stylesheet_leaves_checkboxes_to_the_browser() -> None:
     """The one rule here that could break a control rather than restyle it.
 

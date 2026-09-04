@@ -526,6 +526,33 @@ def test_cancelling_returns_focus_to_the_control_that_opened_it() -> None:
     assert '$("propose-open").focus();' in page
 
 
+def test_the_notes_controls_stay_in_reach_while_it_is_read() -> None:
+    """Both of a note's actions used to live only at the top of it.
+
+    A note body has no bound on its length, so reading one means scrolling --
+    and going back to the listing, or proposing an edit to what you just read,
+    then meant scrolling back up and afterwards finding your place again. The
+    action bar is sticky, so the note scrolls under it instead.
+
+    It offsets by a measured header height rather than a constant, because the
+    shared header wraps onto a second row on a narrow viewport: a guessed value
+    hides the bar under the header when it is too small and leaves a gap the
+    note shows through when it is too large.
+    """
+
+    page = _page()
+
+    assert 'el("div", "row note-actions")' in page
+    assert "position: sticky; top: var(--header-h, 3.7rem);" in page
+    assert 'header.getBoundingClientRect().height' in page
+    assert "new ResizeObserver(publish).observe(header);" in page
+    # Called, not only defined: measured before the first paint rather
+    # than only when something later resizes.
+    assert page.count("trackHeaderHeight()") == 2
+    # Opaque, or the note would read through the bar it scrolls under.
+    assert "background: var(--bg); border-bottom: 1px solid var(--line);" in page
+
+
 def test_edges_are_links_that_name_notes_by_slug() -> None:
     """A hex uuid is not a name, and ADR 0025 says a human never sees one.
 
@@ -541,6 +568,37 @@ def test_edges_are_links_that_name_notes_by_slug() -> None:
     assert '"/notes/edges"' in page, "edges must be resolved in bulk"
     assert "edge.slug" in page
     assert "openNote(edge.note_id)" in page, "a resolved edge must be clickable"
+
+
+def test_an_edge_gets_a_line_and_its_separator_stays_on_it() -> None:
+    """One edge per line, and no line that is only a comma.
+
+    The list was a run of inline content -- a link, a ", " text node, a link --
+    which a browser may break between an inline-block button and the text after
+    it. That stranded a comma at the head of a line, separating nothing from
+    nothing. It also read as a paragraph of slugs rather than as a list of
+    things to go and read.
+
+    So the edges stack one per line, and the separator lives *inside* the item
+    it follows rather than between two of them: a separator that is its own
+    node is a separator a layout can put on a line by itself.
+    """
+
+    page = _page()
+
+    assert 'const item = el("span", "edge");' in page
+    assert (
+        'if (index < ids.length - 1) item.appendChild(el("span", "muted", ","));'
+        in page
+    ), "the separator is trailing, and inside the item it belongs to"
+    assert 'document.createTextNode(", ")' not in page, (
+        "a separator between two items is one that can land on its own line"
+    )
+    assert ".edges { display: flex; flex-direction: column;" in page, (
+        "the edges stack; they do not flow"
+    )
+    # The label heads its own line, so it carries no trailing space.
+    assert 'el("span", "muted", label + ":")' in page
 
 
 def test_edge_resolution_is_one_request_for_the_whole_note() -> None:

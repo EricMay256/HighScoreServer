@@ -47,7 +47,13 @@ header {
 .action-link { color: var(--accept); font-weight: 600; }
 .action-link:hover { text-decoration: underline; }
 h1 { font-size: 1.05rem; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-main { max-width: 68rem; margin: 0 auto; padding: 1.25rem; }
+/* The bottom padding is deliberately deep. A page whose last line sits flush
+   against the bottom of the viewport reads as one that was cut off: nothing
+   distinguishes "the content ends here" from "the rest did not fit", and a
+   reader -- or a client rendering the page into a screenshot -- has to scroll
+   to find out. Empty space below the last line answers that without being
+   asked. */
+main { max-width: 68rem; margin: 0 auto; padding: 1.25rem 1.25rem 6rem; }
 button {
   font: inherit; border: 1px solid var(--line); background: var(--panel);
   color: var(--ink); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer;
