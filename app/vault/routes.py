@@ -17,7 +17,6 @@ leaderboard ``API_KEY`` are not vault credentials.
 """
 
 import logging
-from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -57,6 +56,7 @@ from .api_models import (
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
     VaultMetadataUpdateRequest,
+    VaultNoteEdgeLookupRequest,
     VaultNoteEdgeResponse,
     VaultNoteListResponse,
     VaultReviewCaseResponse,
@@ -403,10 +403,6 @@ async def search_vault(
     )
 
 
-# The bound on one edge-resolution request. A note's `related_ids` plus
-# `source_ids` is a handful in practice; this is the ceiling on one query, not
-# a target. Same shape of bound as MAX_NOTE_PAGE and for the same reason.
-MAX_EDGE_IDS = 100
 async def resolve_edges_quota(
     credential: VaultCredential = Depends(require_read_scope),
 ) -> VaultCredential:
@@ -414,16 +410,23 @@ async def resolve_edges_quota(
     return credential
 
 
-@router.get(
+@router.post(
     "/notes/edges",
     response_model=VaultNoteEdgeResponse,
     dependencies=[Depends(resolve_edges_quota)],
     summary="Resolve note IDs to the names a link can carry",
 )
 async def resolve_vault_edges(
-    id: Annotated[list[str], Query(max_length=MAX_EDGE_IDS)] = [],  # noqa: B006
+    body: VaultNoteEdgeLookupRequest,
 ) -> VaultNoteEdgeResponse:
     """Turn `related_ids` / `source_ids` into something a human can read.
+
+    A POST that reads, which is deliberate. Ids are bounded in count but not
+    in length -- `validate_edge_ids` checks shape, not size -- so a hundred of
+    them in a query string can exceed the 8,192-byte request line Heroku's
+    router accepts, and the request then fails before any handler runs. A
+    body has no such ceiling. GET is the better verb for a read and the wrong
+    transport for this payload.
 
     Edges are stored as ids and stay that way (ADR 0025); a name becomes an id
     at the boundary and never the reverse in storage. So a surface that shows
@@ -450,7 +453,7 @@ async def resolve_vault_edges(
     async with transactions.transaction() as connection:
         briefs = await documents.list_briefs_by_ids(
             connection,
-            id,
+            body.ids,
             statuses=READABLE_STATUSES,
         )
 

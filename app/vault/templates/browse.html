@@ -258,7 +258,7 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
 
 /* ---------- One note ---------- */
 
-/* Must not exceed the server's MAX_EDGE_IDS -- `/notes/edges` answers 422 for
+/* Must not exceed the server's MAX_EDGE_LOOKUP_IDS -- `/notes/edges` answers 422 for
    a longer list, and the console would then resolve nothing for exactly the
    notes with the most edges. `tests/vault/test_browse_console.py` asserts the
    two agree, since they live in different files and nothing else would say. */
@@ -295,9 +295,15 @@ async function resolveEdges(ids) {
      requests at once is how a burst quota gets spent for no benefit. */
   for (let start = 0; start < ids.length; start += EDGE_LOOKUP_BATCH) {
     const batch = ids.slice(start, start + EDGE_LOOKUP_BATCH);
-    const query = batch.map((id) => "id=" + encodeURIComponent(id)).join("&");
     try {
-      const payload = await api("/notes/edges?" + query);
+      /* A POST body, not a query string. Ids are capped in count and not in
+         length, so a hundred long ones exceed the request line Heroku's
+         router accepts and the request dies before reaching the app. */
+      const payload = await api("/notes/edges", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: batch }),
+      });
       for (const edge of payload.edges || []) edges.set(edge.note_id, edge);
     } catch (err) {
       if (err.sessionEnded) throw err;

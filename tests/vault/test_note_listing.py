@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
+from app.vault.api_models import MAX_EDGE_LOOKUP_IDS
 from app.vault.auth import VaultScope
 from app.vault.domain import (
     DocumentKind,
@@ -503,10 +504,10 @@ def test_both_listings_page_by_the_same_rules() -> None:
 
 
 def _edges(client: TestClient, token: str, ids: list[str]) -> dict:
-    response = client.get(
+    response = client.post(
         "/api/v1/vault/notes/edges",
         headers={"Authorization": f"Bearer {token}"},
-        params=[("id", note_id) for note_id in ids],
+        json={"ids": ids},
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -586,10 +587,10 @@ def test_an_unresolvable_edge_is_absent_rather_than_an_error(
 def test_edge_resolution_requires_the_read_scope(client: TestClient) -> None:
     credential_id, token = _issue(scopes=(VaultScope.PROPOSE,))
     try:
-        response = client.get(
+        response = client.post(
             "/api/v1/vault/notes/edges",
             headers={"Authorization": f"Bearer {token}"},
-            params=[("id", "anything")],
+            json={"ids": ["anything"]},
         )
     finally:
         _drop(credential_id)
@@ -608,10 +609,59 @@ def test_edge_resolution_does_not_collide_with_fetch_by_id(
     is why the assertion is on the shape rather than merely on the status.
     """
 
-    response = client.get(
+    response = client.post(
         "/api/v1/vault/notes/edges",
         headers={"Authorization": f"Bearer {read_only_token}"},
+        json={"ids": []},
     )
 
     assert response.status_code == 200, response.text
     assert response.json() == {"edges": []}
+
+
+def test_edge_lookup_refuses_more_ids_than_it_will_resolve(
+    client: TestClient,
+    read_only_token: str,
+) -> None:
+    """The bound is declared so the console can batch to it."""
+
+    over = [f"{index:032x}" for index in range(MAX_EDGE_LOOKUP_IDS + 1)]
+
+    response = client.post(
+        "/api/v1/vault/notes/edges",
+        headers={"Authorization": f"Bearer {read_only_token}"},
+        json={"ids": over},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "too_long"
+
+
+def test_edge_lookup_survives_ids_too_long_for_a_request_line(
+    client: TestClient,
+    corpus: dict[str, str],
+    read_only_token: str,
+) -> None:
+    """A full batch of long ids used to die before reaching the app.
+
+    Nothing bounds an id's length -- `validate_edge_ids` checks shape and
+    uniqueness, not size -- so a hundred of them in a query string can exceed
+    the 8,192-byte request line Heroku's router accepts. The request then
+    fails at the router, which the console reports as a lookup failure, and
+    every edge on the note reads "not looked up".
+
+    A body has no such ceiling. The payload here is far past that limit and
+    still resolves the one real id among the long ones.
+    """
+
+    padding = ["x" * 400 for _ in range(MAX_EDGE_LOOKUP_IDS - 1)]
+    long_ids = [f"{index}-{value}" for index, value in enumerate(padding)]
+    ids = [corpus["alpha"], *long_ids]
+
+    assert sum(len(value) + 4 for value in ids) > 8192, (
+        "the fixture must exceed the request-line limit it is testing"
+    )
+
+    payload = _edges(client, read_only_token, ids)
+
+    assert [edge["note_id"] for edge in payload["edges"]] == [corpus["alpha"]]

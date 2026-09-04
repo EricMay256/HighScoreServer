@@ -17,12 +17,12 @@ from starlette.routing import Route
 
 from app.vault import browse_console as browse
 from app.vault import review_console as review
+from app.vault.api_models import MAX_EDGE_LOOKUP_IDS
 from app.vault.console_page import CONSOLE_HEADERS, console_page
 from app.vault.constants import (
     OAUTH_BASELINE_SCOPES,
     OAUTH_OPERATOR_ENTITLEMENT_SCOPES,
 )
-from app.vault.routes import MAX_EDGE_IDS
 from app.vault.templating import render
 
 
@@ -537,7 +537,7 @@ def test_edges_are_links_that_name_notes_by_slug() -> None:
 
     page = _page()
 
-    assert "/notes/edges?" in page, "edges must be resolved in bulk"
+    assert '"/notes/edges"' in page, "edges must be resolved in bulk"
     assert "edge.slug" in page
     assert "openNote(edge.note_id)" in page, "a resolved edge must be clickable"
 
@@ -687,22 +687,22 @@ def test_the_console_batches_edge_lookups_within_the_endpoint_bound() -> None:
 
     `VaultCompilePageRequest.source_ids` has a minimum and no maximum, so a
     wiki page synthesized from a few hundred notes is valid and ordinary.
-    /notes/edges refuses more than MAX_EDGE_IDS, and the console sent the whole
+    /notes/edges refuses more than MAX_EDGE_LOOKUP_IDS, and the console sent the whole
     union in one request -- so exactly the most connected pages came back 422
     and rendered every label as "not looked up".
 
     The batch size lives in a template and the bound lives in routes.py, with
     nothing between them to notice a change; this is that something. Lowering
-    MAX_EDGE_IDS without lowering the batch would break the console silently,
+    MAX_EDGE_LOOKUP_IDS without lowering the batch would break the console silently,
     and only for large pages.
     """
 
     page = _page()
 
     assert "const EDGE_LOOKUP_BATCH = 100;" in page
-    assert EDGE_LOOKUP_BATCH_IN_CONSOLE <= MAX_EDGE_IDS, (
+    assert EDGE_LOOKUP_BATCH_IN_CONSOLE <= MAX_EDGE_LOOKUP_IDS, (
         f"the console batches {EDGE_LOOKUP_BATCH_IN_CONSOLE} ids into an "
-        f"endpoint that accepts {MAX_EDGE_IDS}"
+        f"endpoint that accepts {MAX_EDGE_LOOKUP_IDS}"
     )
     # The loop, not a single request.
     assert "for (let start = 0; start < ids.length; start += EDGE_LOOKUP_BATCH)" in page

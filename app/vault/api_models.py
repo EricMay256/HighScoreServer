@@ -58,7 +58,15 @@ from .wikilinks import looks_like_a_name, slug_of
 MAX_BODY_CHARS = 100_000
 MAX_RATIONALE_CHARS = 2_000
 MAX_DOCUMENT_ID_CHARS = 256
+# The cap on edges one *note* may declare. Distinct from
+# MAX_EDGE_LOOKUP_IDS below, which bounds one lookup request -- they were
+# both called MAX_EDGE_IDS in different modules, with different values.
 MAX_EDGE_IDS = 50
+
+# The cap on ids one edge-resolution request may name. Larger than the
+# per-note cap because a compiled page may cite more sources than a note
+# may declare edges, and the console batches to this size.
+MAX_EDGE_LOOKUP_IDS = 100
 MAX_AMENDMENT_BATCH_DECISIONS = 50
 
 
@@ -1320,6 +1328,33 @@ class VaultNoteEdge(BaseModel):
         description=(
             "The leaf of `vault_path`, which is the title's slug -- the name a "
             "`[[wikilink]]` to this note carries."
+        ),
+    )
+
+
+class VaultNoteEdgeLookupRequest(BaseModel):
+    """The ids whose names a caller wants.
+
+    A body rather than a query string, and that is a transport decision with a
+    reason. Ids are not length-bounded anywhere -- `validate_edge_ids` checks
+    shape and uniqueness, not size -- so a hundred of them in a query string
+    can exceed the 8,192-byte request line Heroku's router accepts, and the
+    request fails before any handler sees it. A body has no such ceiling.
+
+    Deliberately *not* run through `validate_edge_ids`. This reads what the
+    corpus already holds, including rows written before that rule existed;
+    refusing to look up a malformed id would withhold names from exactly the
+    notes that need repairing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_EDGE_LOOKUP_IDS,
+        description=(
+            "Note ids to resolve. Unknown or unreadable ids are absent from "
+            "the response rather than reported."
         ),
     )
 
