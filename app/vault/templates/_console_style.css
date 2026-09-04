@@ -87,6 +87,11 @@ input:not([type]), input[type="text"], input[type="search"] {
   padding: 0.1rem 0.4rem; border-radius: 4px; background: var(--chip); color: var(--muted);
 }
 .muted { color: var(--muted); }
+/* Something went wrong with this request, as distinct from something being
+   absent from the corpus. `--warn` already existed; the class did not, and
+   the browse console needs one to say a lookup failed without borrowing
+   review.html's private `.dangling`, which means a broken reference. */
+.warn { color: var(--warn); }
 .small { font-size: 0.85rem; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; }
 .title { font-weight: 600; }

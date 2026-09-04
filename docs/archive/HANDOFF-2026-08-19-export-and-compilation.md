@@ -1,9 +1,14 @@
+> **Archived 2026-09-02.** A historical handoff, kept for its reasoning. It is not
+> maintained: every fact below describes the state on the date it was written and
+> may since have changed. The current picture is in [`docs/NEXT-STEPS.md`](../NEXT-STEPS.md)
+> and [`docs/HANDOFF.md`](../HANDOFF.md).
+
 # Handoff — exporter, agent metadata, promotion queue, compilation
 
 Written 2026-08-19 at the end of the session that landed the MCP adapter and ADR 0022.
 Read ADR 0022 first; this file is the execution plan for it and assumes its decisions.
 
-> **Superseded 2026-08-22 by [`HANDOFF-VAULT-IMPLEMENTATION.md`](HANDOFF-VAULT-IMPLEMENTATION.md).**
+> **Superseded 2026-08-22 by [`HANDOFF-VAULT-IMPLEMENTATION.md`](HANDOFF-2026-08-22-vault-implementation.md).**
 > The exporter and the metadata work below shipped. This file is kept for the reasoning,
 > not the plan — do not start a session from the prompt at the bottom of it.
 

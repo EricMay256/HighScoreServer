@@ -28,17 +28,16 @@ ADR 0020's verb split is what makes this expressible.
 **Authentication is our own middleware rather than the SDK's.** ``MCPServer``
 accepts a ``token_verifier``, but refuses it without ``AuthSettings``, which
 requires an ``issuer_url`` -- it is built for the OAuth resource-server profile
-and makes the server publish protected-resource metadata pointing at an
-authorization server. The vault has none. Advertising a discovery document for
-an authorization server that does not exist is worse than advertising nothing:
-a spec-compliant client would start the flow and fail, where today it simply
-sends its bearer token. So the middleware below verifies the token itself and
-the SDK's auth machinery stays switched off.
+and publishes protected-resource metadata itself. The vault's authorization
+server (ADR 0024) exists now, but its discovery documents are published by
+``oauth_routes.py``, gated on ``VAULT_PUBLIC_URL``, so that a deployment with
+no public origin advertises nothing rather than something wrong. The middleware
+below therefore verifies the token itself and the SDK's auth machinery stays
+switched off.
 
-That is the arm to replace if OAuth ever lands: ``principal.resolve_credential``
-is already shaped like the SDK's ``TokenVerifier`` protocol -- token in, scopes
-out -- so the swap is this module plus real ``AuthSettings``, and nothing
-downstream of the credential moves.
+Both kinds of token are ordinary ``hssv1_`` credentials -- operator-issued and
+OAuth-minted alike -- so ``principal.resolve_credential`` serves both, and
+nothing downstream of the credential knows which path minted it.
 
 **The middleware also carries the pre-auth guard, and must.** In ``routes.py``
 that guard is an ``APIRouter`` dependency, deliberately, so it is charged before
@@ -481,7 +480,7 @@ def _metadata_change(
 
 
 def build_vault_mcp_server() -> VaultMCPServer:
-    """Register the fifteen tools over the existing services.
+    """Register every tool over the existing services.
 
     **Every tool carries `ToolAnnotations`, and they are claims rather than
     decoration.** A client may use `readOnlyHint` to decide what to run without
@@ -491,7 +490,7 @@ def build_vault_mcp_server() -> VaultMCPServer:
     per-tool check (ADR 0021) -- but a wrong hint invites a client to skip a
     confirmation the operator wanted.
 
-    Three of the fifteen are judgement calls worth recording:
+    Three are judgement calls worth recording:
 
     - `vault_decide_amendment_proposal` is marked **destructive** even though
       it reads as an adjudication. Accepting a proposal applies it, and a
@@ -554,7 +553,7 @@ def build_vault_mcp_server() -> VaultMCPServer:
     )
     async def vault_search(
         query: Annotated[str, Field(max_length=SEARCH_QUERY_MAX_CHARS)],
-        limit: int = 10,
+        limit: Annotated[int, Field(ge=1, le=50)] = 10,
     ) -> VaultSearchResponse:
         """Find candidate notes by meaning and keyword. Does not return bodies.
 
@@ -587,17 +586,17 @@ def build_vault_mcp_server() -> VaultMCPServer:
 
         await _authorized("vault_search")
 
-        # The length bound is declared on the parameter rather than checked
-        # here, so it reaches the generated input schema as `maxLength` and a
-        # client can discover it. It applies to the raw string, exactly as
-        # HTTP's `max_length` does -- bounding one adapter before stripping and
-        # the other after would let a padded query through one and not the
-        # other, which is the parity this constant exists to hold.
+        # Both bounds are declared on the parameters rather than checked here,
+        # so they reach the generated input schema as `maxLength` and
+        # `minimum`/`maximum` and a client can discover them. `query`'s applies
+        # to the raw string, exactly as HTTP's `max_length` does -- bounding one
+        # adapter before stripping and the other after would let a padded query
+        # through one and not the other, which is the parity this constant
+        # exists to hold. Emptiness survives as a runtime check because it is
+        # about the stripped text, which no schema can express.
         text = query.strip()
         if not text:
             raise ToolError("Search query must contain non-whitespace characters")
-        if not 1 <= limit <= 50:
-            raise ToolError("limit must be between 1 and 50")
 
         service = VaultSearchService(
             transactions=VaultTransactionService(get_vault_engine()),

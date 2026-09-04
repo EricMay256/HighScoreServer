@@ -73,7 +73,7 @@ async client (as the Redis cache does) — never call it directly on the event l
 ## How to run
 
 - Tests: `pytest`
-- Lint (CI scope): `./scripts/lint.sh` on Linux/WSL, `.\scripts\lint.ps1` on Windows. Both wrap `ruff check app/ tests/ scripts/` and take `--fix` / `--format` (`-Fix` / `-Format`). They are two ports of one thing — change both together, and keep the target list in sync with the ruff step in `.github/workflows/ci.yml`.
+- Lint (CI scope): `./scripts/lint.sh` on Linux/WSL, `.\scripts\lint.ps1` on Windows. Both wrap `ruff check .` — the whole tree, because a path list left `migrations/`, `run_dev.py` and `wsgi.py` unlinted until 2026-09-02. They take `--fix` / `--format` (`-Fix` / `-Format`); `--format` deliberately stays narrow (`app/ tests/ scripts/`) so nobody reformats the reviewed migrations in passing. They are two ports of one thing — change both together, and keep them in sync with the ruff step in `.github/workflows/ci.yml`.
 - Dev server: `python run_dev.py` (interactive docs at `/docs`) works everywhere. On Linux/WSL/macOS `uvicorn app.main:app --reload` also works directly, because SelectorEventLoop is already the default there. **On Windows you must use `run_dev.py`** — psycopg3's async pool can't run on Windows' default ProactorEventLoop, and uvicorn builds its loop before importing the app, so the policy has to be set in the launcher first. `tests/conftest.py` sets the same policy for the test suite.
   - That policy code is guarded by `sys.platform == "win32"` in `run_dev.py`, `tests/conftest.py`, and several `scripts/`. It is a deliberate no-op on Linux — **do not delete it as dead code** when working from WSL.
 - **The vault MCP server is not a separate process and has nothing to start.** It is an ASGI app mounted into the host application at `/api/v1/vault/mcp/`, behind the same `VAULT_ENABLED` gate as the vault's HTTP routes. It is therefore already running wherever the host runs: under `run_dev.py` locally, and under gunicorn on Heroku. There is no Procfile entry for it and there should not be one.
@@ -98,7 +98,9 @@ async client (as the Redis cache does) — never call it directly on the event l
 
 ## Scope guardrails for current work
 
-See `docs/specs.md` for the validated-runs / cumulative-scoring spec, and ADR 0015 plus migration `0004_auth_identities` for external identities. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); SQLAlchemy ORM; converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); admin review UI; password reset; React integration of runs; additional external providers beyond Steam unless requested.
+See `docs/specs.md` for the validated-runs / cumulative-scoring spec, and ADR 0015 plus migration `0004_auth_identities` for external identities. Deferred / out of scope unless explicitly raised: asyncpg (the async migration landed on psycopg3 — see ADR 0014; asyncpg specifically remains out of scope); SQLAlchemy ORM; converting slowapi's rate-limit storage to async; server-issued seeds; normalized per-action tables (blob is used instead); password reset; React integration of runs; additional external providers beyond Steam unless requested.
+
+`docs/NEXT-STEPS.md` is the consolidated roadmap across both bounded contexts; `docs/HANDOFF.md` is the start-here for a session; `docs/archive/` holds the historical handoffs.
 
 <!-- BEGIN vault-context — delete this block when app/vault/ is extracted -->
 ### `app/vault/`

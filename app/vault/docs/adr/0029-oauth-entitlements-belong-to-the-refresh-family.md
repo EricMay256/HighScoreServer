@@ -73,3 +73,27 @@ not be widened into a reviewer; authorize a separate read-only family first.
   Historical one-token widening is not silently made permanent.
 - Access credentials remain ordinary `vault_agent_credentials` rows. No second
   bearer-token type is introduced.
+
+### Amendment, 2026-09-02: narrowing on refresh is permanent for that family
+
+A refresh request may ask for fewer scopes than the grant holds, and `_issue`
+writes the narrowed set to `vault_oauth_grants.authorized_scopes` rather than
+applying it to the minted credential alone. The narrowing is therefore durable,
+not per-token.
+
+Combined with the SDK's rule that a refresh request's scopes must be a subset
+of the presented token's, this is one-way: a family that narrows once cannot
+widen again, because every subsequent refresh is bounded by the grant it just
+reduced. Recovery is a new browser authorization, which starts a new family and
+inherits no entitlements.
+
+This is permitted by OAuth and is the safer direction — a client cannot escalate
+by asking — so the behaviour stands. It is recorded because it was
+undocumented, and because "narrow temporarily for one call" is a reasonable
+thing for a client author to assume and is not what happens. The alternative,
+projecting the narrowing onto the credential and leaving the grant alone, was
+considered and not taken: it would make the grant row disagree with what the
+family can actually do, and the grant row is the authoritative record.
+
+Entitlements are unaffected — this concerns `authorized_scopes`, the consented
+baseline, only.

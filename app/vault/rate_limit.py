@@ -89,6 +89,13 @@ LIMITS: dict[str, Limit] = {
     # pause. Priced between search and get_note -- one indexed query with no
     # embedding call, but a page of rows rather than one.
     "list_notes": Limit(per_minute=60, burst=20),
+    # Resolving a note's edges to names. One request per note opened, no body
+    # and no embedding -- cheaper than a listing, which reads a whole page of
+    # rows. Priced with browsing rather than with get_note because that is the
+    # rhythm it follows: a human clicking through linked notes, one lookup per
+    # click. Its own bucket so walking a link graph cannot starve the listing
+    # that got the reader there.
+    "resolve_edges": Limit(per_minute=60, burst=20),
     "contribute": Limit(per_minute=30, burst=20),
     # Proposals persist untrusted workflow state but do not embed or mutate the
     # corpus. A distinct bucket matches the distinct OAuth capability.
@@ -138,32 +145,25 @@ LIMITS: dict[str, Limit] = {
 # Per-principal overrides, for workloads whose shape differs from the one the
 # table above is sized for.
 #
-# The default limits describe an *interactive agent*: retrieve a little, think,
-# contribute one note. A bulk import is a different animal -- it is a queue of
-# known-good content drained as fast as the write path allows -- and at 30/min
-# a 500-note corpus takes over four hours, which is not a safety property,
-# just friction.
+# Empty, and that is the current answer rather than a placeholder. It carried
+# one entry: 'importer', granted 300/min on contribute and update because the
+# default limits describe an *interactive agent* and a bulk import is a queue
+# of known-good content drained as fast as the write path allows. That
+# principal no longer runs, and the entry outlived it -- it had also stopped
+# matching, since the runbook's corpus-migration procedure moved to a fresh
+# principal per re-import and the override keyed on the literal name.
 #
-# Deliberately code rather than configuration, for the same reason unknown
-# operations fail closed: an environment variable that widens a quota is a way
-# to unlimit production by accident, and this is a considered grant to one
-# named principal rather than a knob.
+# Removed rather than widened to a prefix: a quota grant with no workload
+# behind it is a standing exception nobody is watching, and the base limits
+# have to be right for the principals that do exist. If a bulk job returns,
+# add it back here, in code -- never as configuration, for the same reason
+# unknown operations fail closed. An environment variable that widens a quota
+# is a way to unlimit production by accident.
 #
-# 'importer' is that principal by documented convention -- HANDOFF requires the
-# importer run under it because vault_write_requests is keyed
-# (principal_id, idempotency_key), so a different name silently bypasses the
-# only duplicate guard. That requirement is what makes the name safe to key on
-# here.
-#
-# Read operations are untouched. Import writes; it does not search.
-PRINCIPAL_LIMITS: dict[str, dict[str, Limit]] = {
-    "importer": {
-        "contribute": Limit(per_minute=300, burst=60),
-        # Re-import and backfill replace rather than insert (ADR 0018), so the
-        # update path carries the same bulk shape and needs the same headroom.
-        "update": Limit(per_minute=300, burst=60),
-    },
-}
+# A returning importer also needs a stable principal name for a second reason:
+# vault_write_requests is keyed (principal_id, idempotency_key), so a
+# differently named principal silently bypasses the only duplicate guard.
+PRINCIPAL_LIMITS: dict[str, dict[str, Limit]] = {}
 
 
 def limit_for(principal_id: str, operation: str) -> Limit:

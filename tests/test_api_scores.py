@@ -681,6 +681,54 @@ def test_latest_filters_to_requested_modes_only(client, classic_mode, speedrun_m
     # Anything not requested must not appear — the filter is exclusive.
     assert returned_modes <= {classic_mode, speedrun_mode}
 
+def test_latest_total_count_on_an_empty_page_respects_the_filter(
+    client: TestClient, classic_mode: str, speedrun_mode: str
+) -> None:
+    """The fallback count must agree with the windowed one.
+
+    When `offset` lands past the last row there is no row to read
+    COUNT(*) OVER () from, so /latest counts with a separate query. That
+    fallback used to count the whole `scores` table -- every period bucket and
+    every game mode, filter or no filter -- so a client paging a filtered feed
+    read one total on its last populated page and a much larger one on the
+    empty page after it.
+    """
+    for mode, score, suffix in [
+        (classic_mode, 1000, "count_classic"),
+        (speedrun_mode, 300, "count_speedrun"),
+    ]:
+        reg = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"latest_{suffix}_{secrets.token_hex(3)}",
+                "email": f"latest_{suffix}_{secrets.token_hex(3)}@example.com",
+                "password": "testpassword123",
+            },
+        )
+        token = reg.json()["access_token"]
+        client.post(
+            "/api/leaderboard/scores",
+            json={"score": score, "game_mode": mode},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    populated = client.get(f"/api/leaderboard/latest?game_modes={classic_mode}")
+    assert populated.status_code == 200
+    windowed = populated.json()
+    assert windowed["scores"], "the filtered feed needs a row for a windowed count"
+
+    past_end = client.get(
+        f"/api/leaderboard/latest?game_modes={classic_mode}&offset=1000"
+    )
+    assert past_end.status_code == 200
+    fallback = past_end.json()
+
+    assert fallback["scores"] == []
+    assert fallback["total_count"] == windowed["total_count"], (
+        "the empty-page fallback counts a different set than the windowed count"
+    )
+
+
 def test_latest_filter_excludes_unrequested_modes(
     client, classic_mode, speedrun_mode, requires_claimed_account_mode, auth_headers
 ):

@@ -35,23 +35,34 @@ while [ $# -gt 0 ]; do
 done
 
 # CI scope. Keep in sync with .github/workflows/ci.yml ruff step.
-TARGETS=(app/ tests/ scripts/)
+#
+# The whole tree, not a path list. The list used to be `app/ tests/ scripts/`,
+# which left migrations/, run_dev.py and wsgi.py unlinted -- nine findings CI
+# could not see. A list that must be extended whenever a directory is added
+# drifts silently; `.` cannot. Ruff honours .gitignore, so .venv/ and the
+# worktrees under .claude/ are skipped.
+CHECK_TARGETS=(.)
+
+# Formatting stays narrow on purpose. `ruff format` rewrites whole files, and
+# migrations/ is reviewed historical SQL that should not be reformatted
+# wholesale by anyone who passes --format while working on something else.
+FORMAT_TARGETS=(app/ tests/ scripts/)
 
 CYAN=$'\033[36m'; RED=$'\033[31m'; GREEN=$'\033[32m'; RESET=$'\033[0m'
 
 if [ "$FORMAT" -eq 1 ]; then
     echo "${CYAN}→ Running ruff format${RESET}"
-    ruff format "${TARGETS[@]}"
+    ruff format "${FORMAT_TARGETS[@]}"
 fi
 
 if [ "$FIX" -eq 1 ]; then
     echo "${CYAN}→ Running ruff check --fix${RESET}"
     # Don't exit on this — the verify step below is the gate.
-    ruff check "${TARGETS[@]}" --fix || true
+    ruff check "${CHECK_TARGETS[@]}" --fix || true
 fi
 
 echo "${CYAN}→ Running ruff check (verify)${RESET}"
-if ! ruff check "${TARGETS[@]}"; then
+if ! ruff check "${CHECK_TARGETS[@]}"; then
     echo "${RED}✗ Lint failed${RESET}"
     exit 1
 fi

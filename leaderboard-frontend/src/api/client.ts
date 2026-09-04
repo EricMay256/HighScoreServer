@@ -1,10 +1,12 @@
 import {
   getAccessToken,
   getRefreshToken,
+  setAccessToken,
   setTokens,
   clearTokens,
 } from "../auth/store";
 import type {
+  AccessTokenResponse,
   ClaimRequest,
   GameModeConfig,
   LeaderboardResponse,
@@ -229,12 +231,20 @@ export async function logout(): Promise<void> {
   }
 }
 
-export function rename(body: RenameRequest): Promise<void> {
-  return request<void>("/api/auth/rename", {
+export async function rename(
+  body: RenameRequest,
+): Promise<AccessTokenResponse> {
+  // The access token carries the username claim the UI reads, so the new one
+  // has to be stored or the header keeps showing the old name. The refresh
+  // token is deliberately untouched: renaming does not end the session, and
+  // the server no longer mints a replacement for it.
+  const token = await request<AccessTokenResponse>("/api/auth/rename", {
     method: "POST",
     body,
     auth: true,
   });
+  setAccessToken(token.access_token);
+  return token;
 }
 
 export async function claim(body: ClaimRequest): Promise<TokenResponse> {

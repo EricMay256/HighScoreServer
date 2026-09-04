@@ -1,13 +1,18 @@
 import os
 import secrets
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 from jose import jwt
 
+from app import auth_routes
+from app.auth import create_access_token
 from app.auth_identities import NATIVE_AUTH_PROVIDER
+from app.limiter import limiter
 from app.steam_auth import (
     SteamAuthConfigError,
     SteamAuthInvalidTicket,
@@ -459,7 +464,114 @@ def test_rename_happy_path(client):
         json={"username": new_name},
         headers=bearer(tokens["access_token"]),
     )
-    assert response.status_code == 204
+    assert response.status_code == 200
+
+
+def test_rename_returns_a_token_carrying_the_new_username(client: TestClient) -> None:
+    """The access token carries `username`, so a rename must reissue it.
+
+    /rename used to return 204, leaving every client showing the old name
+    until the access token expired and a refresh happened to mint a new one.
+    """
+
+    tokens = register(client)
+    new_name = f"renamed_{secrets.token_hex(4)}"
+
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": new_name},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert decode_token(body["access_token"])["username"] == new_name
+    # The access token only. A refresh token carries no username, so a rename
+    # does not invalidate it and there is nothing here to replace.
+    assert "refresh_token" not in body
+
+    # The caller's existing refresh token still works and still belongs to the
+    # same account, so the pair it now holds does not disagree with itself.
+    refreshed = client.post(
+        "/api/auth/refresh", json={"refresh_token": tokens["refresh_token"]}
+    )
+    assert refreshed.status_code == 200
+    assert decode_token(refreshed.json()["access_token"])["username"] == new_name
+
+
+def test_renaming_repeatedly_mints_no_extra_refresh_tokens(
+    client: TestClient,
+) -> None:
+    """Rename used to add a live credential every time it was called.
+
+    It returned a full TokenResponse, minting a refresh token through
+    `create_refresh_token`, which inserts without revoking anything. The
+    previous token stayed valid for its full lifetime, so five renames left
+    six usable credentials and five surplus rows -- unbounded, because nothing
+    limits how often a client may rename.
+
+    /claim has the same shape and is safe from it only because it can succeed
+    once per account.
+    """
+
+    tokens = register(client)
+    user_id = int(decode_token(tokens["access_token"])["sub"])
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = %s", (user_id,)
+            )
+            before = cur.fetchone()[0]
+    finally:
+        conn.close()
+
+    access = tokens["access_token"]
+    for index in range(3):
+        response = client.post(
+            "/api/auth/rename",
+            json={"username": f"norotate_{secrets.token_hex(4)}_{index}"},
+            headers=bearer(access),
+        )
+        assert response.status_code == 200
+        access = response.json()["access_token"]
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = %s", (user_id,)
+            )
+            after = cur.fetchone()[0]
+    finally:
+        conn.close()
+
+    assert after == before, "a rename minted a refresh token nobody asked for"
+
+
+def test_rename_preserves_guest_status_in_the_reissued_token(client: TestClient) -> None:
+    """Renaming is not a claim: `is_guest` must survive the reissue.
+
+    The new token is built from the row the UPDATE returns rather than from
+    the old token's claims, so this pins that the row's `is_guest` is what
+    reaches it -- a rename that silently promoted a guest would hand out
+    access to guest-gated modes.
+    """
+
+    tokens = guest(client)
+    new_name = f"renamed_guest_{secrets.token_hex(4)}"
+
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": new_name},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    claims = decode_token(response.json()["access_token"])
+    assert claims["username"] == new_name
+    assert claims["is_guest"] is True
 
 
 def test_rename_taken_username_returns_409(client):
@@ -490,7 +602,7 @@ def test_guest_can_rename(client):
         json={"username": new_name},
         headers=bearer(tokens["access_token"]),
     )
-    assert response.status_code == 204
+    assert response.status_code == 200
 
 
 def test_rename_to_guest_username_returns_409(client):
@@ -643,3 +755,217 @@ def test_claimed_account_can_submit_to_requires_auth_mode(client):
         headers=bearer(claimed_tokens["access_token"]),
     )
     assert response.status_code == 201
+
+
+def test_replaying_a_guest_token_after_claiming_does_not_hash(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim path must not pay bcrypt to discover there is nothing to do.
+
+    A successful claim does not revoke the guest token that authorized it, and
+    the JWT's `is_guest` claim stays true for the rest of its hour. The handler
+    trusted that claim, hashed the password, and only then learned from the
+    UPDATE that the account was already claimed -- so replaying one token drove
+    an unbounded number of bcrypt rounds, each occupying an executor thread,
+    on a route with no rate limit.
+
+    Hashing is the amplifier, so hashing is what this asserts on: the replay
+    must be refused without calling it.
+    """
+
+    calls: list[str] = []
+    original = auth_routes.hash_password
+
+    async def counting_hash(plain: str) -> str:
+        calls.append(plain)
+        return await original(plain)
+
+    monkeypatch.setattr(auth_routes, "hash_password", counting_hash)
+
+    tokens = guest(client)
+    body = {
+        "email": f"replay_{secrets.token_hex(4)}@example.com",
+        "password": "testpassword123",
+    }
+
+    first = client.post("/api/auth/claim", json=body, headers=bearer(tokens["access_token"]))
+    assert first.status_code == 200
+    assert len(calls) == 1, "the real claim should hash exactly once"
+
+    # Same token, still carrying is_guest=true, now naming a claimed account.
+    for _ in range(3):
+        replay = client.post(
+            "/api/auth/claim",
+            json={**body, "email": f"replay_{secrets.token_hex(4)}@example.com"},
+            headers=bearer(tokens["access_token"]),
+        )
+        assert replay.status_code == 400
+        assert replay.json()["detail"] == "Account is already claimed"
+
+    assert len(calls) == 1, "a replayed guest token reached bcrypt"
+
+
+# The /claim bucket, and a burst comfortably past twice it -- see the test.
+CLAIM_LIMIT_PER_MINUTE = 5
+ATTEMPTS = 12
+
+
+def test_claim_is_actually_refused_once_its_bucket_empties(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enforcement, not documentation.
+
+    This replaces an assertion on the OpenAPI 429, which was declared by hand
+    in `responses=` and therefore survived removing `@limiter.limit` entirely
+    -- verified: the route kept its documented 429 while enforcing nothing.
+    A test that passes with the protection deleted is worse than no test.
+
+    The suite disables the limiter globally, so this enables it for one test
+    and resets the buckets either side. The guest is created first, while the
+    limiter is still off, because /guest has a 5/minute bucket of its own and
+    would otherwise spend part of what is being measured.
+
+    The burst is deliberately more than twice the limit. slowapi's default
+    storage is a fixed window, so a burst that straddles a minute boundary
+    gets a fresh allowance partway through -- which made an exact
+    "the sixth request is refused" assertion flake once in a full-suite run.
+    With more than 2x the limit in under a second, one boundary can fall
+    anywhere and still leave one side of it over the limit, so a refusal is
+    guaranteed without the test knowing where the boundary is.
+    """
+
+    tokens = guest(client)
+    body = {
+        "email": f"bucket_{secrets.token_hex(4)}@example.com",
+        "password": "testpassword123",
+    }
+
+    limiter.reset()
+    monkeypatch.setattr(limiter, "enabled", True)
+    try:
+        statuses = []
+        for _ in range(ATTEMPTS):
+            reply = client.post(
+                "/api/auth/claim",
+                json={**body, "email": f"bucket_{secrets.token_hex(4)}@example.com"},
+                headers=bearer(tokens["access_token"]),
+            )
+            statuses.append(reply.status_code)
+    finally:
+        limiter.reset()
+
+    assert statuses[0] == 200, f"the first claim should succeed: {statuses}"
+    assert 429 in statuses, f"the bucket never refused anything: {statuses}"
+
+    # Refused by the bucket only after it had let the limit through, so this
+    # also catches a limit set far tighter than intended.
+    first_refusal = statuses.index(429)
+    assert first_refusal >= CLAIM_LIMIT_PER_MINUTE, (
+        f"refused after only {first_refusal} requests: {statuses}"
+    )
+    # Everything before it was refused on account state, not by the bucket --
+    # the two guards are distinct and this says which did the work.
+    assert set(statuses[1:first_refusal]) <= {400}, (
+        f"expected state refusals before the bucket engaged: {statuses}"
+    )
+
+
+def test_rename_invalidates_the_leaderboard_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leaderboard rows carry the username, and cached ones carry the old one.
+
+    Without this the header updates from the new token immediately while the
+    board underneath keeps the previous name for the 120s TTL -- one page
+    disagreeing with itself about who the reader is.
+
+    The whole `leaderboard:` namespace rather than this user's modes: a rename
+    does not say which boards they appear on, and rename is rare enough that
+    refilling the cache costs less than the query to find out.
+    """
+
+    deleted: list[str] = []
+
+    class RecordingCache:
+        async def delete_prefix(self, prefix: str) -> int:
+            deleted.append(prefix)
+            return 0
+
+    monkeypatch.setattr(auth_routes, "get_cache", lambda: RecordingCache())
+
+    tokens = register(client)
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": f"cachebust_{secrets.token_hex(4)}"},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+    assert deleted == ["leaderboard:"]
+
+
+def test_rename_survives_an_unavailable_cache(client: TestClient) -> None:
+    """Invalidation is best effort; a dead cache is a stale name, not a 500.
+
+    The suite runs with `get_cache` raising, so every other rename test already
+    exercises this path -- but that is incidental, and this states it, because
+    the failure it guards against is a rename that reports failure after having
+    already renamed the user.
+    """
+
+    tokens = register(client)
+    response = client.post(
+        "/api/auth/rename",
+        json={"username": f"nocache_{secrets.token_hex(4)}"},
+        headers=bearer(tokens["access_token"]),
+    )
+
+    assert response.status_code == 200
+
+
+def test_rename_never_extends_the_access_token(client: TestClient) -> None:
+    """A repeatable reissue must not renew the session it was authorized by.
+
+    /rename is authorized by an access token and may be called as often as its
+    bucket allows. `create_access_token` sets `exp` an hour out, so returning a
+    default-lifetime token let any still-valid one mint a successor with a
+    fresh hour -- indefinitely, and a stolen token equally, long after the
+    refresh token it descended from had expired or been revoked. The refresh
+    token would stop being what bounds a session.
+
+    The reissue exists to correct the `username` claim. It carries the deadline
+    it was given.
+    """
+
+    tokens = register(client)
+    claims = decode_token(tokens["access_token"])
+
+    # Deliberately not the token `register` handed back. Its `exp` is an hour
+    # out, and so is a freshly minted one, so within the same second the two
+    # are equal and the assertion holds whether or not the deadline is carried
+    # forward -- which is exactly how the first version of this test passed
+    # against the bug. A five-minute deadline cannot be confused with a fresh
+    # hour.
+    access = create_access_token(
+        int(claims["sub"]),
+        claims["username"],
+        is_guest=claims["is_guest"],
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    original_exp = decode_token(access)["exp"]
+    fresh_hour = int((datetime.now(UTC) + timedelta(minutes=60)).timestamp())
+    assert original_exp < fresh_hour - 60, "the fixture must be distinguishable"
+
+    for index in range(3):
+        reply = client.post(
+            "/api/auth/rename",
+            json={"username": f"noextend_{secrets.token_hex(4)}_{index}"},
+            headers=bearer(access),
+        )
+        assert reply.status_code == 200
+        access = reply.json()["access_token"]
+
+        reissued = decode_token(access)
+        assert reissued["exp"] == original_exp, (
+            f"rename {index} moved the expiry: {reissued['exp']} != {original_exp}"
+        )

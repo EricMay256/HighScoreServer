@@ -47,7 +47,7 @@ from .domain import (
 from .facets import normalize_facets
 from .search import SearchResult
 from .snippet import lead_snippet
-from .wikilinks import looks_like_a_name
+from .wikilinks import looks_like_a_name, slug_of
 
 
 # The transport bounds the write path accepts, named because more than one
@@ -58,7 +58,29 @@ from .wikilinks import looks_like_a_name
 MAX_BODY_CHARS = 100_000
 MAX_RATIONALE_CHARS = 2_000
 MAX_DOCUMENT_ID_CHARS = 256
+# The cap on edges one *note* may declare. Distinct from
+# MAX_EDGE_LOOKUP_IDS below, which bounds one lookup request -- they were
+# both called MAX_EDGE_IDS in different modules, with different values.
 MAX_EDGE_IDS = 50
+
+# The cap on ids one edge-resolution request may name. Larger than the
+# per-note cap because a compiled page may cite more sources than a note
+# may declare edges, and the console batches to this size.
+MAX_EDGE_LOOKUP_IDS = 100
+
+# The cap on each edge list of a compiled page. Chosen from the other end: the
+# browse console resolves the *union* of `source_ids` and `related_ids`, in
+# batches of MAX_EDGE_LOOKUP_IDS, and stops after ten of them to leave the
+# reader quota for their next click. Two lists of this size are exactly that
+# thousand, so anything the server accepts, the console can resolve.
+#
+# Left unbounded, ids past the console's thousandth were unreachable forever:
+# a retry restarts at the first id, so the tail was never requested, while the
+# page said "retry to resolve them". A number nobody can reach beats a promise
+# nobody can keep. It is generous against the corpus it governs -- notes cap
+# their own edges at 50, and a page citing 500 sources would have to cite five
+# times every document that exists.
+MAX_PAGE_EDGE_IDS = 500
 MAX_AMENDMENT_BATCH_DECISIONS = 50
 
 
@@ -1299,6 +1321,71 @@ class VaultNoteSummary(BaseModel):
     )
 
 
+class VaultNoteEdge(BaseModel):
+    """One resolved edge: an id, and the two ways a person refers to it.
+
+    Deliberately smaller than ``VaultNoteSummary``. This answers "what is this
+    id called", which a link label needs; it is not a listing row and must not
+    become one by accretion, or every surface showing edges pays a listing's
+    weight to draw a few link texts.
+
+    ``slug`` rather than ``vault_path`` because the slug is what a wikilink
+    carries (ADR 0022's amendment, and what the export writes), and because a
+    path is a location the caller has no use for here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    title: str
+    slug: str = Field(
+        description=(
+            "The leaf of `vault_path`, which is the title's slug -- the name a "
+            "`[[wikilink]]` to this note carries."
+        ),
+    )
+
+
+class VaultNoteEdgeLookupRequest(BaseModel):
+    """The ids whose names a caller wants.
+
+    A body rather than a query string, and that is a transport decision with a
+    reason. Ids are not length-bounded anywhere -- `validate_edge_ids` checks
+    shape and uniqueness, not size -- so a hundred of them in a query string
+    can exceed the 8,192-byte request line Heroku's router accepts, and the
+    request fails before any handler sees it. A body has no such ceiling.
+
+    Deliberately *not* run through `validate_edge_ids`. This reads what the
+    corpus already holds, including rows written before that rule existed;
+    refusing to look up a malformed id would withhold names from exactly the
+    notes that need repairing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_EDGE_LOOKUP_IDS,
+        description=(
+            "Note ids to resolve. Unknown or unreadable ids are absent from "
+            "the response rather than reported."
+        ),
+    )
+
+
+class VaultNoteEdgeResponse(BaseModel):
+    """Every requested id the caller may read, in no meaningful order.
+
+    An id that resolved to nothing readable is absent rather than reported: see
+    the endpoint, where that is a disclosure decision rather than a shape one.
+    The caller holds the ids it asked for and indexes this by `note_id`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    edges: list[VaultNoteEdge]
+
+
 class VaultNoteListResponse(BaseModel):
     """One ordered page of notes, keyed and paged by ``vault_path``."""
 
@@ -1575,6 +1662,22 @@ def note_summary(document: VaultDocumentBrief) -> VaultNoteSummary:
         summary=document.summary,
         updated_at=document.updated_at,
         content_revision=document.content_revision,
+    )
+
+
+def note_edge(document: VaultDocumentBrief) -> VaultNoteEdge:
+    """Project one resolved edge.
+
+    Beside the other projections for the reason they are all here: a projection
+    written at a transport drifts from the other transports. `slug_of` is the
+    same helper the export renders `[[slug]]` with, so a link in the console
+    and a link in the exported tree name a note identically.
+    """
+
+    return VaultNoteEdge(
+        note_id=document.id,
+        title=document.title,
+        slug=slug_of(document.vault_path),
     )
 
 
@@ -1913,6 +2016,7 @@ class VaultCompilePageRequest(BaseModel):
     body: str = Field(min_length=1, max_length=MAX_BODY_CHARS)
     source_ids: list[str] = Field(
         min_length=1,
+        max_length=MAX_PAGE_EDGE_IDS,
         description=(
             "The notes this page was synthesized from. Validated: unlike a "
             "note's related_ids, provenance naming something that does not "
@@ -1921,7 +2025,9 @@ class VaultCompilePageRequest(BaseModel):
     )
     summary: str | None = Field(default=None, max_length=2_000)
     tags: list[str] = Field(default_factory=list)
-    related_ids: list[str] = Field(default_factory=list)
+    related_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_PAGE_EDGE_IDS
+    )
     page_id: str | None = Field(
         default=None,
         description=(
@@ -1929,6 +2035,27 @@ class VaultCompilePageRequest(BaseModel):
             "plan item's `page_id`."
         ),
     )
+
+    @field_validator("related_ids", "source_ids")
+    @classmethod
+    def validate_ids(cls, ids: list[str]) -> list[str]:
+        """The same rule every other edge-writing surface obeys.
+
+        This model shipped without it, so a compiled page could store blanks,
+        duplicates, titles and `[[wikilinks]]` in `related_ids` -- exactly the
+        corruption ADR 0030 draws the line against and
+        `scripts/resolve_vault_wikilinks.py` exists to repair, reintroduced on
+        a path that writes to the corpus. Duplicate `source_ids` also slipped
+        past the existence check, since resolving them collapses the list.
+
+        Deliberately no `max_length` beside it. The other write models cap
+        edges at 50; a compiled page is synthesized *from* notes and may
+        legitimately name many more, so a cardinality bound here is a separate
+        decision about what a page may cite -- not a number to inherit by
+        copying the line above.
+        """
+
+        return validate_edge_ids(ids)
 
 
 class VaultCompileSettleRequest(BaseModel):

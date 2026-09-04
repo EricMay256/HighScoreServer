@@ -17,8 +17,10 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import delete, select, text, update
 
+from app.vault.api_models import MAX_PAGE_EDGE_IDS, VaultCompilePageRequest
 from app.vault.auth import VaultScope
 from app.vault.domain import (
     DocumentKind,
@@ -1174,3 +1176,66 @@ def test_declining_requires_the_compile_scope(client: TestClient) -> None:
         assert response.status_code == 403
     finally:
         _drop(writer_id)
+
+
+def test_a_compiled_page_obeys_the_shared_edge_id_rule() -> None:
+    """This model shipped without the validator every other write path has.
+
+    `VaultContributionRequest` and `VaultMetadataUpdateRequest` both run
+    `validate_edge_ids`; this one did not, so a compiled page could store
+    blanks, duplicates, titles and `[[wikilinks]]` in `related_ids`. That is
+    the corruption ADR 0030 draws the line against and
+    `scripts/resolve_vault_wikilinks.py` exists to repair -- reintroduced on a
+    path that writes to the corpus, which is how it got in the first time.
+
+    Duplicate `source_ids` mattered for a second reason: resolving them
+    collapses the list, so a duplicate passed the existence check that is
+    supposed to make provenance trustworthy.
+    """
+
+    for field in ("related_ids", "source_ids"):
+        for ids in (
+            ["[[Some Note]]"],   # a wikilink
+            ["Some Note"],       # a title with spaces
+            ["   "],             # a blank
+            ["dup", "dup"],      # a duplicate
+        ):
+            payload = {"title": "t", "body": "b", "source_ids": ["seed"]}
+            payload[field] = ids
+            with pytest.raises(ValidationError, match=field):
+                VaultCompilePageRequest(**payload)
+
+    ok = VaultCompilePageRequest(
+        title="t", body="b", source_ids=["abc123"], related_ids=["def456"]
+    )
+    assert ok.source_ids == ["abc123"]
+    assert ok.related_ids == ["def456"]
+
+
+def test_a_compiled_page_is_capped_where_the_console_can_still_read_it() -> None:
+    """Not the note limit, and not unbounded either.
+
+    Notes cap their own edges at 50; a page is synthesized *from* notes and
+    may cite many more, so inheriting that number would refuse valid pages.
+    But unbounded was worse than either. The browse console resolves the union
+    of both lists in batches and stops after ten of them, so ids past its
+    thousandth were unreachable *permanently* -- a retry restarts at the first
+    id and never requests the tail -- while the page offered "retry to resolve
+    them".
+
+    So the bound comes from the other end: two lists of MAX_PAGE_EDGE_IDS are
+    exactly what the console can resolve. Anything the server accepts, the
+    console can read. `test_browse_console.py` asserts that arithmetic, since
+    the two halves live in different files.
+    """
+
+    at_the_cap = [f"{index:032x}" for index in range(MAX_PAGE_EDGE_IDS)]
+
+    page = VaultCompilePageRequest(title="t", body="b", source_ids=at_the_cap)
+    assert len(page.source_ids) == MAX_PAGE_EDGE_IDS
+
+    for field in ("source_ids", "related_ids"):
+        payload = {"title": "t", "body": "b", "source_ids": ["seed"]}
+        payload[field] = [f"{index:032x}" for index in range(MAX_PAGE_EDGE_IDS + 1)]
+        with pytest.raises(ValidationError, match=field):
+            VaultCompilePageRequest(**payload)

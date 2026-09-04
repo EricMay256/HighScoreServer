@@ -323,23 +323,20 @@ def test_the_client_key_tolerates_a_missing_peer() -> None:
     assert client_ip(request) == "unknown"
 
 
-def test_importer_gets_a_wider_contribution_quota() -> None:
-    """Bulk import is a different workload from an interactive agent.
+def test_no_principal_ships_with_a_widened_quota() -> None:
+    """The override table is empty, and every principal is on the base limits.
 
-    At the shared 30/min a 500-note corpus takes over four hours, which is
-    friction rather than a safety property. The grant is to one named principal
-    on the write operations only.
+    It held one entry, for 'importer', which no longer runs. A standing quota
+    exception with no workload behind it is one nobody is watching, and it
+    weakens the reason to keep the base limits honest -- so the table is empty
+    rather than carrying a grant against a future need.
+
+    This is not a rule against overrides. Adding one back is a deliberate act
+    in code, which is what the guards below bound; this pins that today none
+    is in effect.
     """
 
-    assert limit_for("importer", "contribute").per_minute > LIMITS["contribute"].per_minute
-    assert limit_for("importer", "update").per_minute > LIMITS["update"].per_minute
-
-
-def test_the_override_does_not_touch_reads() -> None:
-    """Import writes; it does not search."""
-
-    for operation in ("search", "get_note"):
-        assert limit_for("importer", operation) is LIMITS[operation]
+    assert PRINCIPAL_LIMITS == {}
 
 
 def test_every_other_principal_keeps_the_shared_quota() -> None:
@@ -427,28 +424,41 @@ def test_pruning_uses_the_effective_quota_not_the_base_one() -> None:
 
 
 def test_an_overridden_bucket_is_pruned_on_its_own_refill_time() -> None:
-    """The benign direction, which the shipped override actually takes.
+    """The benign direction: an override that refills faster than the base.
 
-    The importer's contribute bucket refills in 12s rather than the base 40s,
-    so it becomes prunable sooner. Retaining it longer was never a correctness
-    bug, but pruning on the effective quota is what makes that a property of
-    the code instead of the constants.
+    Such a bucket becomes prunable sooner. Retaining it longer was never a
+    correctness bug, but pruning on the effective quota is what makes that a
+    property of the code instead of the constants.
+
+    Injected rather than read from PRINCIPAL_LIMITS, which ships empty since
+    the importer's grant was removed. The sibling test above covers the
+    direction that *is* wrong; between them the shape of the shipped table is
+    irrelevant, which is the point.
     """
 
     limiter = TokenBucketLimiter()
-    override = limit_for("importer", "contribute")
+    # Rate 10x with burst only 3x, so the effective bucket refills in 12s
+    # where the base takes 40s.
+    fast = Limit(per_minute=300, burst=60)
     base = LIMITS["contribute"]
-    override_full_refill = override.burst / override.refill_per_second
-    assert override_full_refill < base.burst / base.refill_per_second
+    fast_full_refill = fast.burst / fast.refill_per_second
+    assert fast_full_refill < base.burst / base.refill_per_second
 
-    async def exercise() -> None:
-        await limiter.check("importer", "contribute", now=0.0)
+    async def exercise(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(PRINCIPAL_LIMITS, "bulk-writer", {"contribute": fast})
+        assert limit_for("bulk-writer", "contribute") is fast
+
+        await limiter.check("bulk-writer", "contribute", now=0.0)
         assert limiter._buckets
 
-        limiter._prune(override_full_refill)
+        limiter._prune(fast_full_refill)
         assert limiter._buckets == {}
 
-    asyncio.run(exercise())
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        asyncio.run(exercise(monkeypatch))
+    finally:
+        monkeypatch.undo()
 
 
 def test_pruning_skips_an_operation_the_base_table_does_not_know() -> None:

@@ -41,10 +41,10 @@ label.check { display: flex; gap: 0.4rem; align-items: center; font-size: 0.88re
   </div>
 </main>
 
-<script id="cfg" type="application/json">{{ {"apiBase": api_base, "scopes": scopes,
+<script id="cfg" type="application/json" nonce="{{ csp_nonce }}">{{ {"apiBase": api_base, "scopes": scopes,
   "consolePath": console_path, "clientName": client_name,
   "storePrefix": store_prefix} | tojson }}</script>
-<script>
+<script nonce="{{ csp_nonce }}">
 "use strict";
 {% include "_console_session.js" %}
 
@@ -463,14 +463,49 @@ async function renderCases() {
 
     /* A duplicate decision cannot be made from the candidate alone -- the
        question is whether it duplicates *something*, and that something has to
-       be on screen. Both sides must load before either button is live. */
+       be on screen. Both sides must load before either button is live.
+
+       The evidence bodies load on expand rather than up front. Rendering the
+       queue used to fetch every similar note of every case, and get_note is
+       quota-limited at 120/min with a burst of 30 per principal, so a handful
+       of cases with five pieces of evidence each drained the burst and the
+       rest of the queue rendered as errors. The stored `similar` already
+       carries id, title and score, which is what triage needs; only the body
+       costs a request, and only the reviewer asks for it. The gate below is
+       unchanged in substance -- it now counts comparisons the reviewer opened
+       instead of ones the page prefetched. */
+    const actions = el("div", "row");
+    const note = document.createElement("input");
+    note.placeholder = "decision note (optional)";
+    note.className = "grow";
+    note.style.cssText = "padding:.35rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)";
+    const keep = el("button", "accept", "Not a duplicate — publish");
+    const drop = el("button", "reject", "Duplicate — delete");
+    const gate = el("span", "small dangling", "");
+    actions.append(note, keep, drop, gate);
+
+    let candidateLoaded = false;
+    let evidenceTotal = 0;
+    let evidenceRead = 0;
     let evidenceLoaded = false;
+    const refreshGate = () => {
+      evidenceLoaded =
+        candidateLoaded && evidenceTotal > 0 && evidenceRead === evidenceTotal;
+      keep.disabled = drop.disabled = !evidenceLoaded;
+      gate.textContent = evidenceLoaded
+        ? ""
+        : "Deciding is disabled until the candidate has loaded and every note it"
+          + " is compared against has been opened (" + evidenceRead + " of "
+          + evidenceTotal + " read).";
+    };
+
     try {
       const detail = await api("/reviews/" + summary.review_case_id);
       const candidate = detail.candidate;
       const evidence = (detail.review_case && detail.review_case.similar) || summary.similar || [];
 
       if (candidate) {
+        candidateLoaded = true;
         titleSlot.textContent = candidate.title;
         const d = document.createElement("details");
         d.open = true;
@@ -486,7 +521,10 @@ async function renderCases() {
         body.appendChild(el("p", "small dangling",
           "This case records no similar notes, so there is no evidence of duplication to weigh."));
       }
-      let fetched = 0;
+      /* Counts every piece of evidence, including one naming no note id: such
+         a case stays undecidable, which is the behaviour before bodies moved
+         behind the expander. */
+      evidenceTotal = evidence.length;
       for (const item of evidence) {
         const row = el("div", "card");
         const rowHead = el("div", "row");
@@ -497,46 +535,41 @@ async function renderCases() {
         }
         row.appendChild(rowHead);
         if (item.note_id) {
-          try {
-            const other = await api("/notes/" + item.note_id);
-            const d = document.createElement("details");
-            d.appendChild(el("summary", null, "Body of the note it may duplicate"));
-            d.appendChild(el("pre", "mono", other.body));
-            row.appendChild(d);
-            fetched++;
-          } catch (err) {
-            if (err.sessionEnded) throw err;
-            row.appendChild(el("p", "small dangling",
-              "Could not load this note for comparison: " + err.message));
-          }
+          const d = document.createElement("details");
+          d.appendChild(el("summary", null, "Body of the note it may duplicate (loads on open)"));
+          const slot = el("div", "small muted", "…");
+          d.appendChild(slot);
+          let fetched = false;
+          d.addEventListener("toggle", async () => {
+            if (!d.open || fetched) return;
+            fetched = true;
+            try {
+              const other = await api("/notes/" + item.note_id);
+              slot.replaceChildren(el("pre", "mono", other.body));
+              evidenceRead++;
+              refreshGate();
+            } catch (err) {
+              if (err.sessionEnded) return;
+              fetched = false;
+              slot.replaceChildren(el("p", "small dangling",
+                "Could not load this note for comparison: " + err.message));
+            }
+          });
+          row.appendChild(d);
         } else {
           row.appendChild(el("p", "small dangling", "This evidence names no note id."));
         }
         body.appendChild(row);
       }
-      /* Publishing needs the candidate; deleting needs to be justified by at
-         least one comparison the reviewer could actually read. */
-      evidenceLoaded = Boolean(candidate) && fetched > 0 && fetched === evidence.length;
     } catch (err) {
       if (err.sessionEnded) throw err;
       body.appendChild(el("p", "small dangling", "Could not load this case: " + err.message));
     }
 
-    const actions = el("div", "row");
-    const note = document.createElement("input");
-    note.placeholder = "decision note (optional)";
-    note.className = "grow";
-    note.style.cssText = "padding:.35rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink)";
-    const keep = el("button", "accept", "Not a duplicate — publish");
-    const drop = el("button", "reject", "Duplicate — delete");
-    actions.append(note, keep, drop);
+    /* Publishing needs the candidate; deleting needs to be justified by every
+       comparison the reviewer actually read. */
+    refreshGate();
     card.appendChild(actions);
-
-    if (!evidenceLoaded) {
-      keep.disabled = drop.disabled = true;
-      actions.appendChild(el("span", "small dangling",
-        "Deciding is disabled until the candidate and every note it is compared against have loaded. Refresh to retry."));
-    }
 
     const decide = async (decision) => {
       if (!evidenceLoaded) return;

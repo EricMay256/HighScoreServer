@@ -194,6 +194,57 @@ def test_decisions_are_withheld_until_the_evidence_loads() -> None:
     assert "if (!loaded) {\n    check.disabled = true;" in page
 
 
+def test_evidence_bodies_load_on_expand_not_while_rendering_the_queue() -> None:
+    """Painting the queue must not spend the reviewer's `get_note` burst.
+
+    The cases tab used to await `GET /notes/{id}` for every similar note of
+    every pending case while rendering. `get_note` is quota-limited at 120/min
+    with a burst of 30 per principal, so a handful of cases carrying five
+    pieces of evidence each drained the burst and the remaining cases rendered
+    as errors -- on the surface a reviewer meets precisely when the queue is
+    long enough to matter.
+
+    The stored `similar` already carries id, title and score, which is what
+    triage needs. Only the body costs a request, and only once the reviewer
+    asks for it. The amendment queue was fixed for this same shape; this pins
+    that the cases tab does not drift back.
+    """
+
+    page = _page()
+
+    loop = page.index("for (const item of evidence)")
+    toggle = page.index('d.addEventListener("toggle"', loop)
+    fetch = page.index('await api("/notes/"', loop)
+    assert toggle < fetch, (
+        "the evidence body must be fetched from the toggle handler, so that "
+        "rendering the queue costs no get_note requests at all"
+    )
+    assert "(loads on open)" in page
+
+
+def test_deciding_still_requires_every_comparison_to_have_been_read() -> None:
+    """Deferring the fetch must not quietly weaken the gate it fed.
+
+    The old gate counted bodies the page had prefetched; the new one counts
+    bodies the reviewer opened, which is the same rule reached more honestly.
+    What must not change is that a case is undecidable until the candidate and
+    every piece of its evidence are on screen -- including evidence naming no
+    note id, which can never be read and so leaves the case undecidable.
+    """
+
+    page = _page()
+
+    assert "evidenceTotal = evidence.length;" in page, (
+        "every piece of evidence counts toward the gate, including one that "
+        "names no note id"
+    )
+    assert (
+        "candidateLoaded && evidenceTotal > 0 && evidenceRead === evidenceTotal"
+        in page
+    )
+    assert "if (!evidenceLoaded) return;" in page
+
+
 def test_the_console_keeps_and_rotates_its_refresh_token() -> None:
     """Discarding it silently breaks the documented "grant it once" workflow.
 
@@ -619,6 +670,25 @@ def test_the_header_prefers_the_label_and_falls_back_to_the_credential_id() -> N
 
     assert "if (IDENTITY && IDENTITY.label) return IDENTITY.label;" in page
     assert 'return "credential " + (credentialId() || "?");' in page
+
+
+def test_the_credential_id_is_asked_for_before_it_is_parsed() -> None:
+    """`GET /authorization` states the id; the token only implies it.
+
+    The console parsed `TOKEN.split("_")[1]`, a left split, while the server
+    and the package's AGENTS.md split from the right because a credential id
+    may contain `_` and the secret is hex. Every id minted today is hex too,
+    so the left split works -- and would stop working silently, on the exact
+    string the operator is told to copy into the entitlement command.
+    """
+
+    page = _page()
+
+    assert "if (IDENTITY && IDENTITY.credential_id) return IDENTITY.credential_id;" in page
+    assert 'TOKEN.lastIndexOf("_")' in page, (
+        "the fallback parse must split from the right, as the server does"
+    )
+    assert 'TOKEN.split("_")[1]' not in page
 
 
 def test_the_label_reaches_the_page_as_text_and_never_as_markup() -> None:

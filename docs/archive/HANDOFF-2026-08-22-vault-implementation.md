@@ -1,3 +1,8 @@
+> **Archived 2026-09-02.** A historical handoff, kept for its reasoning. It is not
+> maintained: every fact below describes the state on the date it was written and
+> may since have changed. The current picture is in [`docs/NEXT-STEPS.md`](../NEXT-STEPS.md)
+> and [`docs/HANDOFF.md`](../HANDOFF.md).
+
 # Handoff — implementing the accepted vault decisions
 
 Written 2026-08-22, at the end of the session that shipped the exporter, the review flow, the

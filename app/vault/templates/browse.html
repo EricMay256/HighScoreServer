@@ -69,10 +69,10 @@ textarea {
   </div>
 </main>
 
-<script id="cfg" type="application/json">{{ {"apiBase": api_base, "scopes": scopes,
+<script id="cfg" type="application/json" nonce="{{ csp_nonce }}">{{ {"apiBase": api_base, "scopes": scopes,
   "consolePath": console_path, "clientName": client_name,
   "storePrefix": store_prefix} | tojson }}</script>
-<script>
+<script nonce="{{ csp_nonce }}">
 "use strict";
 {% include "_console_session.js" %}
 
@@ -257,10 +257,153 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
 }
 
 /* ---------- One note ---------- */
-function edgeList(label, ids) {
+
+/* Must not exceed the server's MAX_EDGE_LOOKUP_IDS -- `/notes/edges` answers 422 for
+   a longer list, and the console would then resolve nothing for exactly the
+   notes with the most edges. `tests/vault/test_browse_console.py` asserts the
+   two agree, since they live in different files and nothing else would say. */
+const EDGE_LOOKUP_BATCH = 100;
+
+/* The most requests one note may spend resolving its edges. The quota bursts
+   at 20, and nothing bounds a compiled page's `source_ids`, so a large enough
+   page could drain the whole allowance and leave the reader's next click
+   rate-limited. Half the burst keeps that headroom; ids past it are honestly
+   marked "not looked up", because they were not. */
+const EDGE_LOOKUP_MAX_BATCHES = 10;
+
+/* Resolve a note's edges to names, in as few requests as the bound allows.
+
+   `related_ids` and `source_ids` hold ids and stay that way in storage
+   (ADR 0025), so showing them to a person is a lookup. One request for every
+   edge of the note rather than one per edge: fetching each note to read its
+   title is what exhausted the review console's `get_note` quota rendering a
+   queue, and this is the same shape.
+
+   Never fatal: the note opens whatever this returns. But a failed lookup is
+   reported as a failure rather than folded into an empty result. Returning
+   `new Map()` on error made every edge indistinguishable from one the corpus
+   genuinely cannot resolve, so a 429 -- readily reached, the bucket is 20 --
+   or a 503 or a dropped request rendered as "this note is retired or you may
+   not read it" about every edge at once. That is infrastructure trouble
+   presented as fact about the corpus, and the reader has no way to tell. */
+async function resolveEdges(ids, stillWanted) {
+  if (!ids.length) return { edges: new Map(), lookedUp: new Set() };
+  const edges = new Map();
+  /* Which ids a batch actually answered for, rather than one flag for the
+     whole run. A single `failed` boolean made every unresolved id read "not
+     looked up" as soon as any batch failed -- so a genuinely dangling edge in
+     a batch that succeeded was reported as unexamined. That is the same false
+     statement the flag was added to prevent, pointing the other way. */
+  const lookedUp = new Set();
+  /* Batched, because /notes/edges refuses more than EDGE_LOOKUP_BATCH ids and
+     nothing bounds how many a note may hold: a compiled wiki page's
+     `source_ids` has a minimum and no maximum, so a page synthesized from a
+     few hundred notes is valid and ordinary. Sending the union in one request
+     made exactly those pages -- the most connected ones -- come back 422, and
+     every label on them read "not looked up".
+
+     Sequential rather than parallel: the note is already on screen, so this
+     costs patience rather than usability, and firing a page's worth of
+     requests at once is how a burst quota gets spent for no benefit. */
+  let batches = 0;
+  for (let start = 0; start < ids.length; start += EDGE_LOOKUP_BATCH) {
+    /* Checked before each request rather than once at the end. The loop
+       outlives the note that started it: a reader who opens a large page and
+       clicks away had every remaining batch still sent, spending their quota
+       on labels for a panel nobody is looking at and delaying the lookups for
+       the note they actually opened. */
+    if (stillWanted && !stillWanted()) break;
+    if (batches >= EDGE_LOOKUP_MAX_BATCHES) break;
+    batches += 1;
+    const batch = ids.slice(start, start + EDGE_LOOKUP_BATCH);
+    try {
+      /* A POST body, not a query string. Ids are capped in count and not in
+         length, so a hundred long ones exceed the request line Heroku's
+         router accepts and the request dies before reaching the app. */
+      const payload = await api("/notes/edges", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: batch }),
+      });
+      for (const edge of payload.edges || []) edges.set(edge.note_id, edge);
+      for (const id of batch) lookedUp.add(id);
+    } catch (err) {
+      if (err.sessionEnded) throw err;
+      /* One failed batch does not discard the ones that answered, and does
+         not claim anything about their ids either: this batch's ids simply
+         never enter `lookedUp`. */
+    }
+  }
+  return { edges, lookedUp };
+}
+
+/* The resolution object before the lookup answers. Shared and never mutated:
+   `edgeList` only reads it. */
+const PENDING_EDGES = { edges: new Map(), lookedUp: new Set(), pending: true };
+
+/* An edge the caller could not resolve is shown as its bare id and is not a
+   link, which is the honest rendering: there is an edge, and it points at
+   something you cannot open. Three different situations arrive here as one --
+   no such note, one the read policy withholds, one that is flagged -- and the
+   endpoint declines to tell them apart on purpose, since doing so would
+   confirm that an id exists. */
+function edgeList(label, ids, resolution) {
+  const resolved = resolution.edges;
   const wrap = el("div", "small");
   wrap.appendChild(el("span", "muted", label + ": "));
-  wrap.appendChild(el("span", "mono", ids.join(", ")));
+  let unresolved = 0;
+  let unexamined = 0;
+  ids.forEach((id, index) => {
+    if (index > 0) wrap.appendChild(document.createTextNode(", "));
+    const edge = resolved.get(id);
+    if (!edge) {
+      /* The marker is text, not a tooltip and not the muted colour. A `title`
+         on a span is unreachable by keyboard and unreliable to a screen
+         reader, and colour alone is not a distinction -- so the one thing
+         that says "this is not a link" would have been available only to a
+         sighted mouse user who hovered it. */
+      /* Decided per id, because within one note both can be true: a batch
+         that answered may contain a genuinely dangling edge while another
+         batch never returned. Only the first is a statement about the corpus.
+         Pending means no answer yet; unexamined means none was obtained for
+         this id; neither says anything about the note it names. */
+      const examined = !resolution.pending && resolution.lookedUp.has(id);
+      if (examined) unresolved += 1;
+      else if (!resolution.pending) unexamined += 1;
+      wrap.appendChild(el("span", "mono muted", id));
+      wrap.appendChild(el("span", "muted",
+        resolution.pending ? " (resolving…)"
+          : examined ? " (unresolved)"
+            : " (not looked up)"));
+      return;
+    }
+    const link = el("button", "link", edge.slug);
+    /* The title is what the slug is a slug *of*, and the slug is what a
+       `[[wikilink]]` to this note carries -- so the label matches the exported
+       tree and the tooltip says which note it means. */
+    link.title = edge.title;
+    link.onclick = () => openNote(edge.note_id).catch(showError);
+    wrap.appendChild(link);
+  });
+  /* Not `else if`: a note can have both, and each line explains only the
+     marker it belongs to. Saying only one of them would leave the other
+     marker unexplained on the same screen. */
+  if (!resolution.pending && unexamined) {
+    /* A statement about this request, not about the corpus. Those ids are
+       still shown -- they are what the note actually holds -- but nothing
+       claims to know what they point at. */
+    wrap.appendChild(el("div", "small warn",
+      "⚠ Some ids could not be looked up just now and are shown as stored. "
+      + "That says nothing about whether those notes exist — retry to "
+      + "resolve them."));
+  }
+  if (!resolution.pending && unresolved) {
+    /* Said once rather than per id: what "unresolved" means, in the place a
+       reader meets it, without needing to hover anything. */
+    wrap.appendChild(el("div", "small muted",
+      "An unresolved id names no note you can open — it may have been "
+      + "retired, or it may be outside what this credential may read."));
+  }
   return wrap;
 }
 
@@ -329,8 +472,31 @@ async function openNote(noteId) {
   for (const [name, values] of Object.entries(detail.facets || {})) {
     panel.appendChild(el("div", "small muted", name + ": " + values.join(", ")));
   }
-  if (detail.related_ids.length) panel.appendChild(edgeList("related", detail.related_ids));
-  if (detail.source_ids.length) panel.appendChild(edgeList("sources", detail.source_ids));
+  /* Placeholders now, names later. The edge lookup used to be awaited before
+     the panel was painted, on the reasoning that a note should not appear and
+     then rearrange itself -- but `api` has no timeout, so a stalled
+     /notes/edges left the note itself invisible for as long as the request
+     hung. The note is the thing the reader asked for; the names on its edges
+     are an enrichment, and an enrichment must not gate it.
+
+     The ids are already known and are what the note actually holds, so the
+     sections are not empty while resolving -- only unlabelled. */
+  const edgeSlots = [];
+  for (const [label, ids] of [
+    ["related", detail.related_ids],
+    ["sources", detail.source_ids],
+  ]) {
+    if (!ids.length) continue;
+    const slot = el("div");
+    /* The same renderer, in its pending state, so the ids are on screen from
+       the first paint. A placeholder reading only "related: resolving…" would
+       hide the one thing the note actually holds -- and hide it for exactly
+       as long as the lookup stalls, which is the failure this whole
+       arrangement exists to avoid. */
+    slot.appendChild(edgeList(label, ids, PENDING_EDGES));
+    panel.appendChild(slot);
+    edgeSlots.push({ label, ids, slot });
+  }
 
   /* The body as it is written: markdown source, not rendered. Rendering it
      would mean a markdown implementation the page cannot fetch under its own
@@ -340,6 +506,28 @@ async function openNote(noteId) {
   const body = el("pre", "body", detail.body);
   body.id = "note-body";
   panel.appendChild(body);
+
+  /* Deliberately not awaited: the note is on screen by now, and this only
+     fills in labels. The generation check is what makes that safe -- a reader
+     who has already navigated on must not have a stale note's edges written
+     into whatever they are looking at instead. */
+  if (edgeSlots.length) {
+    const ids = Array.from(
+      new Set([...detail.related_ids, ...detail.source_ids])
+    );
+    resolveEdges(ids, () => generation === NOTE_GENERATION)
+      .then((resolution) => {
+        if (generation !== NOTE_GENERATION) return;
+        for (const { label, ids: edgeIds, slot } of edgeSlots) {
+          slot.replaceChildren(edgeList(label, edgeIds, resolution));
+        }
+      })
+      .catch((err) => {
+        /* `resolveEdges` reports its own failures and rethrows only a dead
+           session, which has already repainted the page. Nothing to add. */
+        if (!err || !err.sessionEnded) showError(err);
+      });
+  }
 }
 
 /* ---------- Proposing an edit to the open note ----------

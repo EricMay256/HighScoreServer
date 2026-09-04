@@ -7,12 +7,26 @@ import ModeTabs from "./ModeTabs";
 import PeriodTabs from "./PeriodTabs";
 import ScoresTable from "./ScoresTable";
 
+/**
+ * Why there is no active game mode, when there isn't one.
+ *
+ * `loading` may still resolve; `failed` and `none` will not, and they are
+ * different problems — one is the server being unreachable, the other is a
+ * database nobody has seeded.
+ */
+export type ModeAvailability = "loading" | "ready" | "failed" | "none";
+
 interface LeaderboardProps {
   gameMode: string;
   onGameModeChange: (mode: string) => void;
+  modeAvailability: ModeAvailability;
 }
 
-export default function Leaderboard({ gameMode, onGameModeChange }: LeaderboardProps) {
+export default function Leaderboard({
+  gameMode,
+  onGameModeChange,
+  modeAvailability,
+}: LeaderboardProps) {
   // Period stays local — only Leaderboard cares about it. If SubmitPanel
   // ever needs to know which period the user is viewing (it doesn't, since
   // submissions go to all periods server-side via the snapshot upsert),
@@ -34,12 +48,16 @@ export default function Leaderboard({ gameMode, onGameModeChange }: LeaderboardP
   } = useQuery({
     queryKey: ["scores", gameMode, period],
     queryFn: () => getScores(gameMode, period),
+    // Empty until the mode list resolves, and /scores requires a mode.
+    enabled: gameMode !== "",
   });
 
   return (
     <div className="lb-container">
       <div className="lb-header">
-        <h1 className="lb-title">{gameMode.toUpperCase()} MODE</h1>
+        <h1 className="lb-title">
+          {gameMode ? `${gameMode.toUpperCase()} MODE` : "LEADERBOARD"}
+        </h1>
         <p className="lb-subtitle">Top scores</p>
       </div>
 
@@ -51,7 +69,22 @@ export default function Leaderboard({ gameMode, onGameModeChange }: LeaderboardP
 
       <PeriodTabs selected={period} onChange={setPeriod} />
 
-      {isLoading && (
+      {/* Neither of these will resolve on their own, so a spinner would sit
+          there indefinitely claiming otherwise. They are told apart because
+          the reader can act on one of them and not the other. */}
+      {modeAvailability === "failed" && (
+        <div className="lb-error" role="alert">
+          ⚠ Could not load game modes. Reload to try again.
+        </div>
+      )}
+
+      {modeAvailability === "none" && (
+        <div className="lb-error" role="alert">
+          No game modes are configured on this server yet.
+        </div>
+      )}
+
+      {(isLoading || modeAvailability === "loading") && (
         <div className="lb-loading">
           <div className="lb-spinner" />
           Loading scores…

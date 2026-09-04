@@ -66,7 +66,11 @@ async def list_game_modes(request: Request, response: Response) -> list[GameMode
                 )
                 rows = await cur.fetchall()
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Game mode listing error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     return [
         GameModeConfig(
@@ -111,7 +115,11 @@ async def create_game_mode(config: GameModeCreate) -> GameModeConfig:
                 row = await cur.fetchone()
             # connection context manager commits on clean exit
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Game mode creation error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     return GameModeConfig(
         name=row[0], sort_order=row[1], label=row[2], requires_claimed_account=row[3],
@@ -150,10 +158,10 @@ async def latest_scores(
     try:
         async with get_pool().connection() as conn:
             async with conn.cursor() as cur:
-                # COUNT(*) OVER () gives total scores across the whole table.
-                # Unlike /scores this isn't filtered to a mode/period — the "latest"
-                # feed is global. Worth knowing if the table grows large; the count
-                # is cheap on indexed columns but not free.
+                # COUNT(*) OVER () counts the rows this query selects, so it
+                # already respects both the 'alltime' period and any game_modes
+                # filter. _count_latest_scores must repeat those predicates.
+                # Cheap on indexed columns, but not free as the table grows.
                 # validation_tier read straight off scores (denormalized) — no join.
                 if game_modes:
                     await cur.execute(
@@ -186,15 +194,16 @@ async def latest_scores(
                     )
                 rows = await cur.fetchall()
     except Exception as e:
+        logger.error("Latest scores error: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
+            detail="Internal server error",
         ) from e
 
     if rows:
         total_count = rows[0][6]
     elif offset > 0:
-        total_count = await _count_all_scores()
+        total_count = await _count_latest_scores(game_modes)
     else:
         total_count = 0
 
@@ -295,7 +304,11 @@ async def get_scores(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Score listing error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     # total_count from the window function is only present on returned rows.
     # If the page is empty (offset past end, or no scores at all), fall back
@@ -432,7 +445,11 @@ async def submit_score(
             detail=f"Invalid game mode: {submission.game_mode}",
         ) from None
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Score submission error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     await _invalidate_score_caches(submission.game_mode)
 
@@ -611,7 +628,11 @@ async def submit_run(
             detail="Duplicate run submission",
         ) from None
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        logger.error("Run submission error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     if prior_status is not None:
         return await _existing_run_response(prior_status, user_id, submission.game_mode)
@@ -700,12 +721,27 @@ async def _count_scores(game_mode: str, period: str, period_start) -> int:
             )
             return (await cur.fetchone())[0]
 
-async def _count_all_scores() -> int:
-    """Total row count for the scores table. Used by the /latest endpoint
-    to report total_count when a paginated request lands on an empty page."""
+async def _count_latest_scores(game_modes: list[str] | None) -> int:
+    """Count the rows /latest pages over, for when a request lands past the end.
+
+    Must mirror that query's WHERE clause exactly, or the fallback disagrees
+    with the COUNT(*) OVER () the same endpoint returns on a non-empty page.
+    It previously counted the whole table: every period bucket, and every mode
+    regardless of the filter."""
     async with get_pool().connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT COUNT(*) FROM scores")
+            if game_modes:
+                await cur.execute(
+                    """
+                    SELECT COUNT(*) FROM scores
+                    WHERE game_mode = ANY(%s) AND period = 'alltime'
+                    """,
+                    (game_modes,),
+                )
+            else:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM scores WHERE period = 'alltime'"
+                )
             return (await cur.fetchone())[0]
 
 async def _fetch_score_with_rank(user_id: int, game_mode: str, period: str = "alltime") -> ScoreResponse | None:

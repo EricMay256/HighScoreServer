@@ -1777,3 +1777,39 @@ def test_a_registration_pruned_during_bcrypt_fails_cleanly(
 
     assert response.status_code == 400, response.text
     assert FAILURE_MESSAGE in response.text
+
+
+def test_an_unknown_credential_id_is_compared_before_it_is_refused() -> None:
+    """The dummy-hash comparison only equalizes a miss if the miss reaches it.
+
+    `load_access_token` returned as soon as the credential lookup missed, so
+    an unknown id cost one query and no digest comparison while a known one
+    cost a second query *and then* the comparison. That is the timing
+    distinction `auth.secret_matches` runs a dummy hash to remove, preserved
+    by the order of the checks around it.
+
+    Asserted structurally, because the difference is a few microseconds of
+    work and a timing test would be a flaky way to state a rule about code.
+    What has to hold is that the comparison happens before anything branches
+    on the lookup, and that ownership -- the second query -- happens after.
+    """
+
+    import inspect
+
+    from app.vault.oauth import VaultAuthorizationProvider
+
+    source = inspect.getsource(VaultAuthorizationProvider.load_access_token)
+
+    compare = source.index("secret_matches(credential, parsed.secret)")
+    branch = source.index("if credential is None or not matched:")
+    ownership = source.index("client_and_family_for_credential")
+
+    assert compare < branch, (
+        "the secret is compared before the code branches on the lookup miss"
+    )
+    assert branch < ownership, (
+        "ownership is looked up only once the secret has been proven"
+    )
+    # The early `if credential is None: return None` this replaced must not
+    # come back: it is what skipped the comparison entirely.
+    assert "if credential is None:\n" not in source

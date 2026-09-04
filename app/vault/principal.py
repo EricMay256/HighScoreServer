@@ -28,7 +28,8 @@ string in, scopes out -- so replacing static bearer verification with token
 introspection changes this module and nothing downstream. Scopes, quotas,
 ``contributed_by``, and ADR 0014's path policy all stay exactly where they are.
 
-The connection discipline from ``docs/HANDOFF.md`` task 15 is preserved:
+The connection discipline recorded in ``docs/archive/HANDOFF-2026-08-16.md``
+(task 15) is preserved:
 resolution takes its own short checkout and releases it before returning. It
 must never hold one across the caller's work, because ``search``, ``contribute``
 and ``update`` all call the embedding provider between their checkouts and would

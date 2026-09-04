@@ -9,7 +9,6 @@ from fastapi.staticfiles import StaticFiles
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
@@ -135,13 +134,21 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _custom_rate_limit_handler)
     app.add_exception_handler(CrossRouteError, _cross_route_handler)
-    app.add_middleware(SlowAPIMiddleware)
 
-    # Register CORS after SlowAPI (Starlette uses reverse registration order)
-    # so it runs first on requests and handles preflight OPTIONS before any
-    # global rate-limit accounting. Per-route limits are applied at the
-    # decorator, but ordering CORS outermost also ensures CORS headers are
-    # present on 429 and 5xx responses from inner middleware.
+    # Rate limiting here is deliberately per-route: every limited endpoint
+    # carries its own `@limiter.limit`, chosen for what that endpoint costs.
+    # SlowAPIMiddleware is NOT registered, and that is the decision rather
+    # than an omission -- it applies the Limiter's `default_limits`, which is
+    # empty, so it read as global rate limiting while enforcing nothing.
+    # Adding it back means choosing a global default first; the middleware
+    # alone would still cover nothing.
+    #
+    # `app.state.limiter` and the RateLimitExceeded handler above are still
+    # required: the decorators raise through them.
+
+    # CORS is registered outermost (Starlette applies middleware in reverse
+    # registration order) so it handles preflight OPTIONS first and so CORS
+    # headers are present on 429 and 5xx responses raised further in.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(CORS_ALLOWED_ORIGINS),

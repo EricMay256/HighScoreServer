@@ -8,7 +8,7 @@
     "npm": "11.x"
   },
   "scripts": {
-    "build": "cd leaderboard-frontend && npm ci && npm run build",
+    "build": "cd leaderboard-frontend && npm ci --include=dev && npm run build",
     "heroku-postbuild": "npm run build"
   }
 }

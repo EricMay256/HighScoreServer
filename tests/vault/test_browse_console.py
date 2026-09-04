@@ -9,17 +9,26 @@ family holding `vault:read` alone, so a console that could do both would be a
 console that could do neither properly.
 """
 
+import re
+
 import pytest
+from starlette.responses import HTMLResponse
 from starlette.routing import Route
 
 from app.vault import browse_console as browse
 from app.vault import review_console as review
+from app.vault.api_models import MAX_EDGE_LOOKUP_IDS, MAX_PAGE_EDGE_IDS
 from app.vault.console_page import CONSOLE_HEADERS, console_page
 from app.vault.constants import (
     OAUTH_BASELINE_SCOPES,
     OAUTH_OPERATOR_ENTITLEMENT_SCOPES,
 )
 from app.vault.templating import render
+
+
+# The console's own constant, restated so the assertion names both sides.
+EDGE_LOOKUP_BATCH_IN_CONSOLE = 100
+EDGE_LOOKUP_MAX_BATCHES_IN_CONSOLE = 10
 
 
 def _page() -> str:
@@ -108,11 +117,20 @@ def test_the_route_is_registered_at_the_documented_path() -> None:
     assert routes[0].methods == {"GET", "HEAD"}
 
 
+def _console_response() -> HTMLResponse:
+    return console_page(
+        "browse.html",
+        console_path=browse.BROWSE_PATH,
+        scopes=browse.CONSOLE_SCOPES,
+        client_name=browse.CLIENT_NAME,
+        store_prefix=browse.STORE_PREFIX,
+    )
+
+
 @pytest.mark.parametrize(
     "header",
     [
         "X-Frame-Options",
-        "Content-Security-Policy",
         "Referrer-Policy",
         "Cache-Control",
     ],
@@ -122,17 +140,86 @@ def test_the_console_sets_its_protective_headers(header: str) -> None:
 
     A second copy of this policy is a policy that drifts, and it drifts
     silently: the weaker page keeps working.
+
+    The CSP is not in this list because it carries a per-response nonce and so
+    is not a constant; the two tests below cover it.
     """
 
-    response = console_page(
-        "browse.html",
-        console_path=browse.BROWSE_PATH,
-        scopes=browse.CONSOLE_SCOPES,
-        client_name=browse.CLIENT_NAME,
-        store_prefix=browse.STORE_PREFIX,
+    assert _console_response().headers[header] == CONSOLE_HEADERS[header]
+
+
+def test_inline_script_is_allowed_by_nonce_and_not_by_unsafe_inline() -> None:
+    """'unsafe-inline' permits an injected inline script; a nonce does not.
+
+    The pages inline their script, so something has to permit it. Whichever it
+    is applies to *every* inline script the document ends up containing, which
+    is precisely the case the directive exists to govern -- so it is the nonce,
+    which names only the blocks this render emitted.
+
+    Defence in depth. The consoles build their DOM with `textContent` and never
+    interpolate corpus text into markup, so there is no known injection this
+    closes.
+    """
+
+    response = _console_response()
+    csp = response.headers["Content-Security-Policy"]
+    script_src = next(
+        part.strip() for part in csp.split(";") if part.strip().startswith("script-src")
     )
 
-    assert response.headers[header] == CONSOLE_HEADERS[header]
+    assert "'unsafe-inline'" not in script_src
+    assert "'nonce-" in script_src
+
+    # Every inline script in the page must carry that exact nonce, or the page
+    # is served broken rather than served insecure.
+    #
+    # Line-anchored: every real script tag in these templates starts a line,
+    # and `_console_session.js` mentions "<script>" in a comment that is inside
+    # a script body rather than opening one.
+    nonce = script_src.split("'nonce-", 1)[1].split("'", 1)[0]
+    tags = re.findall(r"(?m)^<script\b[^>]*>", response.body.decode())
+
+    assert len(tags) >= 2, "expected the config block and the page script"
+    for tag in tags:
+        assert f'nonce="{nonce}"' in tag, f"inline script without the nonce: {tag}"
+
+
+def test_the_script_nonce_stays_inside_the_unambiguous_alphabet() -> None:
+    """Hex, which is a strict subset of what CSP's grammar accepts.
+
+    CSP3's `base64-value` is
+    `1*( ALPHA / DIGIT / "+" / "/" / "-" / "_" )*2( "=" )`, so the base64url
+    characters a `token_urlsafe` nonce can contain were never out of spec.
+    Hex simply cannot raise the question, and the nonce is machine-generated
+    with no other constraint on its shape, so there is nothing to trade away.
+
+    Pinned because the reason is not visible from the call: `token_urlsafe`
+    reads like the obvious choice for a header value.
+    """
+
+    csp = _console_response().headers["Content-Security-Policy"]
+    nonce = csp.split("'nonce-", 1)[1].split("'", 1)[0]
+
+    assert re.fullmatch(r"[0-9a-f]+", nonce), nonce
+    # 16 bytes of entropy, per _NONCE_BYTES.
+    assert len(nonce) == 32
+
+
+def test_the_script_nonce_is_fresh_on_every_response() -> None:
+    """A reused nonce is 'unsafe-inline' with extra steps.
+
+    Safe to vary per response only because these pages are `no-store`: a
+    cached body would carry a nonce its header no longer names and would
+    silently stop running.
+    """
+
+    first = _console_response()
+    second = _console_response()
+
+    assert first.headers["Content-Security-Policy"] != (
+        second.headers["Content-Security-Policy"]
+    )
+    assert CONSOLE_HEADERS["Cache-Control"] == "no-store"
 
 
 def test_the_console_loads_no_third_party_assets() -> None:
@@ -437,3 +524,331 @@ def test_cancelling_returns_focus_to_the_control_that_opened_it() -> None:
     page = _page()
 
     assert '$("propose-open").focus();' in page
+
+
+def test_edges_are_links_that_name_notes_by_slug() -> None:
+    """A hex uuid is not a name, and ADR 0025 says a human never sees one.
+
+    Edges are stored as ids and stay that way, so the console resolving them
+    is the boundary that ADR describes -- the same one the export crosses when
+    it writes `[[slug]]`. The label is the slug rather than the title because
+    that is what a wikilink carries, so a link here and a link in the exported
+    tree name a note identically.
+    """
+
+    page = _page()
+
+    assert '"/notes/edges"' in page, "edges must be resolved in bulk"
+    assert "edge.slug" in page
+    assert "openNote(edge.note_id)" in page, "a resolved edge must be clickable"
+
+
+def test_edge_resolution_is_one_request_for_the_whole_note() -> None:
+    """Not one per edge, which is the bug this pattern already caused once.
+
+    The review console fetched every evidence note while painting its queue
+    and exhausted the `get_note` burst doing it. A note with five edges is the
+    same shape, so the ids are gathered and resolved together -- deduplicated
+    across `related_ids` and `source_ids`, which commonly overlap.
+    """
+
+    page = _page()
+
+    assert "new Set([...detail.related_ids, ...detail.source_ids])" in page
+
+
+def test_edge_resolution_does_not_gate_showing_the_note() -> None:
+    """The note is what the reader asked for; the labels are enrichment.
+
+    The lookup was awaited before the panel was painted, so that the note
+    would not appear and then rearrange itself. But `api` has no timeout, so a
+    stalled /notes/edges made the note itself invisible for as long as the
+    request hung -- an optional request holding the primary content hostage.
+
+    The panel is now painted with the ids in place and the names filled in
+    afterwards, guarded by the generation counter so a stale note's edges
+    cannot be written into whatever the reader navigated to instead.
+    """
+
+    page = _page()
+
+    # Anchored past the panel, because `resolveEdges(ids)` also matches the
+    # function's own definition earlier in the file -- which is how the
+    # assertion this replaced came to pass on a coincidence.
+    panel_at = page.index('const panel = $("note");')
+    after_panel = page[panel_at:]
+
+    assert ".then((resolution) => {" in after_panel, (
+        "resolution is kicked off after the panel is painted"
+    )
+    # Not awaited -- that is the whole point.
+    assert "await resolveEdges(" not in page
+    assert "resolving…" in page, "the sections say what they are waiting for"
+    # Rendered through edgeList in its pending state, which is what puts the
+    # ids on screen -- see the test below.
+    assert "edgeList(label, ids, PENDING_EDGES)" in page
+    # The late write is generation-guarded.
+    resolve_at = panel_at + after_panel.index(".then((resolution) => {")
+    assert "if (generation !== NOTE_GENERATION) return;" in page[resolve_at:]
+
+
+def test_an_unresolvable_edge_is_shown_but_not_linked() -> None:
+    """It is an edge that points somewhere the reader cannot go.
+
+    Three situations arrive as one -- no such note, withheld by the read
+    policy, flagged -- because the endpoint declines to distinguish them, and
+    saying which would confirm the id exists. Showing the bare id is honest;
+    hiding it would make the note look less connected than it is.
+    """
+
+    page = _page()
+
+    assert 'el("span", "mono muted", id)' in page
+    assert "An unresolved id names no note you can open" in page
+
+
+def test_an_unresolvable_edge_says_so_in_text_not_a_tooltip() -> None:
+    """Colour and a `title` are not available to every reader.
+
+    The marker was a `title` on a non-focusable `<span>`, with muted colour as
+    the only visible cue. A keyboard user cannot reach that tooltip, a screen
+    reader treats it inconsistently, and colour alone is not a distinction --
+    so the one signal that an id is *not* a link reached only a sighted mouse
+    user who happened to hover it.
+
+    It is now text: a per-id marker saying which, and one explanation saying
+    what it means.
+    """
+
+    page = _page()
+
+    assert '" (unresolved)"' in page
+    # The dangling span must carry no tooltip standing in for that text.
+    assert "dangling.title" not in page
+
+
+def test_a_failed_edge_lookup_is_not_reported_as_corpus_state() -> None:
+    """A 429 is not evidence that a note was retired.
+
+    resolveEdges swallowed every non-authentication failure into an empty map,
+    so a rate-limited, unavailable or dropped request rendered identically to
+    ids the corpus genuinely cannot resolve -- and the list then told the
+    reader those notes may have been retired or may be unreadable. That is an
+    infrastructure failure restated as fact about the corpus, and it is easy
+    to reach: the resolve_edges bucket bursts at 20.
+
+    The lookup now reports its own failure, the ids are shown as stored, and
+    nothing claims to know what they point at.
+    """
+
+    page = _page()
+
+    assert "const lookedUp = new Set();" in page, (
+        "a failed lookup must be distinguishable, per id"
+    )
+    assert "return { edges, lookedUp };" in page
+    assert '" (not looked up)"' in page
+    assert "could not be looked up just now" in page
+    assert '" (not looked up)"' in page
+    assert "That says nothing about whether those notes exist" in page
+
+
+def test_edges_show_their_ids_while_the_lookup_is_pending() -> None:
+    """A stalled lookup must not hide what the note actually holds.
+
+    The placeholder was `label + ": resolving…"` and nothing else, so the ids
+    -- the one part already known, fetched with the note itself -- stayed
+    hidden for exactly as long as the lookup hung. That is the failure the
+    non-blocking render exists to prevent, reintroduced one level down: the
+    note appeared promptly and its edges did not.
+
+    The pending state now goes through `edgeList`, so the same rendering path
+    serves all three cases and the ids are on screen from the first paint.
+    What differs is only the marker beside each one.
+    """
+
+    page = _page()
+
+    assert "const PENDING_EDGES = { edges: new Map(), lookedUp: new Set(), pending: true };" in page
+    assert 'resolution.pending ? " (resolving…)"' in page
+
+    # One renderer, three markers, and every branch keeps the id itself.
+    marker_at = page.index('resolution.pending ? " (resolving…)"')
+    id_at = page.index('el("span", "mono muted", id)')
+    assert id_at < marker_at, (
+        "the id is appended before the marker, so no state can omit it"
+    )
+
+    # Nothing claims anything about the corpus while the answer is outstanding.
+    # Nothing is claimed about the corpus while the answer is outstanding:
+    # both trailing explanations are gated on the lookup having finished.
+    assert "if (!resolution.pending && unexamined) {" in page
+    assert "if (!resolution.pending && unresolved) {" in page
+
+
+def test_the_console_batches_edge_lookups_within_the_endpoint_bound() -> None:
+    """A page may hold more edges than one request may name.
+
+    `VaultCompilePageRequest.source_ids` has a minimum and no maximum, so a
+    wiki page synthesized from a few hundred notes is valid and ordinary.
+    /notes/edges refuses more than MAX_EDGE_LOOKUP_IDS, and the console sent the whole
+    union in one request -- so exactly the most connected pages came back 422
+    and rendered every label as "not looked up".
+
+    The batch size lives in a template and the bound lives in routes.py, with
+    nothing between them to notice a change; this is that something. Lowering
+    MAX_EDGE_LOOKUP_IDS without lowering the batch would break the console silently,
+    and only for large pages.
+    """
+
+    page = _page()
+
+    assert "const EDGE_LOOKUP_BATCH = 100;" in page
+    assert EDGE_LOOKUP_BATCH_IN_CONSOLE <= MAX_EDGE_LOOKUP_IDS, (
+        f"the console batches {EDGE_LOOKUP_BATCH_IN_CONSOLE} ids into an "
+        f"endpoint that accepts {MAX_EDGE_LOOKUP_IDS}"
+    )
+    # The loop, not a single request.
+    assert "for (let start = 0; start < ids.length; start += EDGE_LOOKUP_BATCH)" in page
+    assert "ids.slice(start, start + EDGE_LOOKUP_BATCH)" in page
+
+
+def test_one_failed_edge_batch_does_not_discard_the_others() -> None:
+    """Batching introduces partial failure, which has an honest rendering.
+
+    A batch that fails leaves its ids unresolved and marked "not looked up",
+    while the ids other batches answered for keep their links. Resetting the
+    whole map on one failure would throw away work that succeeded and call
+    resolvable edges unresolvable.
+    """
+
+    page = _page()
+
+    resolve_at = page.index("async function resolveEdges(ids, stillWanted)")
+    body = page[resolve_at : page.index("\n}", resolve_at)]
+
+    assert "edges = new Map()" not in body.split("const edges = new Map();", 1)[1], (
+        "a failed batch must not reset what other batches resolved"
+    )
+
+
+def test_a_dangling_edge_is_not_relabelled_by_another_batch_failing() -> None:
+    """Within one note, both outcomes can be true at once.
+
+    A single `failed` flag for the whole run meant that as soon as any batch
+    failed, every unresolved id read "not looked up" -- including ids from a
+    batch that answered, whose edges genuinely dangle. That is the same false
+    statement the flag was introduced to prevent, pointing the other way: it
+    reported an examined edge as unexamined.
+
+    The distinction is per id, so a note can legitimately show a link, an
+    "(unresolved)" and a "(not looked up)" side by side, with the explanation
+    for each marker that is actually present.
+    """
+
+    page = _page()
+
+    assert "const examined = !resolution.pending && resolution.lookedUp.has(id);" in page
+    assert "examined ? \" (unresolved)\"" in page
+    # Both trailing lines are independent `if`s, not an either/or chain: a
+    # note with both kinds of unresolved id needs both explanations.
+    assert "if (!resolution.pending && unexamined) {" in page
+    assert "if (!resolution.pending && unresolved) {" in page
+    assert "} else if (unresolved)" not in page, (
+        "the explanations must not exclude one another"
+    )
+
+
+def test_edge_resolution_stops_when_the_reader_navigates_away() -> None:
+    """The loop outlives the note that started it unless it is told not to.
+
+    Generation was checked once, after every batch had already been sent. A
+    reader who opened a large page and clicked away had the rest of its
+    batches issued anyway -- spending their own quota on labels for a panel
+    nobody is looking at, and delaying the lookups for the note they actually
+    opened.
+
+    Checked before each request instead, so navigating away stops the loop
+    rather than merely discarding its result.
+    """
+
+    page = _page()
+
+    assert "if (stillWanted && !stillWanted()) break;" in page
+    assert "resolveEdges(ids, () => generation === NOTE_GENERATION)" in page
+
+    # Before the request, not after it: the point is not to send it.
+    resolve_at = page.index("async function resolveEdges(ids, stillWanted)")
+    body = page[resolve_at : page.index("\n}", resolve_at)]
+    assert body.index("stillWanted()") < body.index("await api(")
+
+
+def test_one_note_cannot_drain_the_edge_lookup_burst() -> None:
+    """Nothing bounds how many edges a compiled page may declare.
+
+    `VaultCompilePageRequest.source_ids` has no maximum, and the resolve_edges
+    bucket bursts at 20 -- so a large enough page could spend the reader's
+    whole allowance on one note and leave their next click rate-limited.
+
+    The cap is half the burst, which keeps that headroom. Ids past it are
+    marked "not looked up", which is exactly what they are: the honest
+    rendering already existed, so bounding the work needed no new vocabulary.
+    """
+
+    page = _page()
+
+    assert "const EDGE_LOOKUP_MAX_BATCHES = 10;" in page
+    assert "if (batches >= EDGE_LOOKUP_MAX_BATCHES) break;" in page
+
+
+def test_the_console_can_resolve_every_edge_a_page_may_declare() -> None:
+    """The arithmetic that makes truncation unreachable rather than hidden.
+
+    The console batches by EDGE_LOOKUP_BATCH and stops after
+    EDGE_LOOKUP_MAX_BATCHES, so its capacity is the product. It resolves the
+    *union* of `source_ids` and `related_ids`, so a page can present twice
+    MAX_PAGE_EDGE_IDS.
+
+    While the page contract was unbounded, ids past that capacity could never
+    be resolved at all: a retry restarts at the first id, so the tail was
+    never requested, and the console still said "retry to resolve them". The
+    cap exists so that promise is true -- anything the server accepts, the
+    console can read.
+
+    These three numbers live in two files with no import between them, which
+    is why this asserts rather than trusts.
+    """
+
+    page = _page()
+
+    assert f"const EDGE_LOOKUP_BATCH = {EDGE_LOOKUP_BATCH_IN_CONSOLE};" in page
+    assert f"const EDGE_LOOKUP_MAX_BATCHES = {EDGE_LOOKUP_MAX_BATCHES_IN_CONSOLE};" in page
+
+    capacity = EDGE_LOOKUP_BATCH_IN_CONSOLE * EDGE_LOOKUP_MAX_BATCHES_IN_CONSOLE
+    largest_union = 2 * MAX_PAGE_EDGE_IDS
+
+    assert capacity >= largest_union, (
+        f"a page may declare {largest_union} unique edges and the console "
+        f"resolves at most {capacity}; the tail would be permanently "
+        "unreachable while the page offers a retry"
+    )
+
+
+def test_the_retry_wording_is_only_used_where_retrying_can_work() -> None:
+    """"Retry" must not be offered for something a retry cannot reach.
+
+    Unexamined ids are transient by construction now: the only ways to leave
+    one unresolved are a failed batch and navigating away, both of which a
+    reopen re-attempts from the first id. Truncation was the exception, and it
+    is gone -- the page cap is sized to the console's capacity.
+    """
+
+    page = _page()
+
+    # Split across two JS string literals in the source, so match the halves
+    # rather than the sentence -- the naive contiguous assertion fails on
+    # formatting rather than on meaning.
+    assert "retry to " in page and "resolve them." in page
+    # The cap that made the claim false is now unreachable for any accepted
+    # page; see the capacity assertion above.
+    assert "if (batches >= EDGE_LOOKUP_MAX_BATCHES) break;" in page

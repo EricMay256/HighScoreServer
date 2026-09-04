@@ -151,9 +151,9 @@ be edited when it does.
   pages, which is what lets a stale index be pruned once `Agent/wiki/` is owned.
 - **The export writes more prefixes than it prunes.** `EXPORTED_PATH_PREFIXES` is what may be
   written; `CORPUS_OWNED_PATH_PREFIXES` is the subset the service is authoritative for and may
-  therefore delete from. `Agent/wiki/` is in the first and not the second, because the Stage-A
-  librarian still holds 15 compiled pages there; it joins the second when compilation moves to
-  the service. The owned set is explicit rather than derived from occupancy, per ADR 0023:
+  therefore delete from. `Agent/wiki/` joined the owned set on 2026-08-24, after the
+  Stage-A pages were imported as rows (ADR 0027) — in that order, because owning a prefix
+  before its files have rows lets `--prune` delete them. The owned set is explicit rather than derived from occupancy, per ADR 0023:
   "sweep the prefixes that have rows" looks equivalent and fails exactly when an owned folder
   empties — the last promotion candidate settles, no row names the prefix, the sweep skips it,
   and the stale file survives advertising a candidacy that ended.
@@ -386,7 +386,8 @@ be edited when it does.
   all call the embedding provider *between* their checkouts on purpose. It would pin a pooled
   connection across a 23s worst-case embedding budget, which is the same mistake as embedding
   inside a transaction, one layer up. Authentication takes its own short checkout and releases
-  it. Considered and rejected 2026-08-14; see `docs/HANDOFF.md` task 15.
+  it. Considered and rejected 2026-08-14; see task 15 of the host repository's
+  `docs/archive/HANDOFF-2026-08-16.md`.
 - **Agents authenticate with `hssv1_<credential-id>_<secret>`**, verified against
   `vault_agent_credentials`; only `sha256(secret)` is stored. `VAULT_READ_API_KEY` is gone and
   there is no global on/off secret — a credential verifies or it does not. See ADR 0015.
@@ -651,10 +652,11 @@ be edited when it does.
 - **The contribution tool derives its idempotency key from content.** A model asked for one
   invents a fresh value per attempt, which turns a retry into a duplicate note. It must hash
   the same canonical form `canonical_request_digest` does.
-- The SDK's `token_verifier` is deliberately unused: it requires `AuthSettings.issuer_url`,
-  which would publish OAuth discovery metadata for an authorization server that does not
-  exist. That is the arm to replace if OAuth lands — `principal.resolve_credential` already
-  has the `TokenVerifier` shape.
+- The SDK's `token_verifier` is deliberately unused. It requires `AuthSettings.issuer_url`
+  and would publish discovery metadata through the SDK's resource-server profile; the
+  vault's authorization server (ADR 0024) publishes its own from `oauth_routes.py`, gated on
+  `VAULT_PUBLIC_URL`. The mount verifies tokens through `principal.resolve_credential`, and
+  because OAuth-minted tokens are ordinary `hssv1_` credentials, one verifier serves both.
 
 ## The write path
 
@@ -721,14 +723,20 @@ be edited when it does.
 - **A principal may be granted a wider quota, in code and never in configuration.**
   `PRINCIPAL_LIMITS` widens named operations for a named principal; `limit_for` is
   the single lookup and still raises on an operation `LIMITS` does not register, so
-  an override cannot invent one. Today it grants `importer` bulk headroom on
-  `contribute` and `update` only -- import writes, it does not search -- because the
-  shared limits describe an interactive agent and at 30/min a 500-note corpus takes
-  over four hours. Keying on the name is safe only because `docs/HANDOFF.md` already
-  requires the importer to run as that principal; the write ledger is keyed
-  `(principal_id, idempotency_key)`, so a different name bypasses the duplicate
-  guard regardless. Do not move this to an environment variable: a quota a
-  deployment can widen is a way to unlimit production by accident.
+  an override cannot invent one. **It ships empty as of 2026-09-02.** It held one
+  entry, granting `importer` bulk headroom on `contribute` and `update` -- import
+  writes, it does not search -- because the shared limits describe an interactive
+  agent and at 30/min a 500-note corpus takes over four hours. That principal no
+  longer runs, and the entry had also stopped matching: the runbook's
+  corpus-migration procedure moved to a fresh principal per re-import while the
+  override keyed on the literal name. Removed rather than widened to a prefix,
+  because a quota grant with no workload behind it is a standing exception nobody
+  is watching. Re-adding one is a deliberate edit here, in code -- do not move this
+  to an environment variable, since a quota a deployment can widen is a way to
+  unlimit production by accident. A returning bulk job also needs a *stable*
+  principal name: the write ledger is keyed `(principal_id, idempotency_key)`, so a
+  differently named principal bypasses the duplicate guard whatever its quota. The
+  original rule is in the host repository's `docs/archive/HANDOFF-2026-08-16.md`.
 - **Unknown quota operations fail closed.** Every route operation must be registered in
   `LIMITS`; a typo or new operation without a deliberate quota is a programming error, not an
   unlimited bucket.

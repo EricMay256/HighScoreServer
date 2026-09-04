@@ -6,13 +6,12 @@ from the DATABASE_URL environment variable at runtime (never committed).
 """
 import os
 from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config, pool
+from pathlib import Path
 
 from alembic import context
-
-from pathlib import Path
 from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool
+
 
 # Load .env from the repo root so Alembic sees the same DATABASE_URL the app
 # uses, with no per-shell `$env:` setup. override=False is deliberate: a

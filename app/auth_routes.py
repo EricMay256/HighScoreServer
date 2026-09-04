@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
@@ -21,6 +22,7 @@ from app.auth_identities import (
     attach_auth_identity_to_user,
     resolve_auth_identity_login,
 )
+from app.cache import get_cache
 from app.db import get_pool
 from app.dependencies import require_user
 from app.limiter import limiter, rate_limited_responses
@@ -65,6 +67,17 @@ class TokenResponse(BaseModel):
     access_token:  str
     refresh_token: str
     token_type:    str = "bearer"
+
+class AccessTokenResponse(BaseModel):
+    """A replacement access token, with the caller's refresh token untouched.
+
+    For an operation that invalidates what the *access* token says but leaves
+    the session itself alone. Minting a refresh token here would be a second
+    live credential the caller never asked for and cannot be told to discard,
+    because the old one keeps working -- see /rename.
+    """
+    access_token: str
+    token_type:   str = "bearer"
 
 
 async def token_response_for_user(user: AuthenticatedUser) -> TokenResponse:
@@ -124,7 +137,10 @@ async def guest_login(request: Request, response: Response) -> TokenResponse:
                     row = await cur.fetchone()
         except Exception as e:
             logger.error("Guest registration error: %s", e)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Internal server error",
+            ) from e
 
         if row:
             return TokenResponse(
@@ -172,7 +188,10 @@ async def register(request: Request, response: Response, body: RegisterRequest) 
                 detail="Username or email already registered",
             ) from e
         logger.error("Registration error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     return TokenResponse(
         access_token=create_access_token(row[0], body.username, is_guest=False),
@@ -196,7 +215,10 @@ async def login(request: Request, response: Response, body: LoginRequest) -> Tok
                 row = await cur.fetchone()
     except Exception as e:
         logger.error("Login error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     if row is None or not row[1] or not await verify_password(body.password, row[1]):
         raise HTTPException(
@@ -274,7 +296,10 @@ async def refresh(body: RefreshRequest) -> TokenResponse:
                 row = await cur.fetchone()
     except Exception as e:
         logger.error("Refresh error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
@@ -295,11 +320,62 @@ async def logout(body: RefreshRequest) -> None:
     await revoke_refresh_token(body.refresh_token)
 
 
-@router.post("/rename", status_code=status.HTTP_204_NO_CONTENT)
+async def _invalidate_leaderboard_caches() -> None:
+    """Drop every cached leaderboard read after a username changes.
+
+    Imported rather than duplicated: `CACHE_KEY_PREFIX` is the leaderboard's
+    own statement of how it keys its cache, and a second copy here would drift
+    the moment either side changed. leaderboard_routes does not import this
+    module, so the direction is safe.
+
+    Best effort, like the leaderboard's own invalidation: a cache that cannot
+    be cleared is a stale name for two minutes, not a failed rename.
+    """
+
+    from app.leaderboard_routes import CACHE_KEY_PREFIX
+
+    try:
+        await get_cache().delete_prefix(CACHE_KEY_PREFIX)
+    except Exception as e:
+        logger.warning("Leaderboard cache invalidation failed after rename: %s", e)
+
+
+@router.post(
+    "/rename",
+    response_model=AccessTokenResponse,
+    responses=rate_limited_responses("10 per minute"),
+)
+@limiter.limit("10/minute")
 async def rename(
-    body:    RenameRequest,
-    payload: dict = Depends(require_user),
-) -> None:
+    request:  Request,
+    response: Response,
+    body:     RenameRequest,
+    payload:  dict = Depends(require_user),
+) -> AccessTokenResponse:
+    """
+    Changes the username and returns a replacement access token.
+
+    The access token carries `username` as a claim, so a rename that returned
+    nothing left every client showing the old name until the token expired and
+    a refresh happened to mint a new one.
+
+    **The access token only.** The refresh token is opaque and carries no
+    username, so a rename does not invalidate it and there is nothing to
+    replace. Minting one anyway -- which this did until 2026-09-03, by copying
+    /claim -- left the previous credential valid for its full lifetime and
+    added a row per rename, so a client renaming in a loop grew
+    `refresh_tokens` without bound and accumulated live credentials nobody
+    could enumerate a reason for. /claim gets away with the same shape because
+    it can only succeed once per account; rename has no such limit.
+
+    Rate limited like its sibling auth routes, which it should have been from
+    the start: it takes a write lock on a `users` row.
+
+    It was not "the only auth route without a bucket", as this said until
+    2026-09-03. `/refresh` and `/logout` are still unlimited. Neither hashes a
+    password, so neither is the CPU amplifier `/claim` was, but they are not
+    limited and nothing here should be read as saying they are.
+    """
     user_id      = int(payload["sub"])
     new_username = body.username
 
@@ -307,9 +383,13 @@ async def rename(
         async with get_pool().connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "UPDATE users SET username = %s WHERE id = %s",
+                    """
+                    UPDATE users SET username = %s WHERE id = %s
+                    RETURNING username, is_guest
+                    """,
                     (new_username, user_id),
                 )
+                row = await cur.fetchone()
     except Exception as e:
         if getattr(e, "sqlstate", None) == "23505":
             raise HTTPException(
@@ -317,21 +397,97 @@ async def rename(
                 detail="Username is already taken",
             ) from e
         logger.error("Rename error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Leaderboard rows carry the username, and the cached ones carry the old
+    # one. Without this the header updates from the new token immediately while
+    # the board underneath keeps showing the previous name for up to the 120s
+    # TTL -- the same page disagreeing with itself about who the reader is.
+    #
+    # The whole namespace, not this user's modes: a rename does not say which
+    # boards they appear on, and finding out costs a query to save a cache fill
+    # on an operation that happens approximately never.
+    await _invalidate_leaderboard_caches()
+
+    # The presented token's own deadline, carried forward rather than renewed.
+    # This route is authorized by an access token and may be called as often
+    # as the bucket allows, so minting a fresh hour each time would let any
+    # still-valid token renew itself indefinitely -- a stolen one included,
+    # long after the refresh token it came from was revoked or expired. The
+    # reissue exists to correct the `username` claim, not to extend a session.
+    return AccessTokenResponse(
+        access_token=create_access_token(
+            user_id,
+            row[0],
+            is_guest=row[1],
+            expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
+        ),
+    )
 
 
-@router.post("/claim", response_model=TokenResponse)
+@router.post(
+    "/claim",
+    response_model=TokenResponse,
+    responses=rate_limited_responses("5 per minute"),
+)
+@limiter.limit("5/minute")
 async def claim(
-    body:    ClaimRequest,
-    payload: dict = Depends(require_user),
+    request:  Request,
+    response: Response,
+    body:     ClaimRequest,
+    payload:  dict = Depends(require_user),
 ) -> TokenResponse:
     """
     Upgrades a guest account to a claimed account by attaching
     email and password. Issues fresh tokens reflecting is_guest=False.
+
+    Rate limited, and the account state is read before the password is
+    hashed. Both matter here specifically: bcrypt is deliberately expensive
+    and runs on a worker thread, so an unlimited route that hashes before
+    checking anything is a CPU amplifier for whoever holds a token.
     """
     user_id = int(payload["sub"])
 
+    # The token's own claim, which is up to an hour stale and -- because a
+    # successful claim does not revoke the guest token that authorized it --
+    # keeps saying `is_guest` long after the account stopped being one.
     if not payload.get("is_guest"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account is already claimed",
+        )
+
+    # So ask the database before doing the expensive part. Without this, a
+    # replayed guest token reached `hash_password` on every attempt for the
+    # life of the token, each one occupying an executor thread, and only then
+    # learned from the UPDATE that there was nothing to claim.
+    #
+    # An early exit, not the correctness guard: the UPDATE below keeps its own
+    # `AND is_guest = TRUE`, which is what actually settles a race between two
+    # concurrent claims. This only avoids paying bcrypt to find out.
+    try:
+        async with get_pool().connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT is_guest FROM users WHERE id = %s", (user_id,)
+                )
+                current = await cur.fetchone()
+    except Exception as e:
+        logger.error("Claim precheck error: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
+
+    if current is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if not current[0]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Account is already claimed",
@@ -376,7 +532,10 @@ async def claim(
                 detail="Email already registered",
             ) from e
         logger.error("Claim error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        ) from e
 
     if row is None:
         if existing_user is None:

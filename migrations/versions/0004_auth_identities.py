@@ -14,6 +14,7 @@ Create Date: 2026-07-10
 """
 from alembic import op
 
+
 # revision identifiers, used by Alembic.
 revision = "0004_auth_identities"
 down_revision = "0003_max_score_claimed_tier"

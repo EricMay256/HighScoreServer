@@ -60,7 +60,7 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from sqlalchemy import text as sql_text
 
-from .auth import TOKEN_PREFIX, hash_secret, parse_token
+from .auth import TOKEN_PREFIX, hash_secret, parse_token, secret_matches
 from .constants import (
     ACCESS_TOKEN_TTL_SECONDS,
     OAUTH_BASELINE_SCOPES,
@@ -593,16 +593,26 @@ class VaultAuthorizationProvider(
             return None
         async with self._transactions_for().transaction() as connection:
             credential = await self._credentials.get(connection, parsed.credential_id)
-            if credential is None:
+            # Compared before anything branches on whether the id was found.
+            # `secret_matches` runs against a dummy hash when the credential is
+            # None, and that only equalizes a miss with a hit if the miss
+            # actually reaches it -- returning early on the lookup, which this
+            # did until 2026-09-03, left precisely the timing difference the
+            # dummy hash exists to remove. It also meant an id that *did* exist
+            # took a second query before any comparison, so the two cases were
+            # separated twice over.
+            matched = secret_matches(credential, parsed.secret)
+            if credential is None or not matched:
                 return None
+            if not credential.is_active():
+                return None
+            # Only now, with the secret proven, does the ownership lookup run.
+            # It is the one place the query count differs, and reaching it
+            # requires holding the secret rather than guessing an id.
             owner = await self._refresh.client_and_family_for_credential(
                 connection, parsed.credential_id
             )
         if owner is None:
-            return None
-        if credential.secret_sha256 != hash_secret(parsed.secret):
-            return None
-        if not credential.is_active():
             return None
         client_id, _family_id = owner
         return AccessToken(
@@ -747,6 +757,15 @@ class VaultAuthorizationProvider(
         this one.
         """
 
+        # This *writes* the requested baseline scopes to the grant, so a
+        # refresh asking for fewer narrows the family permanently rather than
+        # just this credential. One-way, because the SDK requires a refresh
+        # request's scopes to be a subset of the presented token's: a family
+        # that narrows once cannot widen again without a new authorization.
+        # Deliberate -- the grant row is the authoritative record and must not
+        # disagree with what the family can do -- and recorded in ADR 0029's
+        # 2026-09-02 amendment, because "narrow for one call" is a reasonable
+        # thing to assume and is not what this does.
         authorized = sorted(set(scopes) & set(OAUTH_BASELINE_SCOPES))
         grant = await self._grants.set_authorized_scopes(
             connection,

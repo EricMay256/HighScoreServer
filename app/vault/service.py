@@ -101,7 +101,7 @@ AGENT_NOTES_DIRECTORY = "Agent/notes/"
 # so the promotion verb can send a retracted page back to the folder it came
 # from: folders.yml types that one "Wiki Page" and `Agent/notes/` "Agent Note",
 # so returning a page to the notes folder would leave it violating the rule its
-# own path selects. Nothing writes it yet -- compilation is NEXT-STEPS item 5.
+# own path selects. Compilation (ADR 0027) and the wiki importer write it.
 AGENT_WIKI_DIRECTORY = "Agent/wiki/"
 
 # Where a promotion candidate is projected. Both kinds land here: ADR 0023
@@ -389,7 +389,7 @@ class ContributionRequest:
 
 
 async def _summary_still_repairable(
-connection: AsyncConnection,
+    connection: AsyncConnection,
     *,
     document_id: str | None,
     contributed_by: str,
@@ -1053,9 +1053,9 @@ class VaultDocumentUpdateService:
                 connection, request.document_id, candidate
             )
             if updated is None:
-                # Visible a moment ago and not now. Nothing deletes documents
-                # today, so this is a race rather than an ordinary miss --
-                # surface it as the 404 it is.
+                # Visible a moment ago and not now: a retirement (ADR 0019) or
+                # a review rejection landed between the two reads. A race
+                # rather than an ordinary miss -- surface it as the 404 it is.
                 raise DocumentNotFound(request.document_id)
 
             # Always persist the candidate vector, even when producing it did
