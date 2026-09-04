@@ -1984,6 +1984,27 @@ class VaultCompilePageRequest(BaseModel):
         ),
     )
 
+    @field_validator("related_ids", "source_ids")
+    @classmethod
+    def validate_ids(cls, ids: list[str]) -> list[str]:
+        """The same rule every other edge-writing surface obeys.
+
+        This model shipped without it, so a compiled page could store blanks,
+        duplicates, titles and `[[wikilinks]]` in `related_ids` -- exactly the
+        corruption ADR 0030 draws the line against and
+        `scripts/resolve_vault_wikilinks.py` exists to repair, reintroduced on
+        a path that writes to the corpus. Duplicate `source_ids` also slipped
+        past the existence check, since resolving them collapses the list.
+
+        Deliberately no `max_length` beside it. The other write models cap
+        edges at 50; a compiled page is synthesized *from* notes and may
+        legitimately name many more, so a cardinality bound here is a separate
+        decision about what a page may cite -- not a number to inherit by
+        copying the line above.
+        """
+
+        return validate_edge_ids(ids)
+
 
 class VaultCompileSettleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
