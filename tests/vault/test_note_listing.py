@@ -16,6 +16,7 @@ from sqlalchemy import delete
 
 from app.vault.api_models import MAX_EDGE_LOOKUP_IDS
 from app.vault.auth import VaultScope
+from app.vault.cursors import PATH_SORT, decode_cursor, encode_cursor
 from app.vault.domain import (
     DocumentKind,
     DocumentStatus,
@@ -364,13 +365,17 @@ def test_paging_walks_the_listing_without_repeating_or_skipping(
     read_only_token: str,
     corpus: dict[str, str],
 ) -> None:
-    """Keyset, so the cursor is the last path rather than an offset."""
+    """Keyset, so the cursor names the last row rather than an offset."""
 
     first = _list(client, read_only_token, path="Human/03 Projects/", limit=1)
 
     assert len(first["notes"]) == 1
     assert first["has_more"] is True
-    assert first["next_cursor"] == first["notes"][0]["vault_path"]
+    # The cursor names that row -- it is no longer spelled as it (ADR 0045).
+    assert decode_cursor(first["next_cursor"], sort=PATH_SORT) == (
+        first["notes"][0]["vault_path"],
+        first["notes"][0]["note_id"],
+    )
 
     second = _list(
         client,
@@ -383,6 +388,105 @@ def test_paging_walks_the_listing_without_repeating_or_skipping(
     assert len(second["notes"]) == 1
     assert second["notes"][0]["note_id"] != first["notes"][0]["note_id"]
     assert _paths(first, corpus) + _paths(second, corpus) == ["alpha", "beta"]
+
+
+def test_a_cursor_does_not_publish_the_row_it_names(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Opaque is the point: the paging key stops being part of the contract.
+
+    While the cursor *was* a vault_path, every caller that looked at one
+    learned the order and could construct the next. Sorting has to vary that
+    key -- by `updated_at`, `created_at`, `title` -- and a key callers read is
+    a key that cannot vary. So the token carries the position without
+    spelling it.
+    """
+
+    first = _list(client, read_only_token, path="Human/03 Projects/", limit=1)
+    cursor = first["next_cursor"]
+
+    assert cursor != first["notes"][0]["vault_path"]
+    assert cursor != first["notes"][0]["note_id"]
+    # It travels in a query string, so it must need no escaping there.
+    assert set(cursor) <= set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
+
+
+def test_a_bare_vault_path_is_no_longer_a_cursor(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """The breaking half of ADR 0045, asserted rather than assumed.
+
+    A caller holding yesterday's cursor gets a refusal naming the problem
+    rather than a page starting somewhere arbitrary. Cursors are page-to-page
+    ephemera, so there is no migration window to offer -- but there is a
+    difference between refusing and quietly answering something else.
+    """
+
+    response = client.get(
+        "/api/v1/vault/notes",
+        headers={"Authorization": f"Bearer {read_only_token}"},
+        params={"path": "Human/03 Projects/", "after": "Human/03 Projects/alpha.md"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "cursor" in response.json()["detail"]
+
+
+def test_a_damaged_cursor_is_refused_rather_than_ignored(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Truncation in transit must not silently restart the walk.
+
+    Ignoring an unreadable cursor would answer with page one, which a caller
+    walking pages cannot distinguish from a corpus that changed under them --
+    they would re-read what they had and never reach the end.
+    """
+
+    good = _list(client, read_only_token, path="Human/03 Projects/", limit=1)
+
+    response = client.get(
+        "/api/v1/vault/notes",
+        headers={"Authorization": f"Bearer {read_only_token}"},
+        params={
+            "path": "Human/03 Projects/",
+            "after": good["next_cursor"][:-4] + "zzzz",
+        },
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_a_cursor_from_another_order_is_refused(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """The reason the token carries its sort at all.
+
+    No other sort exists yet, so this is the guard arriving before the thing
+    it guards: once `sort=updated` lands, resuming a path walk from a recency
+    cursor would start at an unrelated row and skip everything between it and
+    where the caller actually was, silently.
+    """
+
+    foreign = encode_cursor("updated", "Human/03 Projects/alpha.md", "whatever")
+
+    response = client.get(
+        "/api/v1/vault/notes",
+        headers={"Authorization": f"Bearer {read_only_token}"},
+        params={"path": "Human/03 Projects/", "after": foreign},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "start the listing again" in response.json()["detail"]
 
 
 def test_the_last_page_says_so(
@@ -483,7 +587,7 @@ def test_both_listings_page_by_the_same_rules() -> None:
 
     prefixes = ("Human/",)
     arguments = {
-        "after_vault_path": "Human/03 Projects/alpha.md",
+        "after": ("Human/03 Projects/alpha.md", "note-id"),
         "limit": 7,
         "statuses": (DocumentStatus.ACTIVE,),
         "readable_only": True,

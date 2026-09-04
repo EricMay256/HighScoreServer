@@ -17,6 +17,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    tuple_,
     update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY as PostgresArray
@@ -214,7 +215,7 @@ def path_page_statement(
     columns: Sequence[Any],
     prefixes: Sequence[str],
     *,
-    after_vault_path: str | None = None,
+    after: tuple[str, str] | None = None,
     limit: int = 200,
     statuses: Sequence[DocumentStatus] | None = None,
     readable_only: bool = False,
@@ -228,6 +229,15 @@ def path_page_statement(
     a browse page and an export walking the same prefixes with different
     filters or a different order would page differently over the same
     corpus, and only one of them would be right.
+
+    ``after`` is the ``(vault_path, id)`` of the last row already seen, and
+    the walk resumes at the row after it in that order. The id is redundant
+    *here* -- ``vault_path`` is UNIQUE, so it separates every pair of rows on
+    its own -- and it is carried anyway so that this is the same paging rule
+    the sorted listings need (ADR 0045), rather than a second one that happens
+    to agree today. A row comparison, not two chained predicates: Postgres
+    compares the tuples left to right, which is exactly the keyset semantics,
+    and spelling it out by hand is how a resumed page loses the rows that tie.
     """
 
     statement = (
@@ -242,12 +252,13 @@ def path_page_statement(
                 )
             )
         )
-        .order_by(vault_documents.c.vault_path)
+        .order_by(vault_documents.c.vault_path, vault_documents.c.id)
         .limit(limit)
     )
-    if after_vault_path is not None:
+    if after is not None:
         statement = statement.where(
-            vault_documents.c.vault_path > after_vault_path
+            tuple_(vault_documents.c.vault_path, vault_documents.c.id)
+            > tuple_(*after)
         )
     if statuses is not None:
         statement = statement.where(
@@ -641,7 +652,7 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         prefixes: Sequence[str],
-        after_vault_path: str | None = None,
+        after: tuple[str, str] | None = None,
         limit: int = 200,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
@@ -650,9 +661,10 @@ class VaultDocumentRepository:
     ) -> tuple[VaultDocument, ...]:
         """One ordered page of the documents living under any of ``prefixes``.
 
-        Ordered by ``vault_path`` and paged by keyset rather than OFFSET.
-        ``vault_path`` is UNIQUE, which is what makes it a total order and a
-        legal cursor.
+        Ordered by ``(vault_path, id)`` and paged by keyset rather than
+        OFFSET. ``vault_path`` is UNIQUE, so it is already a total order and
+        the id decides nothing here; it is carried so that this listing and
+        the sorted ones (ADR 0045) page by one rule rather than two.
 
         **Keyset paging alone does not make the walk stable, and this docstring
         used to claim it did.** OFFSET is the thing it beats: it cannot skip or
@@ -687,7 +699,7 @@ class VaultDocumentRepository:
         statement = path_page_statement(
             self._domain_columns,
             prefixes,
-            after_vault_path=after_vault_path,
+            after=after,
             limit=limit,
             statuses=statuses,
             readable_only=readable_only,
@@ -701,7 +713,7 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         prefixes: Sequence[str],
-        after_vault_path: str | None = None,
+        after: tuple[str, str] | None = None,
         limit: int = 200,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
@@ -722,7 +734,7 @@ class VaultDocumentRepository:
         statement = path_page_statement(
             DOCUMENT_BRIEF_COLUMNS,
             prefixes,
-            after_vault_path=after_vault_path,
+            after=after,
             limit=limit,
             statuses=statuses,
             readable_only=readable_only,

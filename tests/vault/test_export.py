@@ -506,20 +506,20 @@ class _StubDocuments:
 
     def __init__(self, documents: tuple[VaultDocument, ...]) -> None:
         self._documents = tuple(
-            sorted(documents, key=lambda document: document.vault_path)
+            sorted(documents, key=lambda document: (document.vault_path, document.id))
         )
 
     async def list_under_path_prefixes(
         self,
         connection: object,
         prefixes: tuple[str, ...],
-        after_vault_path: str | None = None,
+        after: tuple[str, str] | None = None,
         limit: int = 200,
     ) -> tuple[VaultDocument, ...]:
         remaining = [
             document
             for document in self._documents
-            if after_vault_path is None or document.vault_path > after_vault_path
+            if after is None or (document.vault_path, document.id) > after
         ]
         return tuple(remaining[:limit])
 
@@ -684,13 +684,13 @@ def test_list_under_path_prefixes_pages_the_agent_tree(
                 first = await documents.list_under_path_prefixes(
                     connection,
                     EXPORTED_PATH_PREFIXES,
-                    after_vault_path=f"Agent/notes/zzexport-{marker}-",
+                    after=(f"Agent/notes/zzexport-{marker}-", ""),
                     limit=2,
                 )
                 second = await documents.list_under_path_prefixes(
                     connection,
                     EXPORTED_PATH_PREFIXES,
-                    after_vault_path=first[-1].vault_path,
+                    after=(first[-1].vault_path, first[-1].id),
                     limit=2,
                 )
                 everything = await documents.list_under_path_prefixes(
