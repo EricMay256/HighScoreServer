@@ -49,8 +49,12 @@ textarea {
    Each edge carries its own trailing comma *inside* its item. That is what it
    was for when these ran inline -- a separator that is a node between items is
    a separator a line break can strand on a line of its own -- and it still is:
-   the comma stays on the line of the edge it follows. */
-.edges { display: flex; flex-direction: column; align-items: start; gap: 0.1rem; }
+   the comma stays on the line of the edge it follows.
+
+   `flex-start` rather than `start`: the two mean the same thing here, but an
+   engine that does not know the box-alignment keyword drops the declaration
+   and falls back to `stretch`, which widens every item to the column. */
+.edges { display: flex; flex-direction: column; align-items: flex-start; gap: 0.1rem; }
 .edge { min-width: 0; padding-left: 0.9rem; }
 /* The span being replaced, quoted back so the operator can see exactly what
    the server will be asked to match. */
