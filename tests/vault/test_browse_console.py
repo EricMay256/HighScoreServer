@@ -570,32 +570,32 @@ def test_edges_are_links_that_name_notes_by_slug() -> None:
     assert "openNote(edge.note_id)" in page, "a resolved edge must be clickable"
 
 
-def test_an_edge_gets_a_line_and_its_separator_stays_on_it() -> None:
-    """One edge per line, and no line that is only a comma.
+def test_each_edge_gets_a_line_with_nothing_trailing_it() -> None:
+    """One edge per line, and no separator for a layout to strand.
 
-    The list was a run of inline content -- a link, a ", " text node, a link --
-    which a browser may break between an inline-block button and the text after
-    it. That stranded a comma at the head of a line, separating nothing from
-    nothing. It also read as a paragraph of slugs rather than as a list of
-    things to go and read.
+    The list began as a run of inline content -- a link, a ", " text node, a
+    link -- and a browser may break between an inline-block button and the text
+    after it, which left a comma at the head of a line separating nothing from
+    nothing. Stacking the edges did not fix that on a narrow viewport, and
+    moving the comma inside the item did not either: a slug wider than the
+    column makes the button's shrink-to-fit box exactly the column's width, so
+    a comma after it has nowhere to go but a line of its own.
 
-    So the edges stack one per line, and the separator lives *inside* the item
-    it follows rather than between two of them: a separator that is its own
-    node is a separator a layout can put on a line by itself.
+    A line break already separates one edge from the next, so the separator is
+    gone rather than relocated -- there is no node left to put in the wrong
+    place.
     """
 
     page = _page()
 
     assert 'const item = el("span", "edge");' in page
-    assert (
-        'if (index < ids.length - 1) item.appendChild(el("span", "muted", ","));'
-        in page
-    ), "the separator is trailing, and inside the item it belongs to"
-    assert 'document.createTextNode(", ")' not in page, (
-        "a separator between two items is one that can land on its own line"
-    )
     assert ".edges { display: flex; flex-direction: column;" in page, (
         "the edges stack; they do not flow"
+    )
+    assert 'document.createTextNode(", ")' not in page
+    assert 'el("span", "muted", ",")' not in page, (
+        "a separator is a node, and a node after a link is one that can be "
+        "stranded on a line by itself"
     )
     # The label heads its own line, so it carries no trailing space.
     assert 'el("span", "muted", label + ":")' in page
