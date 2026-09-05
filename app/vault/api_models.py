@@ -1387,7 +1387,12 @@ class VaultNoteEdgeResponse(BaseModel):
 
 
 class VaultNoteListResponse(BaseModel):
-    """One ordered page of notes, keyed and paged by ``vault_path``."""
+    """One ordered page of notes, paged by an opaque cursor.
+
+    Ordered by ``vault_path`` today, and the order is about to become a
+    request parameter (ADR 0045), which is exactly why ``next_cursor`` no
+    longer spells the key it stopped at.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1403,13 +1408,16 @@ class VaultNoteListResponse(BaseModel):
     next_cursor: str | None = Field(
         default=None,
         description=(
-            "The `vault_path` to pass as `after` for the next page, or null at "
-            "the end. Keyset rather than an offset, so rows inserted behind "
-            "the cursor cannot shift the walk. It is not a snapshot: "
-            "`vault_path` is mutable -- promotion moves a note on purpose -- "
-            "so a row that moves across the cursor between calls can be seen "
-            "twice or not at all. For browsing that is a refresh; for anything "
-            "that must be exact, read the export."
+            "The token to pass back as `after` for the next page, or null at "
+            "the end. Opaque: it names a position in one ordered walk, and is "
+            "not a vault_path, a note id, or anything else to build or read "
+            "(ADR 0045). It was a vault_path until then; sending one now is a "
+            "422, so pass this back verbatim. Keyset rather than an offset, so "
+            "rows inserted behind the cursor cannot shift the walk. It is not "
+            "a snapshot: the key it names is mutable -- promotion moves a "
+            "note's vault_path on purpose -- so a row that crosses the cursor "
+            "between calls can be seen twice or not at all. For browsing that "
+            "is a refresh; for anything that must be exact, read the export."
         ),
     )
 
