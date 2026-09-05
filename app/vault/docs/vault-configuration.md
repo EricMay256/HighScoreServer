@@ -1335,18 +1335,30 @@ because the same row sits somewhere different in every order and resuming from
 it would skip everything in between, silently. Start again with no `after`.
 
 The cursor is keyset, so rows inserted behind it cannot shift the walk. It is
-not a snapshot, and what that costs depends on the order:
+not a snapshot. Two different things move a row relative to a walk in progress,
+and the order decides only the first.
 
-- `created` — the key never changes, so every note present when the walk began
-  is reached. A note written during the walk sorts ahead of where it has
-  already passed and is simply not in this pass.
-- `updated` — an edit moves a note to the front, so a note edited before the
-  walk reaches it will be missed. Never duplicated.
+**The sort key moving under the cursor.** This is what the choice of order
+buys or costs:
+
+- `created` — the key never changes, so this cannot happen at all. A note
+  written during the walk sorts ahead of where it has already passed and is
+  simply not in this pass.
+- `updated` — an edit moves a note to the front, so one edited before the walk
+  reaches it is missed. Never duplicated.
 - `path` — the key moves in either direction, because promotion relocates a
   note on purpose, so a row can be seen twice or not at all.
 
-For browsing, all three are a refresh away from correct. For anything that must
-be exact, read the export, which walks one REPEATABLE READ transaction.
+**Membership changing**, which every order pays alike. A note retired or
+flagged between pages, moved out of the requested `path` prefix, or edited
+until it no longer matches a `tag` or `facet` filter simply stops appearing.
+`created` does not protect against this and no order here does: an immutable
+key rules out the first kind of movement, not the second.
+
+So `sort=created` means "no skips or duplicates from the key moving", not "every
+note that was there when I started". For browsing, all three orders are a
+refresh away from correct. For traversal of a fixed set, read the export, which
+walks one REPEATABLE READ transaction.
 
 `GET /api/v1/vault/authorization` describes the presented credential —
 `credential_id`, `principal_id`, `scopes`, and the authorization's `label`. It
