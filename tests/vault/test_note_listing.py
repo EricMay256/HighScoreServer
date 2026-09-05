@@ -452,16 +452,20 @@ def test_a_damaged_cursor_is_refused_rather_than_ignored(
 
     good = _list(client, read_only_token, path="Human/03 Projects/", limit=1)
 
-    response = client.get(
-        "/api/v1/vault/notes",
-        headers={"Authorization": f"Bearer {read_only_token}"},
-        params={
-            "path": "Human/03 Projects/",
-            "after": good["next_cursor"][:-4] + "zzzz",
-        },
-    )
+    for damaged in (
+        good["next_cursor"][:-4] + "zzzz",
+        # Appended junk, which the base64 decoder used to discard silently --
+        # so this exact request answered 200 with the page the intact cursor
+        # named. See `test_listing_cursor` for the whole family.
+        good["next_cursor"] + "!!!!",
+    ):
+        response = client.get(
+            "/api/v1/vault/notes",
+            headers={"Authorization": f"Bearer {read_only_token}"},
+            params={"path": "Human/03 Projects/", "after": damaged},
+        )
 
-    assert response.status_code == 422, response.text
+        assert response.status_code == 422, response.text
 
 
 def test_a_cursor_from_another_order_is_refused(

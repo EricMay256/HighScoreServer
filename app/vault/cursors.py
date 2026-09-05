@@ -114,7 +114,16 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
 
     padded = token + "=" * (-len(token) % 4)
     try:
-        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        # `validate=True`, emphatically. The default *discards* every character
+        # outside the alphabet before decoding, so a token with junk appended
+        # decoded to the payload underneath it and was honoured -- a damaged
+        # cursor answering as if it were intact, which is the one thing this
+        # function exists to prevent.
+        #
+        # Spelled out as `b64decode` with `altchars` because `urlsafe_b64decode`
+        # takes no `validate`: it is the lenient decoder and offers no way to
+        # stop being one.
+        raw = base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True)
     except (binascii.Error, UnicodeEncodeError, ValueError) as error:
         raise InvalidCursor("cursor is not a valid token") from error
 
@@ -137,6 +146,18 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
         or not isinstance(key, str)
         or not isinstance(note_id, str)
     ):
+        raise InvalidCursor("cursor is not a valid token")
+    # Canonical or nothing: a cursor is something this endpoint issued, byte
+    # for byte. Rejecting anything that does not re-encode to itself closes the
+    # whole class of tokens that decode to a valid payload without being the
+    # token we handed out -- junk the base64 alphabet ignores, alternative
+    # padding, unused trailing bits, whitespace inside the JSON. Checking one
+    # of those at a time is how the first of them got through.
+    #
+    # Before the sort comparison, and re-encoded with the sort the token
+    # carries rather than the one asked for, so a cursor from another order is
+    # still met with the message about orders rather than this one.
+    if encode_cursor(carried, key, note_id) != token:
         raise InvalidCursor("cursor is not a valid token")
     if carried != sort:
         raise InvalidCursor(

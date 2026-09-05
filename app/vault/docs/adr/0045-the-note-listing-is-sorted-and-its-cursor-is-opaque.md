@@ -4,10 +4,14 @@ Date: 2026-09-04
 
 ## Status
 
-**Accepted 2026-09-04.** Nothing is implemented. The cursor codec, the
-`created_at` projection, the Alembic index revision and the console control all
-remain to be built; the plan runs in four phases, the first of which changes the
-cursor without adding a sort.
+**Accepted 2026-09-04.** Phase 1 is implemented (PR #27): the cursor is opaque,
+carries the order it belongs to, and every listing -- the default included --
+pages on a compound `(key, id)` keyset. No sort has been added yet, which was
+the point of shipping that phase alone.
+
+Phases 2 to 4 remain: the `sort` parameter itself, `created_at` in the brief
+projection and the note summary, the Alembic index revision, and the browse
+console's sort control with its folder and breadcrumb behaviour.
 
 ## Context
 

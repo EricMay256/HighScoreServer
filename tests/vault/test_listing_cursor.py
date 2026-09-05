@@ -101,6 +101,45 @@ def test_the_bound_covers_the_longest_cursor_this_corpus_can_issue(
     )
 
 
+@pytest.mark.parametrize(
+    ("damage", "corrupt"),
+    [
+        # The one that got through. `base64.urlsafe_b64decode` discards every
+        # character outside the alphabet instead of objecting to it, so this
+        # decoded to the payload underneath and was honoured.
+        ("junk appended", lambda token: token + "!!!!"),
+        ("one junk character", lambda token: token + "!"),
+        ("trailing whitespace", lambda token: token + " "),
+        ("whitespace inside", lambda token: token[:8] + " " + token[8:]),
+        # `=` is stripped on the way out and put back on the way in, so a
+        # token carrying its own padding is not the one that was issued --
+        # spelled as a literal rather than computed, because a computed pad is
+        # empty whenever the token already sits on a multiple of four.
+        ("padding restored", lambda token: token + "="),
+        ("truncated", lambda token: token[:-4]),
+        ("a character swapped", lambda token: token[:-1] + ("A" if token[-1] != "A" else "B")),
+    ],
+)
+def test_a_corrupted_cursor_is_refused_rather_than_repaired(
+    damage: str, corrupt
+) -> None:
+    """Damage to a valid token must not decode to the token underneath it.
+
+    This is the failure the "damaged cursors are refused" promise was making
+    without keeping. A cursor that survives corruption is worse than one that
+    fails: the caller is handed a page from a position they did not ask for,
+    and nothing anywhere says so.
+
+    Canonical or nothing -- a cursor is what this endpoint issued, byte for
+    byte -- because the alternative is finding these one shape at a time.
+    """
+
+    token = encode_cursor(PATH_SORT, "Agent/notes/a.md", "note-1")
+
+    with pytest.raises(InvalidCursor):
+        decode_cursor(corrupt(token), sort=PATH_SORT)
+
+
 def test_a_cursor_with_no_sort_is_malformed_rather_than_foreign() -> None:
     """Two different failures that shared one message.
 
