@@ -12,6 +12,29 @@ class DocumentKind(str, Enum):
     WIKI = "wiki"
 
 
+class NoteSort(str, Enum):
+    """The orders a note listing can be read in (ADR 0045).
+
+    A closed set, and the reason the sort never reaches SQL as text: each
+    member names a column pair the repository holds, so a request selects an
+    order rather than describing one. The same invariant the leaderboard keeps
+    for `sort_order` and `period`.
+
+    `PATH` is the default and the corpus's own order -- it is what makes a
+    folder a place to stand, and the browse console's breadcrumbs and folder
+    strip are downstream of it. The two time orders answer what that one
+    structurally cannot: what changed lately, and what is new.
+
+    Descending is not a member. Every order here has one useful direction --
+    a listing of the *least* recently updated notes is a question nobody asked
+    -- and adding a direction would double the cursor states to serve it.
+    """
+
+    PATH = "path"
+    UPDATED = "updated"
+    CREATED = "created"
+
+
 class DocumentStatus(str, Enum):
     ACTIVE = "active"
     FLAGGED = "flagged"

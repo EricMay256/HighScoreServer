@@ -8,12 +8,12 @@ skips whatever it dropped.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 
 from app.vault.api_models import (
     MAX_EDGE_LOOKUP_IDS,
@@ -21,16 +21,18 @@ from app.vault.api_models import (
     VaultNoteSummary,
 )
 from app.vault.auth import VaultScope
-from app.vault.cursors import PATH_SORT, decode_cursor, encode_cursor
+from app.vault.cursors import decode_cursor, encode_cursor
 from app.vault.domain import (
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
+    NoteSort,
     VaultDocumentBrief,
 )
 from app.vault.repository import (
     DOCUMENT_BRIEF_COLUMNS,
     DOCUMENT_DOMAIN_COLUMNS,
+    SORT_KEYS,
     VaultDocumentRepository,
     path_page_statement,
 )
@@ -157,6 +159,10 @@ def read_only_token(configure_test_env: None) -> str:
         yield token
     finally:
         _drop(credential_id)
+
+
+# The codec speaks in sort names, and `NoteSort` is where they are defined.
+PATH_SORT = NoteSort.PATH.value
 
 
 def _list(client: TestClient, token: str, **params) -> dict:
@@ -559,6 +565,220 @@ def test_the_last_page_says_so(
     assert len(payload["notes"]) == 2
     assert payload["has_more"] is False
     assert payload["next_cursor"] is None
+
+
+def _stamp(ids: dict[str, str], column: str, moments: dict[str, datetime]) -> None:
+    """Give named fixture notes distinct timestamps.
+
+    Written directly rather than through the repository because the fixture
+    seeds every note in one transaction, so `now()` gives all six the same
+    `created_at` and `updated_at` to the microsecond. That tie is exactly what
+    one test below needs and what the others cannot use.
+    """
+
+    transactions, engine = vault_service()
+
+    async def apply() -> None:
+        async with transactions.transaction() as connection:
+            for suffix, moment in moments.items():
+                await connection.execute(
+                    update(vault_documents)
+                    .where(vault_documents.c.id == ids[suffix])
+                    .values(**{column: moment})
+                )
+
+    try:
+        asyncio.run(apply())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_a_time_order_reads_newest_first(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """What a path listing structurally cannot answer.
+
+    Newest first, because that is the only direction anyone asks a recency
+    question in -- which is why `NoteSort` carries no descending variants to
+    double the cursor states for the other one.
+    """
+
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    _stamp(corpus, "updated_at", {"alpha": base, "beta": base + timedelta(days=2)})
+
+    payload = _list(
+        client, read_only_token, path="Human/03 Projects/", sort="updated", limit=100
+    )
+
+    assert _paths(payload, corpus) == ["beta", "alpha"]
+
+
+def test_the_two_time_orders_read_their_own_column(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """`created` and `updated` answer different questions, so set them against
+    each other: the note written first is the one edited last.
+
+    Two tables decide this between them -- `SORT_KEYS` names the column and
+    `_CURSOR_KEYS` reads the key off the row -- with no import between them. A
+    sort reading the wrong column would order plausibly and page wrongly, so
+    it is asserted rather than assumed.
+    """
+
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    _stamp(corpus, "created_at", {"alpha": base, "beta": base + timedelta(days=2)})
+    _stamp(corpus, "updated_at", {"alpha": base + timedelta(days=4), "beta": base})
+
+    by_created = _list(
+        client, read_only_token, path="Human/03 Projects/", sort="created", limit=100
+    )
+    by_updated = _list(
+        client, read_only_token, path="Human/03 Projects/", sort="updated", limit=100
+    )
+
+    assert _paths(by_created, corpus) == ["beta", "alpha"]
+    assert _paths(by_updated, corpus) == ["alpha", "beta"]
+
+
+def test_a_time_order_pages_across_rows_that_share_a_timestamp(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """The case a bare cursor gets wrong, and the reason for the tiebreaker.
+
+    `vault_path` is UNIQUE, so a path cursor is a total order by itself. A
+    timestamp is not: notes written in one transaction share it exactly, and a
+    page boundary landing inside such a group would resume after every row
+    holding that timestamp -- skipping the rest of the group -- or before it,
+    repeating what it already returned. The id is what makes the order total.
+    """
+
+    rows = _list(
+        client, read_only_token, path="Human/03 Projects/", sort="created", limit=100
+    )["notes"]
+    assert len({row["created_at"] for row in rows}) == 1, (
+        "the fixture must seed these in one transaction for this to be a tie"
+    )
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(5):  # bounded, so a walk that loops fails instead of hanging
+        page = _list(
+            client,
+            read_only_token,
+            path="Human/03 Projects/",
+            sort="created",
+            limit=1,
+            **({"after": cursor} if cursor else {}),
+        )
+        seen.extend(_paths(page, corpus))
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert cursor is None, "the walk did not reach the end"
+    assert sorted(seen) == ["alpha", "beta"], (
+        f"a tied timestamp must be walked exactly once each; saw {seen}"
+    )
+
+
+def test_a_cursor_may_not_cross_between_orders(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Both directions, now that there is a second order to cross into.
+
+    The same row sits somewhere different in every order, so resuming from
+    another order's cursor starts at an unrelated position and skips whatever
+    lies between -- silently, which is what makes it worth refusing rather
+    than making a best effort of.
+    """
+
+    by_path = _list(client, read_only_token, path="Human/03 Projects/", limit=1)
+    by_updated = _list(
+        client, read_only_token, path="Human/03 Projects/", sort="updated", limit=1
+    )
+
+    crossings = (
+        (by_path["next_cursor"], "updated"),
+        (by_updated["next_cursor"], "path"),
+        (by_updated["next_cursor"], "created"),
+    )
+    for cursor, sort in crossings:
+        response = client.get(
+            "/api/v1/vault/notes",
+            headers={"Authorization": f"Bearer {read_only_token}"},
+            params={"path": "Human/03 Projects/", "sort": sort, "after": cursor},
+        )
+
+        assert response.status_code == 422, response.text
+        assert "start the listing again" in response.json()["detail"]
+
+
+def test_the_default_order_is_still_the_path_order(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Additive, which is what keeps the exporter untouched.
+
+    It walks the same statement builder inside one REPEATABLE READ transaction
+    and depends on path order; nothing about that changed, because nothing
+    about the default did.
+    """
+
+    _stamp(corpus, "updated_at", {"alpha": datetime(2026, 9, 3, tzinfo=UTC)})
+
+    default = _list(client, read_only_token, limit=100)
+    explicit = _list(client, read_only_token, sort="path", limit=100)
+
+    assert _paths(default, corpus) == _paths(explicit, corpus)
+    paths = [note["vault_path"] for note in default["notes"]]
+    assert paths == sorted(paths)
+
+
+def test_an_unknown_order_is_refused(
+    client: TestClient,
+    read_only_token: str,
+) -> None:
+    """The set is closed, so `recent` is a typo -- and answering a typo with
+    the default order answers a question nobody asked."""
+
+    response = client.get(
+        "/api/v1/vault/notes",
+        headers={"Authorization": f"Bearer {read_only_token}"},
+        params={"sort": "recent"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_every_order_names_a_column_rather_than_describing_one() -> None:
+    """The invariant AGENTS.md states for `sort_order` and `period`.
+
+    A request names a member of a closed enum and the enum names a column the
+    repository holds, so nothing a caller sends is interpolated. That is a
+    property of the mapping rather than of any one request, so it is asserted
+    on the mapping -- including that the mapping is total, since a member with
+    no entry would turn a valid request into a `KeyError`.
+    """
+
+    assert set(SORT_KEYS) == set(NoteSort)
+
+    listed = {column.name for column in DOCUMENT_BRIEF_COLUMNS}
+    for sort in NoteSort:
+        column, _descending = SORT_KEYS[sort]
+        assert column.table is vault_documents
+        assert column.name in listed, (
+            "an order must be by a column the listing actually reads, or a "
+            "row cannot say which order it is in"
+        )
 
 
 def test_a_listing_row_carries_no_body(

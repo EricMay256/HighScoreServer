@@ -17,6 +17,9 @@ leaderboard ``API_KEY`` are not vault credentials.
 """
 
 import logging
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -85,7 +88,6 @@ from .auth import VaultCredential, VaultScope
 from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
 from .cursors import (
     MAX_CURSOR_CHARS,
-    PATH_SORT,
     InvalidCursor,
     decode_cursor,
     encode_cursor,
@@ -94,8 +96,10 @@ from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
     AmendmentProposalState,
+    NoteSort,
     ReviewState,
     VaultCompileRun,
+    VaultDocumentBrief,
 )
 from .embedding_runtime import get_embedding_provider
 from .embeddings import EmbeddingError, EmbeddingInputTooLong
@@ -512,7 +516,31 @@ MAX_NOTE_PAGE = 100
 DEFAULT_NOTE_PAGE = 50
 
 
-def _resume_after(after: str | None) -> tuple[str, str] | None:
+# What a cursor carries for each order: how to read the key off the last row
+# of a page, and how to read it back. Text on the wire because the token is
+# JSON, and the query wants the value -- so a timestamp goes out in ISO-8601
+# and comes back a `datetime`, to the microsecond Postgres stored.
+#
+# One entry per `NoteSort` member, so adding an order is a line here and a
+# line in `SORT_KEYS`. The two tables have no import between them; what keeps
+# them honest is that a key read from the wrong column pages wrongly on the
+# first boundary, which the per-sort paging tests walk.
+_CURSOR_KEYS: dict[
+    NoteSort, tuple[Callable[[VaultDocumentBrief], str], Callable[[str], Any]]
+] = {
+    NoteSort.PATH: (lambda brief: brief.vault_path, lambda text: text),
+    NoteSort.UPDATED: (
+        lambda brief: brief.updated_at.isoformat(),
+        datetime.fromisoformat,
+    ),
+    NoteSort.CREATED: (
+        lambda brief: brief.created_at.isoformat(),
+        datetime.fromisoformat,
+    ),
+}
+
+
+def _resume_after(after: str | None, sort: NoteSort) -> tuple[Any, str] | None:
     """The row a page resumes after, from the token that named it.
 
     Every way a cursor can be wrong answers 422, including one that is a
@@ -520,16 +548,30 @@ def _resume_after(after: str | None) -> tuple[str, str] | None:
     listing that re-seats a foreign cursor into this walk resumes at an
     unrelated row and skips everything between, and says nothing while it
     does. Refusing is the only answer that cannot be mistaken for a page.
+
+    Parsing the key belongs here rather than in the query. A timestamp that
+    will not parse is a malformed cursor, and reaching the repository with it
+    would turn a bad request into whatever psycopg made of it -- the shape of
+    defect this endpoint has already paid for twice.
     """
 
     if after is None:
         return None
     try:
-        return decode_cursor(after, sort=PATH_SORT)
+        key, note_id = decode_cursor(after, sort=sort.value)
     except InvalidCursor as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(error),
+        ) from error
+
+    _, parse = _CURSOR_KEYS[sort]
+    try:
+        return parse(key), note_id
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="cursor is not a valid token",
         ) from error
 
 
@@ -612,6 +654,16 @@ async def list_vault_documents(
             "until ADR 0045; one sent now is refused with 422."
         ),
     ),
+    sort: NoteSort = Query(
+        default=NoteSort.PATH,
+        description=(
+            "Which order to read the listing in. `path` is the default and "
+            "the corpus's own order. `updated` and `created` are newest "
+            "first, and answer what a path order structurally cannot: what "
+            "changed lately, and what is new. A cursor belongs to the order "
+            "it was issued in -- changing `sort` starts a new walk."
+        ),
+    ),
     limit: int = Query(default=DEFAULT_NOTE_PAGE, ge=1, le=MAX_NOTE_PAGE),
 ) -> VaultNoteListResponse:
     """Browse the corpus by where notes live rather than by what they match.
@@ -620,13 +672,21 @@ async def list_vault_documents(
     *look around*, which is why reading the vault as a human meant exporting it
     to somewhere else first (ADR 0039).
 
-    Ordered by `vault_path` and paged by keyset, because that is the corpus's
-    own order: a listing sorted by relevance to no query would be arbitrary,
-    and one sorted by time would scatter a folder across every page.
+    Ordered by `vault_path` unless asked otherwise, and paged by keyset. Path
+    is the default because it is the corpus's own order -- a listing sorted by
+    relevance to no query would be arbitrary, and time order scatters a folder
+    across every page, which is a real cost and the reason it is not the
+    default rather than a reason not to offer it.
 
-    The cursor is opaque (ADR 0045). It names the last row of the previous page
-    *and the order that page was in*, so that a sort added later cannot be
-    resumed by a cursor from a different one.
+    The two time orders are what a path listing cannot answer: what changed
+    lately, and what is new. `updated_at` is the curated one -- adjudication
+    and promotion deliberately leave it alone -- so `sort=updated` means notes
+    an author touched, not rows something wrote to.
+
+    The cursor is opaque (ADR 0045) and belongs to the order it was issued in.
+    Changing `sort` mid-walk is a new walk: the old cursor is refused rather
+    than re-seated, because the same row sits somewhere different in every
+    order and resuming from it would skip everything in between.
 
     The read policy is applied in the query, not to the page: filtering
     afterwards would return short pages and a cursor that skips whatever it
@@ -635,7 +695,7 @@ async def list_vault_documents(
 
     prefixes = (path,) if path is not None else READABLE_PATH_PREFIXES
     facets = _requested_facets(facet)
-    resume_after = _resume_after(after)
+    resume_after = _resume_after(after, sort)
 
     transactions = VaultTransactionService(get_vault_engine())
     documents = VaultDocumentRepository()
@@ -649,6 +709,7 @@ async def list_vault_documents(
         page = await documents.list_briefs_under_path_prefixes(
             connection,
             prefixes,
+            sort=sort,
             after=resume_after,
             limit=limit + 1,
             statuses=READABLE_STATUSES,
@@ -663,7 +724,7 @@ async def list_vault_documents(
         notes=[note_summary(document) for document in visible],
         has_more=has_more,
         next_cursor=(
-            encode_cursor(PATH_SORT, visible[-1].vault_path, visible[-1].id)
+            encode_cursor(sort.value, _CURSOR_KEYS[sort][0](visible[-1]), visible[-1].id)
             if has_more and visible
             else None
         ),
