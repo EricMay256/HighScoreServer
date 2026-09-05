@@ -129,14 +129,21 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
 
     try:
         payload = json.loads(raw)
-    except ValueError as error:
-        # `ValueError` rather than the two obvious subclasses it used to name.
-        # `JSONDecodeError` covers malformed JSON and `UnicodeDecodeError`
-        # covers bytes that are not UTF-8, but parsing fails in ways that are
-        # neither: a JSON integer of more than 4300 digits raises a plain
-        # `ValueError` from the int conversion, and 5000 digits fit inside
-        # MAX_CURSOR_CHARS with room to spare. Naming subclasses meant the
-        # guard covered the failures already thought of.
+    except (ValueError, RecursionError) as error:
+        # Wider than the two subclasses this used to name, and wider than
+        # `ValueError` alone, because parsing fails in ways that are neither.
+        #
+        # A JSON integer of more than 4300 digits raises a plain `ValueError`
+        # from the int conversion. Deeply nested arrays raise `RecursionError`
+        # from the C scanner, which is not a `ValueError` at all -- and how
+        # deep is "deeply" belongs to the interpreter: CPython 3.12, which CI
+        # and production pin, raises at 2997 levels, a token of 8026
+        # characters that fits inside MAX_CURSOR_CHARS. 3.14 parses the
+        # deepest payload the bound allows, which is why a probe run here
+        # reported this unreachable.
+        #
+        # The lesson, three findings running: a guard listing the failures
+        # somebody thought of is a guard that is one short.
         raise InvalidCursor("cursor is not a valid token") from error
 
     if not isinstance(payload, dict):

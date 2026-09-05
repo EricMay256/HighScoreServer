@@ -212,6 +212,36 @@ def test_a_cursor_whose_json_will_not_convert_is_refused() -> None:
         decode_cursor(token, sort=PATH_SORT)
 
 
+def test_a_cursor_nested_past_the_parser_is_refused() -> None:
+    """Reachable on the interpreter that runs this, which is not this one.
+
+    CPython 3.12 -- pinned by `.python-version` for CI and production -- raises
+    `RecursionError` out of the JSON C scanner at 2997 nested arrays, a token
+    of 8026 characters and so comfortably inside the bound `after` accepts.
+    `RecursionError` is not a `ValueError`, so it escaped the parse guard and
+    came back as a 500 on input the caller chooses.
+
+    The assertion is the promise rather than the mechanism, because the
+    mechanism differs by interpreter: on 3.12 the parser raises, and on 3.14
+    the payload parses and is then refused by the type checks below. Both
+    answer `InvalidCursor`, which is the only thing a caller sees. A local
+    probe on 3.14 is what reported this unreachable in the first place.
+    """
+
+    depth = 3000
+    payload = '{"s":"path","k":' + "[" * depth + "]" * depth + ',"i":"x"}'
+    token = (
+        base64.urlsafe_b64encode(payload.encode("ascii"))
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+    assert len(token) < MAX_CURSOR_CHARS, "the bound would refuse this first"
+
+    with pytest.raises(InvalidCursor):
+        decode_cursor(token, sort=PATH_SORT)
+
+
 def test_a_cursor_with_no_sort_is_malformed_rather_than_foreign() -> None:
     """Two different failures that shared one message.
 
