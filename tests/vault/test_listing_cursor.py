@@ -160,6 +160,30 @@ def test_a_cursor_python_can_parse_but_not_re_encode_is_refused() -> None:
         decode_cursor(token, sort=PATH_SORT)
 
 
+def test_a_cursor_carrying_a_nul_is_refused_before_it_reaches_postgres() -> None:
+    """Canonical is not the same as bindable.
+
+    A forger can encode any key they like, and the canonical check only asks
+    that the token be what this encoder would have produced for it -- so a NUL
+    passes every shape test here and then meets psycopg, which refuses to bind
+    one into a text parameter and raises `DataError` from inside the query.
+    That surfaced as a 500 for a request the caller had made wrong.
+
+    Refused here instead, where it is cheap and where the message can say what
+    kind of thing went wrong. Nothing valid is turned away: the column could
+    not have stored such a path in the first place.
+    """
+
+    for key, note_id in (
+        ("Agent/notes/a\x00b.md", "note-1"),
+        ("Agent/notes/a.md", "note\x001"),
+    ):
+        token = encode_cursor(PATH_SORT, key, note_id)
+
+        with pytest.raises(InvalidCursor):
+            decode_cursor(token, sort=PATH_SORT)
+
+
 def test_a_cursor_with_no_sort_is_malformed_rather_than_foreign() -> None:
     """Two different failures that shared one message.
 

@@ -147,6 +147,13 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
         or not isinstance(note_id, str)
     ):
         raise InvalidCursor("cursor is not a valid token")
+    # Postgres text cannot hold a NUL and psycopg refuses to bind one, raising
+    # `DataError` from inside the query -- which reached the caller as a 500
+    # for a request they had made wrong. Nothing legitimate is refused here: a
+    # `vault_path` or an id containing a NUL could not have been stored, so no
+    # cursor this endpoint issued can carry one.
+    if "\x00" in key or "\x00" in note_id:
+        raise InvalidCursor("cursor is not a valid token")
     # Canonical or nothing: a cursor is something this endpoint issued, byte
     # for byte. Rejecting anything that does not re-encode to itself closes the
     # whole class of tokens that decode to a valid payload without being the
