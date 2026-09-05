@@ -1295,8 +1295,9 @@ class VaultNoteSummary(BaseModel):
     title: str
     vault_path: str = Field(
         description=(
-            "Vault-root-relative posix path. Also the paging cursor: pass the "
-            "last one back as `after`."
+            "Vault-root-relative posix path: where the note lives, and what "
+            "the default listing is ordered by. Not a paging cursor -- it was "
+            "one until ADR 0045, and `next_cursor` carries the position now."
         )
     )
     kind: DocumentKind

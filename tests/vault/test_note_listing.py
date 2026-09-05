@@ -14,7 +14,11 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
-from app.vault.api_models import MAX_EDGE_LOOKUP_IDS
+from app.vault.api_models import (
+    MAX_EDGE_LOOKUP_IDS,
+    VaultNoteListResponse,
+    VaultNoteSummary,
+)
 from app.vault.auth import VaultScope
 from app.vault.cursors import PATH_SORT, decode_cursor, encode_cursor
 from app.vault.domain import (
@@ -491,6 +495,54 @@ def test_a_cursor_from_another_order_is_refused(
 
     assert response.status_code == 422, response.text
     assert "start the listing again" in response.json()["detail"]
+
+
+def _described_fields() -> dict[str, str]:
+    """Every documented field of the listing's published schema.
+
+    Nested models are read out of `$defs` rather than followed by hand: the
+    row model is where the stale instruction actually lived, and it reaches a
+    consumer through the response model's `$ref` like any other.
+    """
+
+    fields: dict[str, str] = {}
+    for model in (VaultNoteListResponse, VaultNoteSummary):
+        schema = model.model_json_schema()
+        definitions = [(model.__name__, schema), *schema.get("$defs", {}).items()]
+        for owner, definition in definitions:
+            for name, field in definition.get("properties", {}).items():
+                if "description" in field:
+                    fields[f"{owner}.{name}"] = field["description"]
+    return fields
+
+
+def test_only_the_cursor_tells_a_caller_what_to_pass_as_after() -> None:
+    """The paging contract is documented in one place or it is documented wrong.
+
+    `after` stopped accepting a vault_path (ADR 0045), and the instruction to
+    send one back was written in three places: the parameter, `next_cursor`,
+    and `vault_path` on the row itself. Two rounds of review found them one at
+    a time, which is what a manual sweep is worth against a description that
+    can be copied anywhere.
+
+    So: any field that tells a caller what to pass as `after` must be the
+    cursor. A schema is what a client reads before it reads any prose here.
+    """
+
+    described = _described_fields()
+
+    assert described, "the schema published no descriptions at all"
+
+    instructing = {
+        name: description
+        for name, description in described.items()
+        if "`after`" in description
+    }
+
+    assert set(instructing) == {"VaultNoteListResponse.next_cursor"}, (
+        "these fields tell a caller what to pass as `after`, and only the "
+        f"cursor may: {sorted(set(instructing) - {'VaultNoteListResponse.next_cursor'})}"
+    )
 
 
 def test_the_last_page_says_so(
