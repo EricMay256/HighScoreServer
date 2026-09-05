@@ -1309,15 +1309,44 @@ Endpoints are `GET /api/v1/vault/search`, `GET /api/v1/vault/notes`,
 `DELETE /api/v1/vault/notes/{id}`, plus the amendment workflow below. All take
 `Authorization: Bearer <token>`.
 
-`GET /api/v1/vault/notes` lists notes by `vault_path` for browsing, without
-their bodies: `path` restricts to one prefix, `tag` and `facet` (`name:value`,
-repeatable) narrow conjunctively, and `after` takes the previous page's
-`next_cursor`. It applies the same read policy as `GET /notes/{id}` — flagged
-notes and paths outside `READABLE_PATH_PREFIXES` are absent, and a prefix
-outside that policy returns an empty page rather than an error. Ordered by path
-because that is the corpus's own order; the cursor is keyset, so rows inserted
-behind it cannot shift the walk, but `vault_path` is mutable and a note that
-moves across the cursor between calls can be seen twice or not at all.
+`GET /api/v1/vault/notes` lists notes for browsing, without their bodies:
+`path` restricts to one prefix, `tag` and `facet` (`name:value`, repeatable)
+narrow conjunctively, `sort` picks the order, and `after` takes the previous
+page's `next_cursor`. It applies the same read policy as `GET /notes/{id}` —
+flagged notes and paths outside `READABLE_PATH_PREFIXES` are absent, and a
+prefix outside that policy returns an empty page rather than an error.
+
+`sort` takes one of three values (ADR 0045). Anything else is a 422; the set is
+closed, so a typo is not answered with the default order.
+
+| `sort` | Order | Answers |
+| --- | --- | --- |
+| `path` (default) | `vault_path` ascending | Where a note lives. The corpus's own order, and what makes a folder a place to stand. |
+| `updated` | `updated_at` descending | What changed lately. Curated: adjudication and promotion deliberately do not move `updated_at`, so this means an author edited the note. |
+| `created` | `created_at` descending | What is new. |
+
+The time orders are newest-first and there is no ascending variant: each order
+has one useful direction, and offering the other would double the cursor states
+to serve a question nobody asks.
+
+**The cursor belongs to the order it was issued in.** Changing `sort` mid-walk
+is a new walk — the old cursor is refused with 422 rather than re-seated,
+because the same row sits somewhere different in every order and resuming from
+it would skip everything in between, silently. Start again with no `after`.
+
+The cursor is keyset, so rows inserted behind it cannot shift the walk. It is
+not a snapshot, and what that costs depends on the order:
+
+- `created` — the key never changes, so every note present when the walk began
+  is reached. A note written during the walk sorts ahead of where it has
+  already passed and is simply not in this pass.
+- `updated` — an edit moves a note to the front, so a note edited before the
+  walk reaches it will be missed. Never duplicated.
+- `path` — the key moves in either direction, because promotion relocates a
+  note on purpose, so a row can be seen twice or not at all.
+
+For browsing, all three are a refresh away from correct. For anything that must
+be exact, read the export, which walks one REPEATABLE READ transaction.
 
 `GET /api/v1/vault/authorization` describes the presented credential —
 `credential_id`, `principal_id`, `scopes`, and the authorization's `label`. It

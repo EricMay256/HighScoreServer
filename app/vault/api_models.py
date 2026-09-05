@@ -1405,9 +1405,11 @@ class VaultNoteEdgeResponse(BaseModel):
 class VaultNoteListResponse(BaseModel):
     """One ordered page of notes, paged by an opaque cursor.
 
-    Ordered by ``vault_path`` today, and the order is about to become a
-    request parameter (ADR 0045), which is exactly why ``next_cursor`` no
-    longer spells the key it stopped at.
+    The order is a request parameter: ``sort`` selects ``path`` (the default),
+    ``updated`` or ``created``, and the last two read newest first. That is
+    why ``next_cursor`` does not spell the key it stopped at -- the key is a
+    different column in each order, and one a caller could read is one that
+    could not vary (ADR 0045).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1428,12 +1430,23 @@ class VaultNoteListResponse(BaseModel):
             "the end. Opaque: it names a position in one ordered walk, and is "
             "not a vault_path, a note id, or anything else to build or read "
             "(ADR 0045). It was a vault_path until then; sending one now is a "
-            "422, so pass this back verbatim. Keyset rather than an offset, so "
-            "rows inserted behind the cursor cannot shift the walk. It is not "
-            "a snapshot: the key it names is mutable -- promotion moves a "
-            "note's vault_path on purpose -- so a row that crosses the cursor "
-            "between calls can be seen twice or not at all. For browsing that "
-            "is a refresh; for anything that must be exact, read the export."
+            "422, so pass this back verbatim.\n\n"
+            "It belongs to the order it was issued in. Changing `sort` "
+            "mid-walk is a new walk: the old token is refused rather than "
+            "re-seated, because the same row sits somewhere different in every "
+            "order.\n\n"
+            "Keyset rather than an offset, so rows inserted behind the cursor "
+            "cannot shift the walk. It is not a snapshot, and what that costs "
+            "depends on the order. Under `created` the key never changes, so "
+            "every note present when the walk began is reached; a note written "
+            "during it sorts newest-first, ahead of where the walk already "
+            "passed, and is simply not in this pass. Under `updated` an edit "
+            "moves a note to the front, so one edited before the walk reached "
+            "it will be missed -- never duplicated. Under `path` the key moves "
+            "in either direction, because promotion relocates a note on "
+            "purpose, so a row can be seen twice or not at all. For browsing "
+            "all three are a refresh; for anything that must be exact, read "
+            "the export, which walks one REPEATABLE READ transaction."
         ),
     )
 
