@@ -1406,8 +1406,9 @@ class VaultNoteListResponse(BaseModel):
     """One ordered page of notes, paged by an opaque cursor.
 
     The order is a request parameter: ``sort`` selects ``path`` (the default),
-    ``updated`` or ``created``, and the last two read newest first. That is
-    why ``next_cursor`` does not spell the key it stopped at -- the key is a
+    ``title``, ``updated`` or ``created``. Title ascends under the database's
+    collation; the two time orders read newest first. That is why
+    ``next_cursor`` does not spell the key it stopped at -- the key is a
     different column in each order, and one a caller could read is one that
     could not vary (ADR 0045).
     """
@@ -1444,16 +1445,17 @@ class VaultNoteListResponse(BaseModel):
             "newest-first, ahead of where the walk already passed, and is "
             "simply not in this pass. `updated` moves a note to the front when "
             "it is edited, so one edited before the walk reached it is missed "
-            "-- never duplicated. `path` moves in either direction, because "
-            "promotion relocates a note on purpose, so a row can be seen twice "
-            "or not at all.\n\n"
+            "-- never duplicated. `title` moves in either direction when an "
+            "edit retitles a note, and `path` does the same because promotion "
+            "relocates a note on purpose, so under either order a row can be "
+            "seen twice or not at all.\n\n"
             "Membership changing, which every order pays alike: a note retired "
             "or flagged between pages, moved out of the requested `path` "
             "prefix, or edited until it no longer matches a `tag` or `facet` "
             "filter, stops appearing. `created` does not protect against that "
             "and no order here does -- an immutable key rules out the first "
             "kind of movement, not the second.\n\n"
-            "For browsing all three are a refresh. For traversal of a fixed "
+            "For browsing all four are a refresh. For traversal of a fixed "
             "set, read the export, which walks one REPEATABLE READ "
             "transaction."
         ),

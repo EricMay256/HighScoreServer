@@ -218,12 +218,13 @@ def _amendment_proposal_from_row(row: RowMapping) -> VaultAmendmentProposal:
 # BY` -- the same rule the leaderboard keeps for `sort_order` and `period`.
 #
 # The time orders are descending because that is the only direction anyone
-# asks them in. `vault_path` ascends because a folder listing that ran
-# backwards would not be the corpus's own order.
+# asks them in. `vault_path` and `title` ascend because their useful orders are
+# the corpus's own hierarchy and the ordinary reading order, respectively.
 SORT_KEYS: dict[NoteSort, tuple[Any, bool]] = {
     NoteSort.PATH: (vault_documents.c.vault_path, False),
     NoteSort.UPDATED: (vault_documents.c.updated_at, True),
     NoteSort.CREATED: (vault_documents.c.created_at, True),
+    NoteSort.TITLE: (vault_documents.c.title, False),
 }
 
 
@@ -270,13 +271,14 @@ def path_page_statement(
     rows that tie.
 
     The id is what makes every order total. ``vault_path`` is UNIQUE and needs
-    no help, but a timestamp is not: notes written in one transaction share a
-    ``created_at`` to the microsecond, and without the tiebreaker a page
-    boundary landing inside such a group would skip the rest of it or repeat
-    it. The comparison and the ordering flip together for a descending sort --
-    ``ORDER BY key DESC, id DESC`` paired with ``(key, id) < (:key, :id)`` --
-    because a tiebreaker running the other way to its key is a tiebreaker that
-    breaks ties in the wrong direction.
+    no help, but timestamps and titles are not: notes written in one
+    transaction share a ``created_at`` to the microsecond, and unrelated notes
+    may have the same title. Without the tiebreaker a page boundary landing
+    inside either group would skip the rest of it or repeat it. The comparison
+    and the ordering flip together for a descending sort -- ``ORDER BY key
+    DESC, id DESC`` paired with ``(key, id) < (:key, :id)`` -- because a
+    tiebreaker running the other way to its key is a tiebreaker that breaks
+    ties in the wrong direction.
     """
 
     statement = (
@@ -703,18 +705,19 @@ class VaultDocumentRepository:
     ) -> tuple[VaultDocument, ...]:
         """One ordered page of the documents living under any of ``prefixes``.
 
-        Ordered by ``(vault_path, id)`` and paged by keyset rather than
-        OFFSET. ``vault_path`` is UNIQUE, so it is already a total order and
-        the id decides nothing here; it is carried so that this listing and
-        the sorted ones (ADR 0045) page by one rule rather than two.
+        Ordered by the requested ``(key, id)`` pair and paged by keyset rather
+        than OFFSET. ``vault_path`` is UNIQUE, so the id decides nothing for
+        the default order; timestamps and titles need it to make their orders
+        total (ADR 0045).
 
         **Keyset paging alone does not make the walk stable, and this docstring
         used to claim it did.** OFFSET is the thing it beats: it cannot skip or
         repeat rows because of *insertions* behind the cursor. But the cursor
-        column is mutable -- promotion moves a `vault_path` on purpose -- so a
-        row can still cross the cursor and be seen twice or never. What closes
-        that is the caller reading every page in one REPEATABLE READ
-        transaction, which is what `VaultExportService.documents` does.
+        column may be mutable -- promotion moves a `vault_path` and an edit may
+        move a title or `updated_at` -- so a row can still cross the cursor and
+        be seen twice or never. What closes that is the caller reading every
+        page in one REPEATABLE READ transaction, which is what
+        `VaultExportService.documents` does.
 
         Unfiltered by status and by ``ai_read`` **by default**, for the reason
         ``get_by_id`` gives: which rows a surface may see is that surface's

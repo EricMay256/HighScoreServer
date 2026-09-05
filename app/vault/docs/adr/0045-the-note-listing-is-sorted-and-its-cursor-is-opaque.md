@@ -4,7 +4,7 @@ Date: 2026-09-04
 
 ## Status
 
-**Accepted 2026-09-04. Phases 1 and 2 implemented.**
+**Accepted 2026-09-04. Phases 1 through 3 implemented.**
 
 Phase 1 (PR #27): the cursor is opaque, carries the order it belongs to, and
 every listing -- the default included -- pages on a compound `(key, id)`
@@ -16,8 +16,12 @@ in the vault lineage. The index shape decided below was changed during
 implementation and the decision is restated here as shipped, with what was
 measured; see "Two indexes" and the note that follows it.
 
-Phases 3 and 4 remain: `sort=title`, and the browse console's sort control with
-its folder and breadcrumb behaviour.
+Phase 3: `sort=title`, ascending under the database's collation and using the
+same `(key, id)` cursor shape as every other order. No title index was added;
+the corpus-scale plan is recorded below.
+
+Phase 4 remains: the browse console's sort control with its folder and
+breadcrumb behaviour.
 
 ## Context
 
@@ -57,12 +61,10 @@ Add sorting to `/notes`, and make the cursor opaque.
 mapping to a fixed column pair. Nothing from the request reaches `ORDER BY` as
 text, which is the invariant AGENTS.md states for `sort_order` and `period`.
 
-`title` is decided and deferred, not dropped. `NoteSort` carries three members
-as of phase 2 and gains the fourth in phase 3, which is sequencing rather than
-a change of mind: title order is worth having because it is *not* a near
-duplicate of path order, for the reason the Context gives. A member absent from
-the enum is absent from the API, so until phase 3 lands `sort=title` is refused
-like any other unknown value.
+`title` joined `NoteSort` in phase 3. It is worth having because it is *not* a
+near duplicate of path order, for the reason the Context gives. It ascends
+under the database's collation; the API does not promise a language-neutral or
+case-folded order that PostgreSQL was not asked to provide.
 
 The two time orders are descending, and direction is not a request parameter.
 Each order has one useful direction -- a listing of the least recently updated
@@ -115,12 +117,21 @@ plans as an Index Only Scan on the same index. Not measured is whether the
 planner *chooses* them -- the corpus available locally is a single row, where a
 sequential scan is correct and the planner says so.
 
+No title index was added with phase 3. `ORDER BY title, id` needs a plain btree
+on that exact pair; the existing `vault_path text_pattern_ops` index cannot
+serve a different column or collation. Measured on the configured development
+corpus on 2026-09-05: all 75 documents were readable, and `EXPLAIN (ANALYZE,
+BUFFERS)` chose a sequential scan plus an in-memory quicksort using 38 kB, with
+1.34 ms total execution. At this scale a third write-time index costs more than
+the sort it would avoid. Re-measure on the deployed corpus as it grows, and add
+the plain `(title, id)` btree only when that plan shows the sort is material.
+
 Sorting is a mode of the browse console, not a console of its own. The sort
 control sits in the filter row, and ordering stays orthogonal to the path
 prefix, so "recently updated under `Human/03 Projects/`" is expressible. While a
 non-path sort is active the folder strip is suppressed and the breadcrumb is
-labelled as a filter rather than a location -- under a time order there is no
-location, only a scope.
+labelled as a filter rather than a location -- under any non-path order there
+is no location, only a scope.
 
 ## Consequences
 
@@ -130,7 +141,8 @@ a 422 after this ships. Cursors are page-to-page ephemera and `/notes` is recent
 so no migration window is offered; the refusal names the problem.
 
 Adding a sort afterwards costs an enum member, a column pair and a test. The
-cost of the fourth sort is paid here, in the codec, not in each one.
+cost of the fourth sort was paid in phase 3, in the codec rather than in a
+parallel paging implementation.
 
 Two more indexes to maintain on every write to `vault_documents`.
 
@@ -179,4 +191,5 @@ cursor states for no question anyone asked.
 
 Ascending variants of the time sorts (oldest first). Sorting in the export,
 which has its own ordering contract. Per-sort rate limiting: the listing bucket
-is shared and no sort is more expensive than another once indexed.
+is shared; title-order cost is measured before either an index or a distinct
+limit is introduced.

@@ -537,6 +537,7 @@ _CURSOR_KEYS: dict[
         lambda brief: brief.created_at.isoformat(),
         datetime.fromisoformat,
     ),
+    NoteSort.TITLE: (lambda brief: brief.title, lambda text: text),
 }
 
 
@@ -621,7 +622,7 @@ def _requested_facets(facet: list[str]) -> dict[str, list[str]]:
     "/notes",
     response_model=VaultNoteListResponse,
     dependencies=[Depends(list_notes_quota)],
-    summary="List notes by vault path, newest revision state, without bodies",
+    summary="List note summaries in a selected order, without bodies",
 )
 async def list_vault_documents(
     path: str | None = Query(
@@ -658,10 +659,11 @@ async def list_vault_documents(
         default=NoteSort.PATH,
         description=(
             "Which order to read the listing in. `path` is the default and "
-            "the corpus's own order. `updated` and `created` are newest "
-            "first, and answer what a path order structurally cannot: what "
-            "changed lately, and what is new. A cursor belongs to the order "
-            "it was issued in -- changing `sort` starts a new walk."
+            "the corpus's own order; `title` ascends under the database's "
+            "collation. `updated` and `created` are newest first, and answer "
+            "what the structural orders cannot: what changed lately, and what "
+            "is new. A cursor belongs to the order it was issued in -- "
+            "changing `sort` starts a new walk."
         ),
     ),
     limit: int = Query(default=DEFAULT_NOTE_PAGE, ge=1, le=MAX_NOTE_PAGE),
@@ -678,10 +680,11 @@ async def list_vault_documents(
     across every page, which is a real cost and the reason it is not the
     default rather than a reason not to offer it.
 
-    The two time orders are what a path listing cannot answer: what changed
-    lately, and what is new. `updated_at` is the curated one -- adjudication
-    and promotion deliberately leave it alone -- so `sort=updated` means notes
-    an author touched, not rows something wrote to.
+    Title order interleaves notes and wiki pages that path order groups by
+    directory. The two time orders answer what neither structural order can:
+    what changed lately, and what is new. `updated_at` is the curated one --
+    adjudication and promotion deliberately leave it alone -- so
+    `sort=updated` means notes an author touched, not rows something wrote to.
 
     The cursor is opaque (ADR 0045) and belongs to the order it was issued in.
     Changing `sort` mid-walk is a new walk: the old cursor is refused rather
