@@ -129,7 +129,14 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
 
     try:
         payload = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except ValueError as error:
+        # `ValueError` rather than the two obvious subclasses it used to name.
+        # `JSONDecodeError` covers malformed JSON and `UnicodeDecodeError`
+        # covers bytes that are not UTF-8, but parsing fails in ways that are
+        # neither: a JSON integer of more than 4300 digits raises a plain
+        # `ValueError` from the int conversion, and 5000 digits fit inside
+        # MAX_CURSOR_CHARS with room to spare. Naming subclasses meant the
+        # guard covered the failures already thought of.
         raise InvalidCursor("cursor is not a valid token") from error
 
     if not isinstance(payload, dict):

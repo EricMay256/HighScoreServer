@@ -184,6 +184,34 @@ def test_a_cursor_carrying_a_nul_is_refused_before_it_reaches_postgres() -> None
             decode_cursor(token, sort=PATH_SORT)
 
 
+def test_a_cursor_whose_json_will_not_convert_is_refused() -> None:
+    """Not every parse failure is a `JSONDecodeError`.
+
+    Python refuses to convert an integer literal of more than 4300 digits and
+    raises a plain `ValueError` doing it, so a payload that is perfectly well
+    formed JSON can still fail to parse. The guard named `JSONDecodeError` and
+    `UnicodeDecodeError`, so this one escaped `decode_cursor` and came back as
+    a 500 -- the same shape as the surrogate, and reachable for the same
+    reason: a caller chooses the payload.
+
+    The size is the point. 5000 digits encode to well under the bound `after`
+    accepts, so nothing else stops this first.
+    """
+
+    digits = 5000
+    payload = '{"s":"path","k":' + "1" * digits + ',"i":"x"}'
+    token = (
+        base64.urlsafe_b64encode(payload.encode("ascii"))
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+    assert len(token) < MAX_CURSOR_CHARS, "the bound would refuse this first"
+
+    with pytest.raises(InvalidCursor):
+        decode_cursor(token, sort=PATH_SORT)
+
+
 def test_a_cursor_with_no_sort_is_malformed_rather_than_foreign() -> None:
     """Two different failures that shared one message.
 
