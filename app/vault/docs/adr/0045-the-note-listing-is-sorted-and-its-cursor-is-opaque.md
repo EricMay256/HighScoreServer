@@ -4,14 +4,20 @@ Date: 2026-09-04
 
 ## Status
 
-**Accepted 2026-09-04.** Phase 1 is implemented (PR #27): the cursor is opaque,
-carries the order it belongs to, and every listing -- the default included --
-pages on a compound `(key, id)` keyset. No sort has been added yet, which was
-the point of shipping that phase alone.
+**Accepted 2026-09-04. Phases 1 and 2 implemented.**
 
-Phases 2 to 4 remain: the `sort` parameter itself, `created_at` in the brief
-projection and the note summary, the Alembic index revision, and the browse
-console's sort control with its folder and breadcrumb behaviour.
+Phase 1 (PR #27): the cursor is opaque, carries the order it belongs to, and
+every listing -- the default included -- pages on a compound `(key, id)`
+keyset. No sort was added, which was the point of shipping it alone.
+
+Phase 2 (PR #28): `sort=path|updated|created`, `created_at` in the brief
+projection and the note summary, and migration `0020_note_listing_sort_indexes`
+in the vault lineage. The index shape decided below was changed during
+implementation and the decision is restated here as shipped, with what was
+measured; see "Two indexes" and the note that follows it.
+
+Phases 3 and 4 remain: `sort=title`, and the browse console's sort control with
+its folder and breadcrumb behaviour.
 
 ## Context
 
@@ -51,6 +57,19 @@ Add sorting to `/notes`, and make the cursor opaque.
 mapping to a fixed column pair. Nothing from the request reaches `ORDER BY` as
 text, which is the invariant AGENTS.md states for `sort_order` and `period`.
 
+`title` is decided and deferred, not dropped. `NoteSort` carries three members
+as of phase 2 and gains the fourth in phase 3, which is sequencing rather than
+a change of mind: title order is worth having because it is *not* a near
+duplicate of path order, for the reason the Context gives. A member absent from
+the enum is absent from the API, so until phase 3 lands `sort=title` is refused
+like any other unknown value.
+
+The two time orders are descending, and direction is not a request parameter.
+Each order has one useful direction -- a listing of the least recently updated
+notes is a question nobody asks -- and offering the other would double the
+cursor states to serve it. The ascending variants stay deferred, and the index
+shape below leaves them free to add.
+
 Every sort is a compound keyset on `(key, id)`. `updated_at`, `created_at` and
 `title` are all non-unique, so the key alone is not a total order and a bare
 cursor would skip or repeat rows. `path` takes the same shape despite
@@ -70,10 +89,31 @@ order inside a REPEATABLE READ transaction -- is untouched by construction.
 `note_summary`, so a listing row can say when it was written as well as when it
 changed.
 
-Two indexes, in a vault-lineage Alembic revision: `(status, updated_at DESC,
-id)` and `(status, created_at DESC, id)`. The existing
+Two indexes, in a vault-lineage Alembic revision: `(updated_at, id)` and
+`(created_at, id)`, both ascending. The existing
 `idx_vault_documents_kind_status_updated` leads with `kind` and cannot serve a
 kind-agnostic recency page.
+
+**This is not the shape first decided here, which was `(status, updated_at
+DESC, id)`.** Two corrections, both made while writing the migration:
+
+*No leading `status`.* The listing filters `status IN ('active', 'archived')`
+-- two values of three, so nearly every row. Leading with it buys almost no
+selectivity while putting a non-equality ahead of the ordering key, which is
+what stops the planner walking the index in order: it would gather the matching
+rows and sort them, which is the cost the index exists to avoid.
+
+*Ascending, though the listing reads newest first.* A btree scans either way,
+so `(updated_at, id)` read backwards is exactly `ORDER BY updated_at DESC, id
+DESC`. What cannot be reversed as a unit is a *mixed* index, so a key declared
+DESC beside an ascending tiebreaker would have served the one query it was
+written for and left the deferred ascending variants needing a third index.
+
+Measured rather than reasoned: with `enable_seqscan` off, both orders plan as
+`Index Scan Backward` with no Sort node, and the deferred ascending variant
+plans as an Index Only Scan on the same index. Not measured is whether the
+planner *chooses* them -- the corpus available locally is a single row, where a
+sequential scan is correct and the planner says so.
 
 Sorting is a mode of the browse console, not a console of its own. The sort
 control sits in the filter row, and ordering stays orthogonal to the path
