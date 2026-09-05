@@ -157,7 +157,17 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
     # Before the sort comparison, and re-encoded with the sort the token
     # carries rather than the one asked for, so a cursor from another order is
     # still met with the message about orders rather than this one.
-    if encode_cursor(carried, key, note_id) != token:
+    try:
+        canonical = encode_cursor(carried, key, note_id)
+    except (UnicodeEncodeError, ValueError) as error:
+        # JSON admits escapes that UTF-8 cannot represent -- a lone surrogate
+        # is the reachable one -- so a payload that parses is not always a
+        # payload that re-encodes. Unguarded, that raised out of this function
+        # entirely: `_resume_after` catches InvalidCursor and nothing else, so
+        # a forged cursor came back as a 500, blaming the server for a
+        # malformed request.
+        raise InvalidCursor("cursor is not a valid token") from error
+    if canonical != token:
         raise InvalidCursor("cursor is not a valid token")
     if carried != sort:
         raise InvalidCursor(

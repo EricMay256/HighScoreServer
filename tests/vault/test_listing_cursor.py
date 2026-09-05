@@ -140,6 +140,26 @@ def test_a_corrupted_cursor_is_refused_rather_than_repaired(
         decode_cursor(corrupt(token), sort=PATH_SORT)
 
 
+def test_a_cursor_python_can_parse_but_not_re_encode_is_refused() -> None:
+    """The canonicalisation must not be able to raise past its own caller.
+
+    A lone surrogate is a legal JSON escape and an illegal UTF-8 character,
+    so the payload below decodes, parses, and passes every type check -- and
+    then fails when the canonical check re-encodes it. That failure escaped
+    `decode_cursor`,
+    and `_resume_after` catches only `InvalidCursor`, so a forged cursor was
+    answered with a 500: the server reporting a malformed request as its own
+    fault.
+    """
+
+    token = base64.urlsafe_b64encode(
+        r'{"s":"path","k":"\ud800","i":"x"}'.encode("ascii")
+    ).decode("ascii").rstrip("=")
+
+    with pytest.raises(InvalidCursor):
+        decode_cursor(token, sort=PATH_SORT)
+
+
 def test_a_cursor_with_no_sort_is_malformed_rather_than_foreign() -> None:
     """Two different failures that shared one message.
 
