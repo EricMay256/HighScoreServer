@@ -83,6 +83,13 @@ from .api_models import (
 )
 from .auth import VaultCredential, VaultScope
 from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
+from .cursors import (
+    MAX_CURSOR_CHARS,
+    PATH_SORT,
+    InvalidCursor,
+    decode_cursor,
+    encode_cursor,
+)
 from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
@@ -505,6 +512,27 @@ MAX_NOTE_PAGE = 100
 DEFAULT_NOTE_PAGE = 50
 
 
+def _resume_after(after: str | None) -> tuple[str, str] | None:
+    """The row a page resumes after, from the token that named it.
+
+    Every way a cursor can be wrong answers 422, including one that is a
+    perfectly good cursor for a different order. That is not pedantry: a
+    listing that re-seats a foreign cursor into this walk resumes at an
+    unrelated row and skips everything between, and says nothing while it
+    does. Refusing is the only answer that cannot be mistaken for a page.
+    """
+
+    if after is None:
+        return None
+    try:
+        return decode_cursor(after, sort=PATH_SORT)
+    except InvalidCursor as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+
+
 def _requested_facets(facet: list[str]) -> dict[str, list[str]]:
     """Parse `facet=name:value` pairs into the filter the repository takes.
 
@@ -574,8 +602,15 @@ async def list_vault_documents(
     ),
     after: str | None = Query(
         default=None,
-        max_length=1024,
-        description="The previous page's `next_cursor`, which is a vault_path.",
+        # Not 1024, which was the vault_path's bound and would refuse a cursor
+        # this endpoint had just issued for a long path. See MAX_CURSOR_CHARS.
+        max_length=MAX_CURSOR_CHARS,
+        description=(
+            "The previous page's `next_cursor`, passed back verbatim. Opaque: "
+            "it names a position in one ordered walk, and is not a vault_path, "
+            "a note id, or anything else to build by hand. It was a vault_path "
+            "until ADR 0045; one sent now is refused with 422."
+        ),
     ),
     limit: int = Query(default=DEFAULT_NOTE_PAGE, ge=1, le=MAX_NOTE_PAGE),
 ) -> VaultNoteListResponse:
@@ -589,6 +624,10 @@ async def list_vault_documents(
     own order: a listing sorted by relevance to no query would be arbitrary,
     and one sorted by time would scatter a folder across every page.
 
+    The cursor is opaque (ADR 0045). It names the last row of the previous page
+    *and the order that page was in*, so that a sort added later cannot be
+    resumed by a cursor from a different one.
+
     The read policy is applied in the query, not to the page: filtering
     afterwards would return short pages and a cursor that skips whatever it
     dropped.
@@ -596,6 +635,7 @@ async def list_vault_documents(
 
     prefixes = (path,) if path is not None else READABLE_PATH_PREFIXES
     facets = _requested_facets(facet)
+    resume_after = _resume_after(after)
 
     transactions = VaultTransactionService(get_vault_engine())
     documents = VaultDocumentRepository()
@@ -609,7 +649,7 @@ async def list_vault_documents(
         page = await documents.list_briefs_under_path_prefixes(
             connection,
             prefixes,
-            after_vault_path=after,
+            after=resume_after,
             limit=limit + 1,
             statuses=READABLE_STATUSES,
             readable_only=True,
@@ -622,7 +662,11 @@ async def list_vault_documents(
     return VaultNoteListResponse(
         notes=[note_summary(document) for document in visible],
         has_more=has_more,
-        next_cursor=visible[-1].vault_path if has_more and visible else None,
+        next_cursor=(
+            encode_cursor(PATH_SORT, visible[-1].vault_path, visible[-1].id)
+            if has_more and visible
+            else None
+        ),
     )
 
 

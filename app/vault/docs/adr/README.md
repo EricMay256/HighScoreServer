@@ -53,6 +53,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0042 | [A mutable state store beside the corpus](0042-a-mutable-state-store-beside-the-corpus.md) | Considered, not scheduled |
 | 0043 | [Librarian runs are persisted drafts, and only humans commit them](0043-librarian-runs-are-persisted-drafts-and-only-humans-commit-them.md) | Proposed |
 | 0044 | [Tweaking a proposal creates a linked successor](0044-tweaking-a-proposal-creates-a-linked-successor.md) | Accepted |
+| 0045 | [The note listing is sorted, and its cursor is opaque](0045-the-note-listing-is-sorted-and-its-cursor-is-opaque.md) | Accepted |
 
 ## Reserved numbers
 

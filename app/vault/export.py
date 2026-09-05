@@ -789,18 +789,18 @@ class VaultExportService:
         async with self._transactions.transaction(
             isolation_level="REPEATABLE READ"
         ) as connection:
-            cursor: str | None = None
+            cursor: tuple[str, str] | None = None
             while True:
                 page = await self._documents.list_under_path_prefixes(
                     connection,
                     EXPORTED_PATH_PREFIXES,
-                    after_vault_path=cursor,
+                    after=cursor,
                     limit=self._page_size,
                 )
                 if not page:
                     break
                 documents.extend(page)
-                cursor = page[-1].vault_path
+                cursor = (page[-1].vault_path, page[-1].id)
         return tuple(documents)
 
     async def export(
