@@ -41,6 +41,7 @@ from .domain import (
     DocumentStatus,
     NewVaultDocument,
     NoteCompileState,
+    NoteSort,
     OAuthGrant,
     PendingAuthorization,
     PromotionStatus,
@@ -96,6 +97,7 @@ DOCUMENT_BRIEF_COLUMNS = (
     vault_documents.c.summary,
     vault_documents.c.content_revision,
     vault_documents.c.updated_at,
+    vault_documents.c.created_at,
 )
 
 DOCUMENT_DOMAIN_COLUMNS = (
@@ -211,11 +213,41 @@ def _amendment_proposal_from_row(row: RowMapping) -> VaultAmendmentProposal:
     )
 
 
+# What each order is, as a column and a direction. The request names a member
+# of `NoteSort` and never a column, so nothing a caller sends reaches `ORDER
+# BY` -- the same rule the leaderboard keeps for `sort_order` and `period`.
+#
+# The time orders are descending because that is the only direction anyone
+# asks them in. `vault_path` ascends because a folder listing that ran
+# backwards would not be the corpus's own order.
+SORT_KEYS: dict[NoteSort, tuple[Any, bool]] = {
+    NoteSort.PATH: (vault_documents.c.vault_path, False),
+    NoteSort.UPDATED: (vault_documents.c.updated_at, True),
+    NoteSort.CREATED: (vault_documents.c.created_at, True),
+}
+
+
+def _ordering(sort: NoteSort) -> tuple[Any, Any]:
+    """The ``ORDER BY`` for one sort: its key, then the tiebreaker.
+
+    Both in the same direction, always. The keyset comparison is a single row
+    comparison, so a tiebreaker ordered against its key would disagree with
+    the predicate that resumes the walk -- which shows up only on the rows
+    that tie, and only at a page boundary.
+    """
+
+    column, descending = SORT_KEYS[sort]
+    if descending:
+        return column.desc(), vault_documents.c.id.desc()
+    return column.asc(), vault_documents.c.id.asc()
+
+
 def path_page_statement(
     columns: Sequence[Any],
     prefixes: Sequence[str],
     *,
-    after: tuple[str, str] | None = None,
+    sort: NoteSort = NoteSort.PATH,
+    after: tuple[Any, str] | None = None,
     limit: int = 200,
     statuses: Sequence[DocumentStatus] | None = None,
     readable_only: bool = False,
@@ -230,14 +262,21 @@ def path_page_statement(
     filters or a different order would page differently over the same
     corpus, and only one of them would be right.
 
-    ``after`` is the ``(vault_path, id)`` of the last row already seen, and
-    the walk resumes at the row after it in that order. The id is redundant
-    *here* -- ``vault_path`` is UNIQUE, so it separates every pair of rows on
-    its own -- and it is carried anyway so that this is the same paging rule
-    the sorted listings need (ADR 0045), rather than a second one that happens
-    to agree today. A row comparison, not two chained predicates: Postgres
-    compares the tuples left to right, which is exactly the keyset semantics,
-    and spelling it out by hand is how a resumed page loses the rows that tie.
+    ``after`` is the ``(key, id)`` of the last row already seen, where the key
+    is whatever column ``sort`` orders by, and the walk resumes at the row
+    after it in that order. A row comparison, not two chained predicates:
+    Postgres compares the tuples left to right, which is exactly the keyset
+    semantics, and spelling it out by hand is how a resumed page loses the
+    rows that tie.
+
+    The id is what makes every order total. ``vault_path`` is UNIQUE and needs
+    no help, but a timestamp is not: notes written in one transaction share a
+    ``created_at`` to the microsecond, and without the tiebreaker a page
+    boundary landing inside such a group would skip the rest of it or repeat
+    it. The comparison and the ordering flip together for a descending sort --
+    ``ORDER BY key DESC, id DESC`` paired with ``(key, id) < (:key, :id)`` --
+    because a tiebreaker running the other way to its key is a tiebreaker that
+    breaks ties in the wrong direction.
     """
 
     statement = (
@@ -252,13 +291,15 @@ def path_page_statement(
                 )
             )
         )
-        .order_by(vault_documents.c.vault_path, vault_documents.c.id)
+        .order_by(*_ordering(sort))
         .limit(limit)
     )
     if after is not None:
+        column, descending = SORT_KEYS[sort]
+        position = tuple_(column, vault_documents.c.id)
+        bound = tuple_(*after)
         statement = statement.where(
-            tuple_(vault_documents.c.vault_path, vault_documents.c.id)
-            > tuple_(*after)
+            position < bound if descending else position > bound
         )
     if statuses is not None:
         statement = statement.where(
@@ -652,7 +693,8 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         prefixes: Sequence[str],
-        after: tuple[str, str] | None = None,
+        sort: NoteSort = NoteSort.PATH,
+        after: tuple[Any, str] | None = None,
         limit: int = 200,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
@@ -699,6 +741,7 @@ class VaultDocumentRepository:
         statement = path_page_statement(
             self._domain_columns,
             prefixes,
+            sort=sort,
             after=after,
             limit=limit,
             statuses=statuses,
@@ -713,7 +756,8 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         prefixes: Sequence[str],
-        after: tuple[str, str] | None = None,
+        sort: NoteSort = NoteSort.PATH,
+        after: tuple[Any, str] | None = None,
         limit: int = 200,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
@@ -734,6 +778,7 @@ class VaultDocumentRepository:
         statement = path_page_statement(
             DOCUMENT_BRIEF_COLUMNS,
             prefixes,
+            sort=sort,
             after=after,
             limit=limit,
             statuses=statuses,
@@ -1496,6 +1541,7 @@ def document_brief_from_row(row: RowMapping) -> VaultDocumentBrief:
         summary=row["summary"],
         content_revision=row["content_revision"],
         updated_at=row["updated_at"],
+        created_at=row["created_at"],
     )
 
 

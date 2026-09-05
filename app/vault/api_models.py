@@ -1311,7 +1311,22 @@ class VaultNoteSummary(BaseModel):
             "rather than an error: not every note carries one."
         ),
     )
-    updated_at: datetime
+    updated_at: datetime = Field(
+        description=(
+            "When an author last changed this note. Curated rather than "
+            "incidental: adjudicating a note or moving its promotion status "
+            "deliberately does not move this, so it means an edit rather than "
+            "any write that touched the row."
+        )
+    )
+    created_at: datetime = Field(
+        description=(
+            "When this note was first written. Distinct from `updated_at`, and "
+            "worth carrying both: they answer 'what is new' and 'what changed', "
+            "which are different questions about a corpus agents write faster "
+            "than a person reads."
+        )
+    )
     content_revision: int = Field(
         ge=1,
         description=(
@@ -1390,9 +1405,11 @@ class VaultNoteEdgeResponse(BaseModel):
 class VaultNoteListResponse(BaseModel):
     """One ordered page of notes, paged by an opaque cursor.
 
-    Ordered by ``vault_path`` today, and the order is about to become a
-    request parameter (ADR 0045), which is exactly why ``next_cursor`` no
-    longer spells the key it stopped at.
+    The order is a request parameter: ``sort`` selects ``path`` (the default),
+    ``updated`` or ``created``, and the last two read newest first. That is
+    why ``next_cursor`` does not spell the key it stopped at -- the key is a
+    different column in each order, and one a caller could read is one that
+    could not vary (ADR 0045).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -1413,12 +1430,32 @@ class VaultNoteListResponse(BaseModel):
             "the end. Opaque: it names a position in one ordered walk, and is "
             "not a vault_path, a note id, or anything else to build or read "
             "(ADR 0045). It was a vault_path until then; sending one now is a "
-            "422, so pass this back verbatim. Keyset rather than an offset, so "
-            "rows inserted behind the cursor cannot shift the walk. It is not "
-            "a snapshot: the key it names is mutable -- promotion moves a "
-            "note's vault_path on purpose -- so a row that crosses the cursor "
-            "between calls can be seen twice or not at all. For browsing that "
-            "is a refresh; for anything that must be exact, read the export."
+            "422, so pass this back verbatim.\n\n"
+            "It belongs to the order it was issued in. Changing `sort` "
+            "mid-walk is a new walk: the old token is refused rather than "
+            "re-seated, because the same row sits somewhere different in every "
+            "order.\n\n"
+            "Keyset rather than an offset, so rows inserted behind the cursor "
+            "cannot shift the walk. It is not a snapshot. Two different things "
+            "move a row relative to a walk in progress, and the order decides "
+            "only the first.\n\n"
+            "The sort key moving under the cursor. `created` never changes, so "
+            "this cannot happen at all; a note written during the walk sorts "
+            "newest-first, ahead of where the walk already passed, and is "
+            "simply not in this pass. `updated` moves a note to the front when "
+            "it is edited, so one edited before the walk reached it is missed "
+            "-- never duplicated. `path` moves in either direction, because "
+            "promotion relocates a note on purpose, so a row can be seen twice "
+            "or not at all.\n\n"
+            "Membership changing, which every order pays alike: a note retired "
+            "or flagged between pages, moved out of the requested `path` "
+            "prefix, or edited until it no longer matches a `tag` or `facet` "
+            "filter, stops appearing. `created` does not protect against that "
+            "and no order here does -- an immutable key rules out the first "
+            "kind of movement, not the second.\n\n"
+            "For browsing all three are a refresh. For traversal of a fixed "
+            "set, read the export, which walks one REPEATABLE READ "
+            "transaction."
         ),
     )
 
@@ -1670,6 +1707,7 @@ def note_summary(document: VaultDocumentBrief) -> VaultNoteSummary:
         doc_status=document.doc_status,
         summary=document.summary,
         updated_at=document.updated_at,
+        created_at=document.created_at,
         content_revision=document.content_revision,
     )
 

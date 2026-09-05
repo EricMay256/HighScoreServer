@@ -1045,6 +1045,28 @@ Index(
     vault_documents.c.status,
     vault_documents.c.updated_at.desc(),
 )
+# The note listing's recency orders (ADR 0045). The pair is the keyset each
+# pages on, and the id is what makes the order total where notes written in one
+# transaction share a timestamp exactly.
+#
+# Ascending though the listing reads newest first: a btree scans either way, so
+# `(updated_at, id)` reversed is the `DESC, DESC` the query asks for. A mixed
+# index cannot be reversed as a unit and would serve that one query only.
+#
+# No leading `status`, deliberately. The filter is `IN ('active', 'archived')`
+# -- nearly every row -- so it buys no selectivity while putting a
+# non-equality ahead of the ordering key, which is what would stop the planner
+# walking in order and make it sort instead.
+Index(
+    "idx_vault_documents_updated_at_id",
+    vault_documents.c.updated_at,
+    vault_documents.c.id,
+)
+Index(
+    "idx_vault_documents_created_at_id",
+    vault_documents.c.created_at,
+    vault_documents.c.id,
+)
 # No partial predicate: embedding is NOT NULL, so every row is indexable. With a
 # single unpartitioned index, profile filtering is a post-filter; once a second
 # profile is populated the remedy is a partial HNSW index per profile, added by

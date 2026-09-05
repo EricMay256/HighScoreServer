@@ -34,17 +34,17 @@ from typing import Final
 
 __all__ = [
     "MAX_CURSOR_CHARS",
-    "PATH_SORT",
     "InvalidCursor",
     "decode_cursor",
     "encode_cursor",
 ]
 
 
-# The default walk, and in phase 1 the only one. Named rather than spelled
-# inline so the token's contents and the request's parameter cannot disagree
-# by a typo; ADR 0045's later phases replace it with a `NoteSort` enum.
-PATH_SORT: Final = "path"
+# The sort a token belongs to is passed in as text rather than as `NoteSort`,
+# and that is deliberate: this module imports nothing from the package, so it
+# can be loaded on its own -- which is how its behaviour was checked against
+# the 3.12 interpreter CI pins while the venv here runs 3.14. Callers pass
+# `NoteSort.<member>.value`; the enum is what keeps the set closed.
 
 # The bound `after` is validated against. It exists so a caller pasting a book
 # into the parameter is refused before anything decodes it -- not to be tight.

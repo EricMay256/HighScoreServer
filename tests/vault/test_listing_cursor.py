@@ -13,11 +13,16 @@ import pytest
 
 from app.vault.cursors import (
     MAX_CURSOR_CHARS,
-    PATH_SORT,
     InvalidCursor,
     decode_cursor,
     encode_cursor,
 )
+from app.vault.domain import NoteSort
+
+
+# The codec takes the sort as text so it can be loaded without the package
+# (see its module docstring); the enum is what keeps the set of orders closed.
+PATH_SORT = NoteSort.PATH.value
 
 
 # `vault_documents_vault_path_format`. Restated rather than imported: it lives
