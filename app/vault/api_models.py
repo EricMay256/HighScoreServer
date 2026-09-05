@@ -1311,7 +1311,22 @@ class VaultNoteSummary(BaseModel):
             "rather than an error: not every note carries one."
         ),
     )
-    updated_at: datetime
+    updated_at: datetime = Field(
+        description=(
+            "When an author last changed this note. Curated rather than "
+            "incidental: adjudicating a note or moving its promotion status "
+            "deliberately does not move this, so it means an edit rather than "
+            "any write that touched the row."
+        )
+    )
+    created_at: datetime = Field(
+        description=(
+            "When this note was first written. Distinct from `updated_at`, and "
+            "worth carrying both: they answer 'what is new' and 'what changed', "
+            "which are different questions about a corpus agents write faster "
+            "than a person reads."
+        )
+    )
     content_revision: int = Field(
         ge=1,
         description=(
@@ -1670,6 +1685,7 @@ def note_summary(document: VaultDocumentBrief) -> VaultNoteSummary:
         doc_status=document.doc_status,
         summary=document.summary,
         updated_at=document.updated_at,
+        created_at=document.created_at,
         content_revision=document.content_revision,
     )
 

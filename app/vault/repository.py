@@ -96,6 +96,7 @@ DOCUMENT_BRIEF_COLUMNS = (
     vault_documents.c.summary,
     vault_documents.c.content_revision,
     vault_documents.c.updated_at,
+    vault_documents.c.created_at,
 )
 
 DOCUMENT_DOMAIN_COLUMNS = (
@@ -1496,6 +1497,7 @@ def document_brief_from_row(row: RowMapping) -> VaultDocumentBrief:
         summary=row["summary"],
         content_revision=row["content_revision"],
         updated_at=row["updated_at"],
+        created_at=row["created_at"],
     )
 
 

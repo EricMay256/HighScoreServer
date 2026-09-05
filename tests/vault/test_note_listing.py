@@ -8,6 +8,7 @@ skips whatever it dropped.
 """
 
 import asyncio
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -585,8 +586,40 @@ def test_a_listing_row_carries_no_body(
         "doc_status",
         "summary",
         "updated_at",
+        # Carried so a listing ordered by either timestamp can show which one
+        # it is ordered by, and because "what is new" and "what changed" are
+        # different questions (ADR 0045).
+        "created_at",
         "content_revision",
     }
+
+
+def test_a_listing_row_carries_both_timestamps(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Not interchangeable, and both published.
+
+    `updated_at` is the curated one -- `set_status` and `set_promotion_status`
+    deliberately leave it where it is -- so it means an author changed the
+    note rather than that something touched the row. `created_at` never moves
+    at all. A listing that can be ordered by either has to be able to show
+    which order it is in.
+    """
+
+    row = _list(client, read_only_token, path="Human/03 Projects/", limit=1)[
+        "notes"
+    ][0]
+
+    created = datetime.fromisoformat(row["created_at"])
+    updated = datetime.fromisoformat(row["updated_at"])
+
+    assert created.tzinfo is not None, "a naive timestamp cannot be ordered"
+    assert updated.tzinfo is not None
+    # Seeded in one transaction, so `now()` gives both the same value. What is
+    # asserted is that the row publishes each of them, not a gap between.
+    assert created <= updated
 
 
 def test_a_note_without_a_summary_lists_with_a_null_one(

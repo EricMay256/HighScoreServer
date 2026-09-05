@@ -422,7 +422,13 @@ class VaultDocumentBrief:
     vault_path: str
     title: str
     content_revision: int
+    # Both timestamps, because a listing that can be ordered by either has to
+    # be able to show which it is ordered by (ADR 0045). They answer different
+    # questions -- when a note was written, and when an author last changed it
+    # -- and `updated_at` is the curated one: adjudication and promotion
+    # deliberately leave it alone.
     updated_at: datetime
+    created_at: datetime
     doc_type: str | None = None
     doc_status: str | None = None
     summary: str | None = None
