@@ -193,6 +193,52 @@ def test_a_stale_listing_response_cannot_replace_newer_filters(report: dict) -> 
     assert outcome["cursor"] == "new-cursor"
 
 
+def test_changing_the_order_starts_a_new_walk(report: dict) -> None:
+    """A cursor belongs to the order it was issued in.
+
+    The endpoint refuses a foreign one with 422 rather than re-seating it, so
+    a console that carried its cursor across a change of order would turn the
+    reader's own choice into an error they did not cause -- and would do it
+    only when a page had already been paged, which is the state a manual pass
+    is least likely to be in.
+
+    Nothing guards this by name. It falls out of a change of order starting a
+    fresh listing, and a fresh listing requesting no cursor. That is precisely
+    why it is driven rather than matched: there is no line of source to assert.
+    """
+
+    outcome = report["changingOrderStartsANewWalk"]
+
+    assert outcome["hadCursor"] == "path-cursor", (
+        "the fixture must have paged before changing order, or this proves "
+        "nothing"
+    )
+    assert outcome["sortRequested"] == "updated"
+    assert outcome["afterRequested"] is None, (
+        "the old order's cursor must not travel into the new order's request"
+    )
+    assert outcome["cursorAfterwards"] == "updated-cursor"
+    assert outcome["rows"] == ["Recent listing"], (
+        "a new walk replaces the rows rather than appending to them"
+    )
+
+
+def test_failed_order_replacement_keeps_the_committed_folder_mode(
+    report: dict,
+) -> None:
+    """Presentation belongs to the listing that actually produced the rows.
+
+    A failed fresh request deliberately preserves the prior listing and its
+    pagination. The select now holds the candidate order, so consulting it
+    while paging the preserved listing would show folders for a non-path walk.
+    """
+
+    outcome = report["failedOrderReplacementKeepsCommittedFolderMode"]
+
+    assert outcome["committedSort"] == "updated"
+    assert outcome["folderCount"] == 0
+
+
 def test_a_stale_note_response_cannot_replace_newer_navigation(report: dict) -> None:
     """The last note opened remains authoritative when responses reverse."""
 
@@ -232,6 +278,9 @@ def test_preserved_pagination_uses_its_committed_query(report: dict) -> None:
     assert outcome["query"] == {
         "prefix": "",
         "filters": {"tag": "kept", "facet": ""},
+        # The order is part of the committed query, so an appended page keeps
+        # the order its walk began in rather than reading the control now.
+        "sort": "path",
     }
     assert outcome["rows"] == ["Kept listing", "Appended listing"]
     assert outcome["cursor"] == "appended-cursor"

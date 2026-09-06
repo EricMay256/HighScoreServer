@@ -206,6 +206,7 @@ return {
   spanFromLines,
   occurrenceOf,
   setFilters: (filters) => { FILTERS = filters; },
+  setSort: (sort) => { SORT = sort; },
   setNote: (note) => { NOTE = note; },
   setIdentity: (identity) => { IDENTITY = identity; },
   browseState: () => ({
@@ -305,6 +306,8 @@ function listingPage(title, cursor = null, hasMore = false) {
       vault_path: "Agent/notes/" + title.toLowerCase().replaceAll(" ", "-") + ".md",
       doc_status: null,
       summary: null,
+      updated_at: "2026-09-04T10:00:00+00:00",
+      created_at: "2026-09-01T10:00:00+00:00",
     }],
     next_cursor: cursor,
     has_more: hasMore,
@@ -459,7 +462,74 @@ async function runNavigationCases() {
     report.reversedListingsKeepNewest = page.browseState();
   }
 
+  // 9b. Changing the order starts a new walk rather than resuming the old one.
+  //
+  // A cursor belongs to the order it was issued in and the endpoint refuses a
+  // foreign one with 422, so a console that kept paging with it would turn a
+  // change of order into an error the reader did not cause. The guard is not a
+  // line of source anywhere -- it falls out of a fresh listing being a fresh
+  // listing -- which is exactly why it is checked by driving it.
+  {
+    page.setSort("path");
+    fetchHandler = async () => jsonResponse(
+      listingPage("Path listing", "path-cursor", true),
+    );
+    await page.renderListing(false);
+    const paged = page.browseState();
+
+    fetchCalls.length = 0;
+    page.setSort("updated");
+    fetchHandler = async () => jsonResponse(
+      listingPage("Recent listing", "updated-cursor", true),
+    );
+    await page.renderListing(false);
+
+    const requested = new URL(fetchCalls[0].url, "https://console.test");
+    report.changingOrderStartsANewWalk = {
+      hadCursor: paged.cursor,
+      sortRequested: requested.searchParams.get("sort"),
+      afterRequested: requested.searchParams.get("after"),
+      cursorAfterwards: page.browseState().cursor,
+      rows: page.browseState().rows,
+    };
+    /* Left as it was found. The order is module state, and a scenario that
+       changes it and walks away decides what every later one is ordered by. */
+    page.setSort("path");
+  }
+
   // 10. A slower old note cannot replace the newer note navigation.
+  {
+    /* A failed change of order preserves the old listing and its pagination.
+     * Paging it must also preserve its presentation: the select contains the
+     * candidate order, while the page still belongs to the committed one. */
+    page.setSort("updated");
+    fetchHandler = async () => jsonResponse(
+      listingPage("Committed recent listing", "recent-cursor", true),
+    );
+    await page.renderListing(false);
+    const listing = elementById("listing");
+    const more = find(listing, (node) => node.id === "more");
+
+    page.setSort("path");
+    fetchHandler = async () => failedResponse("temporary replacement failure");
+    try {
+      await page.renderListing(false);
+    } catch (err) {
+      // Expected: the committed recent listing remains available.
+    }
+
+    fetchHandler = async () => jsonResponse(
+      listingPage("Another recent listing"),
+    );
+    await more.onclick();
+    report.failedOrderReplacementKeepsCommittedFolderMode = {
+      committedSort: page.browseState().query.sort,
+      folderCount: elementById("folders").children.length,
+    };
+    page.setSort("path");
+  }
+
+  // 11. A slower old note cannot replace the newer note navigation.
   {
     const oldResponse = deferredResponse();
     const newResponse = deferredResponse();
@@ -475,7 +545,7 @@ async function runNavigationCases() {
     report.reversedNotesKeepNewest = page.browseState();
   }
 
-  // 11. Failed pagination remains retryable and keeps accumulated rows.
+  // 12. Failed pagination remains retryable and keeps accumulated rows.
   {
     page.setFilters({ tag: "kept", facet: "" });
     fetchHandler = async () => jsonResponse(
@@ -496,7 +566,7 @@ async function runNavigationCases() {
       )),
     };
 
-    // 12. A failed fresh request preserves that same listing and control.
+    // 13. A failed fresh request preserves that same listing and control.
     page.setFilters({ tag: "replacement", facet: "" });
     try {
       await page.renderListing(false);
@@ -512,7 +582,7 @@ async function runNavigationCases() {
       )),
     };
 
-    // 13. That preserved button still owns the committed query and cursor.
+    // 14. That preserved button still owns the committed query and cursor.
     fetchCalls.length = 0;
     fetchHandler = async () => jsonResponse(
       listingPage("Appended listing", "appended-cursor", false),
@@ -524,7 +594,7 @@ async function runNavigationCases() {
     };
   }
 
-  // 14. Opening a note invalidates pagination already in flight.
+  // 15. Opening a note invalidates pagination already in flight.
   {
     page.setFilters({ tag: "before-note", facet: "" });
     fetchHandler = async () => jsonResponse(
@@ -546,7 +616,7 @@ async function runNavigationCases() {
     report.noteNavigationInvalidatesPagination = page.browseState();
   }
 
-  // 15. Concurrent sign-in callers share registration and PKCE state.
+  // 16. Concurrent sign-in callers share registration and PKCE state.
   {
     const metadataResponse = deferredResponse();
     fetchCalls.length = 0;
