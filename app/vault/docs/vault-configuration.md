@@ -1316,12 +1316,13 @@ page's `next_cursor`. It applies the same read policy as `GET /notes/{id}` —
 flagged notes and paths outside `READABLE_PATH_PREFIXES` are absent, and a
 prefix outside that policy returns an empty page rather than an error.
 
-`sort` takes one of three values (ADR 0045). Anything else is a 422; the set is
+`sort` takes one of four values (ADR 0045). Anything else is a 422; the set is
 closed, so a typo is not answered with the default order.
 
 | `sort` | Order | Answers |
 | --- | --- | --- |
 | `path` (default) | `vault_path` ascending | Where a note lives. The corpus's own order, and what makes a folder a place to stand. |
+| `title` | `title` ascending, under the database's collation | Notes and wiki pages interleaved by name rather than grouped by directory. |
 | `updated` | `updated_at` descending | What changed lately. Curated: adjudication and promotion deliberately do not move `updated_at`, so this means an author edited the note. |
 | `created` | `created_at` descending | What is new. |
 
@@ -1346,6 +1347,8 @@ buys or costs:
   simply not in this pass.
 - `updated` — an edit moves a note to the front, so one edited before the walk
   reaches it is missed. Never duplicated.
+- `title` — a retitle may move a note in either direction, so a row can be seen
+  twice or not at all.
 - `path` — the key moves in either direction, because promotion relocates a
   note on purpose, so a row can be seen twice or not at all.
 
@@ -1356,7 +1359,7 @@ until it no longer matches a `tag` or `facet` filter simply stops appearing.
 key rules out the first kind of movement, not the second.
 
 So `sort=created` means "no skips or duplicates from the key moving", not "every
-note that was there when I started". For browsing, all three orders are a
+note that was there when I started". For browsing, all four orders are a
 refresh away from correct. For traversal of a fixed set, read the export, which
 walks one REPEATABLE READ transaction.
 

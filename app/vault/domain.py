@@ -22,8 +22,9 @@ class NoteSort(str, Enum):
 
     `PATH` is the default and the corpus's own order -- it is what makes a
     folder a place to stand, and the browse console's breadcrumbs and folder
-    strip are downstream of it. The two time orders answer what that one
-    structurally cannot: what changed lately, and what is new.
+    strip are downstream of it. `TITLE` interleaves notes and wiki pages that
+    path order separates by directory. The two time orders answer what those
+    structural orders cannot: what changed lately, and what is new.
 
     Descending is not a member. Every order here has one useful direction --
     a listing of the *least* recently updated notes is a question nobody asked
@@ -33,6 +34,7 @@ class NoteSort(str, Enum):
     PATH = "path"
     UPDATED = "updated"
     CREATED = "created"
+    TITLE = "title"
 
 
 class DocumentStatus(str, Enum):

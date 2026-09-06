@@ -8,7 +8,9 @@ skips whatever it dropped.
 """
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -486,10 +488,9 @@ def test_a_cursor_from_another_order_is_refused(
 ) -> None:
     """The reason the token carries its sort at all.
 
-    No other sort exists yet, so this is the guard arriving before the thing
-    it guards: once `sort=updated` lands, resuming a path walk from a recency
-    cursor would start at an unrelated row and skip everything between it and
-    where the caller actually was, silently.
+    Resuming a path walk from another order's cursor starts at an unrelated
+    row and skips everything between it and where the caller actually was,
+    silently.
     """
 
     foreign = encode_cursor("updated", "Human/03 Projects/alpha.md", "whatever")
@@ -567,24 +568,27 @@ def test_the_last_page_says_so(
     assert payload["next_cursor"] is None
 
 
-def _stamp(ids: dict[str, str], column: str, moments: dict[str, datetime]) -> None:
-    """Give named fixture notes distinct timestamps.
+def _set_column(
+    ids: dict[str, str], column: str, values: Mapping[str, Any]
+) -> None:
+    """Give named fixture notes controlled values in one column.
 
     Written directly rather than through the repository because the fixture
     seeds every note in one transaction, so `now()` gives all six the same
-    `created_at` and `updated_at` to the microsecond. That tie is exactly what
-    one test below needs and what the others cannot use.
+    `created_at` and `updated_at` to the microsecond, while its path-derived
+    titles happen to follow its paths. The ordering tests need to set those
+    facts against each other, and the tie tests need to make equality exact.
     """
 
     transactions, engine = vault_service()
 
     async def apply() -> None:
         async with transactions.transaction() as connection:
-            for suffix, moment in moments.items():
+            for suffix, value in values.items():
                 await connection.execute(
                     update(vault_documents)
                     .where(vault_documents.c.id == ids[suffix])
-                    .values(**{column: moment})
+                    .values(**{column: value})
                 )
 
     try:
@@ -606,7 +610,9 @@ def test_a_time_order_reads_newest_first(
     """
 
     base = datetime(2026, 9, 1, tzinfo=UTC)
-    _stamp(corpus, "updated_at", {"alpha": base, "beta": base + timedelta(days=2)})
+    _set_column(
+        corpus, "updated_at", {"alpha": base, "beta": base + timedelta(days=2)}
+    )
 
     payload = _list(
         client, read_only_token, path="Human/03 Projects/", sort="updated", limit=100
@@ -630,8 +636,12 @@ def test_the_two_time_orders_read_their_own_column(
     """
 
     base = datetime(2026, 9, 1, tzinfo=UTC)
-    _stamp(corpus, "created_at", {"alpha": base, "beta": base + timedelta(days=2)})
-    _stamp(corpus, "updated_at", {"alpha": base + timedelta(days=4), "beta": base})
+    _set_column(
+        corpus, "created_at", {"alpha": base, "beta": base + timedelta(days=2)}
+    )
+    _set_column(
+        corpus, "updated_at", {"alpha": base + timedelta(days=4), "beta": base}
+    )
 
     by_created = _list(
         client, read_only_token, path="Human/03 Projects/", sort="created", limit=100
@@ -687,6 +697,59 @@ def test_a_time_order_pages_across_rows_that_share_a_timestamp(
     )
 
 
+def test_title_order_reads_titles_in_database_order(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """Title order is independent of the path-derived fixture names.
+
+    The API promises the database's collation rather than inventing a
+    case-folded or language-neutral order in Python, so two plain ASCII values
+    make the direction unambiguous under either the local or deployed locale.
+    """
+
+    _set_column(corpus, "title", {"alpha": "Zulu note", "beta": "Alpha note"})
+
+    payload = _list(
+        client, read_only_token, path="Human/03 Projects/", sort="title", limit=100
+    )
+
+    assert _paths(payload, corpus) == ["beta", "alpha"]
+
+
+def test_title_order_pages_across_rows_that_share_a_title(
+    client: TestClient,
+    read_only_token: str,
+    corpus: dict[str, str],
+) -> None:
+    """A duplicate title needs the id tiebreaker for the same reason time does."""
+
+    shared_title = "The same title"
+    _set_column(corpus, "title", {"alpha": shared_title, "beta": shared_title})
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(5):
+        page = _list(
+            client,
+            read_only_token,
+            path="Human/03 Projects/",
+            sort="title",
+            limit=1,
+            **({"after": cursor} if cursor else {}),
+        )
+        seen.extend(_paths(page, corpus))
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert cursor is None, "the walk did not reach the end"
+    assert sorted(seen) == ["alpha", "beta"], (
+        f"a tied title must be walked exactly once each; saw {seen}"
+    )
+
+
 def test_a_cursor_may_not_cross_between_orders(
     client: TestClient,
     read_only_token: str,
@@ -704,11 +767,17 @@ def test_a_cursor_may_not_cross_between_orders(
     by_updated = _list(
         client, read_only_token, path="Human/03 Projects/", sort="updated", limit=1
     )
+    by_title = _list(
+        client, read_only_token, path="Human/03 Projects/", sort="title", limit=1
+    )
 
     crossings = (
         (by_path["next_cursor"], "updated"),
+        (by_path["next_cursor"], "title"),
         (by_updated["next_cursor"], "path"),
         (by_updated["next_cursor"], "created"),
+        (by_title["next_cursor"], "path"),
+        (by_title["next_cursor"], "updated"),
     )
     for cursor, sort in crossings:
         response = client.get(
@@ -733,7 +802,9 @@ def test_the_default_order_is_still_the_path_order(
     about the default did.
     """
 
-    _stamp(corpus, "updated_at", {"alpha": datetime(2026, 9, 3, tzinfo=UTC)})
+    _set_column(
+        corpus, "updated_at", {"alpha": datetime(2026, 9, 3, tzinfo=UTC)}
+    )
 
     default = _list(client, read_only_token, limit=100)
     explicit = _list(client, read_only_token, sort="path", limit=100)
