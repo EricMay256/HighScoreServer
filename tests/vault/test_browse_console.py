@@ -566,6 +566,42 @@ def test_the_order_travels_with_the_request_and_the_cursor_does_not() -> None:
     assert '$("filter-sort").onchange' in page
 
 
+def test_folders_are_shown_only_in_the_order_that_has_folders() -> None:
+    """A folder strip is the path order's own structure.
+
+    In any other order the rows come from wherever the recent or
+    alphabetically-early notes happen to live, so folders built from them are
+    a list of unrelated places wearing the affordance of a place to stand.
+    """
+
+    page = _page()
+
+    folders_at = page.index("function renderFolders(")
+    body = page[folders_at:page.index("\n}", folders_at)]
+
+    assert 'if (SORT !== "path") return;' in body, (
+        "the folder strip must not be built from a listing that is not in "
+        "path order"
+    )
+
+
+def test_a_non_path_order_says_what_the_breadcrumb_now_means() -> None:
+    """The same path means two different things depending on the order.
+
+    Under `path` it is where you are standing, with folders below it. Under
+    any other it is only a filter, and the folder strip has silently stopped
+    appearing -- so the page says which it is rather than leaving a reader to
+    infer it from something that is no longer there.
+    """
+
+    page = _page()
+
+    assert 'note.id = "order-note";' in page
+    assert "ORDER_LABELS[SORT]" in page
+    assert "no folder list is shown" in page
+    assert "This path is a filter, not a place" in page
+
+
 def test_the_notes_controls_stay_in_reach_while_it_is_read() -> None:
     """Both of a note's actions used to live only at the top of it.
 

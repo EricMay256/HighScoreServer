@@ -210,6 +210,21 @@ function crumbs() {
     crumb.onclick = () => { PREFIX = here; loadAll(); };
     box.appendChild(crumb);
   }
+
+  /* The same path means two different things depending on the order. Under
+     `path` it is where you are standing, with folders below. Under any other
+     it is only a filter -- the rows are ordered by something that has nothing
+     to do with where they live -- so the breadcrumb says which it is rather
+     than leaving a reader to infer it from a folder strip that has quietly
+     stopped appearing. */
+  if (SORT !== "path") {
+    const note = el("div", "small muted");
+    note.id = "order-note";
+    note.textContent = ORDER_LABELS[SORT] + ". "
+      + (PREFIX ? "This path is a filter, not a place: " : "")
+      + "notes are ordered across folders, so no folder list is shown.";
+    box.appendChild(note);
+  }
 }
 
 function folderOf(vaultPath) {
@@ -226,6 +241,13 @@ function folderOf(vaultPath) {
    so a folder whose notes sort after the first fifty never became navigable:
    `Load more` grew the list and the folder cards did not. */
 function renderFolders(rows) {
+  /* Folders are the path order's own structure. In any other order the rows
+     arrive from wherever the recent or alphabetically-early notes happen to
+     live, so a strip of folders built from them is a list of unrelated places
+     that looks like a place to stand. Suppressed rather than left to degrade:
+     the folder view is downstream of the ordering, and saying so is `crumbs`'s
+     job. */
+  if (SORT !== "path") return;
   const panel = $("folders");
   for (const row of rows) {
     const folder = folderOf(row.vault_path);
