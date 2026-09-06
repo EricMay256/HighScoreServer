@@ -602,6 +602,24 @@ def test_a_non_path_order_says_what_the_breadcrumb_now_means() -> None:
     assert "This path is a filter, not a place" in page
 
 
+def test_a_listing_row_shows_both_of_its_timestamps() -> None:
+    """A recency listing has to show what it is ordered by.
+
+    Both in every order, rather than only the active key: rows that changed
+    shape with the control above them would read as a different kind of row
+    rather than the same rows sorted differently.
+    """
+
+    page = _page()
+
+    assert "row.updated_at" in page and "row.created_at" in page
+    # Rendered in the reader's timezone rather than sliced out of the ISO the
+    # server sent -- `timestamptz` arrives in the session's zone, so the date
+    # in that text is not reliably the date anywhere in particular.
+    assert "toLocaleDateString()" in page
+    assert "row.updated_at.slice" not in page
+
+
 def test_the_notes_controls_stay_in_reach_while_it_is_read() -> None:
     """Both of a note's actions used to live only at the top of it.
 

@@ -276,6 +276,20 @@ function noteRow(row) {
   card.appendChild(head);
   card.appendChild(el("div", "small muted mono", row.vault_path));
   if (row.summary) card.appendChild(el("div", "small", row.summary));
+  /* Both, in every order. A recency listing has to show what it is ordered by,
+     and showing only the active key would make the rows change shape with the
+     control above them -- which reads as a different kind of row rather than
+     the same row sorted differently.
+
+     Rendered in the reader's own timezone rather than sliced out of the ISO
+     string the server sent: `timestamptz` arrives in the session's zone, so
+     the date in that text is not reliably the date anywhere in particular. */
+  const dates = el("div", "small muted");
+  dates.appendChild(el("span", null,
+    "updated " + new Date(row.updated_at).toLocaleDateString()));
+  dates.appendChild(el("span", null,
+    " · created " + new Date(row.created_at).toLocaleDateString()));
+  card.appendChild(dates);
   return card;
 }
 

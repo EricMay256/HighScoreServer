@@ -306,6 +306,8 @@ function listingPage(title, cursor = null, hasMore = false) {
       vault_path: "Agent/notes/" + title.toLowerCase().replaceAll(" ", "-") + ".md",
       doc_status: null,
       summary: null,
+      updated_at: "2026-09-04T10:00:00+00:00",
+      created_at: "2026-09-01T10:00:00+00:00",
     }],
     next_cursor: cursor,
     has_more: hasMore,
