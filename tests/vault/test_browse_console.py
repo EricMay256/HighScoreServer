@@ -150,7 +150,8 @@ def test_the_pinned_markdown_assets_are_served(
         response = client.get(path)
 
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/javascript")
+    media_type = response.headers["content-type"].split(";", maxsplit=1)[0]
+    assert media_type in {"application/javascript", "text/javascript"}
     assert version in response.content[:200]
     assert hashlib.sha256(response.content).hexdigest() == sha256
 
