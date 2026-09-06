@@ -203,6 +203,7 @@ return {
   openNote,
   signIn,
   proposeForm,
+  fullBodyForm,
   spanFromLines,
   occurrenceOf,
   setFilters: (filters) => { FILTERS = filters; },
@@ -257,6 +258,25 @@ function openForm(initialSpan = null) {
     replacement: byNodeId("propose-replacement"),
     rationale: byNodeId("propose-rationale"),
     quoted: find(form, (node) => node.className === "excerpt"),
+    submit: find(form, (node) => node.textContent === "Propose"),
+  };
+}
+
+function openFullBodyForm() {
+  page.setNote({
+    note_id: "harness-note",
+    kind: "note",
+    body: BODY,
+    content_revision: 4,
+  });
+  page.setIdentity({ scopes: ["vault:read", "vault:propose"] });
+
+  const form = page.fullBodyForm();
+  const byNodeId = (id) => find(form, (node) => node.id === id);
+  return {
+    form,
+    editor: byNodeId("propose-full-body"),
+    rationale: byNodeId("propose-full-rationale"),
     submit: find(form, (node) => node.textContent === "Propose"),
   };
 }
@@ -440,6 +460,38 @@ function noteDetail(title) {
     submitDisabled: parts.submit.disabled,
     requests: fetchCalls.length,
   };
+}
+
+// 8a. Full-body authoring sends the exact body that was read and the complete
+// edited value through the same span endpoint as a selection edit.
+{
+  const parts = openFullBodyForm();
+  const seededBody = parts.editor.value;
+  fetchCalls.length = 0;
+  parts.editor.value = BODY.replace(
+    "First line, untouched.",
+    "First line, revised.",
+  ).replace(
+    "Third line, untouched.",
+    "Third line, also revised.",
+  );
+  parts.rationale.value = "Revise two distant parts of the note.";
+  parts.submit.onclick();
+  const posted = fetchCalls[0];
+  report.fullBodyPostsExactBodies = {
+    seededBody,
+    url: posted ? posted.url : null,
+    body: posted ? JSON.parse(posted.options.body) : null,
+  };
+}
+
+// 8b. Opening the editor is not itself a change and cannot enqueue a no-op.
+{
+  const parts = openFullBodyForm();
+  fetchCalls.length = 0;
+  parts.rationale.value = "Nothing actually changed.";
+  parts.submit.onclick();
+  report.unchangedFullBodyRefuses = { requests: fetchCalls.length };
 }
 
 async function runNavigationCases() {

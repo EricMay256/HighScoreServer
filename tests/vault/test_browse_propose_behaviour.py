@@ -184,6 +184,48 @@ def test_fractional_line_numbers_are_refused(report: dict) -> None:
     assert outcome["requests"] == 0
 
 
+def test_full_body_edit_posts_the_exact_bodies(report: dict) -> None:
+    """The complete editor is another span authoring gesture.
+
+    The old text must be the body fetched at revision 4, while the replacement
+    may contain edits in distant parts of the note. The server owns conversion
+    to the canonical compact diff; the browser must not reduce this to one
+    locally chosen hunk.
+    """
+
+    outcome = report["fullBodyPostsExactBodies"]
+    original = (
+        "First line, untouched.\n"
+        "Second line, the one to reword.\n"
+        "Third line, untouched.\n"
+    )
+    replacement = (
+        "First line, revised.\n"
+        "Second line, the one to reword.\n"
+        "Third line, also revised.\n"
+    )
+
+    assert outcome["seededBody"] == original
+    assert outcome["url"] == "/api/v1/vault/amendment-proposals"
+    assert outcome["body"] == {
+        "target_note_id": "harness-note",
+        "base_revision": 4,
+        "change": {
+            "kind": "span",
+            "expected_text": original,
+            "replacement_text": replacement,
+            "occurrence": 1,
+        },
+        "rationale": "Revise two distant parts of the note.",
+    }
+
+
+def test_unchanged_full_body_is_refused_in_the_browser(report: dict) -> None:
+    """Opening the editor alone must not enqueue an empty amendment."""
+
+    assert report["unchangedFullBodyRefuses"]["requests"] == 0
+
+
 def test_a_stale_listing_response_cannot_replace_newer_filters(report: dict) -> None:
     """Rows and their cursor must come from one navigation generation."""
 

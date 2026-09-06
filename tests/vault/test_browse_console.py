@@ -387,6 +387,30 @@ def test_the_refusal_is_rechecked_when_the_form_opens() -> None:
     assert any("proposeRefusal(NOTE)" in line for line in lines[start : start + 14])
 
 
+def test_the_note_offers_a_distinct_full_body_editor() -> None:
+    """A complete-body rewrite should not depend on selecting every line."""
+
+    page = _page()
+
+    assert 'el("button", null, "Edit full body")' in page
+    assert "function startFullBodyEdit()" in page
+    assert "function fullBodyForm()" in page
+    assert "editor.value = NOTE.body" in page
+
+
+def test_the_full_body_editor_rechecks_the_same_proposal_boundary() -> None:
+    """Its separate entry point must not bypass note-kind or scope gating."""
+
+    page = _page()
+    lines = page.splitlines()
+    start = next(
+        i for i, line in enumerate(lines)
+        if "function startFullBodyEdit()" in line
+    )
+
+    assert any("proposeRefusal(NOTE)" in line for line in lines[start : start + 14])
+
+
 def test_the_form_is_built_through_text_content() -> None:
     """It quotes note text back at the operator, which is agent-written."""
 

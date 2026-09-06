@@ -569,12 +569,17 @@ async function openNote(noteId) {
   const propose = el("button", null, "Propose an edit");
   propose.id = "propose-open";
   propose.onclick = startPropose;
+  const fullBody = el("button", null, "Edit full body");
+  fullBody.id = "full-body-open";
+  fullBody.onclick = startFullBodyEdit;
   const refusal = proposeRefusal(detail);
   if (refusal) {
     propose.disabled = true;
     propose.title = refusal;
+    fullBody.disabled = true;
+    fullBody.title = refusal;
   }
-  actions.appendChild(propose);
+  actions.append(propose, fullBody);
   panel.appendChild(actions);
   /* Said on the page, not only in a tooltip: a disabled control explains
      itself to a mouse and to nobody else. */
@@ -757,6 +762,45 @@ function lineOf(offset) {
   return NOTE.body.slice(0, offset).split("\n").length;
 }
 
+/* One HTTP path for both authoring gestures. The browser states the exact old
+   and new text; the service checks the revision and materializes the canonical
+   body diff under the corpus lock (ADR 0033). Keeping that here prevents the
+   full-body form from becoming a subtly different amendment client. */
+async function submitSpanProposal(form, submit, cancel, change, rationale) {
+  submit.disabled = cancel.disabled = true;
+  try {
+    const outcome = await api("/amendment-proposals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_note_id: NOTE.note_id,
+        /* The revision this page actually read. If the note moved since,
+           the server answers 409 and the edit is refused rather than applied
+           to text nobody saw. */
+        base_revision: NOTE.content_revision,
+        change: { kind: "span", ...change },
+        rationale,
+      }),
+    });
+    form.replaceChildren(el("div", "small",
+      "Proposed. A reviewer decides it: " + outcome.proposal.proposal_id));
+  } catch (err) {
+    submit.disabled = cancel.disabled = false;
+    if (err.sessionEnded) return;
+    if (err.forbidden) {
+      say("danger", el("div", null,
+        "This credential may not propose. Sign out and in again to authorize "
+        + "with vault:propose."));
+      return;
+    }
+    /* 409 and 422 arrive here as ordinary errors carrying the server's own
+       explanation, which is better than one written twice: it knows whether
+       the note moved, the span stopped matching, or the edit exceeded the
+       compact-diff policy. */
+    say("danger", el("div", null, err.message));
+  }
+}
+
 function proposeForm(span) {
   const form = el("div", "card");
   form.id = "propose";
@@ -894,42 +938,86 @@ function proposeForm(span) {
       say("danger", el("div", null, "A rationale is required: it is what the reviewer decides on."));
       return;
     }
-    submit.disabled = cancel.disabled = true;
-    try {
-      const outcome = await api("/amendment-proposals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          target_note_id: NOTE.note_id,
-          /* The revision this page actually read. If the note moved since,
-             the server answers 409 and the edit is refused rather than applied
-             to text nobody saw. */
-          base_revision: NOTE.content_revision,
-          change: {
-            kind: "span",
-            expected_text: span.expected,
-            replacement_text: replacement.value,
-            occurrence: occurrenceOf(NOTE.body, span.expected, span.start),
-          },
-          rationale: rationale.value.trim(),
-        }),
-      });
-      form.replaceChildren(el("div", "small",
-        "Proposed. A reviewer decides it: " + outcome.proposal.proposal_id));
-    } catch (err) {
-      submit.disabled = cancel.disabled = false;
-      if (err.sessionEnded) return;
-      if (err.forbidden) {
-        say("danger", el("div", null,
-          "This credential may not propose. Sign out and in again to authorize "
-          + "with vault:propose."));
-        return;
-      }
-      /* 409 and 422 arrive here as ordinary errors carrying the server's own
-         explanation, which is better than one written twice: it knows whether
-         the note moved or the span stopped matching. */
-      say("danger", el("div", null, err.message));
+    await submitSpanProposal(
+      form,
+      submit,
+      cancel,
+      {
+        expected_text: span.expected,
+        replacement_text: replacement.value,
+        occurrence: occurrenceOf(NOTE.body, span.expected, span.start),
+      },
+      rationale.value.trim(),
+    );
+  };
+  return form;
+}
+
+function fullBodyForm() {
+  const form = el("div", "card");
+  form.id = "propose";
+  form.appendChild(el("div", "title", "Edit full body"));
+  form.appendChild(el("p", "small muted",
+    "Edit the complete Markdown source. The server will turn the changes into "
+    + "the same reviewable compact diff as a selection edit and will refuse a "
+    + "rewrite outside that diff's limits."));
+
+  const bodyField = el("label", "field");
+  bodyField.htmlFor = "propose-full-body";
+  bodyField.appendChild(el("span", "small muted", "Complete body"));
+  const editor = document.createElement("textarea");
+  editor.id = "propose-full-body";
+  editor.rows = Math.min(30, Math.max(12, NOTE.body.split("\n").length + 2));
+  editor.value = NOTE.body;
+  bodyField.appendChild(editor);
+  form.appendChild(bodyField);
+
+  const rationaleField = el("label", "field");
+  rationaleField.htmlFor = "propose-full-rationale";
+  rationaleField.appendChild(el("span", "small muted", "Rationale"));
+  const rationale = document.createElement("input");
+  rationale.id = "propose-full-rationale";
+  rationale.placeholder = "why this reads better, for the reviewer";
+  rationaleField.appendChild(rationale);
+  form.appendChild(rationaleField);
+
+  const submit = el("button", "primary", "Propose");
+  const cancel = el("button", null, "Cancel");
+  const actions = el("div", "row");
+  actions.append(submit, cancel);
+  form.appendChild(actions);
+  form.appendChild(el("div", "small muted",
+    "Queued for a reviewer. Nothing changes in the note until they accept it."));
+
+  cancel.onclick = () => {
+    form.remove();
+    $("full-body-open").focus();
+  };
+  submit.onclick = async () => {
+    if (editor.value === NOTE.body) {
+      say("danger", el("div", null, "Edit the body before proposing it."));
+      return;
     }
+    if (!editor.value.trim()) {
+      say("danger", el("div", null, "A note body cannot be empty."));
+      return;
+    }
+    if (!rationale.value.trim()) {
+      say("danger", el("div", null,
+        "A rationale is required: it is what the reviewer decides on."));
+      return;
+    }
+    await submitSpanProposal(
+      form,
+      submit,
+      cancel,
+      {
+        expected_text: NOTE.body,
+        replacement_text: editor.value,
+        occurrence: 1,
+      },
+      rationale.value.trim(),
+    );
   };
   return form;
 }
@@ -954,6 +1042,21 @@ function startPropose() {
   if (!span) return;
   $("note").appendChild(proposeForm(span));
   $("propose-replacement").focus();
+}
+
+function startFullBodyEdit() {
+  clearMessages();
+  const existing = $("propose");
+  if (existing) existing.remove();
+
+  const refusal = proposeRefusal(NOTE);
+  if (refusal) {
+    say("info", el("div", null, refusal));
+    return;
+  }
+
+  $("note").appendChild(fullBodyForm());
+  $("propose-full-body").focus();
 }
 
 
