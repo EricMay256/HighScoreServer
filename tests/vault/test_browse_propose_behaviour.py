@@ -223,6 +223,22 @@ def test_changing_the_order_starts_a_new_walk(report: dict) -> None:
     )
 
 
+def test_failed_order_replacement_keeps_the_committed_folder_mode(
+    report: dict,
+) -> None:
+    """Presentation belongs to the listing that actually produced the rows.
+
+    A failed fresh request deliberately preserves the prior listing and its
+    pagination. The select now holds the candidate order, so consulting it
+    while paging the preserved listing would show folders for a non-path walk.
+    """
+
+    outcome = report["failedOrderReplacementKeepsCommittedFolderMode"]
+
+    assert outcome["committedSort"] == "updated"
+    assert outcome["folderCount"] == 0
+
+
 def test_a_stale_note_response_cannot_replace_newer_navigation(report: dict) -> None:
     """The last note opened remains authoritative when responses reverse."""
 

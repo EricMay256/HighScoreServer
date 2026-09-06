@@ -440,7 +440,7 @@ def test_every_page_contributes_its_folders() -> None:
 
     page = _page()
 
-    assert "renderFolders(page.notes)" in page
+    assert "renderFolders(page.notes, query)" in page
     assert "if (!append) crumbs();" in page, (
         "breadcrumbs describe the current prefix and are painted once; folders "
         "accumulate and are not"
@@ -579,7 +579,7 @@ def test_folders_are_shown_only_in_the_order_that_has_folders() -> None:
     folders_at = page.index("function renderFolders(")
     body = page[folders_at:page.index("\n}", folders_at)]
 
-    assert 'if (SORT !== "path") return;' in body, (
+    assert 'if (query.sort !== "path") return;' in body, (
         "the folder strip must not be built from a listing that is not in "
         "path order"
     )

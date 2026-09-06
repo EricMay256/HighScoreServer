@@ -499,6 +499,38 @@ async function runNavigationCases() {
 
   // 10. A slower old note cannot replace the newer note navigation.
   {
+    /* A failed change of order preserves the old listing and its pagination.
+     * Paging it must also preserve its presentation: the select contains the
+     * candidate order, while the page still belongs to the committed one. */
+    page.setSort("updated");
+    fetchHandler = async () => jsonResponse(
+      listingPage("Committed recent listing", "recent-cursor", true),
+    );
+    await page.renderListing(false);
+    const listing = elementById("listing");
+    const more = find(listing, (node) => node.id === "more");
+
+    page.setSort("path");
+    fetchHandler = async () => failedResponse("temporary replacement failure");
+    try {
+      await page.renderListing(false);
+    } catch (err) {
+      // Expected: the committed recent listing remains available.
+    }
+
+    fetchHandler = async () => jsonResponse(
+      listingPage("Another recent listing"),
+    );
+    await more.onclick();
+    report.failedOrderReplacementKeepsCommittedFolderMode = {
+      committedSort: page.browseState().query.sort,
+      folderCount: elementById("folders").children.length,
+    };
+    page.setSort("path");
+  }
+
+  // 11. A slower old note cannot replace the newer note navigation.
+  {
     const oldResponse = deferredResponse();
     const newResponse = deferredResponse();
     const responses = [oldResponse, newResponse];
@@ -513,7 +545,7 @@ async function runNavigationCases() {
     report.reversedNotesKeepNewest = page.browseState();
   }
 
-  // 11. Failed pagination remains retryable and keeps accumulated rows.
+  // 12. Failed pagination remains retryable and keeps accumulated rows.
   {
     page.setFilters({ tag: "kept", facet: "" });
     fetchHandler = async () => jsonResponse(
@@ -534,7 +566,7 @@ async function runNavigationCases() {
       )),
     };
 
-    // 12. A failed fresh request preserves that same listing and control.
+    // 13. A failed fresh request preserves that same listing and control.
     page.setFilters({ tag: "replacement", facet: "" });
     try {
       await page.renderListing(false);
@@ -550,7 +582,7 @@ async function runNavigationCases() {
       )),
     };
 
-    // 13. That preserved button still owns the committed query and cursor.
+    // 14. That preserved button still owns the committed query and cursor.
     fetchCalls.length = 0;
     fetchHandler = async () => jsonResponse(
       listingPage("Appended listing", "appended-cursor", false),
@@ -562,7 +594,7 @@ async function runNavigationCases() {
     };
   }
 
-  // 14. Opening a note invalidates pagination already in flight.
+  // 15. Opening a note invalidates pagination already in flight.
   {
     page.setFilters({ tag: "before-note", facet: "" });
     fetchHandler = async () => jsonResponse(
@@ -584,7 +616,7 @@ async function runNavigationCases() {
     report.noteNavigationInvalidatesPagination = page.browseState();
   }
 
-  // 15. Concurrent sign-in callers share registration and PKCE state.
+  // 16. Concurrent sign-in callers share registration and PKCE state.
   {
     const metadataResponse = deferredResponse();
     fetchCalls.length = 0;

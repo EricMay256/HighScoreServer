@@ -240,14 +240,17 @@ function folderOf(vaultPath) {
    Rendered per page rather than once. Folders came from the first page alone,
    so a folder whose notes sort after the first fifty never became navigable:
    `Load more` grew the list and the folder cards did not. */
-function renderFolders(rows) {
+function renderFolders(rows, query) {
   /* Folders are the path order's own structure. In any other order the rows
      arrive from wherever the recent or alphabetically-early notes happen to
      live, so a strip of folders built from them is a list of unrelated places
      that looks like a place to stand. Suppressed rather than left to degrade:
      the folder view is downstream of the ordering, and saying so is `crumbs`'s
      job. */
-  if (SORT !== "path") return;
+  /* A fresh selection is only a candidate until its request succeeds. If it
+     fails, pagination remains attached to the prior committed query, so the
+     folder decision belongs to that query rather than the select's new value. */
+  if (query.sort !== "path") return;
   const panel = $("folders");
   for (const row of rows) {
     const folder = folderOf(row.vault_path);
@@ -334,7 +337,7 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
   };
 
   if (!append) crumbs();
-  renderFolders(page.notes);
+  renderFolders(page.notes, query);
 
   for (const row of page.notes) panel.appendChild(noteRow(row));
 
