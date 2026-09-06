@@ -119,18 +119,96 @@ function metadataPreview(preview) {
   return box;
 }
 
-function bodyPreview(preview) {
-  const box = document.createElement("div");
-  box.appendChild(el("div", "small muted",
-    preview.added_line_count + " added, " + preview.removed_line_count
-    + " removed, " + preview.hunk_count + " hunk(s)"));
+function splitBodyLines(body) {
+  if (!body) return [];
+  const lines = body.split(/\r\n|[\n\v\f\r\x1c-\x1e\x85\u2028\u2029]/);
+  if (/(?:\r\n|[\n\v\f\r\x1c-\x1e\x85\u2028\u2029])$/.test(body)) lines.pop();
+  return lines;
+}
+
+/* Expand canonical hunks over the exact source body for display only. This
+   deliberately validates context and deletion lines instead of trying to
+   repair a patch that disagrees with the body. */
+function fullContextDiff(originalBody, unifiedDiff) {
+  const source = splitBodyLines(originalBody);
+  if (!unifiedDiff) return source.map(line => " " + line).join("\n");
+
+  const patch = unifiedDiff.split("\n");
+  let patchIndex = 0;
+  if (patch.length >= 2 && patch[0].startsWith("--- ") && patch[1].startsWith("+++ ")) {
+    patchIndex = 2;
+  }
+
+  let sourceIndex = 0;
+  const output = [];
+  while (patchIndex < patch.length) {
+    const header = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$/.exec(patch[patchIndex]);
+    if (!header) return null;
+    const hunkStart = Number(header[1]) - 1;
+    if (hunkStart < sourceIndex || hunkStart > source.length) return null;
+    while (sourceIndex < hunkStart) output.push(" " + source[sourceIndex++]);
+
+    patchIndex += 1;
+    while (patchIndex < patch.length && !patch[patchIndex].startsWith("@@ ")) {
+      const line = patch[patchIndex];
+      if (!line || ![" ", "+", "-"].includes(line[0])) return null;
+      const marker = line[0];
+      if (marker !== "+") {
+        if (sourceIndex >= source.length || source[sourceIndex] !== line.slice(1)) return null;
+        sourceIndex += 1;
+      }
+      output.push(line);
+      patchIndex += 1;
+    }
+  }
+
+  while (sourceIndex < source.length) output.push(" " + source[sourceIndex++]);
+  return output.join("\n");
+}
+
+function diffBlock(diff) {
   const pre = el("pre", "mono");
-  for (const line of (preview.unified_diff || "").split("\n")) {
+  for (const line of diff.split("\n")) {
     const span = el("span", line.startsWith("+") ? "diff-add"
       : line.startsWith("-") ? "diff-del" : null, line + "\n");
     pre.appendChild(span);
   }
-  box.appendChild(pre);
+  return pre;
+}
+
+function bodyPreview(preview, originalBody) {
+  const box = document.createElement("div");
+  box.appendChild(el("div", "small muted",
+    preview.added_line_count + " added, " + preview.removed_line_count
+    + " removed, " + preview.hunk_count + " hunk(s)"));
+  box.appendChild(diffBlock(preview.unified_diff || ""));
+
+  if (typeof originalBody === "string") {
+    const toggle = el("button", null, "Show full context");
+    toggle.setAttribute("aria-expanded", "false");
+    const expandedSlot = el("div", "hidden");
+    let rendered = false;
+    let visible = false;
+    toggle.onclick = () => {
+      if (!rendered) {
+        const expanded = fullContextDiff(originalBody, preview.unified_diff || "");
+        if (expanded === null) {
+          expandedSlot.appendChild(el("p", "small dangling",
+            "Could not expand this diff against the current body. The compact diff above is unchanged."));
+        } else {
+          expandedSlot.appendChild(el("p", "small muted",
+            "Every unchanged line is shown; hunk headers are omitted in this expanded view."));
+          expandedSlot.appendChild(diffBlock(expanded));
+        }
+        rendered = true;
+      }
+      visible = !visible;
+      expandedSlot.classList.toggle("hidden", !visible);
+      toggle.setAttribute("aria-expanded", String(visible));
+      toggle.textContent = visible ? "Hide full context" : "Show full context";
+    };
+    box.append(toggle, expandedSlot);
+  }
   return box;
 }
 
@@ -189,7 +267,7 @@ function proposalCard(summary, preview) {
         const rendered = detail.metadata_preview
           ? metadataPreview(detail.metadata_preview)
           : detail.preview
-            ? bodyPreview(detail.preview)
+            ? bodyPreview(detail.preview, detail.target && detail.target.body)
             : el("p", "small dangling",
                 "The note has moved since this was written; accepting settles it as stale.");
         detailSlot.replaceChildren(rendered);
@@ -239,7 +317,7 @@ function proposalCard(summary, preview) {
       try {
         const detail = await api("/amendment-proposals/" + summary.proposal_id);
         slot.replaceChildren(detail.preview
-          ? bodyPreview(detail.preview)
+          ? bodyPreview(detail.preview, detail.target && detail.target.body)
           : el("p", "small dangling", "No diff: the note has moved since this was written."));
       } catch (err) {
         if (err.sessionEnded) return;
