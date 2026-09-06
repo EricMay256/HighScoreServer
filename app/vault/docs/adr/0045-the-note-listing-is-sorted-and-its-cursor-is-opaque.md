@@ -4,7 +4,7 @@ Date: 2026-09-04
 
 ## Status
 
-**Accepted 2026-09-04. Phases 1 through 3 implemented.**
+**Accepted 2026-09-04. Phases 1 through 4 implemented.**
 
 Phase 1 (PR #27): the cursor is opaque, carries the order it belongs to, and
 every listing -- the default included -- pages on a compound `(key, id)`
@@ -20,8 +20,8 @@ Phase 3: `sort=title`, ascending under the database's collation and using the
 same `(key, id)` cursor shape as every other order. No title index was added;
 the corpus-scale plan is recorded below.
 
-Phase 4 remains: the browse console's sort control with its folder and
-breadcrumb behaviour.
+Phase 4 (PR #30): the browse console's sort control, timestamps on listing
+rows, and the folder and breadcrumb behaviour for non-path orders.
 
 ## Context
 
