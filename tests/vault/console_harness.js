@@ -206,6 +206,7 @@ return {
   spanFromLines,
   occurrenceOf,
   setFilters: (filters) => { FILTERS = filters; },
+  setSort: (sort) => { SORT = sort; },
   setNote: (note) => { NOTE = note; },
   setIdentity: (identity) => { IDENTITY = identity; },
   browseState: () => ({
@@ -457,6 +458,41 @@ async function runNavigationCases() {
     oldResponse.succeed(listingPage("Old listing", "old-cursor"));
     await oldRequest;
     report.reversedListingsKeepNewest = page.browseState();
+  }
+
+  // 9b. Changing the order starts a new walk rather than resuming the old one.
+  //
+  // A cursor belongs to the order it was issued in and the endpoint refuses a
+  // foreign one with 422, so a console that kept paging with it would turn a
+  // change of order into an error the reader did not cause. The guard is not a
+  // line of source anywhere -- it falls out of a fresh listing being a fresh
+  // listing -- which is exactly why it is checked by driving it.
+  {
+    page.setSort("path");
+    fetchHandler = async () => jsonResponse(
+      listingPage("Path listing", "path-cursor", true),
+    );
+    await page.renderListing(false);
+    const paged = page.browseState();
+
+    fetchCalls.length = 0;
+    page.setSort("updated");
+    fetchHandler = async () => jsonResponse(
+      listingPage("Recent listing", "updated-cursor", true),
+    );
+    await page.renderListing(false);
+
+    const requested = new URL(fetchCalls[0].url, "https://console.test");
+    report.changingOrderStartsANewWalk = {
+      hadCursor: paged.cursor,
+      sortRequested: requested.searchParams.get("sort"),
+      afterRequested: requested.searchParams.get("after"),
+      cursorAfterwards: page.browseState().cursor,
+      rows: page.browseState().rows,
+    };
+    /* Left as it was found. The order is module state, and a scenario that
+       changes it and walks away decides what every later one is ordered by. */
+    page.setSort("path");
   }
 
   // 10. A slower old note cannot replace the newer note navigation.

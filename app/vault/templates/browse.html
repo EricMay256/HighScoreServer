@@ -14,6 +14,14 @@
 .field { display: flex; flex-direction: column; gap: 0.15rem; }
 /* The shared stylesheet dresses text fields by type and leaves the rest to the
    browser; a line number is a text field in every way that matters here. */
+/* The shared stylesheet dresses text fields and buttons; the order control is
+   the first `select` either console has had. Matched to the text fields beside
+   it rather than left as the browser's default, which would read as a control
+   belonging to some other page. */
+select {
+  font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
+}
 input[type="number"] {
   font: inherit; color: var(--ink); background: var(--panel);
   border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem;
@@ -94,6 +102,20 @@ textarea {
         <span class="small muted">Facet</span>
         <input id="filter-facet" placeholder="project:hss" size="24">
       </label>
+      <label class="field" for="filter-sort">
+        <span class="small muted">Order</span>
+        <!-- A select rather than the text fields' apply-on-click: an order is
+             a choice from a closed set, so there is nothing to finish typing
+             and nothing to confirm. `Clear` deliberately leaves it alone --
+             clearing narrows the corpus back down, and an order is not a
+             narrowing. -->
+        <select id="filter-sort">
+          <option value="path">Path</option>
+          <option value="updated">Recently updated</option>
+          <option value="created">Recently created</option>
+          <option value="title">Title A-Z</option>
+        </select>
+      </label>
       <button id="apply-filters">Filter</button>
       <button id="clear-filters">Clear</button>
     </div>
@@ -119,6 +141,11 @@ textarea {
    would not survive a sign-in anyway. */
 let PREFIX = "";
 let FILTERS = { tag: "", facet: "" };
+/* The order the listing is read in. Separate from FILTERS because it is not
+   one: a filter narrows what is listed, an order decides how the same set is
+   arranged, and the two are independent -- "recently updated under
+   Human/03 Projects/" is a question this console can ask. */
+let SORT = "path";
 let ROWS = [];
 /* Folders already shown, so an appended page adds the ones it discovers
    without repeating those already on screen. */
@@ -136,6 +163,17 @@ let LISTING_VIEW_GENERATION = 0;
 let COMMITTED_LISTING = null;
 let NOTE_GENERATION = 0;
 
+/* What each order is called on screen. The values are `NoteSort`'s members and
+   the endpoint refuses anything else, so this object and the markup's options
+   are the same closed set said twice -- once for the request, once for the
+   sentence that explains what a reader is looking at. */
+const ORDER_LABELS = {
+  path: "Ordered by path",
+  updated: "Most recently updated first",
+  created: "Most recently created first",
+  title: "Ordered by title",
+};
+
 /* ---------- Listing ---------- */
 function listingParams(query, cursor) {
   const params = new URLSearchParams();
@@ -143,6 +181,10 @@ function listingParams(query, cursor) {
   if (query.filters.tag) params.set("tag", query.filters.tag);
   if (query.filters.facet) params.set("facet", query.filters.facet);
   params.set("limit", "50");
+  /* Always sent, including the default. The request then says what order it is
+     in rather than depending on the server's default staying what it is, and
+     the cursor a page hands back belongs to whatever this asked for. */
+  params.set("sort", query.sort);
   if (cursor) params.set("after", cursor);
   return params;
 }
@@ -222,7 +264,7 @@ async function renderListing(append, committed = COMMITTED_LISTING) {
     : ++LISTING_REQUEST_GENERATION;
   const query = append
     ? committed && committed.query
-    : { prefix: PREFIX, filters: { ...FILTERS } };
+    : { prefix: PREFIX, filters: { ...FILTERS }, sort: SORT };
   const requestedCursor = append && committed ? committed.cursor : null;
   if (!query) return;
   let page;
@@ -954,6 +996,15 @@ $("signout").onclick = signOut;
 $("refresh").onclick = loadAll;
 $("apply-filters").onclick = () => {
   FILTERS = { tag: $("filter-tag").value.trim(), facet: $("filter-facet").value.trim() };
+  loadAll();
+};
+/* Applied on change rather than on a button: there is nothing to finish typing.
+   `loadAll` starts a fresh listing, which is what discards the cursor -- a
+   cursor belongs to the order it was issued in, and the endpoint refuses one
+   from another order rather than re-seating it. The generation counters make a
+   request already in flight under the old order harmless when it lands. */
+$("filter-sort").onchange = () => {
+  SORT = $("filter-sort").value;
   loadAll();
 };
 $("clear-filters").onclick = () => {

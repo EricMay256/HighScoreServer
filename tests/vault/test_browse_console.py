@@ -23,6 +23,7 @@ from app.vault.constants import (
     OAUTH_BASELINE_SCOPES,
     OAUTH_OPERATOR_ENTITLEMENT_SCOPES,
 )
+from app.vault.domain import NoteSort
 from app.vault.templating import render
 
 
@@ -524,6 +525,45 @@ def test_cancelling_returns_focus_to_the_control_that_opened_it() -> None:
     page = _page()
 
     assert '$("propose-open").focus();' in page
+
+
+def test_the_console_offers_every_order_the_endpoint_takes() -> None:
+    """One closed set, said twice, and the two must not drift.
+
+    `NoteSort` is what the endpoint accepts; an option this page offers that
+    the endpoint does not know is a 422 a reader can reach from the control
+    itself, and one it accepts but the page never offers is a feature nobody
+    can use.
+    """
+
+    page = _page()
+
+    for sort in NoteSort:
+        assert f'<option value="{sort.value}">' in page, (
+            f"the order control offers no {sort.value!r} option"
+        )
+        assert f"{sort.value}:" in page, (
+            f"{sort.value!r} has no label for the sentence explaining the view"
+        )
+
+
+def test_the_order_travels_with_the_request_and_the_cursor_does_not() -> None:
+    """A cursor belongs to the order it was issued in.
+
+    Changing the order goes through `loadAll`, which starts a fresh listing --
+    and a fresh listing asks for no cursor. What that costs if it were wrong is
+    a 422 from the endpoint, which refuses a foreign cursor rather than
+    re-seating it. Driven end to end in `test_browse_propose_behaviour`; what
+    is pinned here is that the request carries the order at all.
+    """
+
+    page = _page()
+
+    assert 'params.set("sort", query.sort);' in page
+    # Carried on the committed query, so an appended page keeps the order the
+    # walk began in rather than reading whatever the control says now.
+    assert "sort: SORT }" in page
+    assert '$("filter-sort").onchange' in page
 
 
 def test_the_notes_controls_stay_in_reach_while_it_is_read() -> None:
