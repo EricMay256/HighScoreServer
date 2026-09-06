@@ -226,6 +226,44 @@ def test_unchanged_full_body_is_refused_in_the_browser(report: dict) -> None:
     assert report["unchangedFullBodyRefuses"]["requests"] == 0
 
 
+def test_rendered_and_source_modes_keep_the_source_authoritative(
+    report: dict,
+) -> None:
+    """Rendering is a view over the fetched body, never a replacement for it."""
+
+    outcome = report["markdownBodyModes"]
+
+    assert outcome["rawText"] == outcome["source"]
+    assert outcome["parsed"] == {
+        "source": outcome["source"],
+        "options": {"async": False, "breaks": False, "gfm": True},
+    }
+    assert outcome["sanitized"]["html"] == (
+        '<h1>Parsed Markdown</h1><script>alert("unsafe")</script>'
+    )
+    sanitizer = outcome["sanitized"]["options"]
+    assert sanitizer["RETURN_DOM_FRAGMENT"] is True
+    assert sanitizer["ALLOW_ARIA_ATTR"] is False
+    assert sanitizer["ALLOW_DATA_ATTR"] is False
+    assert "script" not in sanitizer["ALLOWED_TAGS"]
+    assert "input" not in sanitizer["ALLOWED_TAGS"]
+    assert "style" not in sanitizer["ALLOWED_ATTR"]
+    assert outcome["insertedText"] == "Sanitized fragment"
+
+    assert outcome["initial"] == {
+        "renderedSelected": "true",
+        "sourceSelected": "false",
+        "renderedHidden": False,
+        "sourceHidden": True,
+    }
+    assert outcome["afterSource"] == {
+        "renderedSelected": "false",
+        "sourceSelected": "true",
+        "renderedHidden": True,
+        "sourceHidden": False,
+    }
+
+
 def test_a_stale_listing_response_cannot_replace_newer_filters(report: dict) -> None:
     """Rows and their cursor must come from one navigation generation."""
 

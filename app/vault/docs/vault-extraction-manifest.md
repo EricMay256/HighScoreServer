@@ -13,7 +13,8 @@ durable than removability comments scattered across modules, which go stale sile
 | `app/vault/` | package root | Intra-package imports are already relative, so this is a directory move, not a rewrite. This includes the proposed librarian workflow, runners, console, and MCP adapter; `tests/vault/test_boundaries.py` enforces the property. |
 | `app/vault/AGENTS.md` | package root | Already inside the package; needs no edit. |
 | `app/vault/docs/` | package docs | Architecture, configuration runbook, extraction manifest, the librarian plan, and the vault ADR lineage. |
-| `app/vault/templates/` | package assets | Built 2026-08-21 (vault ADR 0024): `login.html`, the operator login and consent page. The first non-documentation asset in the package. Deliberately the vault's own rather than HSS's root `templates/`, with its own environment in `templating.py`: a page extending the host's `base.html` would not move with the package, and `test_boundaries.py` could not catch it because it scans imports rather than templates. |
+| `app/vault/templates/` | package assets | Built 2026-08-21 (vault ADR 0024): the vault's first browser assets. Deliberately the vault's own rather than HSS's root `templates/`, with its own environment in `templating.py`: a page extending the host's `base.html` would not move with the package, and `test_boundaries.py` could not catch it because it scans imports rather than templates. |
+| `app/vault/static/` | package assets | Versioned browser bundles and their licenses for the browse console. Served from the package-owned `/vault/assets/` mount; no host `public/` path or frontend build step is involved. |
 | `app/vault/docs/adr/` | package docs | Independent lineage starting at 0001. Does not interleave with HSS's `docs/adr/`. |
 | Vault-owned tests listed below | package tests | Package tests currently import `app.vault.…`; repoint those imports and provide the standalone fixtures described below. Do **not** move the directory wholesale. |
 
@@ -59,6 +60,11 @@ easy to overlook:
 | `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. |
 
 ## Dependencies that leave
+
+The package also carries two vendored browser dependencies below
+`app/vault/static/vendor/`: Marked 18.0.11 and DOMPurify 3.4.15, with their
+license texts and source maps. They move as package assets and require no npm
+installation or lockfile.
 
 | Package | Used by |
 | ------- | ------- |

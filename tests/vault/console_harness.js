@@ -38,13 +38,30 @@ function makeNode(tag) {
     oninput: null,
     style: {},
     dataset: {},
+    attributes: {},
     parentNode: null,
     classList: {
-      add() {},
-      remove() {},
-      toggle() {},
-      contains() {
-        return false;
+      add(...names) {
+        const classes = new Set(node.className.split(/\s+/).filter(Boolean));
+        names.forEach((name) => classes.add(name));
+        node.className = [...classes].join(" ");
+      },
+      remove(...names) {
+        const removed = new Set(names);
+        node.className = node.className
+          .split(/\s+/)
+          .filter((name) => name && !removed.has(name))
+          .join(" ");
+      },
+      toggle(name, force) {
+        const present = node.classList.contains(name);
+        const wanted = force === undefined ? !present : Boolean(force);
+        if (wanted) node.classList.add(name);
+        else node.classList.remove(name);
+        return wanted;
+      },
+      contains(name) {
+        return node.className.split(/\s+/).includes(name);
       },
     },
     appendChild(child) {
@@ -71,7 +88,12 @@ function makeNode(tag) {
       node.parentNode = null;
     },
     focus() {},
-    setAttribute() {},
+    setAttribute(name, value) {
+      node.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return Object.hasOwn(node.attributes, name) ? node.attributes[name] : null;
+    },
     addEventListener() {},
     dispatchEvent() {},
   };
@@ -162,6 +184,8 @@ function storageStub() {
 }
 
 const navigationCalls = [];
+const markdownCalls = [];
+const sanitizeCalls = [];
 const globals = {
   document: documentStub,
   window: {
@@ -185,6 +209,23 @@ const globals = {
   URLSearchParams,
   URL,
   console,
+  markdownCalls,
+  sanitizeCalls,
+  marked: {
+    parse: (source, options) => {
+      markdownCalls.push({ source, options });
+      return '<h1>Parsed Markdown</h1><script>alert("unsafe")</script>';
+    },
+  },
+  DOMPurify: {
+    sanitize: (html, options) => {
+      sanitizeCalls.push({ html, options });
+      const fragment = makeNode("#fragment");
+      fragment.appendChild(makeNode("p"));
+      fragment.children[0].textContent = "Sanitized fragment";
+      return fragment;
+    },
+  },
   fetch: async (url, options) => {
     fetchCalls.push({ url, options });
     return fetchHandler(url, options);
@@ -204,8 +245,10 @@ return {
   signIn,
   proposeForm,
   fullBodyForm,
+  noteBody,
   spanFromLines,
   occurrenceOf,
+  markdownState: () => ({ markdownCalls, sanitizeCalls }),
   setFilters: (filters) => { FILTERS = filters; },
   setSort: (sort) => { SORT = sort; },
   setNote: (note) => { NOTE = note; },
@@ -492,6 +535,41 @@ function noteDetail(title) {
   parts.rationale.value = "Nothing actually changed.";
   parts.submit.onclick();
   report.unchangedFullBodyRefuses = { requests: fetchCalls.length };
+}
+
+// 8c. Rendered mode parses, sanitizes, and inserts only the returned fragment;
+// source mode preserves the exact body used by selection editing.
+{
+  markdownCalls.length = 0;
+  sanitizeCalls.length = 0;
+  const source = '# Heading\n\n<script>alert("unsafe")</script>\n';
+  const view = page.noteBody(source);
+  const renderedButton = find(view, (node) => node.textContent === "Rendered");
+  const sourceButton = find(view, (node) => node.textContent === "Source");
+  const rendered = find(view, (node) => node.id === "note-body-rendered");
+  const raw = find(view, (node) => node.id === "note-body");
+  const calls = page.markdownState();
+  const initial = {
+    renderedSelected: renderedButton.getAttribute("aria-pressed"),
+    sourceSelected: sourceButton.getAttribute("aria-pressed"),
+    renderedHidden: rendered.classList.contains("hidden"),
+    sourceHidden: raw.classList.contains("hidden"),
+  };
+  sourceButton.onclick();
+  report.markdownBodyModes = {
+    source,
+    rawText: raw.textContent,
+    parsed: calls.markdownCalls[0],
+    sanitized: calls.sanitizeCalls[0],
+    insertedText: rendered.textContent,
+    initial,
+    afterSource: {
+      renderedSelected: renderedButton.getAttribute("aria-pressed"),
+      sourceSelected: sourceButton.getAttribute("aria-pressed"),
+      renderedHidden: rendered.classList.contains("hidden"),
+      sourceHidden: raw.classList.contains("hidden"),
+    },
+  };
 }
 
 async function runNavigationCases() {
