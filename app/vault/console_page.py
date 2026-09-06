@@ -67,9 +67,10 @@ def _csp(nonce: str) -> str:
     which is the case the directive exists for. A nonce permits exactly the
     blocks this render emitted.
 
-    Defence in depth, not a fix for a known hole: the consoles build their DOM
-    with `textContent` and never interpolate corpus text into markup. This is
-    the layer under that, for the same reason the header set exists at all.
+    Defence in depth, not a substitute for safe DOM construction: ordinary
+    values reach `textContent`, while the browse console's one HTML-producing
+    path sanitizes Markdown into a `DocumentFragment` before insertion. This
+    is the layer under both, for the same reason the header set exists at all.
 
     A per-response nonce is only safe because these responses are `no-store`.
     A cached page would serve a nonce its header no longer names, and the page

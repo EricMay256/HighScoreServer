@@ -9,11 +9,14 @@ family holding `vault:read` alone, so a console that could do both would be a
 console that could do neither properly.
 """
 
+import hashlib
 import re
 
 import pytest
+from starlette.applications import Starlette
 from starlette.responses import HTMLResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.testclient import TestClient
 
 from app.vault import browse_console as browse
 from app.vault import review_console as review
@@ -117,6 +120,40 @@ def test_the_route_is_registered_at_the_documented_path() -> None:
     ]
     assert routes[0].methods == {"GET", "HEAD"}
 
+    mounts = [route for route in routes if isinstance(route, Mount)]
+    assert [(mount.path, mount.name) for mount in mounts] == [
+        (browse.ASSET_PATH, "vault-assets")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "version", "sha256"),
+    [
+        (
+            "/vault/assets/vendor/marked-18.0.11/marked.umd.js",
+            b"marked v18.0.11",
+            "69451c8541c9c1e7a4bf3ffc6f73c4d89633de92bfbe3e484dfe182ef8091f88",
+        ),
+        (
+            "/vault/assets/vendor/dompurify-3.4.15/purify.min.js",
+            b"DOMPurify 3.4.15",
+            "f263b05369e050fa175d4ecb9c9358eb4253602d510297adfb31df48b2f1c4d5",
+        ),
+    ],
+)
+def test_the_pinned_markdown_assets_are_served(
+    path: str, version: bytes, sha256: str
+) -> None:
+    """The console has no CDN dependency and the reviewed bytes stay pinned."""
+
+    with TestClient(Starlette(routes=browse.build_vault_browse_routes())) as client:
+        response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/javascript")
+    assert version in response.content[:200]
+    assert hashlib.sha256(response.content).hexdigest() == sha256
+
 
 def _console_response() -> HTMLResponse:
     return console_page(
@@ -157,9 +194,9 @@ def test_inline_script_is_allowed_by_nonce_and_not_by_unsafe_inline() -> None:
     is precisely the case the directive exists to govern -- so it is the nonce,
     which names only the blocks this render emitted.
 
-    Defence in depth. The consoles build their DOM with `textContent` and never
-    interpolate corpus text into markup, so there is no known injection this
-    closes.
+    Defence in depth. Ordinary values reach `textContent`, and the browse
+    console sanitizes the one path that deliberately produces HTML from
+    corpus text. The nonce is the layer under both.
     """
 
     response = _console_response()
@@ -171,8 +208,9 @@ def test_inline_script_is_allowed_by_nonce_and_not_by_unsafe_inline() -> None:
     assert "'unsafe-inline'" not in script_src
     assert "'nonce-" in script_src
 
-    # Every inline script in the page must carry that exact nonce, or the page
-    # is served broken rather than served insecure.
+    # Every script tag in the page carries that exact nonce, including the two
+    # same-origin vendor assets. Keeping one invariant avoids a later asset
+    # move silently weakening the policy.
     #
     # Line-anchored: every real script tag in these templates starts a line,
     # and `_console_session.js` mentions "<script>" in a comment that is inside
@@ -180,7 +218,7 @@ def test_inline_script_is_allowed_by_nonce_and_not_by_unsafe_inline() -> None:
     nonce = script_src.split("'nonce-", 1)[1].split("'", 1)[0]
     tags = re.findall(r"(?m)^<script\b[^>]*>", response.body.decode())
 
-    assert len(tags) >= 2, "expected the config block and the page script"
+    assert len(tags) >= 4, "expected config, two vendor assets, and page script"
     for tag in tags:
         assert f'nonce="{nonce}"' in tag, f"inline script without the nonce: {tag}"
 
@@ -223,14 +261,18 @@ def test_the_script_nonce_is_fresh_on_every_response() -> None:
     assert CONSOLE_HEADERS["Cache-Control"] == "no-store"
 
 
-def test_the_console_loads_no_third_party_assets() -> None:
-    """Its own CSP forbids them, so a reference would be a broken page."""
+def test_the_console_loads_no_third_party_origins() -> None:
+    """Marked and DOMPurify are versioned same-origin package assets."""
 
     page = _page()
 
     assert "http://" not in page.replace("http://localhost", "")
     assert "https://" not in page
     assert "cdn" not in page.lower()
+    assert (
+        f'{browse.ASSET_PATH}/vendor/dompurify-3.4.15/purify.min.js' in page
+    )
+    assert f'{browse.ASSET_PATH}/vendor/marked-18.0.11/marked.umd.js' in page
 
 
 def test_the_page_reads_the_field_names_the_listing_returns() -> None:
@@ -244,15 +286,17 @@ def test_the_page_reads_the_field_names_the_listing_returns() -> None:
         assert field in page
 
 
-def test_the_body_is_rendered_as_text_and_never_as_markup() -> None:
-    """Note bodies are written by agents, and markdown rendering in a page that
-    cannot fetch a markdown library means hand-rolling one -- which is how
-    untrusted text becomes markup. A `pre` block is the honest form."""
+def test_rendered_markdown_is_sanitized_before_it_reaches_the_dom() -> None:
+    """Marked does not sanitize; its output is untrusted until DOMPurify runs."""
 
     page = _page()
 
     assert ".innerHTML" not in page
-    assert 'el("pre", "body", detail.body)' in page
+    assert "const parsed = marked.parse(source" in page
+    assert "return DOMPurify.sanitize(parsed" in page
+    assert "RETURN_DOM_FRAGMENT: true" in page
+    assert "rendered.appendChild(renderedMarkdown(source))" in page
+    assert 'el("pre", "body body-source hidden", source)' in page
 
 
 def test_the_console_includes_the_session_module_rather_than_its_own_copy() -> None:
@@ -323,9 +367,8 @@ def test_the_proposal_carries_the_revision_the_page_read() -> None:
 
 
 def test_the_console_sends_a_span_and_never_a_diff() -> None:
-    """Generating a unified diff in the browser would need a diff
-    implementation the page cannot fetch under its own CSP, which is the reason
-    the kind exists over HTTP at all (ADR 0039)."""
+    """Generating a unified diff here would duplicate the canonical server
+    implementation, which is why the span kind exists over HTTP (ADR 0039)."""
 
     page = _page()
 

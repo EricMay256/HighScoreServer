@@ -70,13 +70,41 @@ textarea {
 /* The span being replaced, quoted back so the operator can see exactly what
    the server will be asked to match. */
 .excerpt { white-space: pre-wrap; overflow-wrap: anywhere; }
-/* Markdown source, shown as written. Overrides the shared `pre` because a note
-   body is the page's content rather than a quoted fragment inside a card. */
+/* Both body modes share the same page-level frame. Source stays monospace and
+   selectable for exact-span edits; rendered Markdown gets ordinary prose
+   typography and its own rules for the block elements Marked emits. */
+.body-view-controls { margin-top: 0.8rem; }
+.body-view-controls button[aria-pressed="true"] {
+  background: var(--chip); border-color: var(--muted);
+}
 .body {
-  white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel);
+  overflow-wrap: anywhere; background: var(--panel);
   border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1rem;
+  margin: 0.5rem 0 0;
+}
+.body-source {
+  white-space: pre-wrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.86rem; margin: 0.8rem 0 0;
+  font-size: 0.86rem;
+}
+.markdown-body { line-height: 1.6; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body a { color: var(--accept); }
+.markdown-body img { max-width: 100%; height: auto; }
+.markdown-body pre {
+  white-space: pre; overflow-x: auto; background: var(--chip);
+  border-radius: 6px; padding: 0.65rem 0.8rem;
+}
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86em; background: var(--chip); border-radius: 4px;
+  padding: 0.08rem 0.25rem;
+}
+.markdown-body pre code { background: transparent; padding: 0; }
+.markdown-body table { border-collapse: collapse; max-width: 100%; }
+.markdown-body th, .markdown-body td {
+  border: 1px solid var(--line); padding: 0.35rem 0.55rem; text-align: left;
 }
 </style>
 </head>
@@ -128,6 +156,8 @@ textarea {
 <script id="cfg" type="application/json" nonce="{{ csp_nonce }}">{{ {"apiBase": api_base, "scopes": scopes,
   "consolePath": console_path, "clientName": client_name,
   "storePrefix": store_prefix} | tojson }}</script>
+<script src="/vault/assets/vendor/dompurify-3.4.15/purify.min.js" nonce="{{ csp_nonce }}"></script>
+<script src="/vault/assets/vendor/marked-18.0.11/marked.umd.js" nonce="{{ csp_nonce }}"></script>
 <script nonce="{{ csp_nonce }}">
 "use strict";
 {% include "_console_session.js" %}
@@ -626,14 +656,7 @@ async function openNote(noteId) {
     edgeSlots.push({ label, ids, slot });
   }
 
-  /* The body as it is written: markdown source, not rendered. Rendering it
-     would mean a markdown implementation the page cannot fetch under its own
-     CSP, and hand-rolling one is how untrusted note text becomes markup. A
-     `pre` block is honest and safe -- and this corpus is read as source by
-     every other consumer it has. */
-  const body = el("pre", "body", detail.body);
-  body.id = "note-body";
-  panel.appendChild(body);
+  panel.appendChild(noteBody(detail.body));
 
   /* Deliberately not awaited: the note is on screen by now, and this only
      fills in labels. The generation check is what makes that safe -- a reader
@@ -658,12 +681,67 @@ async function openNote(noteId) {
   }
 }
 
+/* Marked parses Markdown but deliberately does not sanitize its HTML. Notes
+   are agent-authored and therefore untrusted, so its string never reaches an
+   HTML sink directly. DOMPurify receives an allowlist limited to elements and
+   attributes emitted by ordinary Markdown and returns a DocumentFragment,
+   which the page inserts through appendChild rather than innerHTML. */
+const MARKDOWN_TAGS = [
+  "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4",
+  "h5", "h6", "hr", "img", "li", "ol", "p", "pre", "strong",
+  "table", "tbody", "td", "th", "thead", "tr", "ul",
+];
+const MARKDOWN_ATTRIBUTES = [
+  "align", "alt", "href", "src", "start", "title",
+];
+
+function renderedMarkdown(source) {
+  const parsed = marked.parse(source, { async: false, breaks: false, gfm: true });
+  return DOMPurify.sanitize(parsed, {
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+    ALLOWED_ATTR: MARKDOWN_ATTRIBUTES,
+    ALLOWED_TAGS: MARKDOWN_TAGS,
+    RETURN_DOM_FRAGMENT: true,
+  });
+}
+
+function noteBody(source) {
+  const view = el("div");
+  const controls = el("div", "row body-view-controls");
+  controls.setAttribute("role", "group");
+  controls.setAttribute("aria-label", "Note body view");
+  const renderedButton = el("button", null, "Rendered");
+  const sourceButton = el("button", null, "Source");
+  renderedButton.type = sourceButton.type = "button";
+  controls.append(renderedButton, sourceButton);
+
+  const rendered = el("div", "body markdown-body");
+  rendered.id = "note-body-rendered";
+  rendered.appendChild(renderedMarkdown(source));
+  const raw = el("pre", "body body-source hidden", source);
+  raw.id = "note-body";
+
+  const showRendered = (show) => {
+    rendered.classList.toggle("hidden", !show);
+    raw.classList.toggle("hidden", show);
+    renderedButton.setAttribute("aria-pressed", String(show));
+    sourceButton.setAttribute("aria-pressed", String(!show));
+  };
+  renderedButton.onclick = () => showRendered(true);
+  sourceButton.onclick = () => showRendered(false);
+  showRendered(true);
+
+  view.append(controls, rendered, raw);
+  return view;
+}
+
 /* ---------- Proposing an edit to the open note ----------
 
    The span edit exists for exactly this gesture: select a sentence, write a
    better one, and let the server work out the patch (ADR 0033, ADR 0039). The
-   page sends the two texts and never a diff -- generating one here would mean a
-   diff implementation this page cannot fetch under its own CSP. */
+   page sends the two texts and never a diff -- generating one here would add a
+   second patch implementation beside the server's canonical one. */
 
 /* The selection as offsets into the body we were served, not as
    `Selection.toString()`.

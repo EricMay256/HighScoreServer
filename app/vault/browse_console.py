@@ -35,10 +35,12 @@ credential and answers by burning the family.
 """
 
 import logging
+from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
-from starlette.routing import Route
+from starlette.routing import BaseRoute, Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from .console_page import API_BASE, console_page
 
@@ -46,6 +48,8 @@ from .console_page import API_BASE, console_page
 logger = logging.getLogger(__name__)
 
 BROWSE_PATH = "/vault/browse"
+ASSET_PATH = "/vault/assets"
+_STATIC_DIR = Path(__file__).with_name("static")
 
 # Read to browse, propose to suggest. Space-separated because that is the OAuth
 # scope syntax, and both are baseline -- see the module docstring for why the
@@ -63,6 +67,7 @@ STORE_PREFIX = "vault.browse"
 
 __all__ = [
     "API_BASE",
+    "ASSET_PATH",
     "BROWSE_PATH",
     "CLIENT_NAME",
     "CONSOLE_SCOPES",
@@ -84,7 +89,14 @@ async def browse_console(request: Request) -> HTMLResponse:
     )
 
 
-def build_vault_browse_routes() -> list[Route]:
-    """The console's routes, for the host to extend its router with."""
+def build_vault_browse_routes() -> list[BaseRoute]:
+    """The console shell and its versioned, package-owned browser assets."""
 
-    return [Route(BROWSE_PATH, endpoint=browse_console, methods=["GET"])]
+    return [
+        Route(BROWSE_PATH, endpoint=browse_console, methods=["GET"]),
+        Mount(
+            ASSET_PATH,
+            app=StaticFiles(directory=_STATIC_DIR),
+            name="vault-assets",
+        ),
+    ]
