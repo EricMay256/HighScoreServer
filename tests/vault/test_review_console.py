@@ -6,6 +6,11 @@ they are in what it asks for and what it refuses to become. These tests pin
 those, not the markup.
 """
 
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from app.vault.constants import (
@@ -425,6 +430,87 @@ def test_a_dropped_preview_can_still_be_loaded() -> None:
     assert "accept.disabled = reject.disabled = false;" in page, (
         "loading the preview has to enable the decision it was blocking"
     )
+
+
+def test_body_proposals_offer_a_lazy_full_context_view() -> None:
+    """Both paths that fetch a body preview already receive the source body."""
+
+    page = _page()
+
+    assert page.count(
+        "bodyPreview(detail.preview, detail.target && detail.target.body)"
+    ) == 2
+    assert 'const toggle = el("button", null, "Show full context")' in page
+    assert 'toggle.setAttribute("aria-expanded", "false")' in page
+    assert 'toggle.setAttribute("aria-expanded", String(visible))' in page
+    assert page.index("toggle.onclick = () => {") < page.index(
+        "const expanded = fullContextDiff(originalBody, preview.unified_diff"
+    ), "the potentially large expanded DOM must not be built until requested"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_full_context_diff_restores_omitted_lines_and_refuses_mismatch(
+    tmp_path: Path,
+) -> None:
+    """The display helper fills gaps but never guesses through bad context."""
+
+    page = _page()
+    start = page.index("function splitBodyLines(")
+    end = page.index("\nfunction diffBlock(", start)
+    functions = page[start:end]
+    script = tmp_path / "full-context-diff.js"
+    script.write_text(
+        functions
+        + """
+const original = [
+  "one", "two", "three", "four", "five", "six",
+  "seven", "eight", "nine", "ten", "eleven", "twelve",
+].join("\\n");
+const patch = [
+  "--- current-body",
+  "+++ proposed-body",
+  "@@ -1,5 +1,5 @@",
+  " one", "-two", "+TWO", " three", " four", " five",
+  "@@ -7,6 +7,6 @@",
+  " seven", " eight", " nine", "-ten", "+TEN", " eleven", " twelve",
+].join("\\n");
+process.stdout.write(JSON.stringify({
+  expanded: fullContextDiff(original, patch),
+  mismatched: fullContextDiff(original, "@@ -2 +2 @@\\n wrong"),
+}));
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["node", str(script)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["expanded"] == "\n".join(
+        [
+            " one",
+            "-two",
+            "+TWO",
+            " three",
+            " four",
+            " five",
+            " six",
+            " seven",
+            " eight",
+            " nine",
+            "-ten",
+            "+TEN",
+            " eleven",
+            " twelve",
+        ]
+    )
+    assert output["mismatched"] is None
 
 
 def test_the_session_ended_marker_is_actually_consumed() -> None:
