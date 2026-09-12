@@ -4,7 +4,12 @@ Date: 2026-07-29
 
 ## Status
 
-Accepted
+Accepted; partially superseded by
+[ADR 0048](0048-human-vault-database-authority-and-obsidian-sync.md) for enrolled
+database-owned Human content. That content may be hosted even when `ai_read` is
+forbidden, behind a separate Human-read grant. Agent-facing fail-closed policy
+remains required on every disclosure surface. The original import-exclusion
+decision below is retained as history for the former Markdown-replica model.
 
 ## Context
 
