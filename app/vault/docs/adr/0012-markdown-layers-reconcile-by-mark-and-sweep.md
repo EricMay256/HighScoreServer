@@ -4,7 +4,11 @@ Date: 2026-07-29
 
 ## Status
 
-Accepted
+Accepted; partially superseded by
+[ADR 0048](0048-human-vault-database-authority-and-obsidian-sync.md) for enrolled
+Human notes. Those notes use stable managed identities and revision-based sync;
+local absence never authorizes a server delete. The existing schema and earlier
+replica rationale below are historical context, not the selected sync protocol.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # Next steps
 
-Current as of 2026-09-02. One ordered list of what remains, across the
+Current as of 2026-09-12. One ordered list of what remains, across the
 leaderboard and the vault, with the *why now* and the blocking relationships.
 Detail lives elsewhere and is linked; this file exists so nothing else has to
 be read to know what to pick up.
@@ -13,14 +13,12 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## State
 
-- **`dev` is 94 commits ahead of `main`, and `main` is an ancestor**, so the
-  merge is a fast-forward. The range carries two vault migrations,
-  `0018_metadata_amendments` and `0019_oauth_grant_label`, which the release
-  phase runs on deploy. Behaviour changes to name in the PR: search no longer
-  returns bodies (vault ADR 0031); metadata is a proposal kind of its own
-  (ADR 0036); the landing page and two consoles exist at `/vault`,
-  `/vault/review` and `/vault/browse` (ADRs 0037, 0039); batch amendment
-  decisions; operator labels on authorizations (ADR 0040).
+- **`main` is current with `dev` as of PR #33**, squash-merged, so `main` is no
+  longer an ancestor and the next merge is another PR rather than a
+  fast-forward. Verified against git on 2026-09-12: the vault lineage head is
+  `0020_note_listing_sort_indexes` on both branches, no migration is pending to
+  `main`, and the only difference between the branches is this documentation
+  batch.
 - **Production, as last recorded on 2026-08-28** and not re-verified since:
   vault lineage `0017_oauth_entitlements`, 94 documents (80 notes, 14 wiki
   pages), all active; `VAULT_ENABLED`, `VAULT_PUBLIC_URL` and an operator
@@ -35,9 +33,10 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## 1. Immediate
 
-1. **Merge `dev` into `main`.** Fast-forward, two migrations in range (above).
+1. **Open the ADR 0048 documentation PR.** Done as of PR #33 for the code; what
+   is on `dev` and not on `main` is now only the Human-vault documentation (§4).
    Documentation on a non-default branch is documentation nobody reads, and
-   GitHub shows `main`.
+   GitHub shows `main`. No migration is in range.
 2. **Settle the production game-mode list.** Nothing hardcodes a mode any
    more, so `/leaderboard` and the SPA both land on the first row of
    `/game_modes`, ordered by `name` — the alphabetically first configured mode
@@ -110,7 +109,55 @@ The largest remaining vault feature. The plan is
   [`embedding-calibration.md`](../app/vault/docs/embedding-calibration.md), not
   a constant change.
 
-## 4. Gated on a written trigger — do not start
+## 4. The Human vault — decided 2026-09-11, nothing built
+
+Vault ADR 0048 selected database authority for enrolled Human notes, browser
+authoring, and an OAuth Obsidian sync client with server-only deletion. It
+supersedes ADR 0041's deferral and ADR 0047's Markdown-authoritative import, and
+partially supersedes ADRs 0012, 0014 and 0022 — each of those records which half
+of itself survives. Start at the
+[handoff](../app/vault/docs/human-vault-handoff.md); the contracts are the
+[sync specification](../app/vault/docs/human-vault-sync-spec.md) and the
+[daily embedding specification](../app/vault/docs/human-embedding-refresh.md).
+
+Five phases, each demonstrated before the next begins. Nothing reaches a broader
+read surface until phase B's audience and ownership checks pass.
+
+- **A — baseline and export rehearsal.** Run the existing
+  `scripts/export_vault_markdown.py` into a private staging root, dry run then
+  `--apply`, and preview the exact Human enrollment set. Cheap, reversible, and
+  needs no new code: it is how we find out what the exporter actually does
+  before anything depends on it.
+- **B — the Human service boundary.** Reviewed vault Alembic revisions for
+  stable identity and collection ownership, resource revisions and history,
+  tombstones and an ordered resumable change feed, and the Human operator
+  entitlement. This is the bulk of the work and everything else waits on it.
+  `source_sha256` and unique `vault_path` do not cover it and must not be
+  overloaded to pretend otherwise.
+- **C — browser authoring.** Its own OAuth family, explicit save and conflict
+  states, a separately granted delete, and visible read-policy and
+  semantic-index state.
+- **D — the Obsidian extension. Optional; decide after C is in real use.**
+  Source in `clients/obsidian/`, which does not exist yet: PKCE against a
+  configurable deployment, managed `VaultID`s, revision-checked bidirectional
+  sync, conflict and recovery UI. Desktop is the verified target; mobile is
+  claimed only after real-device tests. What only this buys is authoring
+  offline. Keeping local Markdown current is the other half and is much
+  cheaper — a one-way Human projection, the mirror of the Agent exporter.
+  **Build that if D is skipped**, or enrolled notes freeze at enrollment and the
+  local vault decays over exactly the notes that were enrolled.
+- **E — daily indexing and pilot.** A restartable operator command under a
+  durable lease, coalescing a day's edits into one latest-input request per
+  changed note and retaining the older compatible vector when a refresh fails.
+  May be built alongside C and D. The OpenAI Batch API was evaluated and is not
+  selected: 50% off does not pay for a two-day worst-case lag.
+
+Before phase A, confirm that private `folders.yml` governance and runtime
+`read_policy.py` agree about the notes that are about to be enrolled. Update
+[`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
+when an artifact actually appears — `clients/obsidian/` only if D is built.
+
+## 5. Gated on a written trigger — do not start
 
 - **Chunk-level retrieval** — ADR 0034's evaluation gate.
 - **A `ts_headline` arm for previews** — ADR 0031 records why the two obvious
@@ -126,20 +173,21 @@ The largest remaining vault feature. The plan is
   the effective ceiling is the limit times the worker count. Necessary the
   moment a second dyno exists, not before.
 
-## 5. Deferred decisions — need an ADR before any work
+## 6. Deferred decisions — need an ADR before any work
 
-- **Deferred decision #1: whole-vault read permissions.** `folders.yml` governs
-  `ai_write` and has no `ai_read`; one `vault:read` reads everything the read
-  policy admits. Blocks any `Human/` import. Entangled with **human note
-  identity across renames** (ADR 0012 recorded that a human note's id is stable
-  only while its row survives); settle both before the first edge points at a
-  human note.
+- **Deferred decision #1: whole-vault read permissions — answered, see §4.**
+  The old wording here was wrong twice over. `folders.yml` does govern
+  `ai_read`, fail-closed, and `read_policy.py` mirrors it; what one `vault:read`
+  credential reads is the corpus that policy admits, not every Human folder.
+  Human note identity across renames is answered by the managed `VaultID` of
+  ADR 0048 rather than by row survival. What is left is verification that
+  source and runtime policy agree, which is phase A work.
 - **ADR 0038 — a first-party reviewer authorization.** Recommended deferred:
   the monthly `grant-oauth` step is cheap now that console sessions persist.
   Prefer a narrower `grant-reviewer` convenience if the friction returns.
-- **ADR 0041 — human-authored notes in the vault.** Deferred deliberately.
-  Revisit when the browse console is in real use and the missing notes are
-  felt, or when the dedup gate refuses something a person wrote.
+- **ADR 0041 — human-authored notes in the vault.** No longer deferred:
+  superseded by ADR 0048 on 2026-09-11. The trigger it was waiting for arrived —
+  the browse console is in real use and Markdown stopped being written. See §4.
 - **ADR 0042 — a mutable state store beside the corpus.** Considered, not
   scheduled. Run the cheap experiment first: a plain structured state file with
   an `attempted_fixes` field, for a week of real use.
@@ -153,7 +201,7 @@ The largest remaining vault feature. The plan is
   products.
 - **`superseded` on review cases** stays reserved, with no path that sets it.
 
-## 6. Leaderboard
+## 7. Leaderboard
 
 - **Access-token revocation via a JTI denylist.** Insertion points are marked
   `# DENYLIST HOOK`; needs a shared store (Redis) and a decode-time check.
@@ -177,7 +225,7 @@ The largest remaining vault feature. The plan is
 - **Cursor pagination for `/latest`** if a client ever needs stable feed paging
   under inserts.
 
-## 7. Tooling and hygiene
+## 8. Tooling and hygiene
 
 - **Split the test suite by domain** (`tests/vault` against the rest) so
   feedback rounds on leaderboard work skip the seven-minute run.

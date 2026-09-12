@@ -5,6 +5,14 @@ the package; the host repository's `AGENTS.md` governs everything outside these 
 
 ## What this is
 
+**Planned Human-vault work:** read `docs/human-vault-handoff.md` and vault ADR 0048
+before implementing Human enrollment, editing, or synchronization. The selected
+design is database authority plus an OAuth Obsidian client, with server-only
+deletion and separate Human/Agent write grants. The existing invariants below
+describe current runtime behavior; ADR 0048 explicitly supersedes the former
+Human replica/import-exclusion rules for this implementation. No such rollout
+is implied by this planning note.
+
 The knowledge-platform bounded context: its own API models, domain records, Core tables,
 repositories, services, auth, embeddings, and two transports — HTTP routes and an MCP
 adapter. The package holds runtime code and schema definitions only — never corpus

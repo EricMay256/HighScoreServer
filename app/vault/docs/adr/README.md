@@ -20,9 +20,9 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0009 | [`doc_type` is text validated against `types.yml`, not a second enum](0009-doc-type-is-text-validated-against-types-yml.md) | Accepted |
 | 0010 | [`vault_path` is the only policy key; there is no resolved scope column](0010-vault-path-is-the-only-policy-key.md) | Accepted |
 | 0011 | [`doc_status` carries the Status Map; `status` stays the visibility gate](0011-doc-status-carries-the-status-map.md) | Accepted |
-| 0012 | [Markdown-authored layers reconcile by mark-and-sweep over a content hash](0012-markdown-layers-reconcile-by-mark-and-sweep.md) | Accepted |
+| 0012 | [Markdown-authored layers reconcile by mark-and-sweep over a content hash](0012-markdown-layers-reconcile-by-mark-and-sweep.md) | Partially superseded by 0048 for enrolled Human notes |
 | 0013 | [The embedding text carries semantic frontmatter, not bookkeeping](0013-embedding-text-is-semantic-fields-only.md) | Accepted |
-| 0014 | [`ai_read` excludes at import and again at query time](0014-ai-read-excludes-at-import-and-at-query.md) | Accepted |
+| 0014 | [`ai_read` excludes at import and again at query time](0014-ai-read-excludes-at-import-and-at-query.md) | Partially superseded by 0048 for Human storage; Agent query restrictions preserved |
 | 0015 | [Operator-issued agent credentials replace the shared read key](0015-agent-credentials-replace-the-shared-read-key.md) | Accepted |
 | 0016 | [The governed write path](0016-the-governed-write-path.md) | Accepted (amended 2026-08-12: `flag_at` derivation; 2026-08-13 and 2026-08-16: idempotency digest) |
 | 0017 | [Facets carry classification, outside the embedding text](0017-facets-carry-classification-outside-the-embedding.md) | Accepted |
@@ -30,7 +30,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0019 | [Retiring a document deletes it, and the ledger outlives it](0019-retiring-a-document-deletes-it.md) | Accepted (amended 2026-08-21: a settled review case releases its candidate) |
 | 0020 | [`vault:write` narrows to contribute; update and delete are their own scopes](0020-write-scopes-split-by-verb.md) | Accepted |
 | 0021 | [MCP is a second adapter, and a credential's scopes shape its tool surface](0021-mcp-is-a-second-adapter-with-scope-shaped-tools.md) | Accepted (its OAuth deferral is superseded by 0024) |
-| 0022 | [Two trees, one writer each: humans author markdown, agents author through the service](0022-two-trees-one-writer-each.md) | Accepted (amended 2026-08-20: `vault_path`'s leaf name is the title slug) |
+| 0022 | [Two trees, one writer each: humans author markdown, agents author through the service](0022-two-trees-one-writer-each.md) | Partially superseded by 0048 for Human authority; Agent projection preserved |
 | 0023 | [Candidacy is a field, and the export projects it into a folder](0023-the-export-projects-only-the-engine-managed-folders.md) | Accepted |
 | 0024 | [The vault runs its own authorization server, and an OAuth token is a credential row](0024-oauth-tokens-are-credentials-minted-at-authorization.md) | Accepted |
 | 0025 | [The vault stores edges and does not traverse them](0025-the-vault-stores-edges-and-does-not-traverse-them.md) | Accepted (amended 2026-08-26: both boundaries built; a Wiki Page's `Related` is one) |
@@ -49,12 +49,14 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0038 | [A first-party reviewer authorization](0038-a-first-party-reviewer-authorization.md) | Proposed (deferred; recommends the narrower alternative) |
 | 0039 | [A browse-and-propose console, separate from the reviewer](0039-a-browse-and-propose-console.md) | Accepted (reviewer-side editing deferred) |
 | 0040 | [An authorization carries an operator-assigned label](0040-an-authorization-carries-an-operator-label.md) | Accepted (preserves 0024's amendment) |
-| 0041 | [Human-authored notes in the vault](0041-human-authored-notes-in-the-vault.md) | Deferred |
+| 0041 | [Human-authored notes in the vault](0041-human-authored-notes-in-the-vault.md) | Superseded by 0048 |
 | 0042 | [A mutable state store beside the corpus](0042-a-mutable-state-store-beside-the-corpus.md) | Considered, not scheduled |
 | 0043 | [Librarian runs are persisted drafts, and only humans commit them](0043-librarian-runs-are-persisted-drafts-and-only-humans-commit-them.md) | Proposed |
 | 0044 | [Tweaking a proposal creates a linked successor](0044-tweaking-a-proposal-creates-a-linked-successor.md) | Accepted |
 | 0045 | [The note listing is sorted, and its cursor is opaque](0045-the-note-listing-is-sorted-and-its-cursor-is-opaque.md) | Accepted |
 | 0046 | [The browse console renders sanitized Markdown from pinned local assets](0046-the-browse-console-renders-sanitized-markdown.md) | Accepted (supersedes 0039's source-only presentation) |
+| 0047 | [Publish selected Human notes while preserving Markdown ownership](0047-human-publishing-preserves-markdown-ownership.md) | Superseded by 0048; daily embedding behavior retained |
+| 0048 | [Human notes are database-owned and Obsidian is an OAuth sync client](0048-human-vault-database-authority-and-obsidian-sync.md) | Accepted direction, implementation pending (amended 2026-09-12: the extension is optional; a one-way projection takes its place) |
 
 ## Reserved numbers
 

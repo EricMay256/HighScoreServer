@@ -12,6 +12,12 @@ the plan they were.
 
 **Configuration runbook:** [Vault configuration and Heroku operations](vault-configuration.md)
 
+**Human authoring and Markdown continuity (selected, not implemented):** the
+[2026-09-11 implementation handoff](human-vault-handoff.md) specifies database-owned
+Human notes, browser editing, and an OAuth Obsidian extension with server-only
+deletion. [ADR 0048](adr/0048-human-vault-database-authority-and-obsidian-sync.md)
+supersedes the former Human import/deferral; existing Agent ownership remains.
+
 ## Repository boundary
 
 HSS initially hosts the deployed vault runtime: authentication, authorization, rate limits,
@@ -368,8 +374,9 @@ checked into HSS beside its code and contract tests.
 
 ## Deferred decisions
 
-Open questions surfaced during the persistence foundation and the read-only slice. Item 1 blocks
-the importer. Item 2 is a boundary question with no deadline. Item 3 was settled by measurement
+Questions surfaced during the persistence foundation and the read-only slice. Item 1 now
+points to the selected Human-import plan. Item 2 is a boundary question with no deadline.
+Item 3 was settled by measurement
 on 2026-08-12 and is kept for its reasoning, not as an open question.
 
 Three questions that were open after Phase 1 have since been settled and are no longer listed
@@ -385,20 +392,28 @@ necessary only when a second profile is populated, and the **dimension-change DD
 deliberately left until a dimension change is actually proposed. Both are described in
 `vault-configuration.md`.
 
-### 1. No read-permission model for whole-vault scope
+### 1. Human database authority and Obsidian synchronization — selected
 
-Staleness and deletion are settled — mark-and-sweep over `source_sha256` (ADR 0012) — and so is
-what gets embedded (ADR 0013). The database is a **replica** of `Human/**` and the **system of
-record** for `Agent/**`; `source_sha256 IS NULL` is a row saying it has no upstream file.
+ADR 0012's earlier Human replica design is superseded for enrolled notes by
+database authority and revision-based synchronization. Local deletion cannot
+delete server content; server tombstones propagate through the sync protocol.
 
-What remains open is access. **`folders.yml` governs `ai_write` and has no `ai_read` at all.** With
-the whole vault readable by any credential holding `vault:read`, one scope reads everything,
-including `Human/07 People/**` — notes about real people. ADR 0008's remark that archived is a
-visibility state rather than a privacy one was written for an agent-authored corpus and does not
-carry to whole-vault scope.
+The former statement here that `folders.yml` lacked `ai_read` was stale: ADR 0014,
+the private schema, and `read_policy.py` already define a fail-closed path policy.
+One `vault:read` credential reads the corpus that policy admits, not every Human
+folder. Source/runtime policy agreement still needs verification before import.
 
-Nothing in the schema blocks on this; the columns are the same either way. It should be settled
-before anything imports the human layer, not after.
+On 2026-09-11 the user selected database-owned Human notes, browser authoring,
+and an OAuth Obsidian extension. A separate Human operator grant allows Human
+reads/create/edit/move, with deletion reserved to a separately authorized browser
+family. Human and Agent mutations are mutually isolated. Human-granted reads can
+reach AI-excluded Human content; Agent reads still obey `ai_read`.
+
+See [ADR 0048](adr/0048-human-vault-database-authority-and-obsidian-sync.md) and
+the [active specification](human-vault-sync-spec.md). Explicit enrollment,
+stable identities, revision history, sync feed/tombstones, audience-aware reads,
+and OAuth role constraints require implementation before rollout. Daily Human
+embeddings and the independent Agent projection remain part of the plan.
 
 ### 2. Governance artifacts split across the source/knowledge boundary
 

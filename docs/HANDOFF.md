@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated 2026-09-02. The start-here for a fresh session: where things are,
+Last updated 2026-09-12. The start-here for a fresh session: where things are,
 what is in flight, and the environment facts that bite and are not already in
 `AGENTS.md`. What remains to do is [`NEXT-STEPS.md`](NEXT-STEPS.md); why things
 are the way they are is in the ADRs. Previous handoffs are archived under
@@ -11,8 +11,8 @@ their reasoning, none of them current.
 
 | | |
 | --- | --- |
-| Branches | `dev` at `5ec112b`, 126 commits ahead of `main`; `main` is an ancestor, so the merge is a fast-forward |
-| Migrations on `dev` but not `main` | vault `0018_metadata_amendments` and `0019_oauth_grant_label`; none on the leaderboard lineage |
+| Branches | `main` is current with `dev` through PR #33, squash-merged, so `main` is not an ancestor and the next merge is a PR. Verified 2026-09-12: the branches differ only by the Human-vault documentation |
+| Migrations on `dev` but not `main` | None. Both lineages match; the vault head is `0020_note_listing_sort_indexes` |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
 | Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
@@ -29,6 +29,14 @@ them.
 - **The librarian and proposal revision.** Vault ADR 0044 is Accepted and
   unimplemented; ADR 0043 is Proposed. The plan is
   [`librarian-plan.md`](../app/vault/docs/librarian-plan.md).
+- **The Human vault.** Vault ADR 0048, 2026-09-11: enrolled Human notes become
+  database-authoritative, edited in the browser, with server-only deletion and
+  Human and Agent write grants that cannot be held together. The Obsidian sync
+  client is optional as of the 2026-09-12 amendment — it buys offline authoring
+  and nothing else that a one-way projection would not. Specification only — no
+  code, no migration, no enrollment, no schedule. Start at
+  [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md) and
+  NEXT-STEPS §4, which carries the five phases.
 - **The 2026-09-02 code review** —
   [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — is **done**. Every
   finding is addressed on `dev`, one commit each; the document is kept as the
@@ -40,7 +48,8 @@ them.
   version has since been confirmed as 3.12 — the pin matches what production
   was already doing. Still unconfirmed: the production game-mode list, which
   now decides the landing page (see NEXT-STEPS §1).
-- **The `dev` → `main` merge** is overdue. See NEXT-STEPS §1.
+- **The Human-vault documentation is on `dev` only.** The code merge is done
+  (PR #33); what is left unmerged is the ADR 0048 batch. See NEXT-STEPS §1.
 
 ## What August settled, so nobody re-litigates it
 
@@ -60,6 +69,10 @@ them.
 - Two consoles, two credentials: the reviewer holds `vault:read vault:review`
   and nothing else; the browser holds `vault:read vault:propose` (ADRs 0037,
   0039).
+- Human notes are not a second Agent corpus. A Human grant reads AI-excluded
+  Human content and cannot mutate anything Agent-owned; an Agent grant obeys
+  `ai_read` and cannot write Human content by any path, amendment and
+  compilation included (ADR 0048).
 
 ## Environment facts that bite
 

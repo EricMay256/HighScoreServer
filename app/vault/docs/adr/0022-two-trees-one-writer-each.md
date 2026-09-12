@@ -4,6 +4,12 @@ Date: 2026-08-19
 
 ## Status
 
+Partially superseded by
+[ADR 0048](0048-human-vault-database-authority-and-obsidian-sync.md): enrolled
+Human notes are database-authoritative with browser/Obsidian editing clients.
+Agent ownership and projection remain unchanged. The earlier Human Markdown
+authority and one-way import rule below no longer govern enrolled Human paths.
+
 Accepted. Amended 2026-08-20: `vault_path`'s leaf name is the title's slug (see
 "Amendment: the leaf name is a slug" below), which narrows the "no code path from
 contributor input to `vault_path`" statement in the consequences to "no code path from

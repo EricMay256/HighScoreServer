@@ -4,7 +4,11 @@ Date: 2026-08-30
 
 ## Status
 
-**Deferred.** Recorded so the question is not answered by drift.
+**Superseded by [ADR 0048](0048-human-vault-database-authority-and-obsidian-sync.md)
+on 2026-09-11**, following the intermediate selective-import decision in ADR 0047.
+Database-owned Human authoring and OAuth Obsidian synchronization are selected.
+The original context below is preserved as the record of why inclusion needed
+a decision; see the [active specification](../human-vault-sync-spec.md).
 
 ## Context
 
