@@ -58,6 +58,8 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultHumanNoteDetail,
+    VaultHumanNoteListResponse,
     VaultMetadataUpdateRequest,
     VaultNoteEdgeLookupRequest,
     VaultNoteEdgeResponse,
@@ -79,13 +81,19 @@ from .api_models import (
     compile_work_item,
     contribution_response,
     document_detail,
+    human_note_detail,
+    human_note_summary,
     note_edge,
     note_summary,
     review_case_summary,
     search_response,
 )
 from .auth import VaultCredential, VaultScope
-from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
+from .constants import (
+    HUMAN_COLLECTION_PREFIX,
+    SEARCH_QUERY_MAX_CHARS,
+    resolve_text_search_config,
+)
 from .cursors import (
     MAX_CURSOR_CHARS,
     InvalidCursor,
@@ -96,6 +104,7 @@ from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
     AmendmentProposalState,
+    DocumentCollection,
     NoteSort,
     ReviewState,
     VaultCompileRun,
@@ -301,6 +310,19 @@ async def require_delete_scope(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> VaultCredential:
     return await _authenticated((VaultScope.DELETE,), credentials)
+
+
+async def require_human_read_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Human notes, including those ``ai_read`` withholds (ADR 0050).
+
+    Its own scope rather than ``vault:read`` plus a parameter, because the
+    boundary is the scope: an ordinary read credential must not reach a note
+    governance hid from agents through anything it can put in a request.
+    """
+
+    return await _authenticated((VaultScope.HUMAN_READ,), credentials)
 
 
 async def search_quota(
@@ -725,6 +747,142 @@ async def list_vault_documents(
     visible = page[:limit]
     return VaultNoteListResponse(
         notes=[note_summary(document) for document in visible],
+        has_more=has_more,
+        next_cursor=(
+            encode_cursor(sort.value, _CURSOR_KEYS[sort][0](visible[-1]), visible[-1].id)
+            if has_more and visible
+            else None
+        ),
+    )
+
+
+# ── The Human read surface (ADR 0050) ────────────────────────────────────────
+#
+# Human notes, for a credential holding `vault:human-read`. Separate routes
+# rather than an audience parameter on `/notes`: which rows a request may see is
+# decided by the scope that admitted it, and a query parameter is something the
+# caller chooses. The audience is the collection, not the read policy -- a Human
+# operator reads the notes `ai_read` withholds from agents, and reads no Agent
+# note through this surface.
+
+
+async def human_note_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_get_note")
+    return credential
+
+
+async def human_list_notes_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_list_notes")
+    return credential
+
+
+@router.get(
+    "/human/notes/{note_id}",
+    response_model=VaultHumanNoteDetail,
+    dependencies=[Depends(human_note_quota)],
+    summary="Fetch one Human note by ID, whatever its ai_read policy",
+)
+async def get_human_note(
+    note_id: str = Path(min_length=1, max_length=256),
+) -> VaultHumanNoteDetail:
+    """One Human note.
+
+    Filtered to the Human collection and nothing else. No `ai_read` filter:
+    withholding a note from agents is not withholding it from the person who
+    wrote it. An Agent note id is not found here, just as a Human id is not
+    reachable through the Agent write routes -- neither surface names the
+    other's rows.
+    """
+
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        document = await VaultDocumentRepository().get_by_id(
+            connection,
+            note_id,
+            statuses=READABLE_STATUSES,
+            collection=DocumentCollection.HUMAN,
+        )
+
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Note not found",
+        )
+    return human_note_detail(document)
+
+
+@router.get(
+    "/human/notes",
+    response_model=VaultHumanNoteListResponse,
+    dependencies=[Depends(human_list_notes_quota)],
+    summary="List Human notes in a selected order, without bodies",
+)
+async def list_human_notes(
+    path: str | None = Query(
+        default=None,
+        max_length=1024,
+        description=(
+            "Restrict to one vault path prefix under 'Human/'. Omitted lists "
+            "the whole Human collection. A prefix outside it returns an empty "
+            "page."
+        ),
+    ),
+    tag: list[str] = Query(default=[], description="Every tag must be present."),
+    facet: list[str] = Query(
+        default=[],
+        description=(
+            "Facet filter as 'name:value', repeatable. Every one must match."
+        ),
+    ),
+    after: str | None = Query(
+        default=None,
+        max_length=MAX_CURSOR_CHARS,
+        description=(
+            "The previous page's `next_cursor`, passed back verbatim. Opaque, "
+            "and it belongs to the order it was issued in."
+        ),
+    ),
+    sort: NoteSort = Query(
+        default=NoteSort.PATH,
+        description="The same orders `/notes` offers.",
+    ),
+    limit: int = Query(default=DEFAULT_NOTE_PAGE, ge=1, le=MAX_NOTE_PAGE),
+) -> VaultHumanNoteListResponse:
+    """Walk the Human collection by where notes live.
+
+    The agent listing's ordering, filters and cursor, over another audience:
+    the Human collection, including notes `ai_read` withholds. The collection
+    is applied in the query rather than to the page, for the reason the agent
+    listing applies the read policy there -- a filter applied afterwards
+    returns short pages and a cursor that skips whatever it dropped.
+    """
+
+    prefixes = (path,) if path is not None else (HUMAN_COLLECTION_PREFIX,)
+    facets = _requested_facets(facet)
+    resume_after = _resume_after(after, sort)
+
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        page = await VaultDocumentRepository().list_briefs_under_path_prefixes(
+            connection,
+            prefixes,
+            sort=sort,
+            after=resume_after,
+            limit=limit + 1,
+            statuses=READABLE_STATUSES,
+            collection=DocumentCollection.HUMAN,
+            tags=tag,
+            facets=facets,
+        )
+
+    has_more = len(page) > limit
+    visible = page[:limit]
+    return VaultHumanNoteListResponse(
+        notes=[human_note_summary(document) for document in visible],
         has_more=has_more,
         next_cursor=(
             encode_cursor(sort.value, _CURSOR_KEYS[sort][0](visible[-1]), visible[-1].id)

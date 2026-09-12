@@ -1656,6 +1656,42 @@ def search_response(
     return _assemble(hits, truncated=truncated)
 
 
+class VaultHumanNoteDetail(VaultDocumentDetail):
+    """A Human note as the Human read surface returns it (ADR 0050).
+
+    The agent read model plus ``resource_revision``. A subclass rather than a
+    copy, so the two surfaces cannot drift on what a note *is*; what differs
+    is who may ask, and that belongs to the route's scope, not to the model.
+    """
+
+    resource_revision: int = Field(
+        ge=1,
+        description=(
+            "Moves on every change a client can see -- an edit, a move, a "
+            "status change -- where `content_revision` moves on content alone. "
+            "The version a Human write is checked against."
+        ),
+    )
+
+
+class VaultHumanNoteSummary(VaultNoteSummary):
+    """One row of the Human listing: an agent listing row plus its resource revision."""
+
+    resource_revision: int = Field(
+        ge=1,
+        description=(
+            "The note's resource revision when listed. A hint for a client "
+            "deciding what to fetch, not a substitute for the fetched value."
+        ),
+    )
+
+
+class VaultHumanNoteListResponse(VaultNoteListResponse):
+    """One ordered page of Human notes; the agent listing's paging contract."""
+
+    notes: list[VaultHumanNoteSummary]
+
+
 def document_detail(document: VaultDocument) -> VaultDocumentDetail:
     """Project a domain record onto the public read model.
 
@@ -1711,6 +1747,27 @@ def note_summary(document: VaultDocumentBrief) -> VaultNoteSummary:
         updated_at=document.updated_at,
         created_at=document.created_at,
         content_revision=document.content_revision,
+    )
+
+
+def human_note_detail(document: VaultDocument) -> VaultHumanNoteDetail:
+    """Project a Human note: the agent projection, and the resource revision.
+
+    Built on ``document_detail`` so the shared fields have one projection.
+    """
+
+    return VaultHumanNoteDetail(
+        **document_detail(document).model_dump(),
+        resource_revision=document.resource_revision,
+    )
+
+
+def human_note_summary(document: VaultDocumentBrief) -> VaultHumanNoteSummary:
+    """Project one Human listing row, on top of ``note_summary``."""
+
+    return VaultHumanNoteSummary(
+        **note_summary(document).model_dump(),
+        resource_revision=document.resource_revision,
     )
 
 

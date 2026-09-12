@@ -481,6 +481,9 @@ class VaultDocumentBrief:
     doc_type: str | None = None
     doc_status: str | None = None
     summary: str | None = None
+    # The Human listing publishes it, as the token a Human write compares
+    # against; the agent listing does not project it. See ADR 0050.
+    resource_revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)

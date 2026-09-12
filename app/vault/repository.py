@@ -99,6 +99,7 @@ DOCUMENT_BRIEF_COLUMNS = (
     vault_documents.c.content_revision,
     vault_documents.c.updated_at,
     vault_documents.c.created_at,
+    vault_documents.c.resource_revision,
 )
 
 DOCUMENT_DOMAIN_COLUMNS = (
@@ -257,6 +258,7 @@ def path_page_statement(
     limit: int = 200,
     statuses: Sequence[DocumentStatus] | None = None,
     readable_only: bool = False,
+    collection: DocumentCollection | None = None,
     tags: Sequence[str] = (),
     facets: Mapping[str, Sequence[str]] | None = None,
 ) -> Select:
@@ -314,6 +316,11 @@ def path_page_statement(
         )
     if readable_only:
         statement = statement.where(readable_path_predicate())
+    if collection is not None:
+        # The Human audience's filter, where the agent audience's is the read
+        # policy above (ADR 0050). In the query for the same reason: applied to
+        # the page, it would shorten pages and skip rows past the cursor.
+        statement = statement.where(vault_documents.c.collection == collection.value)
     if tags:
         # `@>` spelled out because `tags` is declared with the generic
         # `ARRAY` type, whose `.contains()` raises rather than guessing at
@@ -806,6 +813,7 @@ class VaultDocumentRepository:
         limit: int = 200,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
+        collection: DocumentCollection | None = None,
         tags: Sequence[str] = (),
         facets: Mapping[str, Sequence[str]] | None = None,
     ) -> tuple[VaultDocumentBrief, ...]:
@@ -828,6 +836,7 @@ class VaultDocumentRepository:
             limit=limit,
             statuses=statuses,
             readable_only=readable_only,
+            collection=collection,
             tags=tags,
             facets=facets,
         )
@@ -1603,6 +1612,7 @@ def document_brief_from_row(row: RowMapping) -> VaultDocumentBrief:
         content_revision=row["content_revision"],
         updated_at=row["updated_at"],
         created_at=row["created_at"],
+        resource_revision=row["resource_revision"],
     )
 
 
@@ -2502,7 +2512,9 @@ class VaultCompileRunRepository:
 
         result = await connection.execute(
             select(func.max(vault_documents.c.updated_at)).where(
-                vault_documents.c.kind == DocumentKind.NOTE.value
+                vault_documents.c.kind == DocumentKind.NOTE.value,
+                # The compile corpus is the Agent collection (ADR 0050).
+                vault_documents.c.collection == DocumentCollection.AGENT.value,
             )
         )
         latest = result.scalar_one_or_none()
@@ -2551,6 +2563,12 @@ class VaultWikiPageRepository:
         that has since been flagged is *stale* -- that is one of the three
         reasons the Stage-A planner recognises -- and it cannot be detected by
         a query that only sees active ones.
+
+        Agent notes only. Human notes stay outside automatic compilation
+        (ADR 0050), and this is where that is decided: planning offers nothing
+        that is not here, and ``write_page`` validates ``source_ids`` against
+        this same map, so a Human id cited as a source is unresolved rather
+        than laundered into a page the agent surface serves.
         """
 
         result = await connection.execute(
@@ -2559,7 +2577,9 @@ class VaultWikiPageRepository:
                 vault_documents.c.updated_at,
                 vault_documents.c.status,
                 vault_documents.c.compile_declined_at,
-            ).where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            )
+            .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            .where(vault_documents.c.collection == DocumentCollection.AGENT.value)
         )
         return {
             row["id"]: NoteCompileState(

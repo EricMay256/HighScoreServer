@@ -96,6 +96,12 @@ LIMITS: dict[str, Limit] = {
     # click. Its own bucket so walking a link graph cannot starve the listing
     # that got the reader there.
     "resolve_edges": Limit(per_minute=60, burst=20),
+    # The Human read surface (ADR 0050), priced like the agent reads it mirrors.
+    # Its own buckets: a principal may hold `vault:read` and `vault:human-read`
+    # together, and walking private notes must not spend the allowance its
+    # ordinary reads depend on.
+    "human_get_note": Limit(per_minute=120, burst=30),
+    "human_list_notes": Limit(per_minute=60, burst=20),
     "contribute": Limit(per_minute=30, burst=20),
     # Proposals persist untrusted workflow state but do not embed or mutate the
     # corpus. A distinct bucket matches the distinct OAuth capability.
