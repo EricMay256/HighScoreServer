@@ -11,7 +11,7 @@ their reasoning, none of them current.
 
 | | |
 | --- | --- |
-| Branches | `main` is current with `dev` through PR #33, squash-merged, so `main` is not an ancestor and the next merge is a PR. Verified 2026-09-12: the branches differ only by the Human-vault documentation |
+| Branches | `main` is current with `dev` through PR #34, squash-merged, so `main` is not an ancestor and the next merge is a PR. Verified 2026-09-12: `git diff dev origin/main` is empty — the trees are identical |
 | Migrations on `dev` but not `main` | None. Both lineages match; the vault head is `0020_note_listing_sort_indexes` |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
@@ -33,10 +33,13 @@ them.
   database-authoritative, edited in the browser, with server-only deletion and
   Human and Agent write grants that cannot be held together. The Obsidian sync
   client is optional as of the 2026-09-12 amendment — it buys offline authoring
-  and nothing else that a one-way projection would not. Specification only — no
-  code, no migration, no enrollment, no schedule. Start at
-  [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md) and
-  NEXT-STEPS §4, which carries the five phases.
+  and nothing else that a one-way projection would not. **Phase A is done
+  locally as of 2026-09-12** — export rehearsal validated and idempotent,
+  governance and runtime read policy verified to agree per file, enrollment set
+  previewed — leaving deployment parity, and phase B next. Still no code, no
+  migration, no enrollment, no schedule. Start at
+  [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md), whose
+  phase A result section carries the findings, and NEXT-STEPS §4.
 - **The 2026-09-02 code review** —
   [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — is **done**. Every
   finding is addressed on `dev`, one commit each; the document is kept as the
@@ -48,8 +51,8 @@ them.
   version has since been confirmed as 3.12 — the pin matches what production
   was already doing. Still unconfirmed: the production game-mode list, which
   now decides the landing page (see NEXT-STEPS §1).
-- **The Human-vault documentation is on `dev` only.** The code merge is done
-  (PR #33); what is left unmerged is the ADR 0048 batch. See NEXT-STEPS §1.
+- **The Human-vault documentation is merged.** PR #33 carried the code, PR #34
+  the ADR 0048 batch; nothing is stranded on `dev`. See NEXT-STEPS §1.
 
 ## What August settled, so nobody re-litigates it
 

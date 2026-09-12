@@ -67,7 +67,7 @@ Phase D is optional as of 2026-09-12; see the note below the table.
 
 | Phase | Deliverable | Exit evidence |
 | --- | --- | --- |
-| A: baseline and rehearsal | Verify deployed/local contracts and source governance; rehearse existing Agent export into private staging; prepare exact Human enrollment preview | Validated export, repeatable unchanged run, preserved originals, synthetic identity/policy examples |
+| A: baseline and rehearsal | Verify deployed/local contracts and source governance; rehearse existing Agent export into private staging; prepare exact Human enrollment preview | Validated export, repeatable unchanged run, preserved originals, synthetic identity/policy examples — **done locally 2026-09-12 except deployment parity; see below** |
 | B: Human service boundary | Reviewed migrations, role/verb scopes, Human reads/writes/history, deletion/tombstones, resource revisions and change feed | Scope/ownership matrix tests, cursor/retry/concurrency tests, no Agent read disclosure of hidden Human content |
 | C: browser authoring | Human editing with its own OAuth family, explicit save/conflict states, separate delete permission, current policy and semantic-index indicators | Real browser create/edit/move/delete and role-isolation checks using synthetic notes |
 | D (optional): Obsidian extension | Source/build/install instructions in `clients/obsidian/`; configurable OAuth, managed IDs, guarded bidirectional synchronization, conflict/recovery UI | Two deployments, reconnect/refresh/revoke, local deletion refusal, dirty-file server deletion, desktop verification |
@@ -86,6 +86,64 @@ Daily indexing may be developed alongside the client phases, but no data enters
 a broader read surface before phase B's audience/ownership checks pass. Mobile
 is a compatibility goal, not an initial claim: use portable APIs and enable
 support only after real-device OAuth, storage, suspend/resume, and sync tests.
+
+## Phase A result, 2026-09-12
+
+Run against the local corpus and the live private `folders.yml`. No production
+access, no enrollment, no corpus write. The staging root was a scratch directory
+outside both repositories; the live `Vault/` was never a target.
+
+**Governance and runtime agree, and now verifiably.**
+`scripts/check_read_policy_parity.py` reads the real `folders.yml` and diffs it
+against `read_policy.py`: 13 `ai_read: allowed` rules, 13 declared prefixes, no
+extras, `default:` still fail-closed, no forbidden folder nested inside a
+readable one. Per *file* rather than per prefix, `is_readable_path` matched the
+resolved governance answer for all 213 markdown files in the vault, 80 of them
+Human — zero mismatches. That is deferred decision #1 closed by measurement
+rather than by reading the two files side by side.
+
+The check was proven able to fail before it was believed: four mutated copies of
+the governance file — a readable folder reclassified, a new readable folder the
+code has not learned, the `default:` flipped open, and a forbidden folder nested
+under a readable one — each produced the matching finding and exit 1.
+
+**The export is a faithful, idempotent projection.** Dry run wrote nothing.
+`--apply` wrote 76 files (61 Agent notes, 14 wiki pages, plus the generated
+`Agent/wiki/_index.md`). A second `--apply` wrote 0 and reported 76 unchanged,
+and all 76 files were byte-identical by SHA-256. `--prune` is correctly scoped:
+with synthetic files planted under both trees it listed and then deleted only
+the orphan under an exported prefix, leaving the synthetic `Human/` files
+byte-identical through both the apply and the prune pass. The exporter does not
+reach `Human/`, as ADR 0022 says and as phase C and any later Human projection
+depend on.
+
+**Three things the rehearsal surfaced.**
+
+1. *13 of 14 wiki pages export with their `related_ids` dropped.* The warning
+   names the fix (`scripts/resolve_vault_wikilinks.py`); until it runs, the
+   projection is lossy in exactly the edges ADR 0025 cares about. Not fixed
+   here: it mutates the corpus and is not phase A's to decide.
+2. *The local markdown tree is ahead of the local corpus* — 92 `Agent/notes/`
+   files on disk against 61 rows, and production held 80 as of 2026-08-28. Any
+   export into the live tree would therefore report a large prunable set that is
+   not evidence of retirement. Reconcile before ever pointing the exporter at
+   `Vault/`.
+3. *Two Human folders and the `Human/` root are governed only by the catch-all.*
+   `Human/14 Ideas/`, `Human/96 Scratch/` and two root-level files match no
+   named rule and resolve to `Human/**` → `forbidden`. Fail-closed worked; but
+   whether those notes are meant to be enrolled is an operator decision, not a
+   default. `Agent/INDEX.md` is the same case on the Agent side, resolving to
+   `default:`.
+
+**Enrollment preview.** 80 Human markdown files, 194 KB, 71 canonical: 57
+agent-readable and 23 hidden under current policy, across fourteen folders. The
+per-file listing stays in private operator storage, not in this repository.
+
+**Not done: deployment parity.** Local vault lineage is
+`0020_note_listing_sort_indexes`. Production was last recorded on 2026-08-28 at
+`0017_oauth_entitlements` with 94 documents, and that has not been re-verified.
+Phase B's migrations land on whatever production actually is, so the applied
+head and config vars are wanted before B starts, not after.
 
 ## Acceptance priorities
 
