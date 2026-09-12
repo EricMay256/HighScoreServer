@@ -16,6 +16,15 @@ unconditional and belongs to the service. The plugin packaging, platform, and
 local-state sections apply only if the extension is built; if it is not, a one-way
 Human projection keeps local Markdown readable in its place.
 
+Amended again 2026-09-12 by [ADR 0049](adr/0049-the-human-collection-boundary.md).
+The Human operator grant is three scopes — `vault:human-read`, `vault:human-write`
+(create, edit, rename, move), and `vault:human-delete` — rather than separate
+create, edit, and move verbs, because no client holds a strict subset of those
+three. `vault:human-read` is exclusive with every Agent mutation scope, not only
+with Human writes. Deletion is recoverable removal: the note leaves every read
+surface and a tombstone enters the feed, while its revision history is kept so an
+operator can restore it.
+
 ## Ownership, hosting, and AI visibility
 
 The database stores the authoritative revision of each enrolled Human note.

@@ -133,12 +133,22 @@ read surface until phase B's audience and ownership checks pass.
   What is left is production: the applied vault head and config vars are still
   the 2026-08-28 record, and phase B's migrations land on whatever is actually
   there.
-- **B — the Human service boundary.** Reviewed vault Alembic revisions for
-  stable identity and collection ownership, resource revisions and history,
-  tombstones and an ordered resumable change feed, and the Human operator
-  entitlement. This is the bulk of the work and everything else waits on it.
+- **B — the Human service boundary. In progress; B1 built 2026-09-12.** The
+  bulk of the work, split into five slices reviewed one at a time.
   `source_sha256` and unique `vault_path` do not cover it and must not be
   overloaded to pretend otherwise.
+  - **B1 — schema and write boundary, built.** Vault ADR 0049 and migration
+    `0021_human_collection_boundary`: `collection` tied to the path prefix,
+    `resource_revision`, `vault_human_revisions` and `vault_human_changes`,
+    three `vault:human-*` scopes kept off every Agent-writing credential, and
+    every Agent write path refusing Human rows. No Human endpoint exists.
+  - **B2 — audience-aware reads.** The Human-read audience reaches Human rows,
+    agents keep `ai_read`, and dedup and compile planning exclude Human rows.
+  - **B3 — Human create, edit and move**, revision-checked, each writing a
+    snapshot and a feed entry under an asserted corpus lock.
+  - **B4 — recoverable deletion**, tombstones, and the snapshot and feed
+    endpoints.
+  - **B5 — a disclosure regression suite** across every Agent surface.
 - **C — browser authoring.** Its own OAuth family, explicit save and conflict
   states, a separately granted delete, and visible read-policy and
   semantic-index state.

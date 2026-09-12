@@ -11,7 +11,8 @@ design is database authority plus an OAuth Obsidian client, with server-only
 deletion and separate Human/Agent write grants. The existing invariants below
 describe current runtime behavior; ADR 0048 explicitly supersedes the former
 Human replica/import-exclusion rules for this implementation. No such rollout
-is implied by this planning note.
+is implied by this planning note. Phase B1 (vault ADR 0049) is built: read the
+`collection` invariant below before changing any document mutation.
 
 The knowledge-platform bounded context: its own API models, domain records, Core tables,
 repositories, services, auth, embeddings, and two transports — HTTP routes and an MCP
@@ -303,6 +304,23 @@ be edited when it does.
   per model by the two-sided procedure in `calibration.py` / `docs/embedding-calibration.md`;
   changing the constant needs a new row in that register. See ADR 0016 and its calibration
   amendments.
+- **`collection` says whose write path owns a row, and every mutation predicates on it.**
+  ADR 0049 and migration 0021. `agent` rows live under `Agent/` and `human` rows under
+  `Human/`; `vault_documents_collection_matches_path` refuses anything else, so a move
+  cannot carry a note across and no row can live outside those two trees. Every
+  document mutation in the repositories takes `collection`, **defaulting to `agent`**,
+  in its `WHERE` clause: a wrong-collection target matches nothing and reads as not
+  found. Do not "simplify" the default into deriving the collection from the path — a
+  Human path must say it is one, and the default makes forgetting fail closed. Agent
+  service loads pass `collection=DocumentCollection.AGENT` so a refused target costs no
+  embedding call, and raw updates in scripts carry the same predicate.
+  `resource_revision` moves on every write to a column in `DOCUMENT_DOMAIN_COLUMNS` and
+  a CHECK holds it at or above `content_revision`, so a raw update that bumps content
+  must bump both; `content_revision` keeps its content-only contract for amendment
+  proposals. `vault_human_revisions` and `vault_human_changes` have no foreign key to
+  `vault_documents`, so history and tombstones outlive a deleted note, and any writer
+  to the feed must hold `CORPUS_LOCK_KEY` or its identity positions stop matching
+  commit order.
 
 ## Retrieval and embeddings
 
@@ -430,6 +448,15 @@ be edited when it does.
 - **`vault:propose` is OAuth-baseline but non-mutating.** It writes an untrusted amendment
   record, not corpus content. Applying one is `vault:review`, and direct replacement remains
   `vault:update`; do not collapse any of the three.
+- **Human and Agent scopes never share a credential** (ADR 0049). `vault:human-read`,
+  `vault:human-write` and `vault:human-delete` are exclusive with `vault:write`,
+  `vault:propose`, `vault:update`, `vault:delete`, `vault:review` and `vault:compile` —
+  Human read included, because reading private Human notes while able to write
+  agent-readable ones is a laundering channel. Enforced by CHECKs on credentials, refresh
+  tokens and grants (over `authorized_scopes || entitled_scopes`), explained by the CLI,
+  and re-checked by `authorize`, which returns `incompatible`. All three are operator
+  entitlements, so a Human OAuth family is authorized requesting `vault:read` alone.
+  **No route consumes them yet.**
 
 ### The OAuth authorization server (ADR 0024)
 

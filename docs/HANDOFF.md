@@ -36,8 +36,9 @@ them.
   and nothing else that a one-way projection would not. **Phase A is done
   locally as of 2026-09-12** — export rehearsal validated and idempotent,
   governance and runtime read policy verified to agree per file, enrollment set
-  previewed — leaving deployment parity, and phase B next. Still no code, no
-  migration, no enrollment, no schedule. Start at
+  previewed — leaving deployment parity. **Phase B1 is built** — the schema
+  and write boundary, vault ADR 0049 and migration 0021 — with no Human
+  endpoint, enrollment, or schedule yet. Start at
   [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md), whose
   phase A result section carries the findings, and NEXT-STEPS §4.
 - **The 2026-09-02 code review** —
@@ -118,6 +119,20 @@ the two shells, and the worktree filesystem rule.
 - **`issue_vault_credential` prints the secret to stdout.** An agent that runs
   it has read the token into its transcript — twice already, on live
   credentials. The person runs it.
+- **A local `VAULT_PUBLIC_URL` fails three OAuth tests.** `tests/conftest.py`
+  only `setdefault`s `https://vault.test.invalid`, so a `.env` carrying
+  `http://127.0.0.1:8000` wins. The discovery-chain, protected-resource-metadata
+  and Google-login tests in `test_oauth_flow.py` then fail identically on a
+  clean `HEAD`. CI has no `.env`, so they pass there.
+- **`run_vault_migration` only upgrades.** It calls `command.upgrade` for every
+  revision but `base`, and upgrading to an ancestor is a silent no-op. A test
+  that needs a downgrade calls `command.downgrade` inside
+  `migration_environment`.
+- **A test that fails mid-way can strand rows that fail an unrelated one.** Not
+  every vault test cleans up in `finally`, and leftover `Agent/notes/` rows
+  surface in later modules — compile planning offers them as new sources. List
+  `vault.vault_documents` in the test database before blaming the module that
+  failed second.
 
 ## Durable records
 
