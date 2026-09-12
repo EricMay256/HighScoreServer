@@ -57,6 +57,7 @@ easy to overlook:
 | `scripts/prune_vault_oauth.py` | Prunes expired OAuth state and long-revoked OAuth credentials (ADR 0024). Same convention and imports. |
 | `scripts/hash_vault_operator_password.py` | Prints the bcrypt hash for `VAULT_OPERATOR_PASSWORD_HASH` (ADR 0024). Same convention; imports `app.vault.passwords` and nothing else, so it needs no database and only that one import repointed. |
 | `scripts/export_vault_markdown.py` | Projects the `Agent/` tree out as markdown (ADR 0022). Same convention and imports; also imports `app.vault.export`. |
+| `scripts/check_read_policy_parity.py` | Diffs `ai_read` in the private `folders.yml` against `READABLE_PATH_PREFIXES` (ADR 0048 phase A). Same convention; imports `app.vault.read_policy` and nothing else, so it needs no database and only that one import repointed. The governance file it reads stays in knowledge-platform and is passed by path, so nothing about it moves. |
 | `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. |
 
 ## Dependencies that leave
