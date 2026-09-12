@@ -133,17 +133,24 @@ a discrepancy to reconcile.
 
 **Three things the rehearsal surfaced.**
 
-1. *13 of 14 wiki pages export with their `related_ids` dropped — **in the local
-   database only**.* Checked against production through the MCP on 2026-09-12:
-   three sampled wiki pages all carry resolved 32-character ids, and the two
-   edges of `operating-the-agent-knowledge-vault` resolve to exactly the pages
-   the local rows name as `[[Title]]` strings. The local corpus is simply a
-   pre-repair snapshot: `scripts/resolve_vault_wikilinks.py --dry-run` plans
-   **21 links across 13 rows, 0 dropped, 0 ambiguous**, byte-for-byte the
+1. *13 of 14 wiki pages exported with their `related_ids` dropped — **in the
+   local database only, and now repaired**.* Checked against production through
+   the MCP on 2026-09-12: three sampled wiki pages all carry resolved
+   32-character ids, and the two edges of `operating-the-agent-knowledge-vault`
+   resolved to exactly the pages the local rows named as `[[Title]]` strings.
+   The local corpus was a pre-repair snapshot holding byte-for-byte the
    population commit `5d357ff` reported on 2026-08-26 and then repaired in
-   production. Nothing is wrong with the design or with the deployment; the
-   local baseline is behind, and the exporter's warning is it doing its job.
-   Repair the local rows before reading anything into a local export's edges.
+   production. Nothing was wrong with the design or with the deployment; the
+   exporter's warning was it doing its job.
+
+   `scripts/resolve_vault_wikilinks.py --apply` has since run against the local
+   corpus: **21 links across 13 rows, 0 dropped, 0 ambiguous**, originals
+   preserved in `frontmatter.Related`, no dangling edge left, and a second run a
+   no-op. The re-export rewrote exactly those 13 files with no warnings, and a
+   further run was byte-identical, so local idempotence holds on the new
+   content. Local now matches production's *shape* — it remains a different
+   import generation, with different ids and 61 notes against production's 80,
+   so it is internally consistent rather than a replica.
 2. *The local markdown tree is ahead of the local corpus* — 92 `Agent/notes/`
    files on disk against 61 rows, and production held 80 as of 2026-08-28. Any
    export into the live tree would therefore report a large prunable set that is
