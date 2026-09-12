@@ -13,14 +13,12 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## State
 
-- **`dev` is 94 commits ahead of `main`, and `main` is an ancestor**, so the
-  merge is a fast-forward. The range carries two vault migrations,
-  `0018_metadata_amendments` and `0019_oauth_grant_label`, which the release
-  phase runs on deploy. Behaviour changes to name in the PR: search no longer
-  returns bodies (vault ADR 0031); metadata is a proposal kind of its own
-  (ADR 0036); the landing page and two consoles exist at `/vault`,
-  `/vault/review` and `/vault/browse` (ADRs 0037, 0039); batch amendment
-  decisions; operator labels on authorizations (ADR 0040).
+- **`main` is current with `dev` as of PR #33**, squash-merged, so `main` is no
+  longer an ancestor and the next merge is another PR rather than a
+  fast-forward. Verified against git on 2026-09-12: the vault lineage head is
+  `0020_note_listing_sort_indexes` on both branches, no migration is pending to
+  `main`, and the only difference between the branches is this documentation
+  batch.
 - **Production, as last recorded on 2026-08-28** and not re-verified since:
   vault lineage `0017_oauth_entitlements`, 94 documents (80 notes, 14 wiki
   pages), all active; `VAULT_ENABLED`, `VAULT_PUBLIC_URL` and an operator
@@ -35,9 +33,10 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## 1. Immediate
 
-1. **Merge `dev` into `main`.** Fast-forward, two migrations in range (above).
+1. **Open the ADR 0048 documentation PR.** Done as of PR #33 for the code; what
+   is on `dev` and not on `main` is now only the Human-vault documentation (§4).
    Documentation on a non-default branch is documentation nobody reads, and
-   GitHub shows `main`.
+   GitHub shows `main`. No migration is in range.
 2. **Settle the production game-mode list.** Nothing hardcodes a mode any
    more, so `/leaderboard` and the SPA both land on the first row of
    `/game_modes`, ordered by `name` — the alphabetically first configured mode

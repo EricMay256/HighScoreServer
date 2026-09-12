@@ -11,8 +11,8 @@ their reasoning, none of them current.
 
 | | |
 | --- | --- |
-| Branches | `dev` at `5ec112b`, 126 commits ahead of `main`; `main` is an ancestor, so the merge is a fast-forward |
-| Migrations on `dev` but not `main` | vault `0018_metadata_amendments` and `0019_oauth_grant_label`; none on the leaderboard lineage |
+| Branches | `main` is current with `dev` through PR #33, squash-merged, so `main` is not an ancestor and the next merge is a PR. Verified 2026-09-12: the branches differ only by the Human-vault documentation |
+| Migrations on `dev` but not `main` | None. Both lineages match; the vault head is `0020_note_listing_sort_indexes` |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
 | Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
@@ -47,7 +47,8 @@ them.
   version has since been confirmed as 3.12 — the pin matches what production
   was already doing. Still unconfirmed: the production game-mode list, which
   now decides the landing page (see NEXT-STEPS §1).
-- **The `dev` → `main` merge** is overdue. See NEXT-STEPS §1.
+- **The Human-vault documentation is on `dev` only.** The code merge is done
+  (PR #33); what is left unmerged is the ADR 0048 batch. See NEXT-STEPS §1.
 
 ## What August settled, so nobody re-litigates it
 
