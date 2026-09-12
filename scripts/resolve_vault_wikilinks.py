@@ -224,14 +224,16 @@ async def run(apply: bool) -> int:
                         # column, so a run that dies between the two cannot
                         # leave a dropped link with nowhere to have gone.
                         values["frontmatter"] = change.frontmatter
-                    # The plan was built from a snapshot this transaction took
-                    # at READ COMMITTED, and this script takes no corpus lock,
-                    # so a governed update may have committed against this row
-                    # in between. Naming the values the plan was built from
-                    # makes the write refuse instead of reverting that update:
+                    # A second layer under the corpus lock taken above, not the
+                    # only one: the lock closes the window this predicate cannot
+                    # see, where a name resolves against rows other than the one
+                    # being written. This half still earns its place -- it is
+                    # what makes the repair safe to rerun against a corpus that
+                    # moved between runs, and it fails closed if the lock is ever
+                    # narrowed. Naming the values the plan was built from makes
+                    # the write refuse rather than revert a governed update:
                     # zero rows means the row moved, and this repair is
-                    # idempotent, so the answer is to rerun it rather than to
-                    # hold the whole corpus still while it runs.
+                    # idempotent, so the answer is to rerun it.
                     statement = (
                         update(vault_documents)
                         .where(vault_documents.c.id == change.document_id)
