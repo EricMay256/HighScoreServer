@@ -117,12 +117,33 @@ byte-identical through both the apply and the prune pass. The exporter does not
 reach `Human/`, as ADR 0022 says and as phase C and any later Human projection
 depend on.
 
+**Edge vocabularies, confirmed against real data rather than assumed.** Phase C
+and any Human projection both consume edges, so the rehearsal checked what the
+three surfaces actually hold. The database stores ids (ADR 0025, enforced by
+shape since ADR 0030). The exported file carries `[[slug]]` — slug and not
+title, because Obsidian resolves `[[x]]` against the file name, and the page
+titled "Calibrating a Semantic Dedup Threshold" lives at
+`semantic-dedup-threshold-calibration.md`. An Agent Note gets both halves,
+`RelatedIDs` for the engine and `SeeAlso` for the reader; a Wiki Page gets
+`Related`. The browse console renders the same slug as the visible label with
+the title as tooltip and navigates by id. Body prose is a fourth, separate case:
+a librarian-written `[[slug]]` inside the text is projected verbatim and is not
+an edge at all. One vocabulary per boundary, translated in `wikilinks.py` — not
+a discrepancy to reconcile.
+
 **Three things the rehearsal surfaced.**
 
-1. *13 of 14 wiki pages export with their `related_ids` dropped.* The warning
-   names the fix (`scripts/resolve_vault_wikilinks.py`); until it runs, the
-   projection is lossy in exactly the edges ADR 0025 cares about. Not fixed
-   here: it mutates the corpus and is not phase A's to decide.
+1. *13 of 14 wiki pages export with their `related_ids` dropped — **in the local
+   database only**.* Checked against production through the MCP on 2026-09-12:
+   three sampled wiki pages all carry resolved 32-character ids, and the two
+   edges of `operating-the-agent-knowledge-vault` resolve to exactly the pages
+   the local rows name as `[[Title]]` strings. The local corpus is simply a
+   pre-repair snapshot: `scripts/resolve_vault_wikilinks.py --dry-run` plans
+   **21 links across 13 rows, 0 dropped, 0 ambiguous**, byte-for-byte the
+   population commit `5d357ff` reported on 2026-08-26 and then repaired in
+   production. Nothing is wrong with the design or with the deployment; the
+   local baseline is behind, and the exporter's warning is it doing its job.
+   Repair the local rows before reading anything into a local export's edges.
 2. *The local markdown tree is ahead of the local corpus* — 92 `Agent/notes/`
    files on disk against 61 rows, and production held 80 as of 2026-08-28. Any
    export into the live tree would therefore report a large prunable set that is
