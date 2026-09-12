@@ -36,9 +36,10 @@ them.
   and nothing else that a one-way projection would not. **Phase A is done
   locally as of 2026-09-12** — export rehearsal validated and idempotent,
   governance and runtime read policy verified to agree per file, enrollment set
-  previewed — leaving deployment parity. **Phase B1 is built** — the schema
-  and write boundary, vault ADR 0049 and migration 0021 — with no Human
-  endpoint, enrollment, or schedule yet. Start at
+  previewed — leaving deployment parity. **Phases B1 and B2 are built** — the
+  schema and write boundary (vault ADR 0049, migration 0021) and Human reads
+  (ADR 0050) — with no Human write endpoint, enrollment, or schedule yet. Start
+  at
   [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md), whose
   phase A result section carries the findings, and NEXT-STEPS §4.
 - **The 2026-09-02 code review** —

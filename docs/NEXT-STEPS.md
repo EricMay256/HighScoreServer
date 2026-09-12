@@ -142,8 +142,10 @@ read surface until phase B's audience and ownership checks pass.
     `resource_revision`, `vault_human_revisions` and `vault_human_changes`,
     three `vault:human-*` scopes kept off every Agent-writing credential, and
     every Agent write path refusing Human rows. No Human endpoint exists.
-  - **B2 — audience-aware reads.** The Human-read audience reaches Human rows,
-    agents keep `ai_read`, and dedup and compile planning exclude Human rows.
+  - **B2 — audience-aware reads, built.** Vault ADR 0050: `/human/notes` and
+    `/human/notes/{id}` under `vault:human-read`, filtered to the Human
+    collection and blind to Agent notes; agents keep `ai_read`; dedup and
+    compile planning exclude Human rows. Human search waits for phase C.
   - **B3 — Human create, edit and move**, revision-checked, each writing a
     snapshot and a feed entry under an asserted corpus lock.
   - **B4 — recoverable deletion**, tombstones, and the snapshot and feed

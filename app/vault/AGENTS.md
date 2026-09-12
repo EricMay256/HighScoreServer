@@ -456,7 +456,16 @@ be edited when it does.
   tokens and grants (over `authorized_scopes || entitled_scopes`), explained by the CLI,
   and re-checked by `authorize`, which returns `incompatible`. All three are operator
   entitlements, so a Human OAuth family is authorized requesting `vault:read` alone.
-  **No route consumes them yet.**
+  `vault:human-read` gates `/human/notes` (ADR 0050); **no route consumes
+  `vault:human-write` or `vault:human-delete` yet.**
+- **Two read audiences, chosen by route and stated in each query** (ADR 0050). The
+  ordinary routes apply `readable_path_predicate`; `/human/notes` applies
+  `collection = 'human'` and no read policy, and names no Agent note. Do not add an
+  audience parameter to `/notes`: a parameter is the caller's choice, and the scope
+  that admitted the request is what decides what it may see. Agent *reads* may return
+  `ai_read`-allowed Human notes; Agent *workflows* may not take them as input —
+  `find_similar` and compile planning (`note_states`, `note_frontier`) filter to the
+  Agent collection, and `write_page` validates sources against that same map.
 
 ### The OAuth authorization server (ADR 0024)
 

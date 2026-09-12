@@ -976,7 +976,7 @@ credential into the wrong database is silent.
 | `vault:review` | List, read, and decide near-duplicate cases and amendment proposals. It applies accepted amendments and is **the only scope that serves `flagged` content**, so grant it narrowly |
 | `vault:compile` | Plan, write, and settle wiki compilation runs; operator-granted only |
 | `vault:export` | Recognised for the future export surface; currently granted by no route |
-| `vault:human-read` | Human notes, including ones `ai_read` withholds from agents (vault ADR 0049). **Currently consumed by no route** |
+| `vault:human-read` | Fetch and list Human notes through `/human/notes`, including ones `ai_read` withholds from agents (vault ADRs 0049, 0050). Reads no Agent note |
 | `vault:human-write` | Create, edit, rename and move Human notes. **Currently consumed by no route** |
 | `vault:human-delete` | Recoverably remove a Human note. **Currently consumed by no route** |
 
