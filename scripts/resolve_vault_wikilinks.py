@@ -54,7 +54,7 @@ from sqlalchemy import text as text_sql
 from app.env import load_environment
 from app.vault.constants import CORPUS_LOCK_KEY
 from app.vault.db import create_vault_engine, describe_database
-from app.vault.domain import DocumentKind
+from app.vault.domain import DocumentCollection, DocumentKind
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings
 from app.vault.tables import vault_documents
@@ -238,6 +238,11 @@ async def run(apply: bool) -> int:
                         update(vault_documents)
                         .where(vault_documents.c.id == change.document_id)
                         .where(vault_documents.c.related_ids == list(change.before))
+                        # Agent rows only; see vault ADR 0049.
+                        .where(
+                            vault_documents.c.collection
+                            == DocumentCollection.AGENT.value
+                        )
                     )
                     if change.frontmatter is not None:
                         # Only when this write touches frontmatter: a governed
@@ -248,7 +253,13 @@ async def run(apply: bool) -> int:
                             vault_documents.c.frontmatter
                             == change.before_frontmatter
                         )
-                    result = await connection.execute(statement.values(**values))
+                    result = await connection.execute(
+                        statement.values(
+                            **values,
+                            resource_revision=vault_documents.c.resource_revision
+                            + 1,
+                        )
+                    )
                     if result.rowcount != 1:
                         stale.append(change)
     finally:

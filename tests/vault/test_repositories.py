@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from app.vault.constants import EMBEDDING_DIMENSIONS
 from app.vault.db import acquire_vault_connection, create_vault_engine
 from app.vault.domain import (
+    DocumentCollection,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
@@ -177,7 +178,7 @@ def test_referenced_compile_run_cannot_be_deleted(
                     NewVaultDocument(
                         id=document_id,
                         kind=DocumentKind.WIKI,
-                        vault_path=f"Wiki/{document_id}.md",
+                        vault_path=f"Agent/wiki/{document_id}.md",
                         status=DocumentStatus.ACTIVE,
                         title="Durable compile provenance",
                         body="The compile run must outlive this wiki document.",
@@ -515,7 +516,10 @@ def test_database_rejects_malformed_vault_paths(
     """Shape only: vault-root-relative posix, no traversal, no backslash.
 
     Which folders exist is folders.yml's business, so a well-formed path
-    naming no real folder is accepted here on purpose.
+    naming no real folder is accepted here on purpose. The top-level tree is
+    the exception since vault ADR 0049: a path outside `Agent/` and `Human/`
+    has no owner, and the collection CHECK refuses it before the shape CHECK
+    is reached, because PostgreSQL checks constraints in name order.
     """
 
     async def exercise() -> None:
@@ -529,6 +533,11 @@ def test_database_rejects_malformed_vault_paths(
                 id=document_id,
                 kind=DocumentKind.NOTE,
                 vault_path=vault_path,
+                collection=(
+                    DocumentCollection.HUMAN
+                    if vault_path.startswith("Human/")
+                    else DocumentCollection.AGENT
+                ),
                 status=DocumentStatus.ACTIVE,
                 title="Path shape fixture",
                 body="Only the shape of vault_path is enforced here.",
@@ -557,7 +566,12 @@ def test_database_rejects_malformed_vault_paths(
                             connection,
                             candidate(f"badpath-{index}-{uuid4().hex}", value),
                         )
-                assert "vault_documents_vault_path_format" in str(caught.value)
+                expected = (
+                    "vault_documents_vault_path_format"
+                    if value.startswith(("Agent/", "Human/"))
+                    else "vault_documents_collection_matches_path"
+                )
+                assert expected in str(caught.value)
 
             # A dot inside a filename is not a traversal segment.
             ordinary_id = f"okpath-{uuid4().hex}"
@@ -659,6 +673,7 @@ def test_reconciliation_fields_round_trip_and_bound_their_hashes(
                         id=imported_id,
                         kind=DocumentKind.NOTE,
                         vault_path=f"Human/17 Concepts/{imported_id}.md",
+                        collection=DocumentCollection.HUMAN,
                         status=DocumentStatus.ACTIVE,
                         title="Imported from Markdown",
                         body="Has an upstream file on disk.",
@@ -711,6 +726,7 @@ def test_reconciliation_fields_round_trip_and_bound_their_hashes(
                             id=f"recon-bad-{uuid4().hex}",
                             kind=DocumentKind.NOTE,
                             vault_path=f"Human/17 Concepts/bad-{uuid4().hex}.md",
+                            collection=DocumentCollection.HUMAN,
                             status=DocumentStatus.ACTIVE,
                             title="Truncated digest",
                             body="Should not be storable.",

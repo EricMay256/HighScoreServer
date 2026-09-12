@@ -43,6 +43,19 @@ class DocumentStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class DocumentCollection(str, Enum):
+    """Which writer owns a document (vault ADR 0049).
+
+    Distinct from ``kind`` (lifecycle) and ``status`` (visibility): this says
+    whose write path may change the row. Agent paths refuse ``human`` rows and
+    Human paths refuse ``agent`` rows, and the database ties the value to the
+    ``vault_path`` prefix so a move cannot carry a note across.
+    """
+
+    AGENT = "agent"
+    HUMAN = "human"
+
+
 class PromotionStatus(str, Enum):
     """Whether a note has been proposed for the Human layer, and what came of it.
 
@@ -203,6 +216,14 @@ class VaultDocument:
     compile_run_id: UUID | None = None
     compiled_by: str | None = None
     compiled_at: datetime | None = None
+    # Moves on every write to a column a client can read -- content, path,
+    # status, provenance -- where `content_revision` moves on content alone.
+    # The Human sync protocol's concurrency token, because a rename or a
+    # deletion must invalidate a client's base as surely as an edit does.
+    # Never below `content_revision`. See ADR 0049.
+    resource_revision: int = 1
+    # Whose write path owns this row. See DocumentCollection and ADR 0049.
+    collection: DocumentCollection = DocumentCollection.AGENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +262,9 @@ class NewVaultDocument:
     compile_run_id: UUID | None = None
     compiled_by: str | None = None
     compiled_at: datetime | None = None
+    # Agent by default because every existing write path is one. A Human path
+    # has to say so, and the database refuses a `Human/` path that did not.
+    collection: DocumentCollection = DocumentCollection.AGENT
 
 
 @dataclass(frozen=True, slots=True)

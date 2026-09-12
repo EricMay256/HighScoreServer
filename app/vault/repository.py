@@ -36,6 +36,7 @@ from .domain import (
     AmendmentProposalKind,
     AmendmentProposalState,
     CompileRunState,
+    DocumentCollection,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
@@ -129,6 +130,8 @@ DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.compile_run_id,
     vault_documents.c.compiled_by,
     vault_documents.c.compiled_at,
+    vault_documents.c.resource_revision,
+    vault_documents.c.collection,
 )
 
 
@@ -166,6 +169,8 @@ def document_from_row(row: RowMapping) -> VaultDocument:
         compile_run_id=row["compile_run_id"],
         compiled_by=row["compiled_by"],
         compiled_at=row["compiled_at"],
+        resource_revision=row["resource_revision"],
+        collection=DocumentCollection(row["collection"]),
     )
 
 
@@ -370,6 +375,7 @@ class VaultDocumentRepository:
                 compile_run_id=document.compile_run_id,
                 compiled_by=document.compiled_by,
                 compiled_at=document.compiled_at,
+                collection=document.collection.value,
             )
             .returning(*self._domain_columns)
         )
@@ -383,6 +389,7 @@ class VaultDocumentRepository:
         content: NewVaultDocument,
         *,
         expected_revision: int | None = None,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Replace one document's caller-supplied content in place.
 
@@ -395,9 +402,19 @@ class VaultDocumentRepository:
 
         Returns None when no row matched, so the caller can 404 without a
         separate existence check.
+
+        ``collection`` is part of the predicate, as it is on every document
+        mutation here: a row owned by the other writer matches nothing and
+        reads as not found. Agent by default because every caller before ADR
+        0049 is an Agent path, so a Human path that forgets to say otherwise
+        fails to reach its own rows rather than reaching the wrong ones.
         """
 
-        statement = update(vault_documents).where(vault_documents.c.id == document_id)
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == collection.value)
+        )
         if expected_revision is not None:
             statement = statement.where(
                 vault_documents.c.content_revision == expected_revision
@@ -416,6 +433,7 @@ class VaultDocumentRepository:
                 source_url=content.source_url,
                 updated_at=func.now(),
                 content_revision=vault_documents.c.content_revision + 1,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -432,6 +450,7 @@ class VaultDocumentRepository:
         contributed_by: str,
         not_before: datetime,
         expected_revision: int,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Fill in an absent ``summary`` on one note, under ADR 0035's carveout.
 
@@ -483,10 +502,12 @@ class VaultDocumentRepository:
             .where(vault_documents.c.contributed_by == contributed_by)
             .where(vault_documents.c.created_at >= not_before)
             .where(vault_documents.c.content_revision == expected_revision)
+            .where(vault_documents.c.collection == collection.value)
             .values(
                 summary=summary,
                 updated_at=func.now(),
                 content_revision=vault_documents.c.content_revision + 1,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -501,6 +522,7 @@ class VaultDocumentRepository:
         *,
         status: DocumentStatus,
         doc_status: str | None,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Move a document's visibility state and its Status Map value together.
 
@@ -517,7 +539,12 @@ class VaultDocumentRepository:
         statement = (
             update(vault_documents)
             .where(vault_documents.c.id == document_id)
-            .values(status=status.value, doc_status=doc_status)
+            .where(vault_documents.c.collection == collection.value)
+            .values(
+                status=status.value,
+                doc_status=doc_status,
+                resource_revision=vault_documents.c.resource_revision + 1,
+            )
             .returning(*self._domain_columns)
         )
         result = await connection.execute(statement)
@@ -531,6 +558,7 @@ class VaultDocumentRepository:
         *,
         promotion_status: PromotionStatus | None,
         vault_path: str,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Move candidacy and the path it routes to, in one statement.
 
@@ -554,11 +582,13 @@ class VaultDocumentRepository:
         statement = (
             update(vault_documents)
             .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == collection.value)
             .values(
                 promotion_status=(
                     None if promotion_status is None else promotion_status.value
                 ),
                 vault_path=vault_path,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -574,6 +604,7 @@ class VaultDocumentRepository:
         compile_run_id: UUID,
         compiled_by: str,
         compiled_at: datetime,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Re-attribute a page to the run that has just rewritten it.
 
@@ -597,10 +628,12 @@ class VaultDocumentRepository:
             update(vault_documents)
             .where(vault_documents.c.id == document_id)
             .where(vault_documents.c.kind == DocumentKind.WIKI.value)
+            .where(vault_documents.c.collection == collection.value)
             .values(
                 compile_run_id=compile_run_id,
                 compiled_by=compiled_by,
                 compiled_at=compiled_at,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -614,6 +647,7 @@ class VaultDocumentRepository:
         document_id: str,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
+        collection: DocumentCollection | None = None,
     ) -> VaultDocument | None:
         """Fetch one document, optionally restricted to certain statuses.
 
@@ -625,11 +659,19 @@ class VaultDocumentRepository:
         ``readable_only`` applies the ``ai_read`` path policy, and defaults
         off for the same reason: review, export, and reconciliation tooling
         must be able to load a row the public read surface withholds.
+
+        ``collection`` narrows to one writer's rows. Unfiltered by default for
+        the same reason again; write paths pass it so a target they may not
+        change is refused before an embedding call is spent on it (ADR 0049).
         """
 
         statement = select(*self._domain_columns).where(
             vault_documents.c.id == document_id
         )
+        if collection is not None:
+            statement = statement.where(
+                vault_documents.c.collection == collection.value
+            )
         if statuses is not None:
             statement = statement.where(
                 vault_documents.c.status.in_([status.value for status in statuses])
@@ -858,6 +900,8 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         document_id: str,
+        *,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> bool:
         """Remove a document. Returns False when no row matched.
 
@@ -870,7 +914,21 @@ class VaultDocumentRepository:
         ``document_id`` is nullable precisely so the row can outlive its
         subject, so the pointer is cleared and the ledger keeps its meaning --
         "this key was used, and what it produced is gone".
+
+        Ownership is settled first, and locked, because the two statements
+        after it detach ledger rows and review cases from the document: a
+        wrong-collection target must return False before anything is touched,
+        not after the references are gone (ADR 0049).
         """
+
+        owned = await connection.execute(
+            select(vault_documents.c.id)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == collection.value)
+            .with_for_update()
+        )
+        if owned.scalar_one_or_none() is None:
+            return False
 
         await connection.execute(
             update(vault_write_requests)
@@ -2518,6 +2576,7 @@ class VaultWikiPageRepository:
         note_ids: Sequence[str],
         *,
         declined_at: datetime,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> tuple[str, ...]:
         """Mark notes as considered-and-declined. Returns the ids it reached.
 
@@ -2538,6 +2597,7 @@ class VaultWikiPageRepository:
             update(vault_documents)
             .where(vault_documents.c.id.in_(list(note_ids)))
             .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            .where(vault_documents.c.collection == collection.value)
             .values(compile_declined_at=declined_at)
             .returning(vault_documents.c.id)
         )

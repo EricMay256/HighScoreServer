@@ -14,10 +14,12 @@ one.
 import hmac
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+
+from .constants import AGENT_MUTATION_SCOPES, HUMAN_SCOPES
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,14 @@ class VaultScope:
     REVIEW = "vault:review"
     COMPILE = "vault:compile"
     EXPORT = "vault:export"
+    # The Human operator's verbs (vault ADR 0049). Read, write and delete, not
+    # read/create/edit/move/delete: no client holds a strict subset of create,
+    # edit and move, so separate verbs could be neither usefully granted nor
+    # usefully withheld -- the test stated above. Delete keeps its own verb
+    # because the Obsidian client is issued without it and the browser with it.
+    HUMAN_READ = "vault:human-read"
+    HUMAN_WRITE = "vault:human-write"
+    HUMAN_DELETE = "vault:human-delete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +154,20 @@ def secret_matches(credential: VaultCredential | None, secret: str) -> bool:
     return matched and credential is not None
 
 
+def scopes_are_compatible(scopes: Iterable[str]) -> bool:
+    """Whether one credential may hold all of these scopes at once.
+
+    False when the set mixes any Human scope with any Agent mutation scope
+    (vault ADR 0049). The database refuses such a row outright; this states the
+    same rule where the operator commands can explain a refusal, and where
+    ``authorize`` applies it to every request -- so a row that somehow carried
+    the combination would authorize nothing rather than everything.
+    """
+
+    held = set(scopes)
+    return not (held & set(HUMAN_SCOPES) and held & set(AGENT_MUTATION_SCOPES))
+
+
 def authorize(
     credential: VaultCredential | None,
     secret: str,
@@ -165,6 +189,8 @@ def authorize(
         return "invalid"
     if not credential.is_active(now):
         return "inactive"
+    if not scopes_are_compatible(credential.scopes):
+        return "incompatible"
     missing = [scope for scope in required_scopes if not credential.has_scope(scope)]
     if missing:
         return "scope"

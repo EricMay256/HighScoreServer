@@ -874,6 +874,47 @@ def test_review_entitlement_requires_a_separate_read_only_family(
     ]
 
 
+def test_human_entitlement_requires_a_family_without_agent_writes(
+    oauth_client: TestClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Vault ADR 0049: a family that consented to the baseline cannot turn Human."""
+
+    client_id, ordinary = full_flow(oauth_client)
+    ordinary_parsed = parse_token(ordinary["access_token"])
+    assert ordinary_parsed is not None
+    assert (
+        asyncio.run(
+            grant_oauth(ordinary_parsed.credential_id, [VaultScope.HUMAN_READ])
+        )
+        == 2
+    )
+    assert "cannot share a credential" in capsys.readouterr().err
+    assert VaultScope.HUMAN_READ not in _credential_scopes(
+        ordinary_parsed.credential_id
+    )
+
+    params = authorize(oauth_client, client_id, scopes=(VaultScope.READ,))
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"][0]
+    human = exchange(oauth_client, client_id, code)
+    human_parsed = parse_token(human["access_token"])
+    assert human_parsed is not None
+
+    assert (
+        asyncio.run(
+            grant_oauth(
+                human_parsed.credential_id,
+                [VaultScope.HUMAN_READ, VaultScope.HUMAN_WRITE],
+            )
+        )
+        == 0
+    )
+    assert sorted(_credential_scopes(human_parsed.credential_id)) == sorted(
+        [VaultScope.READ, VaultScope.HUMAN_READ, VaultScope.HUMAN_WRITE]
+    )
+
+
 def test_static_scope_command_refuses_an_oauth_credential(
     oauth_client: TestClient,
     capsys: pytest.CaptureFixture[str],

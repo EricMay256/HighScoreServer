@@ -29,6 +29,7 @@ from .domain import (
     AmendmentProposalState,
     CompileRunState,
     CompileWorkItem,
+    DocumentCollection,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
@@ -410,6 +411,7 @@ async def _summary_still_repairable(
         document_id,
         statuses=READABLE_STATUSES,
         readable_only=True,
+        collection=DocumentCollection.AGENT,
     )
     if note is None or note.kind is not DocumentKind.NOTE:
         return False
@@ -977,6 +979,7 @@ class VaultDocumentUpdateService:
                 request.document_id,
                 statuses=READABLE_STATUSES,
                 readable_only=True,
+                collection=DocumentCollection.AGENT,
             )
             stored = (
                 None
@@ -1268,6 +1271,7 @@ class VaultDocumentSummaryService:
                 request.document_id,
                 statuses=READABLE_STATUSES,
                 readable_only=True,
+                collection=DocumentCollection.AGENT,
             )
 
         # Three different misses collapse into one 404, deliberately. "No such
@@ -1422,6 +1426,7 @@ class VaultDocumentSummaryService:
             request.document_id,
             statuses=READABLE_STATUSES,
             readable_only=True,
+            collection=DocumentCollection.AGENT,
         )
         if (
             current is None
@@ -1658,6 +1663,7 @@ class VaultDocumentMetadataService:
                 request.document_id,
                 statuses=READABLE_STATUSES,
                 readable_only=True,
+                collection=DocumentCollection.AGENT,
             )
             if target is None:
                 raise DocumentNotFound(request.document_id)
@@ -1742,6 +1748,7 @@ class VaultAmendmentService:
                 request.target_document_id,
                 statuses=READABLE_STATUSES,
                 readable_only=True,
+                collection=DocumentCollection.AGENT,
             )
             if target is None or target.kind is not DocumentKind.NOTE:
                 raise DocumentNotFound(request.target_document_id)
@@ -2106,7 +2113,7 @@ class VaultAmendmentService:
                     "single-decision route for content amendments"
                 )
             target = await documents.get_by_id(
-                connection, proposal.target_document_id
+                connection, proposal.target_document_id, collection=DocumentCollection.AGENT
             )
             preflight_stale = (
                 target is None
@@ -2191,7 +2198,9 @@ class VaultAmendmentService:
                 raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
 
             current = await documents.get_by_id(
-                connection, current_proposal.target_document_id
+                connection,
+                current_proposal.target_document_id,
+                collection=DocumentCollection.AGENT,
             )
             if (
                 current is None
@@ -2302,7 +2311,9 @@ class VaultAmendmentService:
             if current_proposal.state is not AmendmentProposalState.PENDING:
                 raise AmendmentProposalAlreadyDecided(str(request.proposal_id))
 
-            current = await documents.get_by_id(connection, target.id)
+            current = await documents.get_by_id(
+                connection, target.id, collection=DocumentCollection.AGENT
+            )
             if (
                 current is None
                 or current.content_revision != current_proposal.target_revision
@@ -2692,6 +2703,7 @@ class VaultDocumentRetireService:
                 request.document_id,
                 statuses=READABLE_STATUSES,
                 readable_only=True,
+                collection=DocumentCollection.AGENT,
             )
             if existing is None:
                 raise DocumentNotFound(request.document_id)
@@ -2976,6 +2988,7 @@ class VaultPromotionService:
                 connection,
                 request.document_id,
                 statuses=(DocumentStatus.ACTIVE,),
+                collection=DocumentCollection.AGENT,
             )
             if existing is None:
                 raise DocumentNotFound(request.document_id)
@@ -3300,7 +3313,9 @@ class VaultCompileService:
                 # provenance update matched nothing. The transaction would roll
                 # it back, but the caller would get a 500 for what is plainly a
                 # bad field value.
-                target = await documents.get_by_id(connection, request.page_id)
+                target = await documents.get_by_id(
+                    connection, request.page_id, collection=DocumentCollection.AGENT
+                )
                 if target is None:
                     raise DocumentNotFound(request.page_id)
                 if target.kind is not DocumentKind.WIKI:

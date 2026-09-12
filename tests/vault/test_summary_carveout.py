@@ -511,6 +511,7 @@ async def _bump_revision(service, note_id: str) -> None:
             .values(
                 body="A different body entirely, committed by someone else.",
                 content_revision=vault_documents.c.content_revision + 1,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
         )
 

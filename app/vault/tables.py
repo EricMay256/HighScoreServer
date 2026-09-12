@@ -31,7 +31,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ENUM, JSONB, TSVECTOR, UUID
 
-from .constants import EMBEDDING_DIMENSIONS, resolve_text_search_config
+from .constants import (
+    AGENT_MUTATION_SCOPES,
+    EMBEDDING_DIMENSIONS,
+    HUMAN_SCOPES,
+    resolve_text_search_config,
+)
 
 
 VAULT_SCHEMA = "vault"
@@ -42,6 +47,25 @@ VAULT_SCHEMA = "vault"
 TEXT_SEARCH_CONFIG = resolve_text_search_config()
 
 metadata = MetaData(schema=VAULT_SCHEMA)
+
+
+def _scope_array(scopes: tuple[str, ...]) -> str:
+    return "ARRAY[" + ", ".join(f"'{scope}'" for scope in scopes) + "]::text[]"
+
+
+def _human_agent_exclusive(scopes_expression: str) -> str:
+    """The CHECK predicate refusing a scope set that mixes the two writers.
+
+    See vault ADR 0049. Built from the constants rather than restated, so this
+    metadata cannot disagree with ``auth.scopes_are_compatible``. Migration
+    0021 spells the arrays out, because a historical revision must not import
+    the runtime package.
+    """
+
+    return (
+        f"NOT (({scopes_expression}) && {_scope_array(HUMAN_SCOPES)} "
+        f"AND ({scopes_expression}) && {_scope_array(AGENT_MUTATION_SCOPES)})"
+    )
 
 document_kind_enum = ENUM(
     "note",
@@ -54,6 +78,13 @@ document_status_enum = ENUM(
     "flagged",
     "archived",
     name="vault_document_status",
+    schema=VAULT_SCHEMA,
+)
+# Whose write path owns a document. See vault ADR 0049.
+document_collection_enum = ENUM(
+    "agent",
+    "human",
+    name="vault_document_collection",
     schema=VAULT_SCHEMA,
 )
 review_state_enum = ENUM(
@@ -260,6 +291,22 @@ vault_documents = Table(
         nullable=False,
         server_default=text("1"),
     ),
+    # Moves on every write to a readable column, not only content: the Human
+    # sync protocol's concurrency token. See ADR 0049.
+    Column(
+        "resource_revision",
+        BigInteger,
+        nullable=False,
+        server_default=text("1"),
+    ),
+    # Whose write path may change this row, tied to the path prefix by
+    # `vault_documents_collection_matches_path`. See ADR 0049.
+    Column(
+        "collection",
+        document_collection_enum,
+        nullable=False,
+        server_default=text("'agent'"),
+    ),
     Column(
         "created_at",
         DateTime(timezone=True),
@@ -313,6 +360,27 @@ vault_documents = Table(
     CheckConstraint(
         "content_revision > 0",
         name="vault_documents_content_revision_positive",
+    ),
+    # Every content change is a resource change, so a path that bumps the one
+    # and forgets the other fails here rather than handing a sync client a
+    # token that did not move.
+    CheckConstraint(
+        "resource_revision >= content_revision",
+        name="vault_documents_resource_revision_covers_content",
+    ),
+    # A move cannot carry a note from one writer's tree into the other's: the
+    # collection does not follow the path, so the pair stops agreeing.
+    CheckConstraint(
+        "(collection = 'agent' AND starts_with(vault_path, 'Agent/')) "
+        "OR (collection = 'human' AND starts_with(vault_path, 'Human/'))",
+        name="vault_documents_collection_matches_path",
+    ),
+    # Compilation, promotion and compile declines are Agent workflows, and a
+    # Human note carries none of their state.
+    CheckConstraint(
+        "collection = 'agent' OR (kind = 'note' "
+        "AND promotion_status IS NULL AND compile_declined_at IS NULL)",
+        name="vault_documents_human_has_no_agent_workflow",
     ),
     # Shape only, never vocabulary: which names are legal belongs to types.yml
     # and is checked in application code, so that adding a type stays a data
@@ -655,14 +723,21 @@ vault_agent_credentials = Table(
         "octet_length(secret_sha256) = 32",
         name="vault_agent_credentials_sha256_length",
     ),
-    # Mirrors migration 0007. 'vault:write' is contribute only; replacement and
-    # deletion are their own verbs, so a credential that may add a note does not
-    # thereby may destroy one.
+    # Mirrors migrations 0007 and 0021. 'vault:write' is contribute only;
+    # replacement and deletion are their own verbs, so a credential that may add
+    # a note does not thereby may destroy one.
     CheckConstraint(
         "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:propose', 'vault:update', "
         "'vault:delete', 'vault:review', 'vault:compile', "
-        "'vault:export']::text[]",
+        "'vault:export', 'vault:human-read', 'vault:human-write', "
+        "'vault:human-delete']::text[]",
         name="vault_agent_credentials_scopes_known",
+    ),
+    # No credential writes both trees, and none reads private Human notes while
+    # able to write agent-readable ones. See ADR 0049.
+    CheckConstraint(
+        _human_agent_exclusive("scopes"),
+        name="vault_agent_credentials_human_agent_exclusive",
     ),
 )
 
@@ -759,8 +834,17 @@ vault_oauth_grants = Table(
     ),
     CheckConstraint(
         "entitled_scopes <@ ARRAY['vault:update', 'vault:delete', "
-        "'vault:review', 'vault:compile', 'vault:export']::text[]",
+        "'vault:review', 'vault:compile', 'vault:export', "
+        "'vault:human-read', 'vault:human-write', "
+        "'vault:human-delete']::text[]",
         name="vault_oauth_grants_entitled_scopes_privileged",
+    ),
+    # Over the union, because that is what every rotation projects onto the
+    # credential. It is also why a family that consented to the baseline's
+    # `vault:write` cannot be widened into a Human one. See ADR 0049.
+    CheckConstraint(
+        _human_agent_exclusive("authorized_scopes || entitled_scopes"),
+        name="vault_oauth_grants_human_agent_exclusive",
     ),
     CheckConstraint(
         "NOT (authorized_scopes && entitled_scopes)",
@@ -954,8 +1038,149 @@ vault_oauth_refresh_tokens = Table(
     CheckConstraint(
         "scopes <@ ARRAY['vault:read', 'vault:write', 'vault:propose', 'vault:update', "
         "'vault:delete', 'vault:review', 'vault:compile', "
-        "'vault:export']::text[]",
+        "'vault:export', 'vault:human-read', 'vault:human-write', "
+        "'vault:human-delete']::text[]",
         name="vault_oauth_refresh_scopes_known",
+    ),
+    CheckConstraint(
+        _human_agent_exclusive("scopes"),
+        name="vault_oauth_refresh_human_agent_exclusive",
+    ),
+)
+
+# Every accepted revision of a Human note, as a full snapshot (vault ADR 0049).
+#
+# No foreign key to `vault_documents`, by the audit log's rule (ADR 0002) and
+# for the reason that makes Human deletion recoverable: the history has to
+# outlive the row it describes. A snapshot rather than a diff because the notes
+# are small, and a restore must not depend on replaying a chain intact.
+vault_human_revisions = Table(
+    "vault_human_revisions",
+    metadata,
+    Column("id", BigInteger, Identity(always=True), primary_key=True),
+    Column("document_id", Text, nullable=False),
+    Column("resource_revision", BigInteger, nullable=False),
+    Column("content_revision", BigInteger, nullable=False),
+    Column("operation", Text, nullable=False),
+    Column("vault_path", Text, nullable=False),
+    Column("doc_type", Text),
+    Column("doc_status", Text),
+    Column("title", Text, nullable=False),
+    Column("summary", Text),
+    Column("body", Text, nullable=False),
+    Column(
+        "tags",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column(
+        "aliases",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column(
+        "frontmatter",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column(
+        "facets",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column(
+        "related_ids",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column(
+        "source_ids",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column("source_url", Text),
+    # From the credential, never a request body, as `contributed_by` is.
+    Column("principal_id", Text, nullable=False),
+    Column("request_id", Text, nullable=False),
+    Column(
+        "occurred_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint(
+        "operation IN ('create', 'edit', 'move', 'delete', 'restore')",
+        name="vault_human_revisions_operation_known",
+    ),
+    CheckConstraint(
+        "resource_revision > 0 AND content_revision > 0",
+        name="vault_human_revisions_revisions_positive",
+    ),
+    CheckConstraint(
+        "starts_with(vault_path, 'Human/')",
+        name="vault_human_revisions_path_is_human",
+    ),
+    CheckConstraint(
+        "btrim(principal_id) <> ''",
+        name="vault_human_revisions_principal_nonempty",
+    ),
+    CheckConstraint(
+        "btrim(request_id) <> ''",
+        name="vault_human_revisions_request_id_nonempty",
+    ),
+    UniqueConstraint(
+        "document_id",
+        "resource_revision",
+        name="vault_human_revisions_document_revision_key",
+    ),
+)
+
+# The Human sync feed (vault ADR 0049): one row per accepted Human change.
+# Separate from the revisions because a tombstone must outlive content -- a
+# client that missed a deletion has to learn of it whatever happens to the
+# history behind it -- and because a feed reader wants positions, not bodies.
+#
+# `id` is the feed position, and it is monotonic in *commit* order only because
+# every writer holds the corpus advisory lock while inserting. An identity is
+# allocated at insert, not at commit, so two unserialized writers could commit
+# out of order, and a reader already past the later position would never see
+# the earlier one. GENERATED ALWAYS so no caller can supply a position.
+vault_human_changes = Table(
+    "vault_human_changes",
+    metadata,
+    Column("id", BigInteger, Identity(always=True), primary_key=True),
+    Column("document_id", Text, nullable=False),
+    Column("resource_revision", BigInteger, nullable=False),
+    Column("change_kind", Text, nullable=False),
+    Column("vault_path", Text, nullable=False),
+    Column(
+        "occurred_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint(
+        "change_kind IN ('upsert', 'delete')",
+        name="vault_human_changes_kind_known",
+    ),
+    CheckConstraint(
+        "resource_revision > 0",
+        name="vault_human_changes_revision_positive",
+    ),
+    CheckConstraint(
+        "starts_with(vault_path, 'Human/')",
+        name="vault_human_changes_path_is_human",
+    ),
+    UniqueConstraint(
+        "document_id",
+        "resource_revision",
+        name="vault_human_changes_document_revision_key",
     ),
 )
 
