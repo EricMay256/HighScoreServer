@@ -56,7 +56,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0045 | [The note listing is sorted, and its cursor is opaque](0045-the-note-listing-is-sorted-and-its-cursor-is-opaque.md) | Accepted |
 | 0046 | [The browse console renders sanitized Markdown from pinned local assets](0046-the-browse-console-renders-sanitized-markdown.md) | Accepted (supersedes 0039's source-only presentation) |
 | 0047 | [Publish selected Human notes while preserving Markdown ownership](0047-human-publishing-preserves-markdown-ownership.md) | Superseded by 0048; daily embedding behavior retained |
-| 0048 | [Human notes are database-owned and Obsidian is an OAuth sync client](0048-human-vault-database-authority-and-obsidian-sync.md) | Accepted direction, implementation pending |
+| 0048 | [Human notes are database-owned and Obsidian is an OAuth sync client](0048-human-vault-database-authority-and-obsidian-sync.md) | Accepted direction, implementation pending (amended 2026-09-12: the extension is optional; a one-way projection takes its place) |
 
 ## Reserved numbers
 

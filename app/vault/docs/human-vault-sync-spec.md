@@ -10,6 +10,12 @@ from this repository, OAuth deployment configuration, server-only deletion, and
 mutually isolated Human/Agent write capabilities. AI reads remain governed by the
 existing read policy. This document does not claim any implementation or rollout.
 
+Amended 2026-09-12: the Obsidian extension is optional. Everything here about
+ownership, the Human operator grant, revisions, deletion, and the change feed is
+unconditional and belongs to the service. The plugin packaging, platform, and
+local-state sections apply only if the extension is built; if it is not, a one-way
+Human projection keeps local Markdown readable in its place.
+
 ## Ownership, hosting, and AI visibility
 
 The database stores the authoritative revision of each enrolled Human note.

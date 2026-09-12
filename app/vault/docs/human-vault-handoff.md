@@ -63,14 +63,24 @@ families for Human editing, Agent workflows, and each local device.
 
 Complete and demonstrate each phase before expanding to the next. The specification
 does not select actual private notes, authorize production grants, or install jobs.
+Phase D is optional as of 2026-09-12; see the note below the table.
 
 | Phase | Deliverable | Exit evidence |
 | --- | --- | --- |
 | A: baseline and rehearsal | Verify deployed/local contracts and source governance; rehearse existing Agent export into private staging; prepare exact Human enrollment preview | Validated export, repeatable unchanged run, preserved originals, synthetic identity/policy examples |
 | B: Human service boundary | Reviewed migrations, role/verb scopes, Human reads/writes/history, deletion/tombstones, resource revisions and change feed | Scope/ownership matrix tests, cursor/retry/concurrency tests, no Agent read disclosure of hidden Human content |
 | C: browser authoring | Human editing with its own OAuth family, explicit save/conflict states, separate delete permission, current policy and semantic-index indicators | Real browser create/edit/move/delete and role-isolation checks using synthetic notes |
-| D: Obsidian extension | Source/build/install instructions in `clients/obsidian/`; configurable OAuth, managed IDs, guarded bidirectional synchronization, conflict/recovery UI | Two deployments, reconnect/refresh/revoke, local deletion refusal, dirty-file server deletion, desktop verification |
+| D (optional): Obsidian extension | Source/build/install instructions in `clients/obsidian/`; configurable OAuth, managed IDs, guarded bidirectional synchronization, conflict/recovery UI | Two deployments, reconnect/refresh/revoke, local deletion refusal, dirty-file server deletion, desktop verification |
 | E: daily indexing and pilot | Daily server-side Human job, independent Agent export, reviewed enrollment/cutover and operational runbook | Daily coalescing, retained vectors on failure, private pilot evidence, obsolete importer fenced off |
+
+**Phase D is optional (2026-09-12, amending ADR 0048).** What only the extension
+provides is offline authoring: editing while disconnected and synchronizing back.
+Build it if that turns out to be wanted after living with browser authoring, not
+before. Keeping local Markdown current is a separate, cheaper need that a one-way
+Human projection covers — build that instead if D is skipped, because an enrolled
+note's local file otherwise freezes at enrollment and the local vault decays over
+exactly the notes that were enrolled. Phase B's service contracts are unchanged
+either way: a revision-and-tombstone change feed is what either client consumes.
 
 Daily indexing may be developed alongside the client phases, but no data enters
 a broader read surface before phase B's audience/ownership checks pass. Mobile

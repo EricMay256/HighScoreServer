@@ -30,10 +30,11 @@ them.
   unimplemented; ADR 0043 is Proposed. The plan is
   [`librarian-plan.md`](../app/vault/docs/librarian-plan.md).
 - **The Human vault.** Vault ADR 0048, 2026-09-11: enrolled Human notes become
-  database-authoritative, edited in the browser or through an OAuth Obsidian
-  client, with server-only deletion and Human and Agent write grants that
-  cannot be held together. Specification only — no code, no migration, no
-  enrollment, no schedule. Start at
+  database-authoritative, edited in the browser, with server-only deletion and
+  Human and Agent write grants that cannot be held together. The Obsidian sync
+  client is optional as of the 2026-09-12 amendment — it buys offline authoring
+  and nothing else that a one-way projection would not. Specification only — no
+  code, no migration, no enrollment, no schedule. Start at
   [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md) and
   NEXT-STEPS §4, which carries the five phases.
 - **The 2026-09-02 code review** —

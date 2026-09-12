@@ -137,21 +137,25 @@ read surface until phase B's audience and ownership checks pass.
 - **C — browser authoring.** Its own OAuth family, explicit save and conflict
   states, a separately granted delete, and visible read-policy and
   semantic-index state.
-- **D — the Obsidian extension.** Source in `clients/obsidian/`, which does not
-  exist yet: PKCE against a configurable deployment, managed `VaultID`s,
-  revision-checked bidirectional sync, conflict and recovery UI. Desktop is the
-  verified target; mobile is claimed only after real-device tests.
+- **D — the Obsidian extension. Optional; decide after C is in real use.**
+  Source in `clients/obsidian/`, which does not exist yet: PKCE against a
+  configurable deployment, managed `VaultID`s, revision-checked bidirectional
+  sync, conflict and recovery UI. Desktop is the verified target; mobile is
+  claimed only after real-device tests. What only this buys is authoring
+  offline. Keeping local Markdown current is the other half and is much
+  cheaper — a one-way Human projection, the mirror of the Agent exporter.
+  **Build that if D is skipped**, or enrolled notes freeze at enrollment and the
+  local vault decays over exactly the notes that were enrolled.
 - **E — daily indexing and pilot.** A restartable operator command under a
   durable lease, coalescing a day's edits into one latest-input request per
   changed note and retaining the older compatible vector when a refresh fails.
   May be built alongside C and D. The OpenAI Batch API was evaluated and is not
   selected: 50% off does not pay for a two-day worst-case lag.
 
-Two things belong before phase A. Add `clients/obsidian/` and the rest of the
-new artifacts to
-[`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md),
-and confirm that private `folders.yml` governance and runtime `read_policy.py`
-agree about the notes that are about to be enrolled.
+Before phase A, confirm that private `folders.yml` governance and runtime
+`read_policy.py` agree about the notes that are about to be enrolled. Update
+[`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
+when an artifact actually appears — `clients/obsidian/` only if D is built.
 
 ## 5. Gated on a written trigger — do not start
 
