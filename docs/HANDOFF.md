@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated 2026-09-02. The start-here for a fresh session: where things are,
+Last updated 2026-09-12. The start-here for a fresh session: where things are,
 what is in flight, and the environment facts that bite and are not already in
 `AGENTS.md`. What remains to do is [`NEXT-STEPS.md`](NEXT-STEPS.md); why things
 are the way they are is in the ADRs. Previous handoffs are archived under
@@ -29,6 +29,13 @@ them.
 - **The librarian and proposal revision.** Vault ADR 0044 is Accepted and
   unimplemented; ADR 0043 is Proposed. The plan is
   [`librarian-plan.md`](../app/vault/docs/librarian-plan.md).
+- **The Human vault.** Vault ADR 0048, 2026-09-11: enrolled Human notes become
+  database-authoritative, edited in the browser or through an OAuth Obsidian
+  client, with server-only deletion and Human and Agent write grants that
+  cannot be held together. Specification only — no code, no migration, no
+  enrollment, no schedule. Start at
+  [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md) and
+  NEXT-STEPS §4, which carries the five phases.
 - **The 2026-09-02 code review** —
   [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — is **done**. Every
   finding is addressed on `dev`, one commit each; the document is kept as the
@@ -60,6 +67,10 @@ them.
 - Two consoles, two credentials: the reviewer holds `vault:read vault:review`
   and nothing else; the browser holds `vault:read vault:propose` (ADRs 0037,
   0039).
+- Human notes are not a second Agent corpus. A Human grant reads AI-excluded
+  Human content and cannot mutate anything Agent-owned; an Agent grant obeys
+  `ai_read` and cannot write Human content by any path, amendment and
+  compilation included (ADR 0048).
 
 ## Environment facts that bite
 
