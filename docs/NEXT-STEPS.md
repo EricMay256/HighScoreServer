@@ -146,8 +146,13 @@ read surface until phase B's audience and ownership checks pass.
     `/human/notes/{id}` under `vault:human-read`, filtered to the Human
     collection and blind to Agent notes; agents keep `ai_read`; dedup and
     compile planning exclude Human rows. Human search waits for phase C.
-  - **B3 — Human create, edit and move**, revision-checked, each writing a
-    snapshot and a feed entry under an asserted corpus lock.
+  - **B3 — Human create, edit and move, built.** Vault ADR 0051: three routes
+    under `vault:human-write`, each accepted write one transaction under the
+    corpus lock (which the history repository checks) writing the row, a
+    snapshot, a feed entry and an audit event. Create is idempotent by
+    operation id through the write ledger; edit and move succeed without
+    writing when the note already matches, and otherwise 409 with the current
+    revision. No embedding call and no dedup gate.
   - **B4 — recoverable deletion**, tombstones, and the snapshot and feed
     endpoints.
   - **B5 — a disclosure regression suite** across every Agent surface.

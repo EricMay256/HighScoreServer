@@ -977,7 +977,7 @@ credential into the wrong database is silent.
 | `vault:compile` | Plan, write, and settle wiki compilation runs; operator-granted only |
 | `vault:export` | Recognised for the future export surface; currently granted by no route |
 | `vault:human-read` | Fetch and list Human notes through `/human/notes`, including ones `ai_read` withholds from agents (vault ADRs 0049, 0050). Reads no Agent note |
-| `vault:human-write` | Create, edit, rename and move Human notes. **Currently consumed by no route** |
+| `vault:human-write` | Create, edit, rename and move Human notes through `/human/notes` (vault ADR 0051). No embedding call and no dedup gate; a move that would change `ai_read` readability is refused |
 | `vault:human-delete` | Recoverably remove a Human note. **Currently consumed by no route** |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault

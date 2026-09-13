@@ -456,8 +456,23 @@ be edited when it does.
   tokens and grants (over `authorized_scopes || entitled_scopes`), explained by the CLI,
   and re-checked by `authorize`, which returns `incompatible`. All three are operator
   entitlements, so a Human OAuth family is authorized requesting `vault:read` alone.
-  `vault:human-read` gates `/human/notes` (ADR 0050); **no route consumes
-  `vault:human-write` or `vault:human-delete` yet.**
+  `vault:human-read` gates reading `/human/notes` (ADR 0050) and `vault:human-write`
+  gates create, edit and move there (ADR 0051); **no route consumes
+  `vault:human-delete` yet.**
+- **A Human write is one transaction under the corpus lock, and the history write
+  checks the lock** (ADR 0051). `VaultHumanNoteService` changes the row, then
+  `VaultHumanHistoryRepository.record` writes the snapshot and feed entry, then the
+  audit event is appended. `record` queries `pg_locks` and raises without
+  `CORPUS_LOCK_KEY`; do not remove that check as redundant with the callers, because
+  the feed's commit-order guarantee is exactly the thing a caller forgetting would
+  break without a trace. Human writes make no embedding call and never run the dedup
+  gate. Edit and move are retry-safe by state rather than by key: a request the note
+  already matches returns 200 without writing, whatever base it names, and only a
+  change against a moved-on note is a 409 carrying `current_resource_revision`. Do not
+  "tighten" that into refusing every stale base — a resend after a lost response
+  would then conflict with itself. Create is idempotent through the write ledger, and
+  a replay must find a Human note behind the prior entry, since contributions share
+  the ledger's `(principal, key)` namespace.
 - **Two read audiences, chosen by route and stated in each query** (ADR 0050). The
   ordinary routes apply `readable_path_predicate`; `/human/notes` applies
   `collection = 'human'` and no read policy, and names no Agent note. Do not add an

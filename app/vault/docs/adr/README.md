@@ -59,6 +59,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0048 | [Human notes are database-owned and Obsidian is an OAuth sync client](0048-human-vault-database-authority-and-obsidian-sync.md) | Accepted direction, implementation pending (amended 2026-09-12: the extension is optional; a one-way projection takes its place) |
 | 0049 | [The Human collection boundary: ownership, revisions, and a change feed](0049-the-human-collection-boundary.md) | Accepted (refines 0048's grant and deletion contracts) |
 | 0050 | [Human reads: the audience is the collection, and Agent workflows exclude it](0050-human-reads-the-audience-is-the-collection.md) | Accepted |
+| 0051 | [Human writes are revision-checked, recorded in one transaction, and retry-safe](0051-human-writes-are-revision-checked-and-retry-safe.md) | Accepted |
 
 ## Reserved numbers
 
