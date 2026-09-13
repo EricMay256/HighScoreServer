@@ -457,8 +457,19 @@ be edited when it does.
   and re-checked by `authorize`, which returns `incompatible`. All three are operator
   entitlements, so a Human OAuth family is authorized requesting `vault:read` alone.
   `vault:human-read` gates reading `/human/notes` (ADR 0050) and `vault:human-write`
-  gates create, edit and move there (ADR 0051); **no route consumes
-  `vault:human-delete` yet.**
+  gates create, edit and move there (ADR 0051); `vault:human-delete` gates deletion
+  (ADR 0052).
+- **A Human deletion is a tombstone, and only an operator's restore undoes it** (ADR
+  0052). The row goes; the `delete` snapshot and `delete` feed entry stay, at one past
+  the note's last revision. A resent delete returns that same tombstone. Edits, moves
+  and create replays of a deleted id are 404 -- do not add a code path that recreates
+  a Human row from anything but `VaultHumanNoteService.restore`, which keeps the id
+  and continues the revisions so every client sees the restore as newer. **The feed
+  cursor names an entry, and `/human/changes` checks that entry still exists with the
+  same note and revision before resuming** -- a mismatch is 410, because a database
+  restored to an earlier point reuses positions and a bare position would silently
+  skip changes. Do not "simplify" the cursor to a position, and do not order the feed
+  by `occurred_at`.
 - **A Human write is one transaction under the corpus lock, and the history write
   checks the lock** (ADR 0051). `VaultHumanNoteService` changes the row, then
   `VaultHumanHistoryRepository.record` writes the snapshot and feed entry, then the

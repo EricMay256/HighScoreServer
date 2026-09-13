@@ -153,8 +153,13 @@ read surface until phase B's audience and ownership checks pass.
     operation id through the write ledger; edit and move succeed without
     writing when the note already matches, and otherwise 409 with the current
     revision. No embedding call and no dedup gate.
-  - **B4 — recoverable deletion**, tombstones, and the snapshot and feed
-    endpoints.
+  - **B4 — recoverable deletion and the change feed, built.** Vault ADR 0052:
+    `DELETE /human/notes/{id}` leaves a tombstone and keeps the history; a
+    resent delete returns the same tombstone; only the operator's
+    `scripts/restore_human_note.py` brings a note back, under its own id.
+    `/human/changes` and `/human/changes/head` serve the feed, and a cursor
+    whose entry is no longer there is a 410 that means resnapshot. No snapshot
+    endpoint: head, then list, then replay.
   - **B5 — a disclosure regression suite** across every Agent surface.
 - **C — browser authoring.** Its own OAuth family, explicit save and conflict
   states, a separately granted delete, and visible read-policy and

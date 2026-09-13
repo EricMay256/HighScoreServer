@@ -60,6 +60,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0049 | [The Human collection boundary: ownership, revisions, and a change feed](0049-the-human-collection-boundary.md) | Accepted (refines 0048's grant and deletion contracts) |
 | 0050 | [Human reads: the audience is the collection, and Agent workflows exclude it](0050-human-reads-the-audience-is-the-collection.md) | Accepted |
 | 0051 | [Human writes are revision-checked, recorded in one transaction, and retry-safe](0051-human-writes-are-revision-checked-and-retry-safe.md) | Accepted |
+| 0052 | [Human deletion leaves a tombstone, and the feed checks the entry it resumes from](0052-human-deletion-is-a-tombstone-and-the-feed-checks-its-anchor.md) | Accepted |
 
 ## Reserved numbers
 

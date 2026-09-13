@@ -978,7 +978,7 @@ credential into the wrong database is silent.
 | `vault:export` | Recognised for the future export surface; currently granted by no route |
 | `vault:human-read` | Fetch and list Human notes through `/human/notes`, including ones `ai_read` withholds from agents (vault ADRs 0049, 0050). Reads no Agent note |
 | `vault:human-write` | Create, edit, rename and move Human notes through `/human/notes` (vault ADR 0051). No embedding call and no dedup gate; a move that would change `ai_read` readability is refused |
-| `vault:human-delete` | Recoverably remove a Human note. **Currently consumed by no route** |
+| `vault:human-delete` | Recoverably delete a Human note through `DELETE /human/notes/{id}` (vault ADR 0052). Grant it to the browser family only, never to a sync client. An operator restores a deleted note with `python -m scripts.restore_human_note --id <note-id>` (dry run) and `--apply` |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
 ADR 0020.
