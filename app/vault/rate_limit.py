@@ -102,6 +102,12 @@ LIMITS: dict[str, Limit] = {
     # ordinary reads depend on.
     "human_get_note": Limit(per_minute=120, burst=30),
     "human_list_notes": Limit(per_minute=60, burst=20),
+    # Human writes (ADR 0051). No embedding and no dedup gate, so cheaper than a
+    # contribution. Edits get the widest bucket because a sync client saves in
+    # bursts: a debounced session of typing across several notes.
+    "human_create": Limit(per_minute=30, burst=20),
+    "human_edit": Limit(per_minute=60, burst=30),
+    "human_move": Limit(per_minute=30, burst=10),
     "contribute": Limit(per_minute=30, burst=20),
     # Proposals persist untrusted workflow state but do not embed or mutate the
     # corpus. A distinct bucket matches the distinct OAuth capability.

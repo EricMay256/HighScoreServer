@@ -58,8 +58,12 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultHumanNoteContent,
+    VaultHumanNoteCreateRequest,
     VaultHumanNoteDetail,
+    VaultHumanNoteEditRequest,
     VaultHumanNoteListResponse,
+    VaultHumanNoteMoveRequest,
     VaultMetadataUpdateRequest,
     VaultNoteEdgeLookupRequest,
     VaultNoteEdgeResponse,
@@ -140,6 +144,14 @@ from .service import (
     DedupUnavailable,
     DocumentNotFound,
     DocumentUnderReview,
+    HumanCreateRequest,
+    HumanEditRequest,
+    HumanMoveChangesReadPolicy,
+    HumanMoveRequest,
+    HumanNoteContent,
+    HumanNoteInvalid,
+    HumanPathTaken,
+    HumanRevisionConflict,
     IdempotencyConflict,
     MetadataChange,
     MetadataUpdateRequest,
@@ -163,6 +175,7 @@ from .service import (
     VaultDocumentRetireService,
     VaultDocumentSummaryService,
     VaultDocumentUpdateService,
+    VaultHumanNoteService,
     VaultReviewService,
     VaultSearchService,
     VaultTransactionService,
@@ -323,6 +336,14 @@ async def require_human_read_scope(
     """
 
     return await _authenticated((VaultScope.HUMAN_READ,), credentials)
+
+
+async def require_human_write_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Create, edit, rename and move Human notes (ADR 0049's ``vault:human-write``)."""
+
+    return await _authenticated((VaultScope.HUMAN_WRITE,), credentials)
 
 
 async def search_quota(
@@ -890,6 +911,206 @@ async def list_human_notes(
             else None
         ),
     )
+
+
+# ── Human writes (ADR 0051) ──────────────────────────────────────────────────
+
+
+async def human_create_quota(
+    credential: VaultCredential = Depends(require_human_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_create")
+    return credential
+
+
+async def human_edit_quota(
+    credential: VaultCredential = Depends(require_human_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_edit")
+    return credential
+
+
+async def human_move_quota(
+    credential: VaultCredential = Depends(require_human_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_move")
+    return credential
+
+
+_HUMAN_WRITE_REFUSALS = (
+    DocumentNotFound,
+    HumanRevisionConflict,
+    HumanPathTaken,
+    IdempotencyConflict,
+    HumanMoveChangesReadPolicy,
+    HumanNoteInvalid,
+)
+
+
+def _human_write_error(exc: Exception) -> HTTPException:
+    """One rendering of the Human write refusals, shared by the three routes."""
+
+    if isinstance(exc, DocumentNotFound):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Note not found"
+        )
+    if isinstance(exc, HumanRevisionConflict):
+        # The current revision is the whole point of the answer: the client
+        # fetches that version, resolves, and writes against it.
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "The note changed since that revision",
+                "current_resource_revision": exc.current_resource_revision,
+            },
+        )
+    if isinstance(exc, HumanPathTaken):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another note already has that path, ignoring case",
+        )
+    if isinstance(exc, IdempotencyConflict):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Operation id was already used for a different request",
+        )
+    if isinstance(exc, HumanMoveChangesReadPolicy):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        )
+    if isinstance(exc, HumanNoteInvalid):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "message": "Human note failed validation",
+                "errors": list(exc.errors),
+            },
+        )
+    raise TypeError(f"not a Human write refusal: {type(exc).__name__}")
+
+
+def _human_content(body: VaultHumanNoteContent) -> HumanNoteContent:
+    return HumanNoteContent(
+        title=body.title,
+        body=body.body,
+        summary=body.summary,
+        tags=tuple(body.tags),
+        aliases=tuple(body.aliases),
+        facets=body.facets,
+        related_ids=tuple(body.related_ids),
+        source_ids=tuple(body.source_ids),
+        source_url=str(body.source_url) if body.source_url is not None else None,
+        doc_type=body.doc_type,
+        doc_status=body.doc_status,
+        frontmatter=body.frontmatter,
+    )
+
+
+def _human_service() -> VaultHumanNoteService:
+    return VaultHumanNoteService(VaultTransactionService(get_vault_engine()))
+
+
+@router.post(
+    "/human/notes",
+    response_model=VaultHumanNoteDetail,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a Human note at a path its author chose",
+)
+async def create_human_note(
+    body: VaultHumanNoteCreateRequest,
+    request: Request,
+    response: Response,
+    credential: VaultCredential = Depends(human_create_quota),
+) -> VaultHumanNoteDetail:
+    """201 for a new note; 200 when `operation_id` replays an earlier create.
+
+    No embedding call and no dedup gate (ADR 0051). The note is readable at
+    once through `/human/notes`, and through the agent surface too when its
+    folder's `ai_read` allows -- the folder was the author's choice.
+    """
+
+    try:
+        outcome = await _human_service().create(
+            HumanCreateRequest(
+                content=_human_content(body),
+                vault_path=body.vault_path,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+                operation_id=body.operation_id,
+                request_sha256=canonical_request_digest(body),
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    if outcome.replayed:
+        response.status_code = status.HTTP_200_OK
+    return human_note_detail(outcome.document)
+
+
+@router.put(
+    "/human/notes/{note_id}",
+    response_model=VaultHumanNoteDetail,
+    summary="Replace a Human note's content, against a resource revision",
+)
+async def edit_human_note(
+    body: VaultHumanNoteEditRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(human_edit_quota),
+) -> VaultHumanNoteDetail:
+    """409 names the current revision when the note moved on underneath.
+
+    A request the note already matches returns 200 without a new revision,
+    whatever base it names, so a resend after a lost response is not a
+    conflict with itself.
+    """
+
+    try:
+        outcome = await _human_service().edit(
+            HumanEditRequest(
+                document_id=note_id,
+                content=_human_content(body),
+                base_resource_revision=body.base_resource_revision,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    return human_note_detail(outcome.document)
+
+
+@router.post(
+    "/human/notes/{note_id}/move",
+    response_model=VaultHumanNoteDetail,
+    summary="Rename or move a Human note within the Human tree",
+)
+async def move_human_note(
+    body: VaultHumanNoteMoveRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(human_move_quota),
+) -> VaultHumanNoteDetail:
+    """422 when the move would change whether agents may read the note.
+
+    That is a governance decision about a folder, not something a rename should
+    do on the side (ADR 0048). A title edit never moves a note either: the path
+    changes only here.
+    """
+
+    try:
+        outcome = await _human_service().move(
+            HumanMoveRequest(
+                document_id=note_id,
+                vault_path=body.vault_path,
+                base_resource_revision=body.base_resource_revision,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    return human_note_detail(outcome.document)
 
 
 async def write_quota(

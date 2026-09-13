@@ -1,10 +1,13 @@
 """Domain records for the vault bounded context."""
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
 from uuid import UUID
+
+from .constants import HUMAN_COLLECTION_PREFIX
 
 
 class DocumentKind(str, Enum):
@@ -54,6 +57,40 @@ class DocumentCollection(str, Enum):
 
     AGENT = "agent"
     HUMAN = "human"
+
+
+# One control character is enough to make a path unsafe to hand to a
+# filesystem, a shell, or a log line.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def human_path_problem(vault_path: str) -> str | None:
+    """Why a path cannot name a Human note, or None when it can (ADR 0051).
+
+    The database refuses most of these itself, but as an IntegrityError that
+    reaches a caller as a 500; stated here, the rule is a 422 an author can act
+    on, applied before any lock is taken. Beyond the shape the database checks,
+    a Human path names a Markdown file in someone's vault, so it ends in `.md`,
+    and no segment starts with a dot, which is how Obsidian and every other tool
+    marks configuration rather than notes.
+    """
+
+    if not vault_path.startswith(HUMAN_COLLECTION_PREFIX):
+        return f"a Human note's path must start with {HUMAN_COLLECTION_PREFIX!r}"
+    if len(vault_path) > 1024:
+        return "path must be at most 1024 characters"
+    if not vault_path.endswith(".md"):
+        return "path must name a Markdown file ending in '.md'"
+    if "\\" in vault_path or _CONTROL_CHARACTER.search(vault_path):
+        return "path must not contain a backslash or a control character"
+    segments = vault_path.split("/")
+    if any(segment == "" for segment in segments):
+        return "path must not contain an empty segment"
+    if any(segment.startswith(".") for segment in segments):
+        return "no path segment may start with '.'"
+    if any(segment != segment.strip() for segment in segments):
+        return "path segments must not start or end with whitespace"
+    return None
 
 
 class PromotionStatus(str, Enum):

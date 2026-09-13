@@ -20,6 +20,7 @@ from sqlalchemy import (
     tuple_,
     update,
 )
+from sqlalchemy import text as text_sql
 from sqlalchemy.dialects.postgresql import ARRAY as PostgresArray
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .auth import VaultCredential
 from .constants import (
     AUTHORIZATION_CODE_TTL_SECONDS,
+    CORPUS_LOCK_KEY,
     OAUTH_CLIENT_LOCK_KEY,
     PENDING_AUTHORIZATION_TTL_SECONDS,
     REFRESH_TOKEN_TTL_SECONDS,
@@ -64,6 +66,8 @@ from .tables import (
     vault_compile_runs,
     vault_document_embeddings,
     vault_documents,
+    vault_human_changes,
+    vault_human_revisions,
     vault_oauth_authorization_codes,
     vault_oauth_clients,
     vault_oauth_grants,
@@ -447,6 +451,109 @@ class VaultDocumentRepository:
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
+
+    async def replace_human_content(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        content: NewVaultDocument,
+        *,
+        expected_resource_revision: int,
+    ) -> VaultDocument | None:
+        """Replace a Human note's authored content, if still at that revision.
+
+        ``replace_content``'s counterpart for the Human collection (ADR 0051),
+        and wider on purpose: a person's governance type, status and unmodelled
+        frontmatter are authored in the file they edit, where an agent note's
+        are the service's. Identity, path, kind, visibility and contributor
+        still stay put.
+
+        Both revisions move, since this changes content. The resource-revision
+        predicate is the compare-and-swap, so a caller that checked under the
+        corpus lock and one that did not get the same answer. None when nothing
+        matched.
+        """
+
+        result = await connection.execute(
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == DocumentCollection.HUMAN.value)
+            .where(vault_documents.c.resource_revision == expected_resource_revision)
+            .values(
+                title=content.title,
+                summary=content.summary,
+                body=content.body,
+                tags=list(content.tags),
+                aliases=list(content.aliases),
+                facets=content.facets,
+                related_ids=list(content.related_ids),
+                source_ids=list(content.source_ids),
+                source_url=content.source_url,
+                doc_type=content.doc_type,
+                doc_status=content.doc_status,
+                frontmatter=content.frontmatter,
+                updated_at=func.now(),
+                content_revision=vault_documents.c.content_revision + 1,
+                resource_revision=vault_documents.c.resource_revision + 1,
+            )
+            .returning(*self._domain_columns)
+        )
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def move_human_note(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        vault_path: str,
+        expected_resource_revision: int,
+    ) -> VaultDocument | None:
+        """Give a Human note a new path, if still at that revision.
+
+        Content is untouched, so ``content_revision`` and ``updated_at`` stay
+        where they are -- the reading ``set_promotion_status`` gives a move.
+        ``resource_revision`` records it, which is what it exists for. The
+        collection CHECK refuses a path outside ``Human/``, so a caller that
+        skipped the service's own check still cannot carry a note across.
+        """
+
+        result = await connection.execute(
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == DocumentCollection.HUMAN.value)
+            .where(vault_documents.c.resource_revision == expected_resource_revision)
+            .values(
+                vault_path=vault_path,
+                resource_revision=vault_documents.c.resource_revision + 1,
+            )
+            .returning(*self._domain_columns)
+        )
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def id_at_path_ignoring_case(
+        self,
+        connection: AsyncConnection,
+        vault_path: str,
+    ) -> str | None:
+        """The document at this path under case-insensitive comparison, if any.
+
+        ``vault_path`` is UNIQUE, and that comparison is exact. Two paths that
+        differ only in case are two rows here and one file on Windows and on a
+        default macOS volume, so a Human write refuses the second before it
+        exists (ADR 0051). True only under the corpus lock, like every "is this
+        name free" answer in this module. Unindexed: `lower(vault_path)` scans,
+        which is nothing at hundreds of rows and wants an expression index well
+        before tens of thousands.
+        """
+
+        result = await connection.execute(
+            select(vault_documents.c.id)
+            .where(func.lower(vault_documents.c.vault_path) == func.lower(vault_path))
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def set_summary(
         self,
@@ -1437,6 +1544,95 @@ class WriteRequestRecord:
     state: str
     document_id: str | None
     response: dict[str, Any] | None
+
+
+async def _holds_corpus_lock(connection: AsyncConnection) -> bool:
+    """Whether this session holds the corpus advisory lock.
+
+    A bigint advisory key appears in ``pg_locks`` split in two: its high half in
+    ``classid``, its low half in ``objid``, with ``objsubid = 1``.
+    """
+
+    result = await connection.execute(
+        text_sql(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks "
+            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted "
+            "AND classid = CAST(:high AS oid) AND objid = CAST(:low AS oid) "
+            "AND objsubid = 1)"
+        ),
+        {"high": CORPUS_LOCK_KEY >> 32, "low": CORPUS_LOCK_KEY & 0xFFFFFFFF},
+    )
+    return bool(result.scalar_one())
+
+
+class VaultHumanHistoryRepository:
+    """Revision snapshots and the change feed for Human notes (ADRs 0049, 0051).
+
+    One call writes both, because they are two halves of one fact: an accepted
+    Human change is a snapshot someone can restore and a position a sync client
+    resumes past. A change with only one of them is a feed that lies or a
+    history nothing can reach.
+    """
+
+    async def record(
+        self,
+        connection: AsyncConnection,
+        document: VaultDocument,
+        *,
+        operation: str,
+        change_kind: str,
+        principal_id: str,
+        request_id: str,
+    ) -> int:
+        """Append one snapshot and one feed entry; return the feed position.
+
+        Refuses to run unless this transaction holds the corpus advisory lock.
+        The position is an identity, allocated at insert rather than at commit,
+        so it is monotonic in commit order only while writers are serialized. A
+        writer that skipped the lock could commit a position a reader has
+        already moved past, and nothing downstream could detect it; checking
+        ``pg_locks`` turns that into an error at the write.
+        """
+
+        if document.collection is not DocumentCollection.HUMAN:
+            raise ValueError(f"{document.id} is not a Human note")
+        if not await _holds_corpus_lock(connection):
+            raise RuntimeError("Human history must be written under the corpus lock")
+
+        await connection.execute(
+            insert(vault_human_revisions).values(
+                document_id=document.id,
+                resource_revision=document.resource_revision,
+                content_revision=document.content_revision,
+                operation=operation,
+                vault_path=document.vault_path,
+                doc_type=document.doc_type,
+                doc_status=document.doc_status,
+                title=document.title,
+                summary=document.summary,
+                body=document.body,
+                tags=list(document.tags),
+                aliases=list(document.aliases),
+                frontmatter=document.frontmatter,
+                facets=document.facets,
+                related_ids=list(document.related_ids),
+                source_ids=list(document.source_ids),
+                source_url=document.source_url,
+                principal_id=principal_id,
+                request_id=request_id,
+            )
+        )
+        result = await connection.execute(
+            insert(vault_human_changes)
+            .values(
+                document_id=document.id,
+                resource_revision=document.resource_revision,
+                change_kind=change_kind,
+                vault_path=document.vault_path,
+            )
+            .returning(vault_human_changes.c.id)
+        )
+        return int(result.scalar_one())
 
 
 class VaultWriteRequestRepository:

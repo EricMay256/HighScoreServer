@@ -43,6 +43,7 @@ from .domain import (
     VaultDocumentBrief,
     VaultReviewCase,
     VectorSearchStatus,
+    human_path_problem,
 )
 from .facets import normalize_facets
 from .search import SearchResult
@@ -1656,6 +1657,109 @@ def search_response(
     return _assemble(hits, truncated=truncated)
 
 
+# Mirrors `vault_documents_doc_type_format` and `..._doc_status_format`, so a
+# shape the database would refuse is a 422 here rather than a 500 there.
+_GOVERNANCE_VALUE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$"
+# JSONB bounds nothing useful on its own; this is the bound the transport keeps.
+MAX_FRONTMATTER_CHARS = 20_000
+
+
+class VaultHumanNoteContent(VaultDocumentContentRequest):
+    """What a Human write carries: the shared content, and its author's metadata.
+
+    An agent note's type and status are assigned by the service. A person's are
+    authored, in the frontmatter of the file being edited, so a sync client that
+    could not send them would lose them on every save. ``frontmatter`` holds the
+    keys the schema does not model, for the round trip the importer keeps (ADR
+    0013). None of the three is embedded, and none decides `ai_read`, which is
+    the folder's (ADR 0014).
+    """
+
+    doc_type: str | None = Field(default=None, pattern=_GOVERNANCE_VALUE_PATTERN)
+    doc_status: str | None = Field(default=None, pattern=_GOVERNANCE_VALUE_PATTERN)
+    frontmatter: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Frontmatter keys the schema does not model, kept verbatim.",
+    )
+
+    @field_validator("frontmatter")
+    @classmethod
+    def bound_frontmatter(cls, frontmatter: dict[str, Any]) -> dict[str, Any]:
+        if len(json.dumps(frontmatter, ensure_ascii=False)) > MAX_FRONTMATTER_CHARS:
+            raise ValueError(
+                f"frontmatter must serialize to at most {MAX_FRONTMATTER_CHARS} "
+                "characters"
+            )
+        return frontmatter
+
+
+def _human_path(vault_path: str) -> str:
+    problem = human_path_problem(vault_path)
+    if problem is not None:
+        raise ValueError(problem)
+    return vault_path
+
+
+class VaultHumanNoteCreateRequest(VaultHumanNoteContent):
+    """A new Human note, at a path its author chose (ADR 0051)."""
+
+    vault_path: str = Field(
+        description=(
+            "Where the note lives: under 'Human/', ending in '.md'. Chosen by "
+            "the author, where an agent note's path is assigned."
+        ),
+    )
+    operation_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+        description=(
+            "A client-generated id for this create, persisted by the client "
+            "before sending. Resending it with the same body returns the note it "
+            "created rather than a second one; the same id with a different "
+            "body is refused with 409."
+        ),
+    )
+
+    @field_validator("vault_path")
+    @classmethod
+    def validate_vault_path(cls, vault_path: str) -> str:
+        return _human_path(vault_path)
+
+
+class VaultHumanNoteEditRequest(VaultHumanNoteContent):
+    """Full replacement of a Human note's authored content, against a revision.
+
+    A replacement for the reason ``VaultDocumentUpdateRequest`` is one: the
+    client holds the whole file. No operation id: resending an edit converges,
+    because a request the note already matches succeeds without writing.
+    """
+
+    base_resource_revision: int = Field(
+        ge=1,
+        description="The `resource_revision` this edit was made against.",
+    )
+
+
+class VaultHumanNoteMoveRequest(BaseModel):
+    """Rename or move a Human note within the Human tree (ADR 0051)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vault_path: str = Field(
+        description="The new path: under 'Human/', ending in '.md'.",
+    )
+    base_resource_revision: int = Field(
+        ge=1,
+        description="The `resource_revision` this move was made against.",
+    )
+
+    @field_validator("vault_path")
+    @classmethod
+    def validate_vault_path(cls, vault_path: str) -> str:
+        return _human_path(vault_path)
+
+
 class VaultHumanNoteDetail(VaultDocumentDetail):
     """A Human note as the Human read surface returns it (ADR 0050).
 
@@ -1670,6 +1774,14 @@ class VaultHumanNoteDetail(VaultDocumentDetail):
             "Moves on every change a client can see -- an edit, a move, a "
             "status change -- where `content_revision` moves on content alone. "
             "The version a Human write is checked against."
+        ),
+    )
+    frontmatter: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Frontmatter keys the schema does not model, as the author wrote "
+            "them. On the Human surface only: a sync client writes whole files "
+            "back, and the agent read model has no use for them."
         ),
     )
 
@@ -1759,6 +1871,7 @@ def human_note_detail(document: VaultDocument) -> VaultHumanNoteDetail:
     return VaultHumanNoteDetail(
         **document_detail(document).model_dump(),
         resource_revision=document.resource_revision,
+        frontmatter=dict(document.frontmatter),
     )
 
 
@@ -1787,8 +1900,11 @@ def note_edge(document: VaultDocumentBrief) -> VaultNoteEdge:
     )
 
 
-def canonical_request_digest(body: VaultContributionRequest) -> bytes:
-    """Hash a contribution request so a reused idempotency key can be checked.
+def canonical_request_digest(body: BaseModel) -> bytes:
+    """Hash a write request so a reused idempotency key can be checked.
+
+    Contributions and Human creates share it (ADR 0051): they share the write
+    ledger, so they share one rule and one ``REQUEST_DIGEST_VERSION``.
 
     Hashes the validated model rather than the raw bytes: two JSON documents
     differing only in key order or whitespace are the same request, and

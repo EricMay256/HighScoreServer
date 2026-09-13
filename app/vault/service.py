@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text as text_sql
@@ -44,6 +45,7 @@ from .domain import (
     VaultDocument,
     VaultReviewCase,
     VectorSearchStatus,
+    human_path_problem,
 )
 from .embedding_text import assemble_embedding_text, embedding_text_digest
 from .embeddings import (
@@ -68,13 +70,14 @@ from .governance import (
     validate,
 )
 from .origin import normalize_origin, validate_origin
-from .read_policy import READABLE_STATUSES
+from .read_policy import READABLE_STATUSES, is_readable_path
 from .repository import (
     VaultAmendmentProposalRepository,
     VaultAuditEventRepository,
     VaultCompileRunRepository,
     VaultDocumentEmbeddingRepository,
     VaultDocumentRepository,
+    VaultHumanHistoryRepository,
     VaultReviewCaseRepository,
     VaultWikiPageRepository,
     VaultWriteRequestRepository,
@@ -3694,3 +3697,447 @@ def _plan_items(
         )
 
     return tuple(items)
+
+
+# ── Human notes (ADR 0051) ─────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class HumanNoteContent:
+    """A Human note's authored content, as the service takes it."""
+
+    title: str
+    body: str
+    summary: str | None = None
+    tags: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    facets: dict[str, list[str]] = field(default_factory=dict)
+    related_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    source_url: str | None = None
+    doc_type: str | None = None
+    doc_status: str | None = None
+    frontmatter: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class HumanCreateRequest:
+    content: HumanNoteContent
+    vault_path: str
+    principal_id: str
+    request_id: str
+    operation_id: str
+    request_sha256: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class HumanEditRequest:
+    document_id: str
+    content: HumanNoteContent
+    base_resource_revision: int
+    principal_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class HumanMoveRequest:
+    document_id: str
+    vault_path: str
+    base_resource_revision: int
+    principal_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class HumanWriteOutcome:
+    document: VaultDocument
+    # False when the note already matched the request: how a retry after a lost
+    # response succeeds without writing a second time.
+    changed: bool
+    replayed: bool = False
+
+
+class HumanNoteInvalid(ValueError):
+    """The content or path of a Human write failed validation."""
+
+    def __init__(self, errors: list[str]) -> None:
+        super().__init__("; ".join(errors))
+        self.errors = tuple(errors)
+
+
+class HumanRevisionConflict(Exception):
+    """The note moved on since the revision the write was made against."""
+
+    def __init__(self, document_id: str, current_resource_revision: int) -> None:
+        super().__init__(
+            f"{document_id} is at resource revision {current_resource_revision}"
+        )
+        self.document_id = document_id
+        self.current_resource_revision = current_resource_revision
+
+
+class HumanPathTaken(Exception):
+    """Another note already has this path, ignoring case."""
+
+
+class HumanMoveChangesReadPolicy(Exception):
+    """A move that would change whether agents may read the note."""
+
+
+_HUMAN_CONTENT_FIELDS = (
+    "title",
+    "summary",
+    "body",
+    "tags",
+    "aliases",
+    "facets",
+    "related_ids",
+    "source_ids",
+    "source_url",
+    "doc_type",
+    "doc_status",
+    "frontmatter",
+)
+
+
+def _human_candidate(
+    *,
+    document_id: str,
+    vault_path: str,
+    content: HumanNoteContent,
+    contributed_by: str,
+    provenance: dict[str, Any],
+) -> NewVaultDocument:
+    return NewVaultDocument(
+        id=document_id,
+        kind=DocumentKind.NOTE,
+        status=DocumentStatus.ACTIVE,
+        vault_path=vault_path,
+        schema_version=NOTE_SCHEMA_VERSION,
+        doc_type=content.doc_type,
+        doc_status=content.doc_status,
+        title=content.title,
+        summary=content.summary,
+        body=content.body,
+        tags=content.tags,
+        aliases=content.aliases,
+        # Normalized in the service for the reason contributions are: a caller
+        # that is not the HTTP route must store facets the same way.
+        facets=normalize_facets(content.facets),
+        frontmatter=dict(content.frontmatter),
+        related_ids=content.related_ids,
+        source_ids=content.source_ids,
+        source_url=content.source_url,
+        contributed_by=contributed_by,
+        provenance=provenance,
+        collection=DocumentCollection.HUMAN,
+    )
+
+
+def _human_content_errors(content: HumanNoteContent, contributed_by: str) -> list[str]:
+    """Governance and facet validation, before any lock is taken.
+
+    Validation reads content alone, so the candidate's identity and path here
+    are placeholders; the real ones are only known under the lock.
+    """
+
+    try:
+        candidate = _human_candidate(
+            document_id="validation",
+            vault_path="Human/validation.md",
+            content=content,
+            contributed_by=contributed_by,
+            provenance={},
+        )
+    except FacetNameCollision as exc:
+        return [str(exc)]
+    return validate(candidate) + validate_facets(candidate.facets)
+
+
+async def _lock_corpus(connection: AsyncConnection) -> None:
+    await connection.execute(
+        text_sql("SELECT pg_advisory_xact_lock(:key)"), {"key": CORPUS_LOCK_KEY}
+    )
+
+
+class VaultHumanNoteService:
+    """Create, edit and move Human notes (ADR 0051).
+
+    No embedding call and no dedup gate. A Human save is keyword-searchable on
+    commit and semantically indexed by the daily job, and a person's note is
+    not a contribution to adjudicate (ADR 0050). Every accepted write is one
+    transaction under the corpus lock that changes the row, records its
+    snapshot and feed entry, and appends the audit event, so nothing observes
+    a change without its history.
+
+    Edit and move are retry-safe without a key. A request the note already
+    matches succeeds without writing, whatever base it names; only a request
+    that would change a note that has moved on is a conflict. A client
+    resending after a lost response therefore gets its own result back, not a
+    409 for a change it made itself. Create mints identity, so it takes an
+    operation id and the write ledger instead.
+    """
+
+    def __init__(self, transactions: VaultTransactionService) -> None:
+        self._transactions = transactions
+
+    async def create(self, request: HumanCreateRequest) -> HumanWriteOutcome:
+        try:
+            return await self._create(request)
+        except IdempotencyConflict as exc:
+            # Recorded apart from the transaction that refused, which rolled
+            # back -- the same arrangement the contribution path uses.
+            async with self._transactions.transaction() as connection:
+                await VaultAuditEventRepository().record(
+                    connection,
+                    operation="vault.human.create",
+                    outcome="conflict",
+                    request_id=request.request_id,
+                    principal_id=request.principal_id,
+                    target_type="document" if exc.document_id else None,
+                    target_id=exc.document_id,
+                    idempotency_key=request.operation_id,
+                )
+            raise
+
+    async def _create(self, request: HumanCreateRequest) -> HumanWriteOutcome:
+        problem = human_path_problem(request.vault_path)
+        errors = [problem] if problem is not None else []
+        contributed_by = f"human:{request.principal_id}"
+        errors += _human_content_errors(request.content, contributed_by)
+        if errors:
+            raise HumanNoteInvalid(errors)
+
+        candidate = _human_candidate(
+            document_id=uuid4().hex,
+            vault_path=request.vault_path,
+            content=request.content,
+            contributed_by=contributed_by,
+            provenance={"principal_id": request.principal_id, "surface": "human"},
+        )
+        documents = VaultDocumentRepository()
+        writes = VaultWriteRequestRepository()
+
+        async with self._transactions.transaction() as connection:
+            await _lock_corpus(connection)
+
+            prior = await writes.get(
+                connection, request.principal_id, request.operation_id
+            )
+            if prior is not None:
+                return await self._replay_create(connection, prior, request)
+
+            if await documents.id_at_path_ignoring_case(
+                connection, request.vault_path
+            ) is not None:
+                raise HumanPathTaken(request.vault_path)
+
+            stored = await documents.insert(connection, candidate)
+            await VaultHumanHistoryRepository().record(
+                connection,
+                stored,
+                operation="create",
+                change_kind="upsert",
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
+            await writes.complete(
+                connection,
+                principal_id=request.principal_id,
+                idempotency_key=request.operation_id,
+                request_sha256=request.request_sha256,
+                digest_version=REQUEST_DIGEST_VERSION,
+                state="inserted",
+                document_id=stored.id,
+                response={
+                    "status": "created",
+                    "collection": DocumentCollection.HUMAN.value,
+                },
+            )
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.human.create",
+                outcome="created",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=stored.id,
+                idempotency_key=request.operation_id,
+            )
+        return HumanWriteOutcome(document=stored, changed=True)
+
+    @staticmethod
+    async def _replay_create(
+        connection: AsyncConnection,
+        prior: WriteRequestRecord,
+        request: HumanCreateRequest,
+    ) -> HumanWriteOutcome:
+        """A create resent with an operation id that already settled.
+
+        The ledger is shared with contributions, and one OAuth client may hold
+        an Agent family and a Human family under one principal. So the prior
+        entry must have produced a Human note, not merely carry the key. No
+        Human create predates the current digest rule, so there is no
+        grandfathered digest to accept.
+        """
+
+        produced_human = (prior.response or {}).get(
+            "collection"
+        ) == DocumentCollection.HUMAN.value
+        if not produced_human or prior.request_sha256 != request.request_sha256:
+            raise IdempotencyConflict(
+                "operation id was already used for a different request",
+                document_id=prior.document_id,
+            )
+        document = (
+            await VaultDocumentRepository().get_by_id(
+                connection,
+                prior.document_id,
+                collection=DocumentCollection.HUMAN,
+            )
+            if prior.document_id is not None
+            else None
+        )
+        if document is None:
+            # Created and since removed. A replay must not bring it back.
+            raise DocumentNotFound(prior.document_id or request.operation_id)
+        await VaultAuditEventRepository().record(
+            connection,
+            operation="vault.human.create",
+            outcome="replayed",
+            request_id=request.request_id,
+            principal_id=request.principal_id,
+            target_type="document",
+            target_id=document.id,
+            idempotency_key=request.operation_id,
+        )
+        return HumanWriteOutcome(document=document, changed=False, replayed=True)
+
+    async def edit(self, request: HumanEditRequest) -> HumanWriteOutcome:
+        errors = _human_content_errors(
+            request.content, f"human:{request.principal_id}"
+        )
+        if errors:
+            raise HumanNoteInvalid(errors)
+
+        documents = VaultDocumentRepository()
+        async with self._transactions.transaction() as connection:
+            await _lock_corpus(connection)
+            current = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=READABLE_STATUSES,
+                collection=DocumentCollection.HUMAN,
+            )
+            if current is None:
+                raise DocumentNotFound(request.document_id)
+
+            candidate = _human_candidate(
+                document_id=current.id,
+                vault_path=current.vault_path,
+                content=request.content,
+                contributed_by=current.contributed_by,
+                provenance=current.provenance,
+            )
+            if all(
+                getattr(current, name) == getattr(candidate, name)
+                for name in _HUMAN_CONTENT_FIELDS
+            ):
+                await self._audit(connection, "vault.human.edit", "unchanged", request)
+                return HumanWriteOutcome(document=current, changed=False)
+            if current.resource_revision != request.base_resource_revision:
+                raise HumanRevisionConflict(current.id, current.resource_revision)
+
+            updated = await documents.replace_human_content(
+                connection,
+                current.id,
+                candidate,
+                expected_resource_revision=request.base_resource_revision,
+            )
+            if updated is None:
+                # Unreachable under the lock; reported as the conflict it would be.
+                raise HumanRevisionConflict(current.id, current.resource_revision)
+            await VaultHumanHistoryRepository().record(
+                connection,
+                updated,
+                operation="edit",
+                change_kind="upsert",
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
+            await self._audit(connection, "vault.human.edit", "edited", request)
+        return HumanWriteOutcome(document=updated, changed=True)
+
+    async def move(self, request: HumanMoveRequest) -> HumanWriteOutcome:
+        problem = human_path_problem(request.vault_path)
+        if problem is not None:
+            raise HumanNoteInvalid([problem])
+
+        documents = VaultDocumentRepository()
+        async with self._transactions.transaction() as connection:
+            await _lock_corpus(connection)
+            current = await documents.get_by_id(
+                connection,
+                request.document_id,
+                statuses=READABLE_STATUSES,
+                collection=DocumentCollection.HUMAN,
+            )
+            if current is None:
+                raise DocumentNotFound(request.document_id)
+            if current.vault_path == request.vault_path:
+                await self._audit(connection, "vault.human.move", "unchanged", request)
+                return HumanWriteOutcome(document=current, changed=False)
+            if current.resource_revision != request.base_resource_revision:
+                raise HumanRevisionConflict(current.id, current.resource_revision)
+
+            # ADR 0048: a move cannot silently widen or narrow who reads a
+            # note. That is a governance change, made where governance is.
+            readable_now = is_readable_path(current.vault_path)
+            if readable_now != is_readable_path(request.vault_path):
+                raise HumanMoveChangesReadPolicy(
+                    "moving this note would make it "
+                    + ("unreadable" if readable_now else "readable")
+                    + " to agents; change the folder's ai_read policy instead"
+                )
+
+            holder = await documents.id_at_path_ignoring_case(
+                connection, request.vault_path
+            )
+            if holder is not None and holder != current.id:
+                raise HumanPathTaken(request.vault_path)
+
+            moved = await documents.move_human_note(
+                connection,
+                current.id,
+                vault_path=request.vault_path,
+                expected_resource_revision=request.base_resource_revision,
+            )
+            if moved is None:
+                raise HumanRevisionConflict(current.id, current.resource_revision)
+            await VaultHumanHistoryRepository().record(
+                connection,
+                moved,
+                operation="move",
+                change_kind="upsert",
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
+            await self._audit(connection, "vault.human.move", "moved", request)
+        return HumanWriteOutcome(document=moved, changed=True)
+
+    @staticmethod
+    async def _audit(
+        connection: AsyncConnection,
+        operation: str,
+        outcome: str,
+        request: HumanEditRequest | HumanMoveRequest,
+    ) -> None:
+        await VaultAuditEventRepository().record(
+            connection,
+            operation=operation,
+            outcome=outcome,
+            request_id=request.request_id,
+            principal_id=request.principal_id,
+            target_type="document",
+            target_id=request.document_id,
+        )
