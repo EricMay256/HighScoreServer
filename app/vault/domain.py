@@ -662,3 +662,47 @@ class CompileWorkItem:
     # "new-source" -- a note no page covers.
     reason: str
     source_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HumanChange:
+    """One entry of the Human change feed (ADR 0049, 0052)."""
+
+    position: int
+    document_id: str
+    resource_revision: int
+    # "upsert" or "delete". A delete is a tombstone: the note is gone, and this
+    # entry is how a client that was offline learns it.
+    change_kind: str
+    vault_path: str
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class HumanRevision:
+    """One snapshot from a Human note's history (ADR 0049).
+
+    A ``delete`` snapshot holds the content the note had when it was removed,
+    which is what a restore puts back.
+    """
+
+    document_id: str
+    resource_revision: int
+    content_revision: int
+    operation: str
+    vault_path: str
+    title: str
+    body: str
+    principal_id: str
+    request_id: str
+    occurred_at: datetime
+    doc_type: str | None = None
+    doc_status: str | None = None
+    summary: str | None = None
+    tags: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    frontmatter: dict[str, Any] = field(default_factory=dict)
+    facets: dict[str, list[str]] = field(default_factory=dict)
+    related_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    source_url: str | None = None

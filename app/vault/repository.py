@@ -42,6 +42,8 @@ from .domain import (
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
+    HumanChange,
+    HumanRevision,
     NewVaultDocument,
     NoteCompileState,
     NoteSort,
@@ -358,7 +360,19 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         document: NewVaultDocument,
+        *,
+        content_revision: int | None = None,
+        resource_revision: int | None = None,
+        created_at: datetime | None = None,
     ) -> VaultDocument:
+        """Insert a document; the three keywords are for a restore alone.
+
+        A new row starts both revisions at 1 and ``created_at`` at now. A Human
+        note restored from its history continues them instead (ADR 0052), so a
+        client holding the tombstone's revision sees the restore as newer, and
+        the note keeps the day it was first written.
+        """
+
         statement = (
             insert(vault_documents)
             .values(
@@ -390,6 +404,17 @@ class VaultDocumentRepository:
             )
             .returning(*self._domain_columns)
         )
+        restored = {
+            name: value
+            for name, value in (
+                ("content_revision", content_revision),
+                ("resource_revision", resource_revision),
+                ("created_at", created_at),
+            )
+            if value is not None
+        }
+        if restored:
+            statement = statement.values(**restored)
         result = await connection.execute(statement)
         return document_from_row(result.mappings().one())
 
@@ -1565,6 +1590,42 @@ async def _holds_corpus_lock(connection: AsyncConnection) -> bool:
     return bool(result.scalar_one())
 
 
+def _human_change_from_row(row: RowMapping) -> HumanChange:
+    return HumanChange(
+        position=int(row["id"]),
+        document_id=row["document_id"],
+        resource_revision=int(row["resource_revision"]),
+        change_kind=row["change_kind"],
+        vault_path=row["vault_path"],
+        occurred_at=row["occurred_at"],
+    )
+
+
+def _human_revision_from_row(row: RowMapping) -> HumanRevision:
+    return HumanRevision(
+        document_id=row["document_id"],
+        resource_revision=int(row["resource_revision"]),
+        content_revision=int(row["content_revision"]),
+        operation=row["operation"],
+        vault_path=row["vault_path"],
+        title=row["title"],
+        body=row["body"],
+        principal_id=row["principal_id"],
+        request_id=row["request_id"],
+        occurred_at=row["occurred_at"],
+        doc_type=row["doc_type"],
+        doc_status=row["doc_status"],
+        summary=row["summary"],
+        tags=tuple(row["tags"]),
+        aliases=tuple(row["aliases"]),
+        frontmatter=dict(row["frontmatter"]),
+        facets={k: list(v) for k, v in dict(row["facets"]).items()},
+        related_ids=tuple(row["related_ids"]),
+        source_ids=tuple(row["source_ids"]),
+        source_url=row["source_url"],
+    )
+
+
 class VaultHumanHistoryRepository:
     """Revision snapshots and the change feed for Human notes (ADRs 0049, 0051).
 
@@ -1633,6 +1694,82 @@ class VaultHumanHistoryRepository:
             .returning(vault_human_changes.c.id)
         )
         return int(result.scalar_one())
+
+    async def changes_after(
+        self,
+        connection: AsyncConnection,
+        position: int,
+        *,
+        limit: int,
+    ) -> tuple[HumanChange, ...]:
+        """Feed entries past a position, oldest first.
+
+        By position and nothing else. Never by ``occurred_at``: two changes can
+        share a timestamp, and the whole ordering guarantee is the identity's.
+        """
+
+        result = await connection.execute(
+            select(vault_human_changes)
+            .where(vault_human_changes.c.id > position)
+            .order_by(vault_human_changes.c.id)
+            .limit(limit)
+        )
+        return tuple(_human_change_from_row(row) for row in result.mappings())
+
+    async def change_at(
+        self,
+        connection: AsyncConnection,
+        position: int,
+    ) -> HumanChange | None:
+        result = await connection.execute(
+            select(vault_human_changes).where(vault_human_changes.c.id == position)
+        )
+        row = result.mappings().one_or_none()
+        return _human_change_from_row(row) if row is not None else None
+
+    async def head(self, connection: AsyncConnection) -> HumanChange | None:
+        """The newest feed entry, or None when the feed is empty."""
+
+        result = await connection.execute(
+            select(vault_human_changes)
+            .order_by(vault_human_changes.c.id.desc())
+            .limit(1)
+        )
+        row = result.mappings().one_or_none()
+        return _human_change_from_row(row) if row is not None else None
+
+    async def latest_change_for(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+    ) -> HumanChange | None:
+        result = await connection.execute(
+            select(vault_human_changes)
+            .where(vault_human_changes.c.document_id == document_id)
+            .order_by(vault_human_changes.c.id.desc())
+            .limit(1)
+        )
+        row = result.mappings().one_or_none()
+        return _human_change_from_row(row) if row is not None else None
+
+    async def revision(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        latest: bool,
+    ) -> HumanRevision | None:
+        """A note's newest snapshot, or its first: what a restore reads back."""
+
+        order = vault_human_revisions.c.id.desc() if latest else vault_human_revisions.c.id
+        result = await connection.execute(
+            select(vault_human_revisions)
+            .where(vault_human_revisions.c.document_id == document_id)
+            .order_by(order)
+            .limit(1)
+        )
+        row = result.mappings().one_or_none()
+        return _human_revision_from_row(row) if row is not None else None
 
 
 class VaultWriteRequestRepository:

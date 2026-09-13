@@ -33,9 +33,12 @@ from typing import Final
 
 
 __all__ = [
+    "CHANGE_FEED_WALK",
     "MAX_CURSOR_CHARS",
     "InvalidCursor",
+    "decode_change_cursor",
     "decode_cursor",
+    "encode_change_cursor",
     "encode_cursor",
 ]
 
@@ -196,3 +199,48 @@ def decode_cursor(token: str, *, sort: str) -> tuple[str, str]:
             "start the listing again after changing sort"
         )
     return key, note_id
+
+
+# ── The Human change feed (vault ADR 0052) ────────────────────────────────────
+#
+# The feed is one more ordered walk, so its cursor is this module's token rather
+# than a second format: a walk name nothing else uses, the position, and the
+# entry that sat there. The position alone would be enough to resume; the entry
+# is what lets the feed notice that a position it once issued now names
+# something else -- a database restored to an earlier point, where new changes
+# reuse old positions and a client resuming past them would silently skip them.
+CHANGE_FEED_WALK: Final = "human-changes"
+
+# A feed position is a bigint identity. Nineteen digits hold every one, and the
+# bound keeps an absurd key from reaching int(), whose own ceiling raises.
+_MAX_POSITION_DIGITS: Final = 19
+
+
+def encode_change_cursor(position: int, resource_revision: int, note_id: str) -> str:
+    """The token naming one feed entry, or the start of the feed at position 0."""
+
+    return encode_cursor(CHANGE_FEED_WALK, f"{position}:{resource_revision}", note_id)
+
+
+def decode_change_cursor(token: str) -> tuple[int, int, str]:
+    """The ``(position, resource_revision, note_id)`` a feed read resumes after.
+
+    Position 0 is the start of the feed and names no entry, so it carries no
+    revision and no note. Anything else is refused as invalid, including a key
+    that parses to integers but is not how this module would have written them.
+    """
+
+    key, note_id = decode_cursor(token, sort=CHANGE_FEED_WALK)
+    position_text, separator, revision_text = key.partition(":")
+    digits_only = all(
+        part.isascii() and part.isdigit() and len(part) <= _MAX_POSITION_DIGITS
+        for part in (position_text, revision_text)
+    )
+    if not separator or not digits_only:
+        raise InvalidCursor("cursor is not a valid token")
+    position, revision = int(position_text), int(revision_text)
+    if f"{position}:{revision}" != key:
+        raise InvalidCursor("cursor is not a valid token")
+    if (position == 0) != (revision == 0 and note_id == ""):
+        raise InvalidCursor("cursor is not a valid token")
+    return position, revision, note_id

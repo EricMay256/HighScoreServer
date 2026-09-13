@@ -29,6 +29,7 @@ from pydantic import (
 
 from .body_diff import MAX_BODY_DIFF_CHARS, BodyChangeSummary
 from .constants import SUMMARY_GRACE_PERIOD_SECONDS
+from .cursors import encode_change_cursor
 from .domain import (
     AmendmentProposalKind,
     AmendmentProposalState,
@@ -36,6 +37,7 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     EdgeRef,
+    HumanChange,
     MetadataChangeSummary,
     VaultAmendmentProposal,
     VaultCompileRun,
@@ -1804,6 +1806,67 @@ class VaultHumanNoteListResponse(VaultNoteListResponse):
     notes: list[VaultHumanNoteSummary]
 
 
+class VaultHumanNoteTombstone(BaseModel):
+    """What a deleted Human note leaves behind (ADR 0052)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str
+    vault_path: str = Field(description="Where the note was when it was deleted.")
+    resource_revision: int = Field(
+        ge=1,
+        description="The tombstone's revision: one past the note's last.",
+    )
+    deleted_at: datetime
+
+
+class VaultHumanChange(BaseModel):
+    """One entry of the Human change feed (ADR 0052)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cursor: str = Field(
+        description=(
+            "Pass as `after` to resume just past this entry. Opaque. Checkpoint "
+            "it only once the entry has been applied locally."
+        ),
+    )
+    note_id: str
+    change_kind: Literal["upsert", "delete"] = Field(
+        description=(
+            "`upsert`: fetch the note if this revision is newer than yours. "
+            "`delete`: the note is gone; keep any unsynced local edits aside "
+            "rather than uploading them."
+        ),
+    )
+    resource_revision: int = Field(ge=1)
+    vault_path: str
+    occurred_at: datetime
+
+
+class VaultHumanChangeListResponse(BaseModel):
+    """One page of the Human change feed, oldest first."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    changes: list[VaultHumanChange]
+    next_cursor: str = Field(
+        description=(
+            "Always present: the last entry's cursor, or the cursor you sent "
+            "when nothing is new. Store it and poll with it."
+        ),
+    )
+    has_more: bool
+
+
+class VaultHumanChangeHead(BaseModel):
+    """Where the feed stands now: the cursor a snapshot starts replaying from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cursor: str
+
+
 def document_detail(document: VaultDocument) -> VaultDocumentDetail:
     """Project a domain record onto the public read model.
 
@@ -1881,6 +1944,36 @@ def human_note_summary(document: VaultDocumentBrief) -> VaultHumanNoteSummary:
     return VaultHumanNoteSummary(
         **note_summary(document).model_dump(),
         resource_revision=document.resource_revision,
+    )
+
+
+def human_change_cursor(change: HumanChange | None) -> str:
+    """The cursor naming a feed entry, or the start of the feed for None."""
+
+    if change is None:
+        return encode_change_cursor(0, 0, "")
+    return encode_change_cursor(
+        change.position, change.resource_revision, change.document_id
+    )
+
+
+def human_change(change: HumanChange) -> VaultHumanChange:
+    return VaultHumanChange(
+        cursor=human_change_cursor(change),
+        note_id=change.document_id,
+        change_kind=change.change_kind,
+        resource_revision=change.resource_revision,
+        vault_path=change.vault_path,
+        occurred_at=change.occurred_at,
+    )
+
+
+def human_note_tombstone(change: HumanChange) -> VaultHumanNoteTombstone:
+    return VaultHumanNoteTombstone(
+        note_id=change.document_id,
+        vault_path=change.vault_path,
+        resource_revision=change.resource_revision,
+        deleted_at=change.occurred_at,
     )
 
 

@@ -58,12 +58,15 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultHumanChangeHead,
+    VaultHumanChangeListResponse,
     VaultHumanNoteContent,
     VaultHumanNoteCreateRequest,
     VaultHumanNoteDetail,
     VaultHumanNoteEditRequest,
     VaultHumanNoteListResponse,
     VaultHumanNoteMoveRequest,
+    VaultHumanNoteTombstone,
     VaultMetadataUpdateRequest,
     VaultNoteEdgeLookupRequest,
     VaultNoteEdgeResponse,
@@ -85,8 +88,11 @@ from .api_models import (
     compile_work_item,
     contribution_response,
     document_detail,
+    human_change,
+    human_change_cursor,
     human_note_detail,
     human_note_summary,
+    human_note_tombstone,
     note_edge,
     note_summary,
     review_case_summary,
@@ -101,6 +107,7 @@ from .constants import (
 from .cursors import (
     MAX_CURSOR_CHARS,
     InvalidCursor,
+    decode_change_cursor,
     decode_cursor,
     encode_cursor,
 )
@@ -126,7 +133,11 @@ from .principal import (
 )
 from .rate_limit import enforce_preauth_ip_limit
 from .read_policy import READABLE_PATH_PREFIXES, READABLE_STATUSES
-from .repository import VaultDocumentRepository, VaultOAuthGrantRepository
+from .repository import (
+    VaultDocumentRepository,
+    VaultHumanHistoryRepository,
+    VaultOAuthGrantRepository,
+)
 from .service import (
     REQUEST_DIGEST_VERSION,
     AmendmentBaseRevisionMismatch,
@@ -145,6 +156,7 @@ from .service import (
     DocumentNotFound,
     DocumentUnderReview,
     HumanCreateRequest,
+    HumanDeleteRequest,
     HumanEditRequest,
     HumanMoveChangesReadPolicy,
     HumanMoveRequest,
@@ -344,6 +356,18 @@ async def require_human_write_scope(
     """Create, edit, rename and move Human notes (ADR 0049's ``vault:human-write``)."""
 
     return await _authenticated((VaultScope.HUMAN_WRITE,), credentials)
+
+
+async def require_human_delete_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Recoverably delete Human notes (ADR 0049's ``vault:human-delete``).
+
+    Its own verb because the Obsidian client is issued without it and the
+    browser with it: local deletion must never become remote deletion.
+    """
+
+    return await _authenticated((VaultScope.HUMAN_DELETE,), credentials)
 
 
 async def search_quota(
@@ -1111,6 +1135,170 @@ async def move_human_note(
     except _HUMAN_WRITE_REFUSALS as exc:
         raise _human_write_error(exc) from exc
     return human_note_detail(outcome.document)
+
+
+# ── Human deletion and the change feed (ADR 0052) ────────────────────────────
+
+
+async def human_delete_quota(
+    credential: VaultCredential = Depends(require_human_delete_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_delete")
+    return credential
+
+
+async def human_changes_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_changes")
+    return credential
+
+
+async def human_changes_head_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_changes_head")
+    return credential
+
+
+@router.delete(
+    "/human/notes/{note_id}",
+    response_model=VaultHumanNoteTombstone,
+    summary="Recoverably delete a Human note, against a resource revision",
+)
+async def delete_human_note(
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    base_resource_revision: int = Query(
+        ge=1,
+        description=(
+            "The `resource_revision` the caller last saw. A note that changed "
+            "since is not deleted: fetch it, and decide again."
+        ),
+    ),
+    credential: VaultCredential = Depends(human_delete_quota),
+) -> VaultHumanNoteTombstone:
+    """The tombstone; the same tombstone when the note is already deleted.
+
+    The revision is a query parameter rather than a body because a DELETE body
+    is something intermediaries are free to drop. The note's history is kept,
+    and an operator can restore it with `scripts/restore_human_note.py`.
+    """
+
+    try:
+        outcome = await _human_service().delete(
+            HumanDeleteRequest(
+                document_id=note_id,
+                base_resource_revision=base_resource_revision,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    return human_note_tombstone(outcome.tombstone)
+
+
+# The bound on one feed page. Entries are small and fixed-size, so this bounds
+# the query rather than the payload.
+MAX_CHANGE_PAGE = 500
+DEFAULT_CHANGE_PAGE = 100
+
+
+@router.get(
+    "/human/changes/head",
+    response_model=VaultHumanChangeHead,
+    dependencies=[Depends(human_changes_head_quota)],
+    summary="The Human change feed's current position",
+)
+async def human_changes_head() -> VaultHumanChangeHead:
+    """Read this first, then list `/human/notes`, then replay from here.
+
+    That order is what makes a snapshot lose nothing without holding one open:
+    a change that commits while the listing is paged has a position past this
+    one, so the replay delivers it, and applying it again is harmless because
+    every entry carries its revision.
+    """
+
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        head = await VaultHumanHistoryRepository().head(connection)
+    return VaultHumanChangeHead(cursor=human_change_cursor(head))
+
+
+@router.get(
+    "/human/changes",
+    response_model=VaultHumanChangeListResponse,
+    dependencies=[Depends(human_changes_quota)],
+    summary="Human notes changed or deleted since a cursor, oldest first",
+)
+async def list_human_changes(
+    after: str | None = Query(
+        default=None,
+        max_length=MAX_CURSOR_CHARS,
+        description=(
+            "A cursor from an entry, `next_cursor`, or the head. Omitted reads "
+            "the feed from its start."
+        ),
+    ),
+    limit: int = Query(default=DEFAULT_CHANGE_PAGE, ge=1, le=MAX_CHANGE_PAGE),
+) -> VaultHumanChangeListResponse:
+    """Every accepted Human change past the cursor, including deletions.
+
+    **410 means take a new snapshot.** A cursor names an entry, and the feed
+    checks that the entry is still there as it was. When it is not, the
+    database is not the one that issued the cursor -- restored to an earlier
+    point, or replaced -- and resuming from its position would skip whatever
+    now sits in its place. Nothing short of a fresh snapshot is safe.
+    """
+
+    if after is None:
+        position, revision, note_id = 0, 0, ""
+    else:
+        try:
+            position, revision, note_id = decode_change_cursor(after)
+        except InvalidCursor as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(error),
+            ) from error
+
+    history = VaultHumanHistoryRepository()
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        if position:
+            anchor = await history.change_at(connection, position)
+            if (
+                anchor is None
+                or anchor.document_id != note_id
+                or anchor.resource_revision != revision
+            ):
+                gone = True
+            else:
+                gone = False
+        else:
+            gone = False
+        page = (
+            ()
+            if gone
+            else await history.changes_after(connection, position, limit=limit + 1)
+        )
+
+    if gone:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="The feed no longer holds that position; take a new snapshot",
+        )
+    visible = page[:limit]
+    return VaultHumanChangeListResponse(
+        changes=[human_change(change) for change in visible],
+        next_cursor=(
+            human_change(visible[-1]).cursor
+            if visible
+            else after or human_change_cursor(None)
+        ),
+        has_more=len(page) > limit,
+    )
 
 
 async def write_quota(

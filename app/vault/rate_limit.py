@@ -108,6 +108,13 @@ LIMITS: dict[str, Limit] = {
     "human_create": Limit(per_minute=30, burst=20),
     "human_edit": Limit(per_minute=60, burst=30),
     "human_move": Limit(per_minute=30, burst=10),
+    # Priced like `retire`: destructive, even when recoverable, and rare.
+    "human_delete": Limit(per_minute=10, burst=5),
+    # A sync client polls the feed every minute and pages when it is behind, so
+    # the bucket is generous in burst and modest in rate. The head is read once
+    # per snapshot.
+    "human_changes": Limit(per_minute=120, burst=30),
+    "human_changes_head": Limit(per_minute=30, burst=10),
     "contribute": Limit(per_minute=30, burst=20),
     # Proposals persist untrusted workflow state but do not embed or mutate the
     # corpus. A distinct bucket matches the distinct OAuth capability.

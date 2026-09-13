@@ -35,6 +35,7 @@ from .domain import (
     DocumentKind,
     DocumentStatus,
     EdgeRef,
+    HumanChange,
     MetadataChangeSummary,
     NewVaultDocument,
     NoteCompileState,
@@ -3860,6 +3861,32 @@ async def _lock_corpus(connection: AsyncConnection) -> None:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class HumanDeleteRequest:
+    document_id: str
+    base_resource_revision: int
+    principal_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class HumanRestoreRequest:
+    document_id: str
+    principal_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class HumanDeleteOutcome:
+    # The tombstone. The same one every time a delete is resent.
+    tombstone: HumanChange
+    changed: bool
+
+
+class HumanNoteNotDeleted(Exception):
+    """A restore asked for a note that is still live."""
+
+
 class VaultHumanNoteService:
     """Create, edit and move Human notes (ADR 0051).
 
@@ -4130,7 +4157,7 @@ class VaultHumanNoteService:
         connection: AsyncConnection,
         operation: str,
         outcome: str,
-        request: HumanEditRequest | HumanMoveRequest,
+        request: HumanEditRequest | HumanMoveRequest | HumanDeleteRequest,
     ) -> None:
         await VaultAuditEventRepository().record(
             connection,
@@ -4141,3 +4168,133 @@ class VaultHumanNoteService:
             target_type="document",
             target_id=request.document_id,
         )
+
+    async def delete(self, request: HumanDeleteRequest) -> HumanDeleteOutcome:
+        """Remove a Human note, recoverably, and leave a tombstone (ADR 0052).
+
+        The tombstone takes the next resource revision, so a client that held
+        the note sees the deletion as newer than anything it has. Its snapshot
+        holds the content the note had, which is what makes the removal
+        recoverable: the row goes, and the history does not.
+
+        A note already deleted answers with its tombstone rather than 404, for
+        the reason a resent edit succeeds: the request is already true. And
+        nothing brings the row back but ``restore`` -- edits and moves of the
+        id find no row, and a resent create finds its ledger entry detached.
+        """
+
+        documents = VaultDocumentRepository()
+        history = VaultHumanHistoryRepository()
+        async with self._transactions.transaction() as connection:
+            await _lock_corpus(connection)
+            current = await documents.get_by_id(
+                connection, request.document_id, collection=DocumentCollection.HUMAN
+            )
+            if current is None:
+                latest = await history.latest_change_for(connection, request.document_id)
+                if latest is None or latest.change_kind != "delete":
+                    raise DocumentNotFound(request.document_id)
+                await self._audit(connection, "vault.human.delete", "unchanged", request)
+                return HumanDeleteOutcome(tombstone=latest, changed=False)
+            if current.resource_revision != request.base_resource_revision:
+                raise HumanRevisionConflict(current.id, current.resource_revision)
+
+            position = await history.record(
+                connection,
+                replace(current, resource_revision=current.resource_revision + 1),
+                operation="delete",
+                change_kind="delete",
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
+            if not await documents.delete(
+                connection, current.id, collection=DocumentCollection.HUMAN
+            ):
+                raise DocumentNotFound(current.id)
+            await self._audit(connection, "vault.human.delete", "deleted", request)
+            tombstone = await history.change_at(connection, position)
+        if tombstone is None:
+            raise RuntimeError("a tombstone written in this transaction vanished")
+        return HumanDeleteOutcome(tombstone=tombstone, changed=True)
+
+    async def restore(self, request: HumanRestoreRequest) -> HumanWriteOutcome:
+        """Put a deleted Human note back, under its own id (ADR 0052).
+
+        An operator action, deliberately not a route: deleting is a person's
+        decision made in the browser, and undoing it is rare enough that a
+        scope for it would be one more thing to grant carefully and nothing
+        more. The id is kept so every client that knew the note knows it again,
+        and the revisions continue past the tombstone so the restore reads as
+        the newest thing that happened to it. ``created_at`` and the author are
+        the first snapshot's, so the note keeps the day it was written.
+        """
+
+        documents = VaultDocumentRepository()
+        history = VaultHumanHistoryRepository()
+        async with self._transactions.transaction() as connection:
+            await _lock_corpus(connection)
+            if await documents.get_by_id(connection, request.document_id) is not None:
+                raise HumanNoteNotDeleted(request.document_id)
+            latest = await history.latest_change_for(connection, request.document_id)
+            if latest is None or latest.change_kind != "delete":
+                raise DocumentNotFound(request.document_id)
+            snapshot = await history.revision(
+                connection, request.document_id, latest=True
+            )
+            first = await history.revision(connection, request.document_id, latest=False)
+            if snapshot is None or first is None:
+                raise DocumentNotFound(request.document_id)
+            if await documents.id_at_path_ignoring_case(
+                connection, snapshot.vault_path
+            ) is not None:
+                raise HumanPathTaken(snapshot.vault_path)
+
+            content = HumanNoteContent(
+                title=snapshot.title,
+                body=snapshot.body,
+                summary=snapshot.summary,
+                tags=snapshot.tags,
+                aliases=snapshot.aliases,
+                facets=snapshot.facets,
+                related_ids=snapshot.related_ids,
+                source_ids=snapshot.source_ids,
+                source_url=snapshot.source_url,
+                doc_type=snapshot.doc_type,
+                doc_status=snapshot.doc_status,
+                frontmatter=snapshot.frontmatter,
+            )
+            restored = await documents.insert(
+                connection,
+                _human_candidate(
+                    document_id=snapshot.document_id,
+                    vault_path=snapshot.vault_path,
+                    content=content,
+                    contributed_by=f"human:{first.principal_id}",
+                    provenance={
+                        "principal_id": first.principal_id,
+                        "surface": "human",
+                        "restored_by": request.principal_id,
+                    },
+                ),
+                content_revision=snapshot.content_revision,
+                resource_revision=snapshot.resource_revision + 1,
+                created_at=first.occurred_at,
+            )
+            await history.record(
+                connection,
+                restored,
+                operation="restore",
+                change_kind="upsert",
+                principal_id=request.principal_id,
+                request_id=request.request_id,
+            )
+            await VaultAuditEventRepository().record(
+                connection,
+                operation="vault.human.restore",
+                outcome="restored",
+                request_id=request.request_id,
+                principal_id=request.principal_id,
+                target_type="document",
+                target_id=restored.id,
+            )
+        return HumanWriteOutcome(document=restored, changed=True)
