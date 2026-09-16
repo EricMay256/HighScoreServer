@@ -1,10 +1,13 @@
 """Domain records for the vault bounded context."""
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
 from uuid import UUID
+
+from .constants import HUMAN_COLLECTION_PREFIX
 
 
 class DocumentKind(str, Enum):
@@ -41,6 +44,53 @@ class DocumentStatus(str, Enum):
     ACTIVE = "active"
     FLAGGED = "flagged"
     ARCHIVED = "archived"
+
+
+class DocumentCollection(str, Enum):
+    """Which writer owns a document (vault ADR 0049).
+
+    Distinct from ``kind`` (lifecycle) and ``status`` (visibility): this says
+    whose write path may change the row. Agent paths refuse ``human`` rows and
+    Human paths refuse ``agent`` rows, and the database ties the value to the
+    ``vault_path`` prefix so a move cannot carry a note across.
+    """
+
+    AGENT = "agent"
+    HUMAN = "human"
+
+
+# One control character is enough to make a path unsafe to hand to a
+# filesystem, a shell, or a log line.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def human_path_problem(vault_path: str) -> str | None:
+    """Why a path cannot name a Human note, or None when it can (ADR 0051).
+
+    The database refuses most of these itself, but as an IntegrityError that
+    reaches a caller as a 500; stated here, the rule is a 422 an author can act
+    on, applied before any lock is taken. Beyond the shape the database checks,
+    a Human path names a Markdown file in someone's vault, so it ends in `.md`,
+    and no segment starts with a dot, which is how Obsidian and every other tool
+    marks configuration rather than notes.
+    """
+
+    if not vault_path.startswith(HUMAN_COLLECTION_PREFIX):
+        return f"a Human note's path must start with {HUMAN_COLLECTION_PREFIX!r}"
+    if len(vault_path) > 1024:
+        return "path must be at most 1024 characters"
+    if not vault_path.endswith(".md"):
+        return "path must name a Markdown file ending in '.md'"
+    if "\\" in vault_path or _CONTROL_CHARACTER.search(vault_path):
+        return "path must not contain a backslash or a control character"
+    segments = vault_path.split("/")
+    if any(segment == "" for segment in segments):
+        return "path must not contain an empty segment"
+    if any(segment.startswith(".") for segment in segments):
+        return "no path segment may start with '.'"
+    if any(segment != segment.strip() for segment in segments):
+        return "path segments must not start or end with whitespace"
+    return None
 
 
 class PromotionStatus(str, Enum):
@@ -203,6 +253,14 @@ class VaultDocument:
     compile_run_id: UUID | None = None
     compiled_by: str | None = None
     compiled_at: datetime | None = None
+    # Moves on every write to a column a client can read -- content, path,
+    # status, provenance -- where `content_revision` moves on content alone.
+    # The Human sync protocol's concurrency token, because a rename or a
+    # deletion must invalidate a client's base as surely as an edit does.
+    # Never below `content_revision`. See ADR 0049.
+    resource_revision: int = 1
+    # Whose write path owns this row. See DocumentCollection and ADR 0049.
+    collection: DocumentCollection = DocumentCollection.AGENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +299,9 @@ class NewVaultDocument:
     compile_run_id: UUID | None = None
     compiled_by: str | None = None
     compiled_at: datetime | None = None
+    # Agent by default because every existing write path is one. A Human path
+    # has to say so, and the database refuses a `Human/` path that did not.
+    collection: DocumentCollection = DocumentCollection.AGENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +518,9 @@ class VaultDocumentBrief:
     doc_type: str | None = None
     doc_status: str | None = None
     summary: str | None = None
+    # The Human listing publishes it, as the token a Human write compares
+    # against; the agent listing does not project it. See ADR 0050.
+    resource_revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,3 +662,47 @@ class CompileWorkItem:
     # "new-source" -- a note no page covers.
     reason: str
     source_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HumanChange:
+    """One entry of the Human change feed (ADR 0049, 0052)."""
+
+    position: int
+    document_id: str
+    resource_revision: int
+    # "upsert" or "delete". A delete is a tombstone: the note is gone, and this
+    # entry is how a client that was offline learns it.
+    change_kind: str
+    vault_path: str
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class HumanRevision:
+    """One snapshot from a Human note's history (ADR 0049).
+
+    A ``delete`` snapshot holds the content the note had when it was removed,
+    which is what a restore puts back.
+    """
+
+    document_id: str
+    resource_revision: int
+    content_revision: int
+    operation: str
+    vault_path: str
+    title: str
+    body: str
+    principal_id: str
+    request_id: str
+    occurred_at: datetime
+    doc_type: str | None = None
+    doc_status: str | None = None
+    summary: str | None = None
+    tags: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    frontmatter: dict[str, Any] = field(default_factory=dict)
+    facets: dict[str, list[str]] = field(default_factory=dict)
+    related_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    source_url: str | None = None

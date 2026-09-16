@@ -976,9 +976,23 @@ credential into the wrong database is silent.
 | `vault:review` | List, read, and decide near-duplicate cases and amendment proposals. It applies accepted amendments and is **the only scope that serves `flagged` content**, so grant it narrowly |
 | `vault:compile` | Plan, write, and settle wiki compilation runs; operator-granted only |
 | `vault:export` | Recognised for the future export surface; currently granted by no route |
+| `vault:human-read` | Fetch and list Human notes through `/human/notes`, including ones `ai_read` withholds from agents (vault ADRs 0049, 0050). Reads no Agent note |
+| `vault:human-write` | Create, edit, rename and move Human notes through `/human/notes` (vault ADR 0051). No embedding call and no dedup gate; a move that would change `ai_read` readability is refused |
+| `vault:human-delete` | Recoverably delete a Human note through `DELETE /human/notes/{id}` (vault ADR 0052). Grant it to the browser family only, never to a sync client. An operator restores a deleted note with `python -m scripts.restore_human_note --id <note-id>` (dry run) and `--apply` |
 
 `vault:write` is contribute *only*. It gated all three write routes until vault
 ADR 0020.
+
+**Human and Agent scopes never share a credential** (vault ADR 0049). The schema
+refuses any credential, OAuth grant, or refresh token holding a `vault:human-*`
+scope together with `vault:write`, `vault:propose`, `vault:update`,
+`vault:delete`, `vault:review`, or `vault:compile`; `issue`, `grant`, and
+`grant-oauth` explain the refusal, and every request re-checks it.
+`vault:human-read` counts on the Human side on purpose: a credential that could
+read private Human notes and write agent-readable ones could copy the first
+into the second. All three are operator entitlements, so an OAuth family meant
+to hold them must be authorized requesting `vault:read` alone, the same shape as
+a reviewer family. Migration `0021_human_collection_boundary` grants nothing.
 
 `vault:propose` and `vault:review` are deliberately separate capability profiles. An ordinary
 agent may author inert proposals but cannot apply them. A reviewer should hold exactly

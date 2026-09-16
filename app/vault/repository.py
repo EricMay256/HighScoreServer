@@ -20,6 +20,7 @@ from sqlalchemy import (
     tuple_,
     update,
 )
+from sqlalchemy import text as text_sql
 from sqlalchemy.dialects.postgresql import ARRAY as PostgresArray
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import RowMapping
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .auth import VaultCredential
 from .constants import (
     AUTHORIZATION_CODE_TTL_SECONDS,
+    CORPUS_LOCK_KEY,
     OAUTH_CLIENT_LOCK_KEY,
     PENDING_AUTHORIZATION_TTL_SECONDS,
     REFRESH_TOKEN_TTL_SECONDS,
@@ -36,9 +38,12 @@ from .domain import (
     AmendmentProposalKind,
     AmendmentProposalState,
     CompileRunState,
+    DocumentCollection,
     DocumentEmbedding,
     DocumentKind,
     DocumentStatus,
+    HumanChange,
+    HumanRevision,
     NewVaultDocument,
     NoteCompileState,
     NoteSort,
@@ -63,6 +68,8 @@ from .tables import (
     vault_compile_runs,
     vault_document_embeddings,
     vault_documents,
+    vault_human_changes,
+    vault_human_revisions,
     vault_oauth_authorization_codes,
     vault_oauth_clients,
     vault_oauth_grants,
@@ -98,6 +105,7 @@ DOCUMENT_BRIEF_COLUMNS = (
     vault_documents.c.content_revision,
     vault_documents.c.updated_at,
     vault_documents.c.created_at,
+    vault_documents.c.resource_revision,
 )
 
 DOCUMENT_DOMAIN_COLUMNS = (
@@ -129,6 +137,8 @@ DOCUMENT_DOMAIN_COLUMNS = (
     vault_documents.c.compile_run_id,
     vault_documents.c.compiled_by,
     vault_documents.c.compiled_at,
+    vault_documents.c.resource_revision,
+    vault_documents.c.collection,
 )
 
 
@@ -166,6 +176,8 @@ def document_from_row(row: RowMapping) -> VaultDocument:
         compile_run_id=row["compile_run_id"],
         compiled_by=row["compiled_by"],
         compiled_at=row["compiled_at"],
+        resource_revision=row["resource_revision"],
+        collection=DocumentCollection(row["collection"]),
     )
 
 
@@ -252,6 +264,7 @@ def path_page_statement(
     limit: int = 200,
     statuses: Sequence[DocumentStatus] | None = None,
     readable_only: bool = False,
+    collection: DocumentCollection | None = None,
     tags: Sequence[str] = (),
     facets: Mapping[str, Sequence[str]] | None = None,
 ) -> Select:
@@ -309,6 +322,11 @@ def path_page_statement(
         )
     if readable_only:
         statement = statement.where(readable_path_predicate())
+    if collection is not None:
+        # The Human audience's filter, where the agent audience's is the read
+        # policy above (ADR 0050). In the query for the same reason: applied to
+        # the page, it would shorten pages and skip rows past the cursor.
+        statement = statement.where(vault_documents.c.collection == collection.value)
     if tags:
         # `@>` spelled out because `tags` is declared with the generic
         # `ARRAY` type, whose `.contains()` raises rather than guessing at
@@ -342,7 +360,19 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         document: NewVaultDocument,
+        *,
+        content_revision: int | None = None,
+        resource_revision: int | None = None,
+        created_at: datetime | None = None,
     ) -> VaultDocument:
+        """Insert a document; the three keywords are for a restore alone.
+
+        A new row starts both revisions at 1 and ``created_at`` at now. A Human
+        note restored from its history continues them instead (ADR 0052), so a
+        client holding the tombstone's revision sees the restore as newer, and
+        the note keeps the day it was first written.
+        """
+
         statement = (
             insert(vault_documents)
             .values(
@@ -370,9 +400,21 @@ class VaultDocumentRepository:
                 compile_run_id=document.compile_run_id,
                 compiled_by=document.compiled_by,
                 compiled_at=document.compiled_at,
+                collection=document.collection.value,
             )
             .returning(*self._domain_columns)
         )
+        restored = {
+            name: value
+            for name, value in (
+                ("content_revision", content_revision),
+                ("resource_revision", resource_revision),
+                ("created_at", created_at),
+            )
+            if value is not None
+        }
+        if restored:
+            statement = statement.values(**restored)
         result = await connection.execute(statement)
         return document_from_row(result.mappings().one())
 
@@ -383,6 +425,7 @@ class VaultDocumentRepository:
         content: NewVaultDocument,
         *,
         expected_revision: int | None = None,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Replace one document's caller-supplied content in place.
 
@@ -395,9 +438,19 @@ class VaultDocumentRepository:
 
         Returns None when no row matched, so the caller can 404 without a
         separate existence check.
+
+        ``collection`` is part of the predicate, as it is on every document
+        mutation here: a row owned by the other writer matches nothing and
+        reads as not found. Agent by default because every caller before ADR
+        0049 is an Agent path, so a Human path that forgets to say otherwise
+        fails to reach its own rows rather than reaching the wrong ones.
         """
 
-        statement = update(vault_documents).where(vault_documents.c.id == document_id)
+        statement = (
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == collection.value)
+        )
         if expected_revision is not None:
             statement = statement.where(
                 vault_documents.c.content_revision == expected_revision
@@ -416,12 +469,116 @@ class VaultDocumentRepository:
                 source_url=content.source_url,
                 updated_at=func.now(),
                 content_revision=vault_documents.c.content_revision + 1,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
         result = await connection.execute(statement)
         row = result.mappings().one_or_none()
         return document_from_row(row) if row is not None else None
+
+    async def replace_human_content(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        content: NewVaultDocument,
+        *,
+        expected_resource_revision: int,
+    ) -> VaultDocument | None:
+        """Replace a Human note's authored content, if still at that revision.
+
+        ``replace_content``'s counterpart for the Human collection (ADR 0051),
+        and wider on purpose: a person's governance type, status and unmodelled
+        frontmatter are authored in the file they edit, where an agent note's
+        are the service's. Identity, path, kind, visibility and contributor
+        still stay put.
+
+        Both revisions move, since this changes content. The resource-revision
+        predicate is the compare-and-swap, so a caller that checked under the
+        corpus lock and one that did not get the same answer. None when nothing
+        matched.
+        """
+
+        result = await connection.execute(
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == DocumentCollection.HUMAN.value)
+            .where(vault_documents.c.resource_revision == expected_resource_revision)
+            .values(
+                title=content.title,
+                summary=content.summary,
+                body=content.body,
+                tags=list(content.tags),
+                aliases=list(content.aliases),
+                facets=content.facets,
+                related_ids=list(content.related_ids),
+                source_ids=list(content.source_ids),
+                source_url=content.source_url,
+                doc_type=content.doc_type,
+                doc_status=content.doc_status,
+                frontmatter=content.frontmatter,
+                updated_at=func.now(),
+                content_revision=vault_documents.c.content_revision + 1,
+                resource_revision=vault_documents.c.resource_revision + 1,
+            )
+            .returning(*self._domain_columns)
+        )
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def move_human_note(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        vault_path: str,
+        expected_resource_revision: int,
+    ) -> VaultDocument | None:
+        """Give a Human note a new path, if still at that revision.
+
+        Content is untouched, so ``content_revision`` and ``updated_at`` stay
+        where they are -- the reading ``set_promotion_status`` gives a move.
+        ``resource_revision`` records it, which is what it exists for. The
+        collection CHECK refuses a path outside ``Human/``, so a caller that
+        skipped the service's own check still cannot carry a note across.
+        """
+
+        result = await connection.execute(
+            update(vault_documents)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == DocumentCollection.HUMAN.value)
+            .where(vault_documents.c.resource_revision == expected_resource_revision)
+            .values(
+                vault_path=vault_path,
+                resource_revision=vault_documents.c.resource_revision + 1,
+            )
+            .returning(*self._domain_columns)
+        )
+        row = result.mappings().one_or_none()
+        return document_from_row(row) if row is not None else None
+
+    async def id_at_path_ignoring_case(
+        self,
+        connection: AsyncConnection,
+        vault_path: str,
+    ) -> str | None:
+        """The document at this path under case-insensitive comparison, if any.
+
+        ``vault_path`` is UNIQUE, and that comparison is exact. Two paths that
+        differ only in case are two rows here and one file on Windows and on a
+        default macOS volume, so a Human write refuses the second before it
+        exists (ADR 0051). True only under the corpus lock, like every "is this
+        name free" answer in this module. Unindexed: `lower(vault_path)` scans,
+        which is nothing at hundreds of rows and wants an expression index well
+        before tens of thousands.
+        """
+
+        result = await connection.execute(
+            select(vault_documents.c.id)
+            .where(func.lower(vault_documents.c.vault_path) == func.lower(vault_path))
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def set_summary(
         self,
@@ -432,6 +589,7 @@ class VaultDocumentRepository:
         contributed_by: str,
         not_before: datetime,
         expected_revision: int,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Fill in an absent ``summary`` on one note, under ADR 0035's carveout.
 
@@ -483,10 +641,12 @@ class VaultDocumentRepository:
             .where(vault_documents.c.contributed_by == contributed_by)
             .where(vault_documents.c.created_at >= not_before)
             .where(vault_documents.c.content_revision == expected_revision)
+            .where(vault_documents.c.collection == collection.value)
             .values(
                 summary=summary,
                 updated_at=func.now(),
                 content_revision=vault_documents.c.content_revision + 1,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -501,6 +661,7 @@ class VaultDocumentRepository:
         *,
         status: DocumentStatus,
         doc_status: str | None,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Move a document's visibility state and its Status Map value together.
 
@@ -517,7 +678,12 @@ class VaultDocumentRepository:
         statement = (
             update(vault_documents)
             .where(vault_documents.c.id == document_id)
-            .values(status=status.value, doc_status=doc_status)
+            .where(vault_documents.c.collection == collection.value)
+            .values(
+                status=status.value,
+                doc_status=doc_status,
+                resource_revision=vault_documents.c.resource_revision + 1,
+            )
             .returning(*self._domain_columns)
         )
         result = await connection.execute(statement)
@@ -531,6 +697,7 @@ class VaultDocumentRepository:
         *,
         promotion_status: PromotionStatus | None,
         vault_path: str,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Move candidacy and the path it routes to, in one statement.
 
@@ -554,11 +721,13 @@ class VaultDocumentRepository:
         statement = (
             update(vault_documents)
             .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == collection.value)
             .values(
                 promotion_status=(
                     None if promotion_status is None else promotion_status.value
                 ),
                 vault_path=vault_path,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -574,6 +743,7 @@ class VaultDocumentRepository:
         compile_run_id: UUID,
         compiled_by: str,
         compiled_at: datetime,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> VaultDocument | None:
         """Re-attribute a page to the run that has just rewritten it.
 
@@ -597,10 +767,12 @@ class VaultDocumentRepository:
             update(vault_documents)
             .where(vault_documents.c.id == document_id)
             .where(vault_documents.c.kind == DocumentKind.WIKI.value)
+            .where(vault_documents.c.collection == collection.value)
             .values(
                 compile_run_id=compile_run_id,
                 compiled_by=compiled_by,
                 compiled_at=compiled_at,
+                resource_revision=vault_documents.c.resource_revision + 1,
             )
             .returning(*self._domain_columns)
         )
@@ -614,6 +786,7 @@ class VaultDocumentRepository:
         document_id: str,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
+        collection: DocumentCollection | None = None,
     ) -> VaultDocument | None:
         """Fetch one document, optionally restricted to certain statuses.
 
@@ -625,11 +798,19 @@ class VaultDocumentRepository:
         ``readable_only`` applies the ``ai_read`` path policy, and defaults
         off for the same reason: review, export, and reconciliation tooling
         must be able to load a row the public read surface withholds.
+
+        ``collection`` narrows to one writer's rows. Unfiltered by default for
+        the same reason again; write paths pass it so a target they may not
+        change is refused before an embedding call is spent on it (ADR 0049).
         """
 
         statement = select(*self._domain_columns).where(
             vault_documents.c.id == document_id
         )
+        if collection is not None:
+            statement = statement.where(
+                vault_documents.c.collection == collection.value
+            )
         if statuses is not None:
             statement = statement.where(
                 vault_documents.c.status.in_([status.value for status in statuses])
@@ -764,6 +945,7 @@ class VaultDocumentRepository:
         limit: int = 200,
         statuses: Sequence[DocumentStatus] | None = None,
         readable_only: bool = False,
+        collection: DocumentCollection | None = None,
         tags: Sequence[str] = (),
         facets: Mapping[str, Sequence[str]] | None = None,
     ) -> tuple[VaultDocumentBrief, ...]:
@@ -786,6 +968,7 @@ class VaultDocumentRepository:
             limit=limit,
             statuses=statuses,
             readable_only=readable_only,
+            collection=collection,
             tags=tags,
             facets=facets,
         )
@@ -858,6 +1041,8 @@ class VaultDocumentRepository:
         self,
         connection: AsyncConnection,
         document_id: str,
+        *,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> bool:
         """Remove a document. Returns False when no row matched.
 
@@ -870,7 +1055,21 @@ class VaultDocumentRepository:
         ``document_id`` is nullable precisely so the row can outlive its
         subject, so the pointer is cleared and the ledger keeps its meaning --
         "this key was used, and what it produced is gone".
+
+        Ownership is settled first, and locked, because the two statements
+        after it detach ledger rows and review cases from the document: a
+        wrong-collection target must return False before anything is touched,
+        not after the references are gone (ADR 0049).
         """
+
+        owned = await connection.execute(
+            select(vault_documents.c.id)
+            .where(vault_documents.c.id == document_id)
+            .where(vault_documents.c.collection == collection.value)
+            .with_for_update()
+        )
+        if owned.scalar_one_or_none() is None:
+            return False
 
         await connection.execute(
             update(vault_write_requests)
@@ -1372,6 +1571,207 @@ class WriteRequestRecord:
     response: dict[str, Any] | None
 
 
+async def _holds_corpus_lock(connection: AsyncConnection) -> bool:
+    """Whether this session holds the corpus advisory lock.
+
+    A bigint advisory key appears in ``pg_locks`` split in two: its high half in
+    ``classid``, its low half in ``objid``, with ``objsubid = 1``.
+    """
+
+    result = await connection.execute(
+        text_sql(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks "
+            "WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted "
+            "AND classid = CAST(:high AS oid) AND objid = CAST(:low AS oid) "
+            "AND objsubid = 1)"
+        ),
+        {"high": CORPUS_LOCK_KEY >> 32, "low": CORPUS_LOCK_KEY & 0xFFFFFFFF},
+    )
+    return bool(result.scalar_one())
+
+
+def _human_change_from_row(row: RowMapping) -> HumanChange:
+    return HumanChange(
+        position=int(row["id"]),
+        document_id=row["document_id"],
+        resource_revision=int(row["resource_revision"]),
+        change_kind=row["change_kind"],
+        vault_path=row["vault_path"],
+        occurred_at=row["occurred_at"],
+    )
+
+
+def _human_revision_from_row(row: RowMapping) -> HumanRevision:
+    return HumanRevision(
+        document_id=row["document_id"],
+        resource_revision=int(row["resource_revision"]),
+        content_revision=int(row["content_revision"]),
+        operation=row["operation"],
+        vault_path=row["vault_path"],
+        title=row["title"],
+        body=row["body"],
+        principal_id=row["principal_id"],
+        request_id=row["request_id"],
+        occurred_at=row["occurred_at"],
+        doc_type=row["doc_type"],
+        doc_status=row["doc_status"],
+        summary=row["summary"],
+        tags=tuple(row["tags"]),
+        aliases=tuple(row["aliases"]),
+        frontmatter=dict(row["frontmatter"]),
+        facets={k: list(v) for k, v in dict(row["facets"]).items()},
+        related_ids=tuple(row["related_ids"]),
+        source_ids=tuple(row["source_ids"]),
+        source_url=row["source_url"],
+    )
+
+
+class VaultHumanHistoryRepository:
+    """Revision snapshots and the change feed for Human notes (ADRs 0049, 0051).
+
+    One call writes both, because they are two halves of one fact: an accepted
+    Human change is a snapshot someone can restore and a position a sync client
+    resumes past. A change with only one of them is a feed that lies or a
+    history nothing can reach.
+    """
+
+    async def record(
+        self,
+        connection: AsyncConnection,
+        document: VaultDocument,
+        *,
+        operation: str,
+        change_kind: str,
+        principal_id: str,
+        request_id: str,
+    ) -> int:
+        """Append one snapshot and one feed entry; return the feed position.
+
+        Refuses to run unless this transaction holds the corpus advisory lock.
+        The position is an identity, allocated at insert rather than at commit,
+        so it is monotonic in commit order only while writers are serialized. A
+        writer that skipped the lock could commit a position a reader has
+        already moved past, and nothing downstream could detect it; checking
+        ``pg_locks`` turns that into an error at the write.
+        """
+
+        if document.collection is not DocumentCollection.HUMAN:
+            raise ValueError(f"{document.id} is not a Human note")
+        if not await _holds_corpus_lock(connection):
+            raise RuntimeError("Human history must be written under the corpus lock")
+
+        await connection.execute(
+            insert(vault_human_revisions).values(
+                document_id=document.id,
+                resource_revision=document.resource_revision,
+                content_revision=document.content_revision,
+                operation=operation,
+                vault_path=document.vault_path,
+                doc_type=document.doc_type,
+                doc_status=document.doc_status,
+                title=document.title,
+                summary=document.summary,
+                body=document.body,
+                tags=list(document.tags),
+                aliases=list(document.aliases),
+                frontmatter=document.frontmatter,
+                facets=document.facets,
+                related_ids=list(document.related_ids),
+                source_ids=list(document.source_ids),
+                source_url=document.source_url,
+                principal_id=principal_id,
+                request_id=request_id,
+            )
+        )
+        result = await connection.execute(
+            insert(vault_human_changes)
+            .values(
+                document_id=document.id,
+                resource_revision=document.resource_revision,
+                change_kind=change_kind,
+                vault_path=document.vault_path,
+            )
+            .returning(vault_human_changes.c.id)
+        )
+        return int(result.scalar_one())
+
+    async def changes_after(
+        self,
+        connection: AsyncConnection,
+        position: int,
+        *,
+        limit: int,
+    ) -> tuple[HumanChange, ...]:
+        """Feed entries past a position, oldest first.
+
+        By position and nothing else. Never by ``occurred_at``: two changes can
+        share a timestamp, and the whole ordering guarantee is the identity's.
+        """
+
+        result = await connection.execute(
+            select(vault_human_changes)
+            .where(vault_human_changes.c.id > position)
+            .order_by(vault_human_changes.c.id)
+            .limit(limit)
+        )
+        return tuple(_human_change_from_row(row) for row in result.mappings())
+
+    async def change_at(
+        self,
+        connection: AsyncConnection,
+        position: int,
+    ) -> HumanChange | None:
+        result = await connection.execute(
+            select(vault_human_changes).where(vault_human_changes.c.id == position)
+        )
+        row = result.mappings().one_or_none()
+        return _human_change_from_row(row) if row is not None else None
+
+    async def head(self, connection: AsyncConnection) -> HumanChange | None:
+        """The newest feed entry, or None when the feed is empty."""
+
+        result = await connection.execute(
+            select(vault_human_changes)
+            .order_by(vault_human_changes.c.id.desc())
+            .limit(1)
+        )
+        row = result.mappings().one_or_none()
+        return _human_change_from_row(row) if row is not None else None
+
+    async def latest_change_for(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+    ) -> HumanChange | None:
+        result = await connection.execute(
+            select(vault_human_changes)
+            .where(vault_human_changes.c.document_id == document_id)
+            .order_by(vault_human_changes.c.id.desc())
+            .limit(1)
+        )
+        row = result.mappings().one_or_none()
+        return _human_change_from_row(row) if row is not None else None
+
+    async def revision(
+        self,
+        connection: AsyncConnection,
+        document_id: str,
+        *,
+        latest: bool,
+    ) -> HumanRevision | None:
+        """A note's newest snapshot, or its first: what a restore reads back."""
+
+        order = vault_human_revisions.c.id.desc() if latest else vault_human_revisions.c.id
+        result = await connection.execute(
+            select(vault_human_revisions)
+            .where(vault_human_revisions.c.document_id == document_id)
+            .order_by(order)
+            .limit(1)
+        )
+        row = result.mappings().one_or_none()
+        return _human_revision_from_row(row) if row is not None else None
+
+
 class VaultWriteRequestRepository:
     """Idempotency records for governed writes."""
 
@@ -1545,6 +1945,7 @@ def document_brief_from_row(row: RowMapping) -> VaultDocumentBrief:
         content_revision=row["content_revision"],
         updated_at=row["updated_at"],
         created_at=row["created_at"],
+        resource_revision=row["resource_revision"],
     )
 
 
@@ -2444,7 +2845,9 @@ class VaultCompileRunRepository:
 
         result = await connection.execute(
             select(func.max(vault_documents.c.updated_at)).where(
-                vault_documents.c.kind == DocumentKind.NOTE.value
+                vault_documents.c.kind == DocumentKind.NOTE.value,
+                # The compile corpus is the Agent collection (ADR 0050).
+                vault_documents.c.collection == DocumentCollection.AGENT.value,
             )
         )
         latest = result.scalar_one_or_none()
@@ -2493,6 +2896,12 @@ class VaultWikiPageRepository:
         that has since been flagged is *stale* -- that is one of the three
         reasons the Stage-A planner recognises -- and it cannot be detected by
         a query that only sees active ones.
+
+        Agent notes only. Human notes stay outside automatic compilation
+        (ADR 0050), and this is where that is decided: planning offers nothing
+        that is not here, and ``write_page`` validates ``source_ids`` against
+        this same map, so a Human id cited as a source is unresolved rather
+        than laundered into a page the agent surface serves.
         """
 
         result = await connection.execute(
@@ -2501,7 +2910,9 @@ class VaultWikiPageRepository:
                 vault_documents.c.updated_at,
                 vault_documents.c.status,
                 vault_documents.c.compile_declined_at,
-            ).where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            )
+            .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            .where(vault_documents.c.collection == DocumentCollection.AGENT.value)
         )
         return {
             row["id"]: NoteCompileState(
@@ -2518,6 +2929,7 @@ class VaultWikiPageRepository:
         note_ids: Sequence[str],
         *,
         declined_at: datetime,
+        collection: DocumentCollection = DocumentCollection.AGENT,
     ) -> tuple[str, ...]:
         """Mark notes as considered-and-declined. Returns the ids it reached.
 
@@ -2538,6 +2950,7 @@ class VaultWikiPageRepository:
             update(vault_documents)
             .where(vault_documents.c.id.in_(list(note_ids)))
             .where(vault_documents.c.kind == DocumentKind.NOTE.value)
+            .where(vault_documents.c.collection == collection.value)
             .values(compile_declined_at=declined_at)
             .returning(vault_documents.c.id)
         )

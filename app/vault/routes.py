@@ -58,6 +58,15 @@ from .api_models import (
     VaultDocumentDetail,
     VaultDocumentUpdateRequest,
     VaultDocumentUpdateResponse,
+    VaultHumanChangeHead,
+    VaultHumanChangeListResponse,
+    VaultHumanNoteContent,
+    VaultHumanNoteCreateRequest,
+    VaultHumanNoteDetail,
+    VaultHumanNoteEditRequest,
+    VaultHumanNoteListResponse,
+    VaultHumanNoteMoveRequest,
+    VaultHumanNoteTombstone,
     VaultMetadataUpdateRequest,
     VaultNoteEdgeLookupRequest,
     VaultNoteEdgeResponse,
@@ -79,16 +88,26 @@ from .api_models import (
     compile_work_item,
     contribution_response,
     document_detail,
+    human_change,
+    human_change_cursor,
+    human_note_detail,
+    human_note_summary,
+    human_note_tombstone,
     note_edge,
     note_summary,
     review_case_summary,
     search_response,
 )
 from .auth import VaultCredential, VaultScope
-from .constants import SEARCH_QUERY_MAX_CHARS, resolve_text_search_config
+from .constants import (
+    HUMAN_COLLECTION_PREFIX,
+    SEARCH_QUERY_MAX_CHARS,
+    resolve_text_search_config,
+)
 from .cursors import (
     MAX_CURSOR_CHARS,
     InvalidCursor,
+    decode_change_cursor,
     decode_cursor,
     encode_cursor,
 )
@@ -96,6 +115,7 @@ from .db import get_vault_engine
 from .domain import (
     AmendmentProposalKind,
     AmendmentProposalState,
+    DocumentCollection,
     NoteSort,
     ReviewState,
     VaultCompileRun,
@@ -113,7 +133,11 @@ from .principal import (
 )
 from .rate_limit import enforce_preauth_ip_limit
 from .read_policy import READABLE_PATH_PREFIXES, READABLE_STATUSES
-from .repository import VaultDocumentRepository, VaultOAuthGrantRepository
+from .repository import (
+    VaultDocumentRepository,
+    VaultHumanHistoryRepository,
+    VaultOAuthGrantRepository,
+)
 from .service import (
     REQUEST_DIGEST_VERSION,
     AmendmentBaseRevisionMismatch,
@@ -131,6 +155,15 @@ from .service import (
     DedupUnavailable,
     DocumentNotFound,
     DocumentUnderReview,
+    HumanCreateRequest,
+    HumanDeleteRequest,
+    HumanEditRequest,
+    HumanMoveChangesReadPolicy,
+    HumanMoveRequest,
+    HumanNoteContent,
+    HumanNoteInvalid,
+    HumanPathTaken,
+    HumanRevisionConflict,
     IdempotencyConflict,
     MetadataChange,
     MetadataUpdateRequest,
@@ -154,6 +187,7 @@ from .service import (
     VaultDocumentRetireService,
     VaultDocumentSummaryService,
     VaultDocumentUpdateService,
+    VaultHumanNoteService,
     VaultReviewService,
     VaultSearchService,
     VaultTransactionService,
@@ -301,6 +335,39 @@ async def require_delete_scope(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> VaultCredential:
     return await _authenticated((VaultScope.DELETE,), credentials)
+
+
+async def require_human_read_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Human notes, including those ``ai_read`` withholds (ADR 0050).
+
+    Its own scope rather than ``vault:read`` plus a parameter, because the
+    boundary is the scope: an ordinary read credential must not reach a note
+    governance hid from agents through anything it can put in a request.
+    """
+
+    return await _authenticated((VaultScope.HUMAN_READ,), credentials)
+
+
+async def require_human_write_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Create, edit, rename and move Human notes (ADR 0049's ``vault:human-write``)."""
+
+    return await _authenticated((VaultScope.HUMAN_WRITE,), credentials)
+
+
+async def require_human_delete_scope(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> VaultCredential:
+    """Recoverably delete Human notes (ADR 0049's ``vault:human-delete``).
+
+    Its own verb because the Obsidian client is issued without it and the
+    browser with it: local deletion must never become remote deletion.
+    """
+
+    return await _authenticated((VaultScope.HUMAN_DELETE,), credentials)
 
 
 async def search_quota(
@@ -731,6 +798,506 @@ async def list_vault_documents(
             if has_more and visible
             else None
         ),
+    )
+
+
+# ── The Human read surface (ADR 0050) ────────────────────────────────────────
+#
+# Human notes, for a credential holding `vault:human-read`. Separate routes
+# rather than an audience parameter on `/notes`: which rows a request may see is
+# decided by the scope that admitted it, and a query parameter is something the
+# caller chooses. The audience is the collection, not the read policy -- a Human
+# operator reads the notes `ai_read` withholds from agents, and reads no Agent
+# note through this surface.
+
+
+async def human_note_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_get_note")
+    return credential
+
+
+async def human_list_notes_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_list_notes")
+    return credential
+
+
+@router.get(
+    "/human/notes/{note_id}",
+    response_model=VaultHumanNoteDetail,
+    dependencies=[Depends(human_note_quota)],
+    summary="Fetch one Human note by ID, whatever its ai_read policy",
+)
+async def get_human_note(
+    note_id: str = Path(min_length=1, max_length=256),
+) -> VaultHumanNoteDetail:
+    """One Human note.
+
+    Filtered to the Human collection and nothing else. No `ai_read` filter:
+    withholding a note from agents is not withholding it from the person who
+    wrote it. An Agent note id is not found here, just as a Human id is not
+    reachable through the Agent write routes -- neither surface names the
+    other's rows.
+    """
+
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        document = await VaultDocumentRepository().get_by_id(
+            connection,
+            note_id,
+            statuses=READABLE_STATUSES,
+            collection=DocumentCollection.HUMAN,
+        )
+
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Note not found",
+        )
+    return human_note_detail(document)
+
+
+@router.get(
+    "/human/notes",
+    response_model=VaultHumanNoteListResponse,
+    dependencies=[Depends(human_list_notes_quota)],
+    summary="List Human notes in a selected order, without bodies",
+)
+async def list_human_notes(
+    path: str | None = Query(
+        default=None,
+        max_length=1024,
+        description=(
+            "Restrict to one vault path prefix under 'Human/'. Omitted lists "
+            "the whole Human collection. A prefix outside it returns an empty "
+            "page."
+        ),
+    ),
+    tag: list[str] = Query(default=[], description="Every tag must be present."),
+    facet: list[str] = Query(
+        default=[],
+        description=(
+            "Facet filter as 'name:value', repeatable. Every one must match."
+        ),
+    ),
+    after: str | None = Query(
+        default=None,
+        max_length=MAX_CURSOR_CHARS,
+        description=(
+            "The previous page's `next_cursor`, passed back verbatim. Opaque, "
+            "and it belongs to the order it was issued in."
+        ),
+    ),
+    sort: NoteSort = Query(
+        default=NoteSort.PATH,
+        description="The same orders `/notes` offers.",
+    ),
+    limit: int = Query(default=DEFAULT_NOTE_PAGE, ge=1, le=MAX_NOTE_PAGE),
+) -> VaultHumanNoteListResponse:
+    """Walk the Human collection by where notes live.
+
+    The agent listing's ordering, filters and cursor, over another audience:
+    the Human collection, including notes `ai_read` withholds. The collection
+    is applied in the query rather than to the page, for the reason the agent
+    listing applies the read policy there -- a filter applied afterwards
+    returns short pages and a cursor that skips whatever it dropped.
+    """
+
+    prefixes = (path,) if path is not None else (HUMAN_COLLECTION_PREFIX,)
+    facets = _requested_facets(facet)
+    resume_after = _resume_after(after, sort)
+
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        page = await VaultDocumentRepository().list_briefs_under_path_prefixes(
+            connection,
+            prefixes,
+            sort=sort,
+            after=resume_after,
+            limit=limit + 1,
+            statuses=READABLE_STATUSES,
+            collection=DocumentCollection.HUMAN,
+            tags=tag,
+            facets=facets,
+        )
+
+    has_more = len(page) > limit
+    visible = page[:limit]
+    return VaultHumanNoteListResponse(
+        notes=[human_note_summary(document) for document in visible],
+        has_more=has_more,
+        next_cursor=(
+            encode_cursor(sort.value, _CURSOR_KEYS[sort][0](visible[-1]), visible[-1].id)
+            if has_more and visible
+            else None
+        ),
+    )
+
+
+# ── Human writes (ADR 0051) ──────────────────────────────────────────────────
+
+
+async def human_create_quota(
+    credential: VaultCredential = Depends(require_human_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_create")
+    return credential
+
+
+async def human_edit_quota(
+    credential: VaultCredential = Depends(require_human_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_edit")
+    return credential
+
+
+async def human_move_quota(
+    credential: VaultCredential = Depends(require_human_write_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_move")
+    return credential
+
+
+_HUMAN_WRITE_REFUSALS = (
+    DocumentNotFound,
+    HumanRevisionConflict,
+    HumanPathTaken,
+    IdempotencyConflict,
+    HumanMoveChangesReadPolicy,
+    HumanNoteInvalid,
+)
+
+
+def _human_write_error(exc: Exception) -> HTTPException:
+    """One rendering of the Human write refusals, shared by the three routes."""
+
+    if isinstance(exc, DocumentNotFound):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Note not found"
+        )
+    if isinstance(exc, HumanRevisionConflict):
+        # The current revision is the whole point of the answer: the client
+        # fetches that version, resolves, and writes against it.
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "The note changed since that revision",
+                "current_resource_revision": exc.current_resource_revision,
+            },
+        )
+    if isinstance(exc, HumanPathTaken):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another note already has that path, ignoring case",
+        )
+    if isinstance(exc, IdempotencyConflict):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Operation id was already used for a different request",
+        )
+    if isinstance(exc, HumanMoveChangesReadPolicy):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        )
+    if isinstance(exc, HumanNoteInvalid):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "message": "Human note failed validation",
+                "errors": list(exc.errors),
+            },
+        )
+    raise TypeError(f"not a Human write refusal: {type(exc).__name__}")
+
+
+def _human_content(body: VaultHumanNoteContent) -> HumanNoteContent:
+    return HumanNoteContent(
+        title=body.title,
+        body=body.body,
+        summary=body.summary,
+        tags=tuple(body.tags),
+        aliases=tuple(body.aliases),
+        facets=body.facets,
+        related_ids=tuple(body.related_ids),
+        source_ids=tuple(body.source_ids),
+        source_url=str(body.source_url) if body.source_url is not None else None,
+        doc_type=body.doc_type,
+        doc_status=body.doc_status,
+        frontmatter=body.frontmatter,
+    )
+
+
+def _human_service() -> VaultHumanNoteService:
+    return VaultHumanNoteService(VaultTransactionService(get_vault_engine()))
+
+
+@router.post(
+    "/human/notes",
+    response_model=VaultHumanNoteDetail,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a Human note at a path its author chose",
+)
+async def create_human_note(
+    body: VaultHumanNoteCreateRequest,
+    request: Request,
+    response: Response,
+    credential: VaultCredential = Depends(human_create_quota),
+) -> VaultHumanNoteDetail:
+    """201 for a new note; 200 when `operation_id` replays an earlier create.
+
+    No embedding call and no dedup gate (ADR 0051). The note is readable at
+    once through `/human/notes`, and through the agent surface too when its
+    folder's `ai_read` allows -- the folder was the author's choice.
+    """
+
+    try:
+        outcome = await _human_service().create(
+            HumanCreateRequest(
+                content=_human_content(body),
+                vault_path=body.vault_path,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+                operation_id=body.operation_id,
+                request_sha256=canonical_request_digest(body),
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    if outcome.replayed:
+        response.status_code = status.HTTP_200_OK
+    return human_note_detail(outcome.document)
+
+
+@router.put(
+    "/human/notes/{note_id}",
+    response_model=VaultHumanNoteDetail,
+    summary="Replace a Human note's content, against a resource revision",
+)
+async def edit_human_note(
+    body: VaultHumanNoteEditRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(human_edit_quota),
+) -> VaultHumanNoteDetail:
+    """409 names the current revision when the note moved on underneath.
+
+    A request the note already matches returns 200 without a new revision,
+    whatever base it names, so a resend after a lost response is not a
+    conflict with itself.
+    """
+
+    try:
+        outcome = await _human_service().edit(
+            HumanEditRequest(
+                document_id=note_id,
+                content=_human_content(body),
+                base_resource_revision=body.base_resource_revision,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    return human_note_detail(outcome.document)
+
+
+@router.post(
+    "/human/notes/{note_id}/move",
+    response_model=VaultHumanNoteDetail,
+    summary="Rename or move a Human note within the Human tree",
+)
+async def move_human_note(
+    body: VaultHumanNoteMoveRequest,
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    credential: VaultCredential = Depends(human_move_quota),
+) -> VaultHumanNoteDetail:
+    """422 when the move would change whether agents may read the note.
+
+    That is a governance decision about a folder, not something a rename should
+    do on the side (ADR 0048). A title edit never moves a note either: the path
+    changes only here.
+    """
+
+    try:
+        outcome = await _human_service().move(
+            HumanMoveRequest(
+                document_id=note_id,
+                vault_path=body.vault_path,
+                base_resource_revision=body.base_resource_revision,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    return human_note_detail(outcome.document)
+
+
+# ── Human deletion and the change feed (ADR 0052) ────────────────────────────
+
+
+async def human_delete_quota(
+    credential: VaultCredential = Depends(require_human_delete_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_delete")
+    return credential
+
+
+async def human_changes_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_changes")
+    return credential
+
+
+async def human_changes_head_quota(
+    credential: VaultCredential = Depends(require_human_read_scope),
+) -> VaultCredential:
+    await _enforce_quota(credential, "human_changes_head")
+    return credential
+
+
+@router.delete(
+    "/human/notes/{note_id}",
+    response_model=VaultHumanNoteTombstone,
+    summary="Recoverably delete a Human note, against a resource revision",
+)
+async def delete_human_note(
+    request: Request,
+    note_id: str = Path(min_length=1, max_length=256),
+    base_resource_revision: int = Query(
+        ge=1,
+        description=(
+            "The `resource_revision` the caller last saw. A note that changed "
+            "since is not deleted: fetch it, and decide again."
+        ),
+    ),
+    credential: VaultCredential = Depends(human_delete_quota),
+) -> VaultHumanNoteTombstone:
+    """The tombstone; the same tombstone when the note is already deleted.
+
+    The revision is a query parameter rather than a body because a DELETE body
+    is something intermediaries are free to drop. The note's history is kept,
+    and an operator can restore it with `scripts/restore_human_note.py`.
+    """
+
+    try:
+        outcome = await _human_service().delete(
+            HumanDeleteRequest(
+                document_id=note_id,
+                base_resource_revision=base_resource_revision,
+                principal_id=credential.principal_id,
+                request_id=request.headers.get("X-Request-Id") or uuid4().hex,
+            )
+        )
+    except _HUMAN_WRITE_REFUSALS as exc:
+        raise _human_write_error(exc) from exc
+    return human_note_tombstone(outcome.tombstone)
+
+
+# The bound on one feed page. Entries are small and fixed-size, so this bounds
+# the query rather than the payload.
+MAX_CHANGE_PAGE = 500
+DEFAULT_CHANGE_PAGE = 100
+
+
+@router.get(
+    "/human/changes/head",
+    response_model=VaultHumanChangeHead,
+    dependencies=[Depends(human_changes_head_quota)],
+    summary="The Human change feed's current position",
+)
+async def human_changes_head() -> VaultHumanChangeHead:
+    """Read this first, then list `/human/notes`, then replay from here.
+
+    That order is what makes a snapshot lose nothing without holding one open:
+    a change that commits while the listing is paged has a position past this
+    one, so the replay delivers it, and applying it again is harmless because
+    every entry carries its revision.
+    """
+
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        head = await VaultHumanHistoryRepository().head(connection)
+    return VaultHumanChangeHead(cursor=human_change_cursor(head))
+
+
+@router.get(
+    "/human/changes",
+    response_model=VaultHumanChangeListResponse,
+    dependencies=[Depends(human_changes_quota)],
+    summary="Human notes changed or deleted since a cursor, oldest first",
+)
+async def list_human_changes(
+    after: str | None = Query(
+        default=None,
+        max_length=MAX_CURSOR_CHARS,
+        description=(
+            "A cursor from an entry, `next_cursor`, or the head. Omitted reads "
+            "the feed from its start."
+        ),
+    ),
+    limit: int = Query(default=DEFAULT_CHANGE_PAGE, ge=1, le=MAX_CHANGE_PAGE),
+) -> VaultHumanChangeListResponse:
+    """Every accepted Human change past the cursor, including deletions.
+
+    **410 means take a new snapshot.** A cursor names an entry, and the feed
+    checks that the entry is still there as it was. When it is not, the
+    database is not the one that issued the cursor -- restored to an earlier
+    point, or replaced -- and resuming from its position would skip whatever
+    now sits in its place. Nothing short of a fresh snapshot is safe.
+    """
+
+    if after is None:
+        position, revision, note_id = 0, 0, ""
+    else:
+        try:
+            position, revision, note_id = decode_change_cursor(after)
+        except InvalidCursor as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(error),
+            ) from error
+
+    history = VaultHumanHistoryRepository()
+    transactions = VaultTransactionService(get_vault_engine())
+    async with transactions.transaction() as connection:
+        if position:
+            anchor = await history.change_at(connection, position)
+            if (
+                anchor is None
+                or anchor.document_id != note_id
+                or anchor.resource_revision != revision
+            ):
+                gone = True
+            else:
+                gone = False
+        else:
+            gone = False
+        page = (
+            ()
+            if gone
+            else await history.changes_after(connection, position, limit=limit + 1)
+        )
+
+    if gone:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="The feed no longer holds that position; take a new snapshot",
+        )
+    visible = page[:limit]
+    return VaultHumanChangeListResponse(
+        changes=[human_change(change) for change in visible],
+        next_cursor=(
+            human_change(visible[-1]).cursor
+            if visible
+            else after or human_change_cursor(None)
+        ),
+        has_more=len(page) > limit,
     )
 
 

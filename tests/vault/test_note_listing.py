@@ -25,6 +25,7 @@ from app.vault.api_models import (
 from app.vault.auth import VaultScope
 from app.vault.cursors import decode_cursor, encode_cursor
 from app.vault.domain import (
+    DocumentCollection,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
@@ -135,6 +136,12 @@ def corpus(configure_test_env: None) -> dict[str, str]:
                         facets=facets,
                         contributed_by=f"agent:{PREFIX}seed",
                         provenance={"fixture": True},
+                        # The tree decides the owner (vault ADR 0049).
+                        collection=(
+                            DocumentCollection.HUMAN
+                            if path.startswith("Human/")
+                            else DocumentCollection.AGENT
+                        ),
                     ),
                 )
 

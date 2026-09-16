@@ -44,6 +44,7 @@ from sqlalchemy import select, update
 
 from app.env import load_environment
 from app.vault.db import create_vault_engine, describe_database
+from app.vault.domain import DocumentCollection
 from app.vault.service import VaultTransactionService
 from app.vault.settings import VaultSettings
 from app.vault.tables import vault_documents
@@ -192,7 +193,16 @@ async def run(map_paths: list[Path], apply: bool) -> int:
                     await connection.execute(
                         update(vault_documents)
                         .where(vault_documents.c.id == change.document_id)
-                        .values(**{change.column: change.after})
+                        # Agent rows only; see vault ADR 0049.
+                        .where(
+                            vault_documents.c.collection
+                            == DocumentCollection.AGENT.value
+                        )
+                        .values(
+                            **{change.column: change.after},
+                            resource_revision=vault_documents.c.resource_revision
+                            + 1,
+                        )
                     )
     finally:
         await engine.dispose()

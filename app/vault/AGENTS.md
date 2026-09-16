@@ -11,7 +11,8 @@ design is database authority plus an OAuth Obsidian client, with server-only
 deletion and separate Human/Agent write grants. The existing invariants below
 describe current runtime behavior; ADR 0048 explicitly supersedes the former
 Human replica/import-exclusion rules for this implementation. No such rollout
-is implied by this planning note.
+is implied by this planning note. Phase B1 (vault ADR 0049) is built: read the
+`collection` invariant below before changing any document mutation.
 
 The knowledge-platform bounded context: its own API models, domain records, Core tables,
 repositories, services, auth, embeddings, and two transports — HTTP routes and an MCP
@@ -303,6 +304,23 @@ be edited when it does.
   per model by the two-sided procedure in `calibration.py` / `docs/embedding-calibration.md`;
   changing the constant needs a new row in that register. See ADR 0016 and its calibration
   amendments.
+- **`collection` says whose write path owns a row, and every mutation predicates on it.**
+  ADR 0049 and migration 0021. `agent` rows live under `Agent/` and `human` rows under
+  `Human/`; `vault_documents_collection_matches_path` refuses anything else, so a move
+  cannot carry a note across and no row can live outside those two trees. Every
+  document mutation in the repositories takes `collection`, **defaulting to `agent`**,
+  in its `WHERE` clause: a wrong-collection target matches nothing and reads as not
+  found. Do not "simplify" the default into deriving the collection from the path — a
+  Human path must say it is one, and the default makes forgetting fail closed. Agent
+  service loads pass `collection=DocumentCollection.AGENT` so a refused target costs no
+  embedding call, and raw updates in scripts carry the same predicate.
+  `resource_revision` moves on every write to a column in `DOCUMENT_DOMAIN_COLUMNS` and
+  a CHECK holds it at or above `content_revision`, so a raw update that bumps content
+  must bump both; `content_revision` keeps its content-only contract for amendment
+  proposals. `vault_human_revisions` and `vault_human_changes` have no foreign key to
+  `vault_documents`, so history and tombstones outlive a deleted note, and any writer
+  to the feed must hold `CORPUS_LOCK_KEY` or its identity positions stop matching
+  commit order.
 
 ## Retrieval and embeddings
 
@@ -430,6 +448,50 @@ be edited when it does.
 - **`vault:propose` is OAuth-baseline but non-mutating.** It writes an untrusted amendment
   record, not corpus content. Applying one is `vault:review`, and direct replacement remains
   `vault:update`; do not collapse any of the three.
+- **Human and Agent scopes never share a credential** (ADR 0049). `vault:human-read`,
+  `vault:human-write` and `vault:human-delete` are exclusive with `vault:write`,
+  `vault:propose`, `vault:update`, `vault:delete`, `vault:review` and `vault:compile` —
+  Human read included, because reading private Human notes while able to write
+  agent-readable ones is a laundering channel. Enforced by CHECKs on credentials, refresh
+  tokens and grants (over `authorized_scopes || entitled_scopes`), explained by the CLI,
+  and re-checked by `authorize`, which returns `incompatible`. All three are operator
+  entitlements, so a Human OAuth family is authorized requesting `vault:read` alone.
+  `vault:human-read` gates reading `/human/notes` (ADR 0050) and `vault:human-write`
+  gates create, edit and move there (ADR 0051); `vault:human-delete` gates deletion
+  (ADR 0052).
+- **A Human deletion is a tombstone, and only an operator's restore undoes it** (ADR
+  0052). The row goes; the `delete` snapshot and `delete` feed entry stay, at one past
+  the note's last revision. A resent delete returns that same tombstone. Edits, moves
+  and create replays of a deleted id are 404 -- do not add a code path that recreates
+  a Human row from anything but `VaultHumanNoteService.restore`, which keeps the id
+  and continues the revisions so every client sees the restore as newer. **The feed
+  cursor names an entry, and `/human/changes` checks that entry still exists with the
+  same note and revision before resuming** -- a mismatch is 410, because a database
+  restored to an earlier point reuses positions and a bare position would silently
+  skip changes. Do not "simplify" the cursor to a position, and do not order the feed
+  by `occurred_at`.
+- **A Human write is one transaction under the corpus lock, and the history write
+  checks the lock** (ADR 0051). `VaultHumanNoteService` changes the row, then
+  `VaultHumanHistoryRepository.record` writes the snapshot and feed entry, then the
+  audit event is appended. `record` queries `pg_locks` and raises without
+  `CORPUS_LOCK_KEY`; do not remove that check as redundant with the callers, because
+  the feed's commit-order guarantee is exactly the thing a caller forgetting would
+  break without a trace. Human writes make no embedding call and never run the dedup
+  gate. Edit and move are retry-safe by state rather than by key: a request the note
+  already matches returns 200 without writing, whatever base it names, and only a
+  change against a moved-on note is a 409 carrying `current_resource_revision`. Do not
+  "tighten" that into refusing every stale base — a resend after a lost response
+  would then conflict with itself. Create is idempotent through the write ledger, and
+  a replay must find a Human note behind the prior entry, since contributions share
+  the ledger's `(principal, key)` namespace.
+- **Two read audiences, chosen by route and stated in each query** (ADR 0050). The
+  ordinary routes apply `readable_path_predicate`; `/human/notes` applies
+  `collection = 'human'` and no read policy, and names no Agent note. Do not add an
+  audience parameter to `/notes`: a parameter is the caller's choice, and the scope
+  that admitted the request is what decides what it may see. Agent *reads* may return
+  `ai_read`-allowed Human notes; Agent *workflows* may not take them as input —
+  `find_similar` and compile planning (`note_states`, `note_frontier`) filter to the
+  Agent collection, and `write_page` validates sources against that same map.
 
 ### The OAuth authorization server (ADR 0024)
 

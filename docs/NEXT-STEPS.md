@@ -13,12 +13,12 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## State
 
-- **`main` is current with `dev` as of PR #33**, squash-merged, so `main` is no
+- **`main` is current with `dev` as of PR #34**, squash-merged, so `main` is no
   longer an ancestor and the next merge is another PR rather than a
-  fast-forward. Verified against git on 2026-09-12: the vault lineage head is
-  `0020_note_listing_sort_indexes` on both branches, no migration is pending to
-  `main`, and the only difference between the branches is this documentation
-  batch.
+  fast-forward. Verified against git on 2026-09-12: `git diff dev origin/main`
+  is empty — the two trees are byte-identical, including the ADR 0048
+  documentation batch that #34 carried — and the vault lineage head is
+  `0020_note_listing_sort_indexes` on both, with no migration pending to `main`.
 - **Production, as last recorded on 2026-08-28** and not re-verified since:
   vault lineage `0017_oauth_entitlements`, 94 documents (80 notes, 14 wiki
   pages), all active; `VAULT_ENABLED`, `VAULT_PUBLIC_URL` and an operator
@@ -33,10 +33,9 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## 1. Immediate
 
-1. **Open the ADR 0048 documentation PR.** Done as of PR #33 for the code; what
-   is on `dev` and not on `main` is now only the Human-vault documentation (§4).
-   Documentation on a non-default branch is documentation nobody reads, and
-   GitHub shows `main`. No migration is in range.
+1. **Open the ADR 0048 documentation PR. Done — PR #34, merged 2026-09-12.**
+   `main` and `dev` now hold identical trees, so nothing about the Human vault
+   is stranded on a branch nobody reads. No migration was in range.
 2. **Settle the production game-mode list.** Nothing hardcodes a mode any
    more, so `/leaderboard` and the SPA both land on the first row of
    `/game_modes`, ordered by `name` — the alphabetically first configured mode
@@ -123,17 +122,45 @@ of itself survives. Start at the
 Five phases, each demonstrated before the next begins. Nothing reaches a broader
 read surface until phase B's audience and ownership checks pass.
 
-- **A — baseline and export rehearsal.** Run the existing
-  `scripts/export_vault_markdown.py` into a private staging root, dry run then
-  `--apply`, and preview the exact Human enrollment set. Cheap, reversible, and
-  needs no new code: it is how we find out what the exporter actually does
-  before anything depends on it.
-- **B — the Human service boundary.** Reviewed vault Alembic revisions for
-  stable identity and collection ownership, resource revisions and history,
-  tombstones and an ordered resumable change feed, and the Human operator
-  entitlement. This is the bulk of the work and everything else waits on it.
+- **A — baseline and export rehearsal. Done locally 2026-09-12, except
+  deployment parity.** The export is a faithful idempotent projection (76 files,
+  second `--apply` byte-identical, `--prune` scoped to exported prefixes and
+  `Human/` untouched), and governance now agrees with the runtime by
+  measurement: `scripts/check_read_policy_parity.py` diffs the private
+  `folders.yml` against `read_policy.py`, and per-file agreement held for all
+  213 markdown files. Results, and the three things it surfaced, are in the
+  [handoff](../app/vault/docs/human-vault-handoff.md#phase-a-result-2026-09-12).
+  What is left is production: the applied vault head and config vars are still
+  the 2026-08-28 record, and phase B's migrations land on whatever is actually
+  there.
+- **B — the Human service boundary. In progress; B1 built 2026-09-12.** The
+  bulk of the work, split into five slices reviewed one at a time.
   `source_sha256` and unique `vault_path` do not cover it and must not be
   overloaded to pretend otherwise.
+  - **B1 — schema and write boundary, built.** Vault ADR 0049 and migration
+    `0021_human_collection_boundary`: `collection` tied to the path prefix,
+    `resource_revision`, `vault_human_revisions` and `vault_human_changes`,
+    three `vault:human-*` scopes kept off every Agent-writing credential, and
+    every Agent write path refusing Human rows. No Human endpoint exists.
+  - **B2 — audience-aware reads, built.** Vault ADR 0050: `/human/notes` and
+    `/human/notes/{id}` under `vault:human-read`, filtered to the Human
+    collection and blind to Agent notes; agents keep `ai_read`; dedup and
+    compile planning exclude Human rows. Human search waits for phase C.
+  - **B3 — Human create, edit and move, built.** Vault ADR 0051: three routes
+    under `vault:human-write`, each accepted write one transaction under the
+    corpus lock (which the history repository checks) writing the row, a
+    snapshot, a feed entry and an audit event. Create is idempotent by
+    operation id through the write ledger; edit and move succeed without
+    writing when the note already matches, and otherwise 409 with the current
+    revision. No embedding call and no dedup gate.
+  - **B4 — recoverable deletion and the change feed, built.** Vault ADR 0052:
+    `DELETE /human/notes/{id}` leaves a tombstone and keeps the history; a
+    resent delete returns the same tombstone; only the operator's
+    `scripts/restore_human_note.py` brings a note back, under its own id.
+    `/human/changes` and `/human/changes/head` serve the feed, and a cursor
+    whose entry is no longer there is a 410 that means resnapshot. No snapshot
+    endpoint: head, then list, then replay.
+  - **B5 — a disclosure regression suite** across every Agent surface.
 - **C — browser authoring.** Its own OAuth family, explicit save and conflict
   states, a separately granted delete, and visible read-policy and
   semantic-index state.
@@ -152,8 +179,10 @@ read surface until phase B's audience and ownership checks pass.
   May be built alongside C and D. The OpenAI Batch API was evaluated and is not
   selected: 50% off does not pay for a two-day worst-case lag.
 
-Before phase A, confirm that private `folders.yml` governance and runtime
-`read_policy.py` agree about the notes that are about to be enrolled. Update
+The governance precondition is met: private `folders.yml` and runtime
+`read_policy.py` were confirmed to agree, per file, about every note that is
+about to be enrolled (2026-09-12). Re-run `scripts/check_read_policy_parity.py`
+whenever either side changes — that is the point of it. Update
 [`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
 when an artifact actually appears — `clients/obsidian/` only if D is built.
 
@@ -180,8 +209,10 @@ when an artifact actually appears — `clients/obsidian/` only if D is built.
   `ai_read`, fail-closed, and `read_policy.py` mirrors it; what one `vault:read`
   credential reads is the corpus that policy admits, not every Human folder.
   Human note identity across renames is answered by the managed `VaultID` of
-  ADR 0048 rather than by row survival. What is left is verification that
-  source and runtime policy agree, which is phase A work.
+  ADR 0048 rather than by row survival. The verification that source and runtime
+  policy agree was the last piece, and it is done —
+  `scripts/check_read_policy_parity.py`, 2026-09-12, zero mismatches over all
+  213 files. **Closed.**
 - **ADR 0038 — a first-party reviewer authorization.** Recommended deferred:
   the monthly `grant-oauth` step is cheap now that console sessions persist.
   Prefer a narrower `grant-reviewer` convenience if the friction returns.

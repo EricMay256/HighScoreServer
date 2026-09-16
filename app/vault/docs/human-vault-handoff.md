@@ -67,8 +67,8 @@ Phase D is optional as of 2026-09-12; see the note below the table.
 
 | Phase | Deliverable | Exit evidence |
 | --- | --- | --- |
-| A: baseline and rehearsal | Verify deployed/local contracts and source governance; rehearse existing Agent export into private staging; prepare exact Human enrollment preview | Validated export, repeatable unchanged run, preserved originals, synthetic identity/policy examples |
-| B: Human service boundary | Reviewed migrations, role/verb scopes, Human reads/writes/history, deletion/tombstones, resource revisions and change feed | Scope/ownership matrix tests, cursor/retry/concurrency tests, no Agent read disclosure of hidden Human content |
+| A: baseline and rehearsal | Verify deployed/local contracts and source governance; rehearse existing Agent export into private staging; prepare exact Human enrollment preview | Validated export, repeatable unchanged run, preserved originals, synthetic identity/policy examples — **done locally 2026-09-12 except deployment parity; see below** |
+| B: Human service boundary (B1–B4 built 2026-09-12, ADRs [0049](adr/0049-the-human-collection-boundary.md), [0050](adr/0050-human-reads-the-audience-is-the-collection.md), [0051](adr/0051-human-writes-are-revision-checked-and-retry-safe.md) and [0052](adr/0052-human-deletion-is-a-tombstone-and-the-feed-checks-its-anchor.md)) | Reviewed migrations, role/verb scopes, Human reads/writes/history, deletion/tombstones, resource revisions and change feed | Scope/ownership matrix tests, cursor/retry/concurrency tests, no Agent read disclosure of hidden Human content |
 | C: browser authoring | Human editing with its own OAuth family, explicit save/conflict states, separate delete permission, current policy and semantic-index indicators | Real browser create/edit/move/delete and role-isolation checks using synthetic notes |
 | D (optional): Obsidian extension | Source/build/install instructions in `clients/obsidian/`; configurable OAuth, managed IDs, guarded bidirectional synchronization, conflict/recovery UI | Two deployments, reconnect/refresh/revoke, local deletion refusal, dirty-file server deletion, desktop verification |
 | E: daily indexing and pilot | Daily server-side Human job, independent Agent export, reviewed enrollment/cutover and operational runbook | Daily coalescing, retained vectors on failure, private pilot evidence, obsolete importer fenced off |
@@ -86,6 +86,92 @@ Daily indexing may be developed alongside the client phases, but no data enters
 a broader read surface before phase B's audience/ownership checks pass. Mobile
 is a compatibility goal, not an initial claim: use portable APIs and enable
 support only after real-device OAuth, storage, suspend/resume, and sync tests.
+
+## Phase A result, 2026-09-12
+
+Run against the local corpus and the live private `folders.yml`. No production
+access, no enrollment, no corpus write. The staging root was a scratch directory
+outside both repositories; the live `Vault/` was never a target.
+
+**Governance and runtime agree, and now verifiably.**
+`scripts/check_read_policy_parity.py` reads the real `folders.yml` and diffs it
+against `read_policy.py`: 13 `ai_read: allowed` rules, 13 declared prefixes, no
+extras, `default:` still fail-closed, no forbidden folder nested inside a
+readable one. Per *file* rather than per prefix, `is_readable_path` matched the
+resolved governance answer for all 213 markdown files in the vault, 80 of them
+Human — zero mismatches. That is deferred decision #1 closed by measurement
+rather than by reading the two files side by side.
+
+The check was proven able to fail before it was believed: four mutated copies of
+the governance file — a readable folder reclassified, a new readable folder the
+code has not learned, the `default:` flipped open, and a forbidden folder nested
+under a readable one — each produced the matching finding and exit 1.
+
+**The export is a faithful, idempotent projection.** Dry run wrote nothing.
+`--apply` wrote 76 files (61 Agent notes, 14 wiki pages, plus the generated
+`Agent/wiki/_index.md`). A second `--apply` wrote 0 and reported 76 unchanged,
+and all 76 files were byte-identical by SHA-256. `--prune` is correctly scoped:
+with synthetic files planted under both trees it listed and then deleted only
+the orphan under an exported prefix, leaving the synthetic `Human/` files
+byte-identical through both the apply and the prune pass. The exporter does not
+reach `Human/`, as ADR 0022 says and as phase C and any later Human projection
+depend on.
+
+**Edge vocabularies, confirmed against real data rather than assumed.** Phase C
+and any Human projection both consume edges, so the rehearsal checked what the
+three surfaces actually hold. The database stores ids (ADR 0025, enforced by
+shape since ADR 0030). The exported file carries `[[slug]]` — slug and not
+title, because Obsidian resolves `[[x]]` against the file name, and the page
+titled "Calibrating a Semantic Dedup Threshold" lives at
+`semantic-dedup-threshold-calibration.md`. An Agent Note gets both halves,
+`RelatedIDs` for the engine and `SeeAlso` for the reader; a Wiki Page gets
+`Related`. The browse console renders the same slug as the visible label with
+the title as tooltip and navigates by id. Body prose is a fourth, separate case:
+a librarian-written `[[slug]]` inside the text is projected verbatim and is not
+an edge at all. One vocabulary per boundary, translated in `wikilinks.py` — not
+a discrepancy to reconcile.
+
+**Three things the rehearsal surfaced.**
+
+1. *13 of 14 wiki pages exported with their `related_ids` dropped — **in the
+   local database only, and now repaired**.* Checked against production through
+   the MCP on 2026-09-12: three sampled wiki pages all carry resolved
+   32-character ids, and the two edges of `operating-the-agent-knowledge-vault`
+   resolved to exactly the pages the local rows named as `[[Title]]` strings.
+   The local corpus was a pre-repair snapshot holding byte-for-byte the
+   population commit `5d357ff` reported on 2026-08-26 and then repaired in
+   production. Nothing was wrong with the design or with the deployment; the
+   exporter's warning was it doing its job.
+
+   `scripts/resolve_vault_wikilinks.py --apply` has since run against the local
+   corpus: **21 links across 13 rows, 0 dropped, 0 ambiguous**, originals
+   preserved in `frontmatter.Related`, no dangling edge left, and a second run a
+   no-op. The re-export rewrote exactly those 13 files with no warnings, and a
+   further run was byte-identical, so local idempotence holds on the new
+   content. Local now matches production's *shape* — it remains a different
+   import generation, with different ids and 61 notes against production's 80,
+   so it is internally consistent rather than a replica.
+2. *The local markdown tree is ahead of the local corpus* — 92 `Agent/notes/`
+   files on disk against 61 rows, and production held 80 as of 2026-08-28. Any
+   export into the live tree would therefore report a large prunable set that is
+   not evidence of retirement. Reconcile before ever pointing the exporter at
+   `Vault/`.
+3. *Two Human folders and the `Human/` root are governed only by the catch-all.*
+   `Human/14 Ideas/`, `Human/96 Scratch/` and two root-level files match no
+   named rule and resolve to `Human/**` → `forbidden`. Fail-closed worked; but
+   whether those notes are meant to be enrolled is an operator decision, not a
+   default. `Agent/INDEX.md` is the same case on the Agent side, resolving to
+   `default:`.
+
+**Enrollment preview.** 80 Human markdown files, 194 KB, 71 canonical: 57
+agent-readable and 23 hidden under current policy, across fourteen folders. The
+per-file listing stays in private operator storage, not in this repository.
+
+**Not done: deployment parity.** Local vault lineage is
+`0020_note_listing_sort_indexes`. Production was last recorded on 2026-08-28 at
+`0017_oauth_entitlements` with 94 documents, and that has not been re-verified.
+Phase B's migrations land on whatever production actually is, so the applied
+head and config vars are wanted before B starts, not after.
 
 ## Acceptance priorities
 

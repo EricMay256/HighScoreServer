@@ -189,6 +189,42 @@ OAUTH_OPERATOR_ENTITLEMENT_SCOPES: tuple[str, ...] = (
     "vault:review",
     "vault:compile",
     "vault:export",
+    "vault:human-read",
+    "vault:human-write",
+    "vault:human-delete",
+)
+
+# ── Human and Agent collections (vault ADR 0049) ───────────────────────────
+
+# The path prefix each collection's documents live under. A persistence
+# contract: `vault_documents_collection_matches_path` restates both, which is
+# what stops a move carrying a note from one writer's tree into the other's.
+AGENT_COLLECTION_PREFIX = "Agent/"
+HUMAN_COLLECTION_PREFIX = "Human/"
+
+# The Human operator's scopes. All three are operator entitlements and never
+# baseline: `vault:human-read` reaches notes `ai_read` withholds from agents,
+# which is exactly what ordinary OAuth consent must not be able to hand out.
+HUMAN_SCOPES: tuple[str, ...] = (
+    "vault:human-read",
+    "vault:human-write",
+    "vault:human-delete",
+)
+
+# Scopes that change Agent content or Agent workflow state. No credential may
+# hold one of these together with any Human scope -- `vault:human-read`
+# included, deliberately: a credential that can read private Human notes and
+# write agent-readable ones is a channel for copying the first into the
+# second. `vault:read` and `vault:export` belong to neither set. Restated by
+# the `*_human_agent_exclusive` CHECKs in migration 0021, which cannot import
+# this module.
+AGENT_MUTATION_SCOPES: tuple[str, ...] = (
+    "vault:write",
+    "vault:propose",
+    "vault:update",
+    "vault:delete",
+    "vault:review",
+    "vault:compile",
 )
 
 # How long an authorization may sit waiting for the operator to finish the login
