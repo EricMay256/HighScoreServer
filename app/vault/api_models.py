@@ -216,10 +216,18 @@ class VaultDocumentContentRequest(BaseModel):
         description=(
             "Ids of notes this one was derived from. Same rule as "
             "`related_ids` and enforced by the same validator: not checked for "
-            "existence, but a title or a [[wikilink]] is rejected."
+            "existence, but a title or a [[wikilink]] is rejected. Derivation "
+            "does not establish support for a claim; fetch the sources before "
+            "relying on their content."
         ),
     )
-    source_url: AnyUrl | None = None
+    source_url: AnyUrl | None = Field(
+        default=None,
+        description=(
+            "Supplied external locator; does not attest to retrieval, freshness, "
+            "or support for a particular claim."
+        ),
+    )
 
     @field_validator("summary")
     @classmethod
@@ -1177,15 +1185,27 @@ class VaultDocumentDetail(BaseModel):
         ),
     )
     related_ids: list[str]
-    source_ids: list[str]
-    source_url: str | None
+    source_ids: list[str] = Field(
+        description=(
+            "Document derivation references, potentially unresolved. Fetch before "
+            "relying on their content; a reference alone does not prove support."
+        ),
+    )
+    source_url: str | None = Field(
+        description=(
+            "Supplied external locator; does not attest to retrieval, freshness, "
+            "or support for a particular claim."
+        ),
+    )
     created_at: datetime
     updated_at: datetime
     content_revision: int = Field(
         ge=1,
         description=(
             "Monotonic content version. Supply this as base_revision when "
-            "proposing an amendment so newer edits cannot be overwritten."
+            "proposing an amendment so newer edits cannot be overwritten. "
+            "Identifies the observed content version, not its accuracy; historical "
+            "content is not retrievable through this fetch contract."
         ),
     )
 

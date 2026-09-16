@@ -1,7 +1,7 @@
 # Vault answer grounding: immediate implementation specification
 
 Date: 2026-09-16
-Status: Proposed implementation scope; this document does not mark any task complete.
+Status: Implementation authorized; first stage implemented locally. See rollout record.
 
 ## Outcome and boundary
 
@@ -12,8 +12,8 @@ search and fetch contracts. No database migration, new dependency, infrastructur
 scope, or answer-generation endpoint is required for this phase.
 
 "Today" means the next bounded implementation phase, not a delivery-time estimate.
-The request that created this document authorizes specification writing; implementation
-and release are separate work. Longer-term features are in the
+Implementation was authorized after the specification commit. Production release
+and behavioral verification remain separate milestones. Longer-term features are in the
 [deferred specification](answer-grounding-deferred-spec.md).
 
 ## Baseline and motivation
@@ -199,6 +199,27 @@ No source registry, claim tables, automatic corpus backfill, or external fetchin
 service is included. No async/sync boundary changes are expected; any future test
 runner performs provider I/O outside web handlers. The skill-first approach is a
 pragmatic first phase: guidance influences behavior but is not server enforcement.
+
+## Rollout record
+
+### Stage 1: protocol and provenance descriptions (2026-09-16)
+
+- G1: added the service answer-grounding reference and routing entry in the canonical
+  knowledge-platform skill, with its managed agent-format mirror. The owner repository
+  identifies `engine/.claude/skills/knowledge-vault/` as canonical.
+- G2: clarified existing contribution/fetch model descriptions and MCP guidance.
+  No fields, permissions, database behavior, or server answer-generation path changed.
+- Verification: 42 tests passed across `test_mcp.py`, `test_mcp_contract.py`, and
+  `test_mcp_budget.py`; whole-tree Ruff passed; skill frontmatter validation passed.
+- Distribution: the owner's `sync_skill.py` updated all four local managed copies;
+  its `--check` confirmed agreement. Other machines and hosted clients are unverified.
+- Production deployment: not performed. Existing sessions may retain old skill/tool
+  context; local synchronization does not establish that a running client loaded it.
+- G3: evaluation fixtures, transcript checker, old/new client runs, and human semantic
+  review remain pending. These test results verify tool contracts and budgets only;
+  they do not establish answer quality or satisfy the full rollout acceptance gate.
+- Next stage: implement G3's offline fixture/checker suite in its own commit, then
+  record actual client evaluation and deployment as separate rollout milestones.
 
 ## References
 
