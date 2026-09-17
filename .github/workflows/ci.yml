@@ -99,6 +99,11 @@ jobs:
       # DB under-built and the suite would fail with UndefinedColumn/Table.
       # A failed migration exits non-zero and fails the job. env.py reads
       # DATABASE_URL (not TEST_DATABASE_URL).
+      - name: Check offline vault grounding evaluator (no schema required)
+        run: |
+          python -m unittest tests.vault.test_grounding_evaluation -v
+          python -m scripts.evaluate_vault_grounding
+
       - name: Apply database schema (alembic upgrade head)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/highscore_test

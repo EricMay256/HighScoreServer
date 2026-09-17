@@ -221,6 +221,23 @@ pragmatic first phase: guidance influences behavior but is not server enforcemen
 - Next stage: implement G3's offline fixture/checker suite in its own commit, then
   record actual client evaluation and deployment as separate rollout milestones.
 
+### Stage 2: offline evaluation infrastructure (2026-09-16)
+
+- Added 14 synthetic cases, a recorded-transcript structural checker, and negative
+  tests for forged results, preview-only citations, revision mismatches, prohibited
+  calls, traversal limits, and malformed inputs. No provider integration or new
+  dependency was added; no database migration or async handler change is needed.
+- The standalone CI check runs before database migrations. See the
+  [evaluation runbook](answer-grounding-evaluation.md) for commands, recording format,
+  and the human review gate.
+- Actual old/new skill client runs: **0**. Human semantic reviews: **0**.
+  Synthetic checker tests are not evidence of client answer quality.
+- Local verification: **20 checker tests passed**, all **14 fixtures validated**,
+  and whole-tree Ruff passed. The full database-backed suite was not rerun for
+  this offline-only change; the updated hosted CI workflow has not yet run.
+- G3 remains incomplete until those client runs and reviews are recorded. Production
+  deployment and verification in running clients remain separate rollout milestones.
+
 ## References
 
 - [ADR 0025: document edges and caller traversal](adr/0025-the-vault-stores-edges-and-does-not-traverse-them.md)

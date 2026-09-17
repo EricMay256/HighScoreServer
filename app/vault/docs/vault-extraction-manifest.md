@@ -129,6 +129,16 @@ a future provider needs a vendor SDK, it belongs in this table.
 | `AGENTS.md` | Delete the block delimited by `<!-- BEGIN vault-context -->` / `<!-- END vault-context -->`. |
 | `.env.example` | Remove the `VAULT_*` entries. |
 
+## Offline grounding evaluation assets
+
+Move `scripts/evaluate_vault_grounding.py`,
+`tests/vault/test_grounding_evaluation.py`, and
+`tests/vault/fixtures/grounding/cases.json` with the vault. The runbook and specs
+already live under `app/vault/docs/`. Move the dedicated offline grounding CI step
+out of HSS and into the extracted package's CI; adjust its module paths and the
+checker's default fixture path if the destination layout differs. This evaluator
+uses Pydantic but imports no host application or database modules.
+
 ## Verification after extraction
 
 - `grep -rn "vault" --include="*.py" app/ tests/` in HSS returns nothing.
