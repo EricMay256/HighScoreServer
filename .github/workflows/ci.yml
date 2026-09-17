@@ -101,7 +101,7 @@ jobs:
       # DATABASE_URL (not TEST_DATABASE_URL).
       - name: Check offline vault grounding evaluator (no schema required)
         run: |
-          python -m unittest tests.vault.test_grounding_evaluation -v
+          python -m unittest tests.vault.test_grounding_evaluation tests.vault.test_grounding_comparison -v
           python -m scripts.evaluate_vault_grounding
 
       - name: Apply database schema (alembic upgrade head)

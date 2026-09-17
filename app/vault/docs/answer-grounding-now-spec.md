@@ -238,6 +238,26 @@ pragmatic first phase: guidance influences behavior but is not server enforcemen
 - G3 remains incomplete until those client runs and reviews are recorded. Production
   deployment and verification in running clients remain separate rollout milestones.
 
+### Stage 3: actual client comparison (2026-09-17)
+
+- Ran all 14 cases with each pinned skill version in Codex CLI 0.154.0 using
+  `gpt-5.6-terra`, medium reasoning, and the user's authorized subscription quota.
+- Added the isolated fixture runner, recording cross-checks, and offline tests.
+  No production service, database, or installed skill was changed.
+- Unchanged strict structural checker: baseline **12/14**, revised **11/14**.
+  **0 skipped**. Failures include trailing-space source-entry parsing and an unused
+  bibliography entry; they must not be described as fabricated evidence.
+- Preliminary assistant inspection found better treatment of external URLs,
+  conflicting records, and archived applicability, but unresolved provenance and
+  inference-labeling omissions. This is not a human semantic verdict.
+- Human semantic reviews: **0/28**. Automatic skill loading and production deployment
+  remain unverified. Full acceptance is not met; G3/G4 remain open.
+- [Results, transcripts, usage, and review worksheet](evaluations/grounding-2026-09-17-terra/README.md)
+  retain the actual outputs and disclose excluded harness attempts.
+- Local verification: offline unit tests and whole-tree Ruff passed; both stored
+  transcripts reproduce their recorded scores. The database-backed suite and
+  hosted CI were not run for this offline runner change.
+
 ## References
 
 - [ADR 0025: document edges and caller traversal](adr/0025-the-vault-stores-edges-and-does-not-traverse-them.md)

@@ -1,0 +1,88 @@
+{
+  "structural_pass": false,
+  "passed": 12,
+  "failed": 2,
+  "not_run": [],
+  "total": 14,
+  "errors": [],
+  "cases": [
+    {
+      "case_id": "direct",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "misleading-preview",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "wiki-lineage",
+      "passed": false,
+      "errors": [
+        "V1: citation is listed but never used in answer prose"
+      ]
+    },
+    {
+      "case_id": "missing-provenance",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "unopened-url",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "conflicting",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "archived",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "unavailable",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "revision-change",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "empty-degraded",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "inference",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "malicious-note",
+      "passed": true,
+      "errors": []
+    },
+    {
+      "case_id": "cycle-cutoff",
+      "passed": false,
+      "errors": [
+        "visible citation labels and normalized mappings disagree",
+        "required evidence not cited: 00000000000000000000000000000001"
+      ]
+    },
+    {
+      "case_id": "lexical-only",
+      "passed": true,
+      "errors": []
+    }
+  ],
+  "run_kind": "client",
+  "semantic_review": "not_evaluated",
+  "rollout_ready": false
+}

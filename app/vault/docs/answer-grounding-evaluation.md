@@ -10,7 +10,7 @@ From the repository root, using the project virtual environment:
 
 ```console
 python -m scripts.evaluate_vault_grounding
-python -m unittest tests.vault.test_grounding_evaluation -v
+python -m unittest tests.vault.test_grounding_evaluation tests.vault.test_grounding_comparison -v
 python -m scripts.evaluate_vault_grounding --transcript path/to/recording.json
 ```
 
@@ -24,14 +24,52 @@ Exit codes: **0** valid fixtures or a complete structural pass; **1** failed or
 incomplete recorded run; **2** invalid input. Reports are JSON on stdout. The tool
 does not modify files or contact services. `--fixtures` selects another corpus.
 
-## Controlled client runs (not yet performed)
+## Controlled client runs
 
 Use `tests/vault/fixtures/grounding/cases.json`, revision `grounding-v1`, for both
 the old-skill baseline and proposed-skill run. Start an isolated session per case;
 record the exact skill commit, client/model/version, run date, and raw transcript.
-Expose only read-only fixture tools; do not use production credentials. The fixture
-adapter/client runner is not implemented by this checker and must be provided for
-this milestone. No live provider execution is implied by the unit tests.
+Expose only read-only fixture tools; do not use production credentials. The
+`scripts.run_vault_grounding_comparison` runner provides a stdio fixture adapter
+using the existing MCP dependency. It never imports the production app. No live
+provider execution is implied by its unit tests or CI.
+
+The runner requires explicit authorization to consume subscription quota. Example:
+
+```console
+python -m scripts.run_vault_grounding_comparison compare --codex /path/to/codex --skill-repository /path/to/knowledge-platform --output /new/local/run-directory
+python -m scripts.run_vault_grounding_comparison package --source /local/run-directory --output /new/artifact-directory
+```
+
+This experiment pins `gpt-5.6-terra`, medium reasoning, and skill commits
+`80dd1cf0af46a1483b099e8dff2d4a1194a386a0` (baseline) and
+`c1e6c162057e60ce8f851ddfe879f425e883503b` (revised). It checks for ChatGPT login,
+forces subscription authentication, removes API-key overrides from the child
+environment, and does not copy authentication files. Existing account authentication
+is used; client configuration and rules are ignored. Each case starts a fresh,
+ephemeral session in an empty temporary working directory with read-only sandboxing.
+Host skill discovery, project instructions, hooks, plugins, apps, shell, browsing,
+and nested agents are disabled. Only the local fixture server is configured and
+its two read-only tools are approved. Code Mode's host remains enabled because
+Codex CLI 0.154.0 uses it to execute these tool calls.
+
+The chosen skill revision is supplied explicitly as developer instructions; the
+revised arm includes its grounding reference. **This tests supplied protocol text,
+not automatic skill routing/loading or a production client's installed setup.**
+Tool descriptions and the citation-format prompt are identical across arms. Those
+common instructions already encourage some grounding behavior, so this is an
+incremental comparison, not an unguided-model baseline. Fixed retrieval responses
+also exclude production ranking, authorization, and network behavior from the test.
+
+Raw events, independent fixture-call logs, final answers, prompts, invocation
+settings, and skill text are retained locally. Packaging cross-checks client tool
+results against fixture logs and answers against final output, then includes only
+raw client events, normalized transcripts, structural reports, and a manifest with
+artifact hashes and token usage. Private skill text and local invocation files
+are excluded from the publishable package. Inspect artifacts for private data
+before committing them. Token counts are usage telemetry, not a dollar charge or
+an estimate of remaining subscription quota. Output directories must be new;
+prior attempts are never overwritten.
 
 Give the client the case question, vault-only scope, and document/source-hop
 budgets. Keep `expected_evidence`, `required_facts`, `acceptable_abstentions`,
@@ -116,4 +154,5 @@ results. Initial acceptance requires all mandatory cases to pass both checks in 
 least one named supported client, as specified in
 [the immediate spec](answer-grounding-now-spec.md). This is evidence about these
 cases, not a general hallucination guarantee. Client runs, human review, and
-production deployment remain unperformed at the end of stage 2.
+production deployment remained unperformed at the end of stage 2. Subsequent run
+records belong under `evaluations/`; a client run does not complete human review.
