@@ -45,6 +45,19 @@ NOTES = "/api/v1/vault/human/notes"
 PREFIX = "test-human-writes-"
 
 
+@pytest.fixture
+def client(vault_client: TestClient) -> TestClient:
+    """This module's requests go to the vault application alone.
+
+    Not the composed one: these tests exercise only vault routes, so they hold
+    against ``create_vault_app()`` and move with the package unchanged at
+    extraction (host ADR 0016). The vault's lifespan is still owned by the
+    session's ``composed_client``; see ``tests/vault/conftest.py``.
+    """
+
+    return vault_client
+
+
 def _run(work):
     async def exercise():
         transactions, engine = vault_service()

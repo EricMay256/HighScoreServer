@@ -2,6 +2,7 @@ import os
 from collections.abc import Iterator
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.vault.rate_limit import reset_ip_limiter
 from tests.vault.migration_helpers import create_database, drop_database
@@ -39,3 +40,28 @@ def disposable_database_urls(
     finally:
         for name, _url in reversed(created):
             drop_database(base_url, name)
+
+
+@pytest.fixture(scope="session")
+def vault_client(composed_client: TestClient) -> TestClient:
+    """A client whose requests reach the vault application alone (host ADR 0016).
+
+    It targets the very vault app inside the composed one -- the instance whose
+    lifespan started the engine and the MCP session manager -- and runs on
+    ``composed_client``'s event loop by sharing its portal. Starting a second
+    lifespan instead would fail outright (``init_vault_db`` refuses a second
+    engine), and a client with its own loop would inherit a pool bound to the
+    wrong one. ``TestClient.portal`` is public, and ``_portal_factory`` reuses it
+    when set; that is the whole mechanism.
+
+    After extraction this fixture owns the lifespan itself, and nothing that
+    uses it changes.
+    """
+
+    composed = composed_client.app
+    vault_app = getattr(composed, "vault", None)
+    if vault_app is None:
+        pytest.skip("VAULT_ENABLED is off, so there is no vault application")
+    vault = TestClient(vault_app)
+    vault.portal = composed_client.portal
+    return vault

@@ -79,7 +79,7 @@ def oauth_client(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     failures and the second an intermittent "Event loop is closed".
 
     ``tests/conftest.py`` therefore sets ``VAULT_PUBLIC_URL`` before
-    ``app.main`` is imported, which is what puts the OAuth routes on the one
+    ``composed`` is imported, which is what puts the OAuth routes on the one
     application the suite shares. All this fixture adds is the operator
     password, which ``operator_password_hash`` reads per call and so can be set
     per test.
@@ -270,13 +270,13 @@ def test_nothing_is_published_without_a_public_url(
     Asserted against the route table rather than over HTTP, because making
     requests would mean a second application -- which the ``oauth_client``
     docstring explains must not happen. The question here is only which routes
-    ``create_app`` assembles, and the table answers it exactly.
+    ``create_vault_app`` assembles, and the table answers it exactly.
     """
 
     monkeypatch.delenv("VAULT_PUBLIC_URL", raising=False)
-    from app.main import create_app
+    from app.vault.application import create_vault_app
 
-    paths = {getattr(route, "path", "") for route in create_app().router.routes}
+    paths = {getattr(route, "path", "") for route in create_vault_app().router.routes}
 
     assert "/authorize" not in paths
     assert "/token" not in paths
@@ -1239,9 +1239,9 @@ def test_the_public_oauth_routes_carry_the_preauth_guard() -> None:
     next.
     """
 
-    from app.main import create_app
+    from app.vault.application import create_vault_app
 
-    routes = create_app().router.routes
+    routes = create_vault_app().router.routes
     guarded = {
         route.path
         for route in routes

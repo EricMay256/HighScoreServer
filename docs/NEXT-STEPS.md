@@ -211,19 +211,23 @@ Decided 2026-11-25:
   `knowledge_vault`), which holds no corpus.
 - **The Heroku app `high-score-server` is re-pointed to it.** At build it fetches
   HSS's public `main`, which needs no credential, and logs both commit SHAs.
-- **HSS gains a generic extension point and names no vault code.**
-  `knowledge-vault` owns the composed `wsgi`, the Procfile and the release
-  script, and its CI tests the composition against HSS's public `main`.
+- **HSS and the vault are two applications behind a path dispatcher** (host
+  ADR 0016). `knowledge-vault` owns `composed.py`, the `wsgi`, the Procfile and
+  the release script, and its CI tests the composition against HSS's public
+  `main`.
 
 [`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
 is the checklist. In order:
 
 1. §1.1 — `main` level with `dev`, and the production vault head known.
-2. **In HSS, before anything moves:** the `create_app(extensions=...)` extension
-   point, and the vault wiring in `app/main.py` converted into a vault extension
-   registered behind `VAULT_ENABLED`. This is testable in one suite. This
-   Windows machine has no Postgres, so the database tests run in CI or on the
-   WSL machine.
+2. **In HSS, before anything moves: two applications. Implemented on `dev`
+   2026-11-25 (host ADR 0016); the database suite has not yet run against it.**
+   `create_vault_app()` builds the vault alone, `composed.py` dispatches by
+   path, and `app/main.py` names no vault code. Verified locally without a
+   database: a lint pass, 35 database-free tests, and a mocked-lifespan smoke
+   run of the composed app. Still to verify: the full suite, which needs
+   Postgres with pgvector. CI runs only for `main`, and this Windows machine
+   has no database.
 3. **No staging spike** (operator's choice, 2026-11-25). The build mechanism is
    proven at cutover, under ADR 0062's rollback plan: cut over only when
    production's migration heads already match, keep the vault in HSS until the

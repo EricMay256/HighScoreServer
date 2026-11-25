@@ -21,10 +21,10 @@ from fastapi.testclient import TestClient
 
 load_dotenv()  # load .env before any os.environ reads
 os.environ["RATE_LIMITER_ENABLED"] = "false"  # disable rate limiter for tests
-# The vault's OAuth authorization server is assembled inside create_app() from
-# this variable -- its presence is the on/off switch (vault ADR 0024) -- and
-# `app` below is built at import. Setting it here is what puts /authorize,
-# /token and /vault/login on the one application the whole suite shares.
+# The vault's OAuth authorization server is assembled inside create_vault_app()
+# from this variable -- its presence is the on/off switch (vault ADR 0024) --
+# and `app` below is built at import. Setting it here is what puts /authorize,
+# /token and /vault/login on the one composed application the suite shares.
 #
 # Sharing matters more than it looks. A test that built its own app and entered
 # its lifespan would tear the vault engine down for every other test:
@@ -32,7 +32,9 @@ os.environ["RATE_LIMITER_ENABLED"] = "false"  # disable rate limiter for tests
 # connections belong to the session client's event loop. Both failures are
 # action-at-a-distance in files the offending test never mentions.
 os.environ.setdefault("VAULT_PUBLIC_URL", "https://vault.test.invalid")
-from app.main import app  # noqa: E402 Must import after overriding env var
+# The composed application (host ADR 0016): the leaderboard alone, or the
+# leaderboard and the vault behind one dispatcher when VAULT_ENABLED.
+from composed import app  # noqa: E402 Must import after overriding env var
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -45,14 +47,28 @@ def configure_test_env():
 
 
 @pytest.fixture(scope="session")
-def client(configure_test_env):
+def composed_client(configure_test_env):
     """
-    Single TestClient for the session.
-    FastAPI's lifespan runs on first request, initializing the DB pool
-    against TEST_DATABASE_URL.
+    Single TestClient for the session, and the only one that runs a lifespan.
+
+    Entering it runs the composed lifespan -- the leaderboard's, then the
+    vault's -- against TEST_DATABASE_URL. It must stay the only lifespan owner:
+    the vault engine is a module-level global bound to this client's event
+    loop, and init_vault_db refuses a second one. tests/vault/conftest.py's
+    vault_client reuses this client's loop rather than starting its own.
     """
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(scope="session")
+def client(composed_client):
+    """The client most tests use: the composed application.
+
+    A separate name from composed_client so a module can override `client`
+    (as the vault-only modules do) without creating a fixture cycle.
+    """
+    return composed_client
 
 
 @pytest.fixture(autouse=True)

@@ -183,9 +183,9 @@ calls, or policy decisions. Services own transaction boundaries. Domain records 
 business-relevant fields; they do not automatically carry vectors or generated search
 columns. API responses map deliberate subsets of those records.
 
-`app.main` initializes and disposes the vault engine in the existing FastAPI lifespan and
-includes the vault HTTP/MCP routers before the SPA/static catch-all. The engine is created
-once per worker, never per request.
+`create_vault_app()` (`application.py`) owns the vault's lifespan, routes and handlers, and
+`composed.py` runs it beside the leaderboard, dispatching by path (host ADR 0016). The engine
+is created once per worker, never per request.
 
 ### Identity and request correlation
 

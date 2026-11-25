@@ -35,7 +35,7 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "app.main:app",
+        "composed:app",
         host=os.environ.get("DEV_HOST", "127.0.0.1"),
         port=int(os.environ.get("DEV_PORT", "8000")),
         reload=True,

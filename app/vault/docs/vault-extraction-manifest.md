@@ -17,18 +17,12 @@ follow vault ADR 0062; see "Destination and composition" below.
 - **It is the Heroku deploy root.** `high-score-server` is re-pointed to it. At build it fetches
   HSS's public `main`, which needs no credential, and it owns the composed `wsgi`, the Procfile
   and the release script.
-- **First step, done inside HSS before anything moves: a generic extension point.** HSS's
-  `create_app` accepts extensions. Each extension provides `include(app)`, called where the
-  vault block sits today, ahead of the SPA catch-all, and a `lifespan(app)` async context,
-  entered inside HSS's lifespan.
-
-  `app/main.py` currently wires the vault in about 100 lines spread across `lifespan` and
-  `create_app`: engine and embedding start-up, `report_vault_pool`, `vault_mcp_lifespan`, the
-  REST router, the saturation handler, the MCP mount and its canonical-path redirect, and the
-  OAuth, landing, browse and review routes. That wiring moves into a vault-owned extension
-  (`app/vault/composition.py`), registered from `wsgi.py` behind `VAULT_ENABLED` until
-  extraction. After extraction HSS's `wsgi.py` passes no extensions, and `knowledge-vault`'s
-  passes the vault's.
+- **First step, done inside HSS 2026-11-25 (host ADR 0016): two applications.**
+  `create_vault_app()` in `app/vault/application.py` builds the vault alone, with its own
+  lifespan, exception handlers (including the 429 handler it used to borrow from the host)
+  and docs. `composed.py` at the repository root dispatches by path. `app/main.py` names no
+  vault code. At extraction `composed.py` moves to `knowledge-vault` with only its vault
+  import path changed.
 
 ## Moves with the package
 
@@ -50,7 +44,8 @@ follow vault ADR 0062; see "Destination and composition" below.
 | Private composition | `test_amendments.py`, `test_compile.py`, `test_contributions.py`, `test_mcp.py`, `test_oauth_flow.py`, `test_routes.py`, `test_rate_limit.py`, `test_schema_drift.py`, `tests/vault/conftest.py` | Move to the composing application or split package-only cases out. Replace HSS's global `TestClient(app.main.app)` with a standalone vault application factory; provide package-owned migrated Postgres/pgvector and credential fixtures. |
 | Vault package, added 2026-11-25 (no database) | `test_browse_console.py`, `test_browse_propose_behaviour.py`, `test_chunk_eligibility_fences.py`, `test_console_session_module.py`, `test_console_style.py`, `test_describe_database.py`, `test_landing_page.py`, `test_listing_cursor.py`, `test_mcp_contract.py`, `test_measure_chunk_eligibility.py`, `test_measurement.py`, `test_pool_observer.py`, `test_public_url_drift.py`, `test_retrieval_cases.py`, `test_retrieval_harness.py`, `test_review_console.py`, `test_snippet.py`, `test_span_edit.py`, `test_wiki_import_revalidation.py`, plus the assets `console_harness.js` and `mcp_surface.json` | Move with the package. `test_browse_console.py` already builds its own Starlette app; none reaches `app.main`. |
 | Vault package, added 2026-11-25 (database) | `test_backfill_summaries_script.py`, `test_metadata_amendments.py`, `test_oauth_grant_label.py` | Move, replacing `TEST_DATABASE_URL`/`configure_test_env` with the package-owned database fixture. |
-| Private composition, added 2026-11-25 | `test_human_deletes.py`, `test_human_reads.py`, `test_human_writes.py`, `test_mcp_budget.py`, `test_note_listing.py`, `test_restore_human_note_script.py`, `test_span_edit_tool.py`, `test_summary_carveout.py` | All use the root `client` fixture, i.e. `TestClient(app.main.app)`. Run them in the private repository's CI against HSS's public `main` (ADR 0062), or rebase them onto a package-only app factory where they do not need the host. |
+| Vault package, added 2026-11-25 (vault app only) | `test_human_deletes.py`, `test_human_reads.py`, `test_human_writes.py`, `test_mcp_budget.py`, `test_note_listing.py`, `test_restore_human_note_script.py`, `test_span_edit_tool.py`, `test_summary_carveout.py` | Each overrides `client` with `vault_client`, so requests reach `create_vault_app()` alone (host ADR 0016). Move with the package; the only change is that `vault_client` owns the lifespan instead of borrowing `composed_client`'s. |
+| Composition, added 2026-11-25 | `test_composition.py`, `tests/test_vault_disabled.py` | Path ownership, no shadowed leaderboard route, CORS scope, the 429 shape, and the disabled-vault import guarantee. Move to `knowledge-vault`'s composition CI. |
 | HSS host | `test_hss_pool_config.py` | Keep in HSS and move out of `tests/vault/`; it verifies `app.db`, not the extracted package. |
 | Dual-lineage composition | `test_migrations.py`, `migration_helpers.py` | Keep the shared-vs-separate topology cases with the composition owner. Move vault-only upgrade/downgrade, offline-render, and extracted revision-graph cases with the vault lineage. |
 | Boundary contract | `test_boundaries.py` | Split: package-to-host and historical-migration checks move with the vault; the reverse host-to-vault scan stays in HSS. |
@@ -145,7 +140,7 @@ a future provider needs a vendor SDK, it belongs in this table.
 
 | File | Change |
 | ---- | ------ |
-| `app/main.py`, `wsgi.py` | Keep the generic extension point; `wsgi.py` stops registering the vault extension. Nothing in HSS names the vault package. What the extension replaced: vault lifespan wiring (`init_vault_db`, `init_vault_embeddings` and their `close_*` counterparts), the `vault_enabled()` route gate, and the `/api/v1/vault` router registration. The `load_environment()` call at the top of `create_app` exists so that gate can be evaluated — check whether anything else came to depend on it before removing it. |
+| `composed.py`, `wsgi.py`, `run_dev.py` | `composed.py` moves to `knowledge-vault`; HSS's `wsgi.py` and `run_dev.py` go back to `app.main:app`. `app/main.py` already names no vault code (host ADR 0016). Historical note, the wiring it once held: vault lifespan wiring (`init_vault_db`, `init_vault_embeddings` and their `close_*` counterparts), the `vault_enabled()` route gate, and the `/api/v1/vault` router registration. The `load_environment()` call at the top of `create_app` exists so that gate can be evaluated — check whether anything else came to depend on it before removing it. |
 | `app/db.py` | Restore an HSS-only pool default/capacity decision and remove comments whose arithmetic reserves connections for the vault. Do not blindly restore 10 per worker; retain operational reserve. |
 | `README.md` | Remove the staged-vault overview, extraction-cost table, dark-deployment notes, dual-lineage commands, and vault connection-budget discussion. |
 | `db/role.sql` | Remove the vault-schema ownership/grant commentary; keep leaderboard role grants unchanged. |

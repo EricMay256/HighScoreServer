@@ -48,6 +48,19 @@ pytestmark = pytest.mark.skipif(
 # suite's convention (see `test_amendments`) is that each module owns its
 # fixtures and shares only the helpers underneath them.
 @pytest.fixture
+def client(vault_client: TestClient) -> TestClient:
+    """This module's requests go to the vault application alone.
+
+    Not the composed one: these tests exercise only vault routes, so they hold
+    against ``create_vault_app()`` and move with the package unchanged at
+    extraction (host ADR 0016). The vault's lifespan is still owned by the
+    session's ``composed_client``; see ``tests/vault/conftest.py``.
+    """
+
+    return vault_client
+
+
+@pytest.fixture
 def provider(monkeypatch: pytest.MonkeyPatch) -> StubEmbeddingProvider:
     stub = StubEmbeddingProvider()
     monkeypatch.setattr("app.vault.routes.get_embedding_provider", lambda: stub)

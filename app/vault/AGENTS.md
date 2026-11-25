@@ -183,7 +183,8 @@ client (ADR 0053); retrieval tuning is frozen until 500 active documents (ADR 00
 - `vault_list_review_cases` returns no bodies. `similars` (notes-only, the verdict) and
   `related_pages` (wiki-only, context) come from separate queries.
 - The mount inherits nothing from the host: `VaultMCPAuthMiddleware` carries the pre-auth
-  guard; `app.main` enters `vault_mcp_lifespan` explicitly; the app is built per `create_app()`.
+  guard; `application.vault_lifespan` enters `vault_mcp_lifespan` explicitly; the MCP app is built per
+  `create_vault_app()`. The vault is its own application, dispatched by path (host ADR 0016).
 - DNS-rebinding protection is off unless `VAULT_MCP_ALLOWED_HOSTS` is set.
 - The contribution tool derives its idempotency key from content, never from the model.
 - A change to the tool surface is not finished until the `knowledge-vault` skill has been read
