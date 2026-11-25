@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated 2026-09-12. The start-here for a fresh session: where things are,
+Last updated 2026-11-25. The start-here for a fresh session: where things are,
 what is in flight, and the environment facts that bite and are not already in
 `AGENTS.md`. What remains to do is [`NEXT-STEPS.md`](NEXT-STEPS.md); why things
 are the way they are is in the ADRs. Previous handoffs are archived under
@@ -11,8 +11,8 @@ their reasoning, none of them current.
 
 | | |
 | --- | --- |
-| Branches | `main` is current with `dev` through PR #34, squash-merged, so `main` is not an ancestor and the next merge is a PR. Verified 2026-09-12: `git diff dev origin/main` is empty — the trees are identical |
-| Migrations on `dev` but not `main` | None. Both lineages match; the vault head is `0020_note_listing_sort_indexes` |
+| Branches | `dev` is ahead of `main` (verified 2026-11-25): it carries Human-vault phases B1–B4 with vault migration 0021, the answer-grounding evaluation, and the 2026-11-25 direction batch. Merging it is NEXT-STEPS §1.1 |
+| Migrations on `dev` but not `main` | Vault `0021_human_collection_boundary`. The leaderboard lineage matches |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
 | Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
@@ -26,14 +26,17 @@ them.
 
 ## In flight
 
-- **The librarian and proposal revision.** Vault ADR 0044 is Accepted and
-  unimplemented; ADR 0043 is Proposed. The plan is
-  [`librarian-plan.md`](../app/vault/docs/librarian-plan.md).
+- **The 2026-11-25 vault direction.** The vault exists to improve the user's agents —
+  memory across sessions and providers, valued per token of context. The librarian is
+  replaced by a client-side agent loop (vault ADR 0053, rejecting 0043); retrieval tuning is
+  frozen to 500 documents (0055); extraction is scheduled (0062, Proposed). The vault
+  AGENTS.md was cut to its rules, with the old text in `app/vault/docs/invariants-rationale.md`.
+  See NEXT-STEPS "Vault direction".
 - **The Human vault.** Vault ADR 0048, 2026-09-11: enrolled Human notes become
   database-authoritative, edited in the browser, with server-only deletion and
   Human and Agent write grants that cannot be held together. The Obsidian sync
-  client is optional as of the 2026-09-12 amendment — it buys offline authoring
-  and nothing else that a one-way projection would not. **Phase A is done
+  client is **not built** (vault ADR 0054, 2026-11-25); offline access is a
+  read-only download. **Phase A is done
   locally as of 2026-09-12** — export rehearsal validated and idempotent,
   governance and runtime read policy verified to agree per file, enrollment set
   previewed — leaving deployment parity. **Phases B1–B4 are built** — the

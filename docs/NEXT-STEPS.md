@@ -1,6 +1,6 @@
 # Next steps
 
-Current as of 2026-09-12. One ordered list of what remains, across the
+Current as of 2026-11-25 for the vault; the leaderboard sections were last revised 2026-09-12. One ordered list of what remains, across the
 leaderboard and the vault, with the *why now* and the blocking relationships.
 Detail lives elsewhere and is linked; this file exists so nothing else has to
 be read to know what to pick up.
@@ -13,12 +13,10 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## State
 
-- **`main` is current with `dev` as of PR #34**, squash-merged, so `main` is no
-  longer an ancestor and the next merge is another PR rather than a
-  fast-forward. Verified against git on 2026-09-12: `git diff dev origin/main`
-  is empty — the two trees are byte-identical, including the ADR 0048
-  documentation batch that #34 carried — and the vault lineage head is
-  `0020_note_listing_sort_indexes` on both, with no migration pending to `main`.
+- **`dev` is ahead of `main`** (verified 2026-11-25). Since PR #34 it has
+  carried Human-vault phases B1–B4 with vault migration
+  `0021_human_collection_boundary`, the answer-grounding evaluation, and the
+  2026-11-25 direction batch. Merging it is §1.1.
 - **Production, as last recorded on 2026-08-28** and not re-verified since:
   vault lineage `0017_oauth_entitlements`, 94 documents (80 notes, 14 wiki
   pages), all active; `VAULT_ENABLED`, `VAULT_PUBLIC_URL` and an operator
@@ -31,170 +29,167 @@ Historical handoffs are under [`archive/`](archive/README.md).
   2026-09-02 — the old `app/ tests/ scripts/` scope left `migrations/`,
   `run_dev.py` and `wsgi.py` unlinted.
 
+## Vault direction — decided 2026-11-25
+
+**What the vault is for:** improving the quality of the user's agents —
+persistent memory and information across sessions and providers, judged by the
+value it returns per token of context it costs. Not by corpus size, and not by
+governance completeness. The vault is deliberately larger than the leaderboard
+and built for a corpus that has not arrived yet; that is accepted.
+
+The 2026-11-25 review found effort concentrated on *write correctness* and
+almost none on whether notes are *read, used, and kept true*. What follows moves
+it. The decisions are vault ADRs 0053–0062 and amendments to 0016, 0023, 0025,
+0030–0032, 0034, 0043 and 0048:
+
+- **The librarian is replaced** by client hooks, existing tools and scheduled
+  routines — vault ADR 0053, which rejects ADR 0043 (§2).
+- **Human vault:** phase B stands as built; the Obsidian extension is not built;
+  offline access is a read-only download — ADR 0054 (§4).
+- **The operator side is frozen** — OAuth, both login methods, labels,
+  entitlements, the consoles. Its intended use, one credential per provider
+  with the narrowest scopes, is already supported.
+- **Retrieval tuning is frozen until 500 active documents** — ADR 0055 (§5).
+- **Extraction moves up**, with a deployment-shaped definition of done — ADR
+  0062, Proposed (§6).
+- **`app/vault/AGENTS.md` was cut** from 832 lines to 225 on 2026-11-25; the
+  full prior text is kept verbatim in `app/vault/docs/invariants-rationale.md`.
+
 ## 1. Immediate
 
-1. **Open the ADR 0048 documentation PR. Done — PR #34, merged 2026-09-12.**
-   `main` and `dev` now hold identical trees, so nothing about the Human vault
-   is stranded on a branch nobody reads. No migration was in range.
+1. **Bring `main` level with `dev`.** `dev` carries migration
+   `0021_human_collection_boundary`, phases B1–B4, the answer-grounding
+   evaluation and the 2026-11-25 batch; `main`, and therefore production, does
+   not. Extraction (§6) deploys from `main`, so this goes first. Before merging,
+   record the production vault head with
+   `heroku run "python -m alembic -c alembic-vault.ini current"`. The last
+   recorded value is `0017`, and 0018–0021 would all apply in one release.
 2. **Settle the production game-mode list.** Nothing hardcodes a mode any
    more, so `/leaderboard` and the SPA both land on the first row of
    `/game_modes`, ordered by `name` — the alphabetically first configured mode
    *is* the landing page. `blitz` is expected to sort first and unused modes
    are to be pruned, but neither has been confirmed against the deployment.
-   Worth doing before the merge, because the failure is silent: a stale or
-   test mode sorting earlier makes it the front page and nothing errors.
-
-   The buildpack's interpreter was the other half of this item and is settled
-   — 3.12, matching the pin. Still unchecked from the same visit: `heroku
-   config` and the applied vault lineage head; the production facts above are
-   from 2026-08-28.
+   The failure is silent: a stale or test mode sorting earlier becomes the
+   front page and nothing errors.
 3. **Backfill note summaries.** 67 of 80 production notes lacked one on
    2026-08-28. `summary` joins the embedding text and is the search preview
    (ADR 0031), so an unsummarized note is measurably harder to find.
    `scripts/backfill_vault_summaries.py` plans and applies; an agent writes the
-   prose. Intake is fixed (ADR 0035), so this is back-catalogue only.
-4. **Decide whether the four largest notes want splitting.** Contributed
-   2026-08-28 at 10.7k–15.4k characters against a corpus mean of 2.1k. Editorial
-   before technical: is each one insight or several?
-   `scripts/measure_chunk_eligibility.py` reports the population ADR 0034
-   watches.
+   prose. A natural first job for the garden routine (§2).
+4. **Decide whether the four largest notes want splitting.** 10.7k–15.4k
+   characters against a corpus mean of 2.1k. Editorial before technical: is
+   each one insight or several?
 
-## 2. The librarian and proposal revision
+## 2. The agent loop — vault ADR 0053
 
-The largest remaining vault feature. The plan is
-[`librarian-plan.md`](../app/vault/docs/librarian-plan.md); the decisions are vault ADR 0044
-(Accepted, unimplemented) and ADR 0043 (Proposed).
+**Phase 1. Client side, in knowledge-platform; no HSS change.**
 
-1. **Phase 1 — proposal lineage (ADR 0044).** One Alembic revision on the vault
-   lineage adding `revises_proposal_id` (an unconstrained correlation, not a
-   self-foreign-key) and an amendment-specific `superseded` state; Core
-   metadata, domain and API models, repository and service methods, REST
-   routes, the two-credential review-page flow with its recoverable
-   "successor filed; finish settlement" state, and tests. Independent of any
-   model integration.
-2. **Accept or amend ADR 0043**, then Phases 2–8: the workflow tables
-   (sessions, events, artifacts, invocations), the `/vault/librarian` console,
-   the external-MCP runner and its `vault:librarian` / `vault:librarian-run`
-   scopes, the approval adapters, the optional provider-API runner with its
-   hard USD 5 monthly ceiling, bounded heartbeat, and the verification corpus.
-   Every scope change touches the OAuth constraints, grants, refresh tokens,
-   constants, the CLI and the schema-drift tests together.
-3. **Open decision:** the first provider/model pair for the sub-USD-5
-   experiment, chosen against current official pricing at implementation time.
+- **Package `knowledge-vault` as a Claude Code plugin** — skill, hooks and hook
+  scripts in one unit, from a private marketplace. Today the skill reaches
+  only the projects `sync_skill.py` copies it into. On the Windows machine it
+  was absent while the MCP connector was present. The MCP server stays a
+  claude.ai connector, which already syncs per account and works in Orca and
+  cloud sessions. Still unverified: whether a plugin synced through the
+  claude.ai account carries hooks as well as skills. If not, each device runs
+  `/plugin marketplace add` once, plus `gh auth setup-git` for auto-update.
+- **Four hook behaviours**, specified provider-neutrally in ADR 0053 so Codex
+  and others can implement their own equivalents: retrieve on failure, reflect
+  at stop after substantial work, inject promoted titles at session start, and
+  mark a reflection due before compaction.
+- **Skill guidance:** write on resolution, not on failure; amend rather than
+  add; read the activity log before gardening or reflecting; file synthesized
+  answers back through `source_ids`; follow the answer-grounding protocol
+  ([`answer-grounding-now-spec.md`](../app/vault/docs/answer-grounding-now-spec.md)),
+  which is client guidance with an offline evaluator and already fits this
+  shape.
+- **The garden routine**, run on demand or on a schedule with an action budget.
+  Its credential holds `vault:read`, `vault:write`, `vault:propose` and
+  `vault:compile`, and nothing more.
+- **Measure for a week:** contributions per session, flagged outcomes,
+  contributions at or above 0.75 similarity, and reflections that ended in
+  "nothing durable".
+
+ADR 0044 (proposal lineage) is independent of all this and stays Accepted but
+unscheduled.
 
 ## 3. Corpus quality and retrieval
 
+**Phase 2. HSS, code only.**
+
+1. **Refuse tool-call markup** (`</summary>`, `<parameter name=`, and similar)
+   in title, summary and tags at the write boundary. Note
+   `8b01449717c14ec5a91206c2ffcfeacb` stored a leaked tool call in its summary,
+   and its tags are probably inside it. Repair it by amendment.
+2. **The deterministic health report** — vault ADR 0056. A script first, then a
+   read-only MCP tool. It absorbs the tag census.
+3. **The similarity warning** — ADR 0032's 2026-11-25 amendment.
+   `similarity_warning_at` defaults to 0.75 and is advice only. Check it
+   against the `test_mcp_budget.py` ratchet.
+4. **Recalibrate `flag_at`** — ADR 0016's 2026-11-25 amendment. Build 15–20
+   realistic duplicate pairs, then choose an operating point under the new
+   cost-trade rule and record it in `embedding-calibration.md`. Review cases
+   become reachable once `flag_at` drops below 1.0.
+5. **The activity log** — vault ADR 0057: `vault_recent_activity` plus an
+   exported `Agent/_log.md`.
+
+**Phase 3. Each item is a vault Alembic revision.**
+
+6. **Usage counters** — vault ADR 0058.
+7. **Feedback on notes** — vault ADR 0059.
+8. **`supersedes_ids`** — vault ADR 0060.
+9. **Promotion nomination and the new meaning of `promoted`** — vault ADR 0061.
+   Includes `vault_list_promoted`, which the session-start hook consumes.
+10. **Link evolution** — near neighbours returned as paired-link suggestions
+    (A-MEM; vault note `20aabea1…`).
+
+Still open from before:
+
 - **Validate the retrieval label set.** Every case in
-  `app/vault/retrieval_cases.py` is `validated=False`, authored by the same
-  agent that reshaped the search response. A human pass over the relevant sets
-  is what turns `scripts/measure_retrieval_quality.py` from a self-assessment
-  into a regression signal.
-- **The exporter and the governance linter disagree on frontmatter key order.**
-  Every fresh export presents as roughly 25 files of fixable drift, and
-  knowledge-platform's pre-commit hook blocks until `lint --fix` runs.
-  Format-only, but manual and cross-repository. Teach the exporter the linter's
-  order, or have the export script run the fixer.
-- **Facet vocabulary.** `FACET_NAMES` is `{project, area, system}`; the
-  2026-08-13 census found half the corpus tagged `gotcha`, a *kind* rather than
-  a topic, with nowhere to go. Decide on a `kind`/`genre` axis on queryability
-  alone — the dedup-margin argument is settled, tags stay in the embedding
-  text. Moving a tag to a facet re-embeds every affected note; do it in one
-  pass.
-- **A tag census endpoint** (`GROUP BY unnest(tags)`) is the cheapest way to
-  make vocabulary drift visible. Independent of everything else.
-- **`flag_at` stays 1.0.** Measured, not provisional: the bands overlap on
-  `text-embedding-3-small`. The remaining lever is a different model, and that
-  is a calibration run recorded in
-  [`embedding-calibration.md`](../app/vault/docs/embedding-calibration.md), not
-  a constant change.
+  `app/vault/retrieval_cases.py` is `validated=False`. A human pass turns
+  `scripts/measure_retrieval_quality.py` into a regression signal, and the
+  500-document unfreeze (§5) is measured against it.
+- **Exporter versus linter key order.** Lower priority now that no
+  bidirectional sync is planned; it matters only to the offline download.
+- **Facet vocabulary.** Half the corpus is tagged `gotcha`, a kind rather than
+  a topic. Decide a `kind` axis on queryability alone, and re-embed affected
+  notes in one pass.
 
-## 4. The Human vault — decided 2026-09-11, nothing built
+## 4. The Human vault
 
-Vault ADR 0048 selected database authority for enrolled Human notes, browser
-authoring, and an OAuth Obsidian sync client with server-only deletion. It
-supersedes ADR 0041's deferral and ADR 0047's Markdown-authoritative import, and
-partially supersedes ADRs 0012, 0014 and 0022 — each of those records which half
-of itself survives. Start at the
-[handoff](../app/vault/docs/human-vault-handoff.md); the contracts are the
-[sync specification](../app/vault/docs/human-vault-sync-spec.md) and the
-[daily embedding specification](../app/vault/docs/human-embedding-refresh.md).
+Vault ADR 0048 selected database authority for enrolled Human notes. As of
+2026-11-25, vault ADR 0054 partially supersedes it. **The Obsidian extension is
+not built, and offline access is a read-only download** containing exactly what
+the downloading credential could read. That download is the `vault:export`
+surface, whose scope and `snapshot` quota already exist. Until it is built,
+`scripts/export_vault_markdown.py` covers it.
 
-Five phases, each demonstrated before the next begins. Nothing reaches a broader
-read surface until phase B's audience and ownership checks pass.
-
-- **A — baseline and export rehearsal. Done locally 2026-09-12, except
-  deployment parity.** The export is a faithful idempotent projection (76 files,
-  second `--apply` byte-identical, `--prune` scoped to exported prefixes and
-  `Human/` untouched), and governance now agrees with the runtime by
-  measurement: `scripts/check_read_policy_parity.py` diffs the private
-  `folders.yml` against `read_policy.py`, and per-file agreement held for all
-  213 markdown files. Results, and the three things it surfaced, are in the
+- **A — baseline and export rehearsal. Done locally 2026-09-12**, except
+  deployment parity. See the
   [handoff](../app/vault/docs/human-vault-handoff.md#phase-a-result-2026-09-12).
-  What is left is production: the applied vault head and config vars are still
-  the 2026-08-28 record, and phase B's migrations land on whatever is actually
-  there.
-- **B — the Human service boundary. In progress; B1 built 2026-09-12.** The
-  bulk of the work, split into five slices reviewed one at a time.
-  `source_sha256` and unique `vault_path` do not cover it and must not be
-  overloaded to pretend otherwise.
-  - **B1 — schema and write boundary, built.** Vault ADR 0049 and migration
-    `0021_human_collection_boundary`: `collection` tied to the path prefix,
-    `resource_revision`, `vault_human_revisions` and `vault_human_changes`,
-    three `vault:human-*` scopes kept off every Agent-writing credential, and
-    every Agent write path refusing Human rows. No Human endpoint exists.
-  - **B2 — audience-aware reads, built.** Vault ADR 0050: `/human/notes` and
-    `/human/notes/{id}` under `vault:human-read`, filtered to the Human
-    collection and blind to Agent notes; agents keep `ai_read`; dedup and
-    compile planning exclude Human rows. Human search waits for phase C.
-  - **B3 — Human create, edit and move, built.** Vault ADR 0051: three routes
-    under `vault:human-write`, each accepted write one transaction under the
-    corpus lock (which the history repository checks) writing the row, a
-    snapshot, a feed entry and an audit event. Create is idempotent by
-    operation id through the write ledger; edit and move succeed without
-    writing when the note already matches, and otherwise 409 with the current
-    revision. No embedding call and no dedup gate.
-  - **B4 — recoverable deletion and the change feed, built.** Vault ADR 0052:
-    `DELETE /human/notes/{id}` leaves a tombstone and keeps the history; a
-    resent delete returns the same tombstone; only the operator's
-    `scripts/restore_human_note.py` brings a note back, under its own id.
-    `/human/changes` and `/human/changes/head` serve the feed, and a cursor
-    whose entry is no longer there is a 410 that means resnapshot. No snapshot
-    endpoint: head, then list, then replay.
-  - **B5 — a disclosure regression suite** across every Agent surface.
-- **C — browser authoring.** Its own OAuth family, explicit save and conflict
-  states, a separately granted delete, and visible read-policy and
-  semantic-index state.
-- **D — the Obsidian extension. Optional; decide after C is in real use.**
-  Source in `clients/obsidian/`, which does not exist yet: PKCE against a
-  configurable deployment, managed `VaultID`s, revision-checked bidirectional
-  sync, conflict and recovery UI. Desktop is the verified target; mobile is
-  claimed only after real-device tests. What only this buys is authoring
-  offline. Keeping local Markdown current is the other half and is much
-  cheaper — a one-way Human projection, the mirror of the Agent exporter.
-  **Build that if D is skipped**, or enrolled notes freeze at enrollment and the
-  local vault decays over exactly the notes that were enrolled.
-- **E — daily indexing and pilot.** A restartable operator command under a
-  durable lease, coalescing a day's edits into one latest-input request per
-  changed note and retaining the older compatible vector when a refresh fails.
-  May be built alongside C and D. The OpenAI Batch API was evaluated and is not
-  selected: 50% off does not pay for a two-day worst-case lag.
+- **B — the Human service boundary. B1–B4 built** on `dev` (vault ADRs
+  0049–0052, migration 0021): the collection boundary, audience-aware reads,
+  create/edit/move, and tombstoned deletion with the change feed.
+  **B5, a disclosure regression suite across every Agent surface, remains** —
+  and it matters more now that Human rows exist in the schema.
+- **C — browser authoring of Human notes. Undecided.** The 2026-11-25 direction
+  says the web interface suffices for authoring. Whether that means building C,
+  or that the existing console is enough, is an open question for the operator.
+- **D — the Obsidian extension. Dropped** (ADR 0054).
+- **E — daily Human indexing. Undecided**, and it matters only if Human notes
+  are to be searchable.
 
-The governance precondition is met: private `folders.yml` and runtime
-`read_policy.py` were confirmed to agree, per file, about every note that is
-about to be enrolled (2026-09-12). Re-run `scripts/check_read_policy_parity.py`
-whenever either side changes — that is the point of it. Update
-[`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
-when an artifact actually appears — `clients/obsidian/` only if D is built.
+Re-run `scripts/check_read_policy_parity.py` whenever `folders.yml` or
+`read_policy.py` changes.
 
 ## 5. Gated on a written trigger — do not start
 
-- **Chunk-level retrieval** — ADR 0034's evaluation gate.
-- **A `ts_headline` arm for previews** — ADR 0031 records why the two obvious
-  shortcuts fail and what a real one costs.
-- **Batched multi-query search** — only if traces still show repeated-search
-  overhead.
-- **Batch fetch by id** (`GET /notes?ids=a,b,c`) — ADR 0025; build it when a
-  caller needs it, which the librarian's paired-link work may be.
+- **Retrieval tuning — frozen until 500 active readable documents** (vault ADR
+  0055). Frozen: RRF parameters, the disjunction rule, the snippet bound, a
+  `ts_headline` arm, chunk-level retrieval (ADR 0034), batched multi-query
+  search, and batch fetch by id. Not frozen: bug fixes, the §3 dedup work
+  (write path), and validating the label set. At 500, validate the label set
+  first, then re-run `measure_retrieval_quality.py` and
+  `measure_chunk_eligibility.py` before changing anything.
 - **Partial HNSW index per profile** and the **dimension-change DDL shape** —
   when a second embedding profile is populated, or a dimension change is
   proposed.
@@ -202,37 +197,50 @@ when an artifact actually appears — `clients/obsidian/` only if D is built.
   the effective ceiling is the limit times the worker count. Necessary the
   moment a second dyno exists, not before.
 
-## 6. Deferred decisions — need an ADR before any work
+## 6. Extraction — moved up (vault ADR 0062, Proposed)
 
-- **Deferred decision #1: whole-vault read permissions — answered, see §4.**
-  The old wording here was wrong twice over. `folders.yml` does govern
-  `ai_read`, fail-closed, and `read_policy.py` mirrors it; what one `vault:read`
-  credential reads is the corpus that policy admits, not every Human folder.
-  Human note identity across renames is answered by the managed `VaultID` of
-  ADR 0048 rather than by row survival. The verification that source and runtime
-  policy agree was the last piece, and it is done —
-  `scripts/check_read_policy_parity.py`, 2026-09-12, zero mismatches over all
-  213 files. **Closed.**
-- **ADR 0038 — a first-party reviewer authorization.** Recommended deferred:
-  the monthly `grant-oauth` step is cheap now that console sessions persist.
-  Prefer a narrower `grant-reviewer` convenience if the friction returns.
-- **ADR 0041 — human-authored notes in the vault.** No longer deferred:
-  superseded by ADR 0048 on 2026-09-11. The trigger it was waiting for arrived —
-  the browse console is in real use and Markdown stopped being written. See §4.
+**Done when:** both products are hosted on the one Heroku app as an ongoing
+arrangement, and a Heroku rebuild deploys the current head of `main` from both
+repositories.
+
+The proposal:
+
+- The runtime moves to a **new private repository holding no corpus**.
+  Deploying from knowledge-platform would put `Vault/` into Heroku's build
+  input.
+- **HSS stays the deploy root**, composing the runtime through one optional
+  seam, `mount(app)` plus the lifespan.
+- HSS **installs the runtime from the private `main` at build**, using a
+  read-only token held only as a Heroku config var.
+- **The private repository's CI tests the composition** against HSS's public
+  `main`.
+
+[`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
+is the checklist for what moves. Prerequisites, in order:
+
+1. §1.1 — `main` level with `dev`, and the production vault head known.
+2. **The operator's answers to ADR 0062's three forks:** head versus lock, what
+   triggers a deploy when only the runtime changes, and the repository and
+   package names.
+3. **Approval for the new GitHub repository and the Heroku config var.** Both
+   are new infrastructure under the host's rule.
+4. **A packaging spike on a staging Heroku app.** It must answer three things:
+   does the buildpack re-resolve a `git+…@main` requirement each build, does the
+   token reach the build, and does the release phase find the package's
+   migrations.
+
+## 7. Other deferred decisions
+
+- **ADR 0038 — a first-party reviewer authorization.** Deferred, and covered by
+  the operator freeze.
 - **ADR 0042 — a mutable state store beside the corpus.** Considered, not
   scheduled. Run the cheap experiment first: a plain structured state file with
   an `attempted_fixes` field, for a week of real use.
 - **Making the compile plan binding** — persisted work items and an explicit
   declined state. ADR 0027's amendment names the cost of not doing it.
-- **A `vault:export` surface.** The scope and the `snapshot` quota exist; no
-  route does. `scripts/export_vault_markdown.py` covers the current need.
-- **Extracting `app/vault/` to its own repository.** The enabler for a two-tier
-  release; [`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
-  is the checklist. Trigger: the first consumer that needs only one of the two
-  products.
 - **`superseded` on review cases** stays reserved, with no path that sets it.
 
-## 7. Leaderboard
+## 8. Leaderboard
 
 - **Access-token revocation via a JTI denylist.** Insertion points are marked
   `# DENYLIST HOOK`; needs a shared store (Redis) and a decode-time check.
@@ -256,7 +264,7 @@ when an artifact actually appears — `clients/obsidian/` only if D is built.
 - **Cursor pagination for `/latest`** if a client ever needs stable feed paging
   under inserts.
 
-## 8. Tooling and hygiene
+## 9. Tooling and hygiene
 
 - **Split the test suite by domain** (`tests/vault` against the rest) so
   feedback rounds on leaderboard work skip the seven-minute run.
