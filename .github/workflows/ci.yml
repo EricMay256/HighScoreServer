@@ -16,6 +16,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Run on demand against any branch, e.g. `gh workflow run ci.yml --ref dev`.
+  # dev gets no automatic runs; this is how its full Postgres suite is checked
+  # before a PR exists.
+  workflow_dispatch:
 
 # Cancel older in-progress runs when a new commit lands on the same ref.
 # Mostly useful for PRs where I push fix-up commits in quick succession.
