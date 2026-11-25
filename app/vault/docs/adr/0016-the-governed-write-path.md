@@ -19,6 +19,11 @@ the throughput it costs and the condition under which the decision would be
 revisited. Nothing about the decision changes — no code changed with it — so this
 is an amendment in place. See "Amendment, 2026-08-14" below.
 
+Amended 2026-11-25: the rule for *adopting* a `flag_at` changes from "the bands must
+separate by `MINIMUM_SEPARATION`" to a cost trade, and the reference set grows to realistic
+duplicates. `flag_at` stays 1.0 until that measurement is in the register. See
+"Amendment, 2026-11-25" below.
+
 ## Context
 
 `POST /api/v1/vault/contributions` is the first write surface. Vault ADR 0004
@@ -346,3 +351,32 @@ still a request change. `REQUEST_DIGEST_VERSION` is now 3, and migration
 `0009_request_digest_v3` changes the database default for future/direct writers
 without relabeling existing v1/v2 rows. Those rows retain their honest version
 and use the same one-replay compatibility path established above.
+
+## Amendment, 2026-11-25: adopting a threshold is a cost trade
+
+The two-sided procedure stays. What changes is how its result is turned into a threshold.
+
+**The separation rule asked the wrong question.** It required restatements and
+legitimately distinct notes to separate by 0.05 before any threshold was adopted. On
+`text-embedding-3-small` they overlap: the closest distinct pair scores 0.8318 and the
+weakest restatement 0.7500. So the rule kept `flag_at = 1.0`, and review cases became
+unreachable — only an identical embedding flags, and idempotency already absorbs most of
+those. Meanwhile ADR 0053's hooks raise write volume.
+
+A flag is not a rejection. A flagged note goes to review, where a human publishes or
+deletes it. A false flag costs one review decision and a delay; a missed duplicate costs a
+restatement in the corpus for good. Those costs are asymmetric and both are known.
+
+**New rule:** choose `flag_at` as the highest value that catches a stated fraction of
+known duplicates while flagging no more than a stated number of the corpus's own pairs.
+Record both numbers, the operating point, and the review load it implies in the register.
+The band need not be empty.
+
+**New reference set:** three hand-written pairs cannot locate an operating point. Build
+15–20 pairs the way duplicates arise in use. Give a different agent, preferably a
+different provider, the *situation* behind a real note — the error, the context, the fix —
+without the note, and have it write the note from scratch. Add these beside the existing
+pairs in `calibration.py`, through `assemble_embedding_text` as before.
+
+`similarity_warning_at` (ADR 0032's 2026-11-25 amendment) is separate. It is advice, so it
+needs no operating point.

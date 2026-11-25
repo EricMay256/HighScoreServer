@@ -4,7 +4,10 @@ Date: 2026-08-19. Substantially revised 2026-08-22.
 
 ## Status
 
-Accepted 2026-08-22.
+Accepted 2026-08-22. **Partially superseded 2026-11-25 by ADR 0061:** the
+mechanics below stand, but `promoted` now means human-endorsed and eligible for
+session-start injection, not "a Human note has been written from it", and agents may
+nominate through a `promotion` amendment proposal.
 
 The governance changes this required are applied (knowledge-platform `d40bdfc`): the folder is
 `canonical: true`, `engine_managed: true`, `ai_write: engine_only`, `validation_mode: agent`,

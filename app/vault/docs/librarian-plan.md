@@ -2,6 +2,11 @@
 
 Date: 2026-09-02
 
+> **Superseded 2026-11-25 by vault ADR 0053.** The librarian is not built; the agent loop
+> moves to client hooks, existing tools and scheduled routines. Phase 1 (proposal lineage,
+> ADR 0044) is independent of this and remains Accepted but unscheduled. Kept for its
+> schema audit and reasoning.
+
 Status (2026-09-02): Phase 0 is done — vault ADR 0044 (proposal lineage) is Accepted
 and ADR 0043 (the librarian workflow) is Proposed, awaiting acceptance. No
 implementation of Phases 1–8 has started. This file was `docs/HANDOFF-2026-09-02.md`;

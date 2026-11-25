@@ -5,7 +5,8 @@ Date: 2026-08-26
 ## Status
 
 Accepted 2026-08-26. Answers the question ADR 0025's 2026-08-26 amendment left
-open, and narrows nothing that ADR 0025 decided.
+open, and narrows nothing that ADR 0025 decided. Applies to `supersedes_ids` too
+(ADR 0060, 2026-11-25).
 
 ## Context
 

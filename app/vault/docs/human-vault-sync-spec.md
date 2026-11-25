@@ -2,6 +2,10 @@
 
 Date: 2026-09-11
 
+> **Partially superseded 2026-11-25 by vault ADR 0054.** The Obsidian client and the
+> bidirectional sync it needed are not built; offline access is a read-only download. The
+> server contracts built in phase B (ADRs 0049–0052) stand.
+
 Status: selected design; implementation pending. This is the active specification
 under [ADR 0048](adr/0048-human-vault-database-authority-and-obsidian-sync.md).
 It replaces the Markdown-authoritative Human reconciliation design. The user

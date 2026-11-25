@@ -9,6 +9,9 @@ implied since the embedding table was built, and sets the conditions under
 which it should be reopened. Constrains any future retrieval work; changes
 nothing that ships today.
 
+Its reopening trigger is subject to ADR 0055 (2026-11-25): retrieval tuning waits for
+500 active readable documents.
+
 ## Context
 
 An external assessment of the vault's MCP efficiency proposed adding chunk-level

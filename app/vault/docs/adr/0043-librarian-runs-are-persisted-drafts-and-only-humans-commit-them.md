@@ -4,8 +4,10 @@ Date: 2026-09-02
 
 ## Status
 
-**Proposed.** This records the Phase 0 design for approval before the workflow
-schema, scopes, routes, MCP operations, or provider integration are implemented.
+**Rejected 2026-11-25, by ADR 0053.** The agent loop moves to the client — hooks, the
+existing propose and compile tools, and scheduled routines — and none of the workflow
+schema, scopes, runners or provider billing below is built. Kept as the record of the
+design considered. It was originally recorded as Proposed, pending approval of the Phase 0 design.
 
 ## Context
 
