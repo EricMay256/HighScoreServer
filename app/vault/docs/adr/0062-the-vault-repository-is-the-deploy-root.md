@@ -6,7 +6,8 @@ Date: 2026-11-25
 
 Accepted 2026-11-25. The operator answered the proposal's three forks the same day, and
 the second answer inverted its direction: the private repository deploys, HSS does not.
-The build mechanism still has to be proven on a staging app before cutover.
+The operator also chose to skip a staging spike. The build mechanism is proven at
+cutover, under the rollback plan below.
 
 Partially supersedes "Eventual repository and CI composition" in
 `vault-architecture.md`. That section's direction is kept — the private side composes,
@@ -64,9 +65,18 @@ Constraints:
   wiring in `app/main.py` becomes a vault extension registered behind `VAULT_ENABLED`.
   That is testable while both halves share one suite, and it is the extraction's first
   commit.
-- Unverified, and the staging spike must answer it: how the build fetches HSS before the
-  Node and Python buildpacks run, whether through a first buildpack or a build hook.
-  Check that the SPA build and the leaderboard migrations both find the fetched tree.
+- Unverified until cutover: how the build fetches HSS before the Node and Python
+  buildpacks run, whether through a first buildpack or a build hook, and whether the SPA
+  build and the leaderboard migrations both find the fetched tree.
+- **Rollback plan, since there is no spike:**
+  - Cut over only when production already runs HSS `main` with every migration from
+    both lineages applied. The first `knowledge-vault` release phase is then a no-op
+    `upgrade head`, not a schema change.
+  - Keep the vault inside HSS until the cutover is verified. Re-pointing the app back
+    to HSS then restores the previous arrangement exactly.
+  - `heroku rollback` returns to the previous release's slug immediately, whatever
+    repository built it.
+  - Remove the vault from HSS only after the composed app has served real traffic.
 - One new private GitHub repository, approved by the operator 2026-11-25. No token
   config var is needed, and no new add-ons.
 - Vault development needs local checkouts of both repositories. The composition root

@@ -224,10 +224,10 @@ is the checklist. In order:
    registered behind `VAULT_ENABLED`. This is testable in one suite. This
    Windows machine has no Postgres, so the database tests run in CI or on the
    WSL machine.
-3. **A staging spike:** a scratch Heroku app built from a skeleton
-   `knowledge-vault`. It must prove that the build fetches HSS before the Node
-   and Python buildpacks run, that the SPA builds, and that both migration
-   lineages run in the release phase.
+3. **No staging spike** (operator's choice, 2026-11-25). The build mechanism is
+   proven at cutover, under ADR 0062's rollback plan: cut over only when
+   production's migration heads already match, keep the vault in HSS until the
+   composed app is verified, and use `heroku rollback` if anything fails.
 4. **Create `knowledge-vault`** and move the package, migrations, scripts, tests
    and docs per the manifest. Then repoint imports, add the package-owned test
    fixtures, and set up CI.
