@@ -46,10 +46,10 @@ Syncthing distributes that projection only to human devices.
 
 ## Eventual repository and CI composition
 
-> **Proposed replacement, 2026-11-25: vault ADR 0062.** The runtime moves to its own private
-> repository and is composed into HSS at build, tracking both `main` branches, instead of
-> the private composition CI and component lock described below. The leak checks in item 6
-> still apply. Until 0062 is accepted, this section remains the record.
+> **Partially superseded 2026-11-25 by vault ADR 0062.** The direction below stands: the
+> private side composes, and neither product imports the other's domain. The private
+> `knowledge-vault` repository is the Heroku deploy root and fetches HSS's public `main` at
+> build, tracking heads instead of the component lock. The leak checks in item 6 still apply.
 
 An `app/vault/` package supplies code-level separation, but it does not by itself preserve
 repository focus. The eventual target inverts the dependency at the private deployment

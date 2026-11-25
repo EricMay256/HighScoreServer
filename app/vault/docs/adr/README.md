@@ -70,7 +70,7 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0059 | [Feedback on a note is workflow state, not a document](0059-feedback-is-workflow-state-not-a-document.md) | Accepted, not implemented (needs a migration) |
 | 0060 | [A note may declare what it supersedes, and review archives what it replaced](0060-a-note-may-declare-what-it-supersedes.md) | Accepted, not implemented (needs a migration) |
 | 0061 | [Promotion means human endorsement, and agents may nominate](0061-promotion-is-human-endorsement.md) | Accepted, not implemented (needs a migration; partially supersedes 0023) |
-| 0062 | [The extracted runtime is composed into HSS at build, tracking both mains](0062-the-extracted-runtime-is-composed-into-hss-at-build.md) | Proposed (three forks open) |
+| 0062 | [The vault repository is the deploy root, and composes HSS's public `main` at build](0062-the-vault-repository-is-the-deploy-root.md) | Accepted (build mechanism to be proven on staging) |
 
 ## Reserved numbers
 

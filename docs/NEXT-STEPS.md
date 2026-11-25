@@ -51,7 +51,7 @@ it. The decisions are vault ADRs 0053–0062 and amendments to 0016, 0023, 0025,
   with the narrowest scopes, is already supported.
 - **Retrieval tuning is frozen until 500 active documents** — ADR 0055 (§5).
 - **Extraction moves up**, with a deployment-shaped definition of done — ADR
-  0062, Proposed (§6).
+  0062 (§6).
 - **`app/vault/AGENTS.md` was cut** from 832 lines to 225 on 2026-11-25; the
   full prior text is kept verbatim in `app/vault/docs/invariants-rationale.md`.
 
@@ -171,12 +171,14 @@ surface, whose scope and `snapshot` quota already exist. Until it is built,
   create/edit/move, and tombstoned deletion with the change feed.
   **B5, a disclosure regression suite across every Agent surface, remains** —
   and it matters more now that Human rows exist in the schema.
-- **C — browser authoring of Human notes. Undecided.** The 2026-11-25 direction
-  says the web interface suffices for authoring. Whether that means building C,
-  or that the existing console is enough, is an open question for the operator.
+- **C — browser authoring of Human notes. To build** (decided 2026-11-25): its own
+  OAuth family, explicit save and conflict states, a separately granted delete, and
+  visible read-policy and semantic-index state. This is the web interface the
+  2026-11-25 direction relies on. B5 comes first.
 - **D — the Obsidian extension. Dropped** (ADR 0054).
-- **E — daily Human indexing. Undecided**, and it matters only if Human notes
-  are to be searchable.
+- **E — daily Human indexing. To build** (decided 2026-11-25), per the
+  [daily embedding specification](../app/vault/docs/human-embedding-refresh.md).
+  It may be built alongside C.
 
 Re-run `scripts/check_read_policy_parity.py` whenever `folders.yml` or
 `read_policy.py` changes.
@@ -197,37 +199,44 @@ Re-run `scripts/check_read_policy_parity.py` whenever `folders.yml` or
   the effective ceiling is the limit times the worker count. Necessary the
   moment a second dyno exists, not before.
 
-## 6. Extraction — moved up (vault ADR 0062, Proposed)
+## 6. Extraction — moved up (vault ADR 0062)
 
 **Done when:** both products are hosted on the one Heroku app as an ongoing
 arrangement, and a Heroku rebuild deploys the current head of `main` from both
 repositories.
 
-The proposal:
+Decided 2026-11-25:
 
-- The runtime moves to a **new private repository holding no corpus**.
-  Deploying from knowledge-platform would put `Vault/` into Heroku's build
-  input.
-- **HSS stays the deploy root**, composing the runtime through one optional
-  seam, `mount(app)` plus the lifespan.
-- HSS **installs the runtime from the private `main` at build**, using a
-  read-only token held only as a Heroku config var.
-- **The private repository's CI tests the composition** against HSS's public
-  `main`.
+- **The runtime moves to a new private repository, `knowledge-vault`** (package
+  `knowledge_vault`), which holds no corpus.
+- **The Heroku app `high-score-server` is re-pointed to it.** At build it fetches
+  HSS's public `main`, which needs no credential, and logs both commit SHAs.
+- **HSS gains a generic extension point and names no vault code.**
+  `knowledge-vault` owns the composed `wsgi`, the Procfile and the release
+  script, and its CI tests the composition against HSS's public `main`.
 
 [`vault-extraction-manifest.md`](../app/vault/docs/vault-extraction-manifest.md)
-is the checklist for what moves. Prerequisites, in order:
+is the checklist. In order:
 
 1. §1.1 — `main` level with `dev`, and the production vault head known.
-2. **The operator's answers to ADR 0062's three forks:** head versus lock, what
-   triggers a deploy when only the runtime changes, and the repository and
-   package names.
-3. **Approval for the new GitHub repository and the Heroku config var.** Both
-   are new infrastructure under the host's rule.
-4. **A packaging spike on a staging Heroku app.** It must answer three things:
-   does the buildpack re-resolve a `git+…@main` requirement each build, does the
-   token reach the build, and does the release phase find the package's
-   migrations.
+2. **In HSS, before anything moves:** the `create_app(extensions=...)` extension
+   point, and the vault wiring in `app/main.py` converted into a vault extension
+   registered behind `VAULT_ENABLED`. This is testable in one suite. This
+   Windows machine has no Postgres, so the database tests run in CI or on the
+   WSL machine.
+3. **A staging spike:** a scratch Heroku app built from a skeleton
+   `knowledge-vault`. It must prove that the build fetches HSS before the Node
+   and Python buildpacks run, that the SPA builds, and that both migration
+   lineages run in the release phase.
+4. **Create `knowledge-vault`** and move the package, migrations, scripts, tests
+   and docs per the manifest. Then repoint imports, add the package-owned test
+   fixtures, and set up CI.
+5. **Cut over:** re-point `high-score-server` to `knowledge-vault`, deploy, and
+   verify. Then remove the vault from HSS per the manifest's "HSS files that
+   need editing".
+
+An HSS-only change reaches production on the next build of the vault app. Add a
+rebuild workflow later if that lag matters.
 
 ## 7. Other deferred decisions
 

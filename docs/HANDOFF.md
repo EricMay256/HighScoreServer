@@ -29,7 +29,7 @@ them.
 - **The 2026-11-25 vault direction.** The vault exists to improve the user's agents —
   memory across sessions and providers, valued per token of context. The librarian is
   replaced by a client-side agent loop (vault ADR 0053, rejecting 0043); retrieval tuning is
-  frozen to 500 documents (0055); extraction is scheduled (0062, Proposed). The vault
+  frozen to 500 documents (0055); extraction is scheduled — the private `knowledge-vault` repo becomes the deploy root (0062). The vault
   AGENTS.md was cut to its rules, with the old text in `app/vault/docs/invariants-rationale.md`.
   See NEXT-STEPS "Vault direction".
 - **The Human vault.** Vault ADR 0048, 2026-09-11: enrolled Human notes become

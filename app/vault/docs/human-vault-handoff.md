@@ -3,8 +3,8 @@
 Date: 2026-09-11
 
 > **Partially superseded 2026-11-25 by vault ADR 0054.** Phase D (the Obsidian extension) is
-> dropped; offline access is a read-only download. Phases A and B1–B4 are done; C and E are
-> undecided.
+> dropped; offline access is a read-only download. Phases A and B1–B4 are done; C (browser
+> authoring) and E (daily indexing) are to be built (decided 2026-11-25).
 
 Status: selected design, implementation pending. The user selected database-owned
 Human notes, browser authoring, and an OAuth-authenticated Obsidian extension.

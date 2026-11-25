@@ -40,5 +40,5 @@ wanted offline is reading, with no contribution.
   (ADRs 0049, 0052) stay as built. A future incremental download may consume them.
 - Local Markdown is a cache that may be stale. Deleting or editing it does nothing to
   the server, by design.
-- Whether to build phase C, and on what timetable, is still open and should be decided
-  explicitly rather than inferred from this ADR.
+- Phases C and E were left open here. The operator decided the same day to build both,
+  under ADR 0048 as written. That needs no new ADR, and the roadmap records it.

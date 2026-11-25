@@ -8,26 +8,27 @@ durable than removability comments scattered across modules, which go stale sile
 
 **Re-audited against `dev` on 2026-11-25.** Thirty test files, two scripts and two test assets
 that had landed since the last revision are now classified. Destination and composition
-follow vault ADR 0062, which is **Proposed**; see "Destination and composition" below.
+follow vault ADR 0062; see "Destination and composition" below.
 
-## Destination and composition (ADR 0062, Proposed)
+## Destination and composition (ADR 0062)
 
-- **Destination:** a new private repository holding no corpus content. Not knowledge-platform:
-  deploying from it would put `Vault/` into Heroku's build input. Its name and the package's
-  import name are open (ADR 0062, fork 3); `knowledge_vault` is used below as a placeholder.
-- **HSS stays the deploy root** and installs the package from the private repository's `main`
-  at build, using a read-only token held only as a Heroku config var.
-- **First step, done inside HSS before anything moves: a package-owned composition seam.**
+- **Destination:** a new private repository, `knowledge-vault` (package `knowledge_vault`),
+  holding no corpus content.
+- **It is the Heroku deploy root.** `high-score-server` is re-pointed to it. At build it fetches
+  HSS's public `main`, which needs no credential, and it owns the composed `wsgi`, the Procfile
+  and the release script.
+- **First step, done inside HSS before anything moves: a generic extension point.** HSS's
+  `create_app` accepts extensions. Each extension provides `include(app)`, called where the
+  vault block sits today, ahead of the SPA catch-all, and a `lifespan(app)` async context,
+  entered inside HSS's lifespan.
+
   `app/main.py` currently wires the vault in about 100 lines spread across `lifespan` and
   `create_app`: engine and embedding start-up, `report_vault_pool`, `vault_mcp_lifespan`, the
   REST router, the saturation handler, the MCP mount and its canonical-path redirect, and the
-  OAuth, landing, browse and review routes, all ahead of the SPA catch-all. Move that into
-  `app/vault/composition.py`, exposing exactly two functions:
-  - `include_vault(app: FastAPI) -> None`, called in route order where the block sits today;
-  - `vault_lifespan(app: FastAPI) -> AsyncContextManager[None]`, entered inside HSS's lifespan.
-
-  HSS then calls those two and nothing else. The extraction becomes a change of import path
-  plus an optional dependency, and the seam is tested while both halves still share one suite.
+  OAuth, landing, browse and review routes. That wiring moves into a vault-owned extension
+  (`app/vault/composition.py`), registered from `wsgi.py` behind `VAULT_ENABLED` until
+  extraction. After extraction HSS's `wsgi.py` passes no extensions, and `knowledge-vault`'s
+  passes the vault's.
 
 ## Moves with the package
 
@@ -86,7 +87,7 @@ easy to overlook:
 | `scripts/check_read_policy_parity.py` | Diffs `ai_read` in the private `folders.yml` against `READABLE_PATH_PREFIXES` (ADR 0048 phase A). Same convention; imports `app.vault.read_policy` and nothing else, so it needs no database and only that one import repointed. The governance file it reads stays in knowledge-platform and is passed by path, so nothing about it moves. |
 | `scripts/restore_human_note.py` | Operator-only restore of a tombstoned Human note under its own id (ADR 0052). Same convention and imports. |
 | `scripts/validate_body_diff.py` | Client-side validator for strict unified body diffs (ADR 0033's companion). Same convention; imports `app.vault.body_diff`. |
-| `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. |
+| `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. The composed app's release script in `knowledge-vault` runs both. |
 
 ## Dependencies that leave
 
@@ -144,7 +145,7 @@ a future provider needs a vendor SDK, it belongs in this table.
 
 | File | Change |
 | ---- | ------ |
-| `app/main.py` | **Under ADR 0062:** after the composition seam above, keep only the two calls, imported from the installed package behind `VAULT_ENABLED`. **If ADR 0062 is rejected**, remove the wiring entirely: remove vault lifespan wiring (`init_vault_db`, `init_vault_embeddings` and their `close_*` counterparts), the `vault_enabled()` route gate, and the `/api/v1/vault` router registration. The `load_environment()` call at the top of `create_app` exists so that gate can be evaluated — check whether anything else came to depend on it before removing it. |
+| `app/main.py`, `wsgi.py` | Keep the generic extension point; `wsgi.py` stops registering the vault extension. Nothing in HSS names the vault package. What the extension replaced: vault lifespan wiring (`init_vault_db`, `init_vault_embeddings` and their `close_*` counterparts), the `vault_enabled()` route gate, and the `/api/v1/vault` router registration. The `load_environment()` call at the top of `create_app` exists so that gate can be evaluated — check whether anything else came to depend on it before removing it. |
 | `app/db.py` | Restore an HSS-only pool default/capacity decision and remove comments whose arithmetic reserves connections for the vault. Do not blindly restore 10 per worker; retain operational reserve. |
 | `README.md` | Remove the staged-vault overview, extraction-cost table, dark-deployment notes, dual-lineage commands, and vault connection-budget discussion. |
 | `db/role.sql` | Remove the vault-schema ownership/grant commentary; keep leaderboard role grants unchanged. |
