@@ -1,832 +1,225 @@
 # AGENTS.md — vault bounded context
 
-Standing context for work under `app/vault/` and `vault_migrations/`. This file travels with
-the package; the host repository's `AGENTS.md` governs everything outside these directories.
+Rules for work under `app/vault/` and `vault_migrations/`. This file travels with the
+package; the host repository's `AGENTS.md` governs everything else. Read all of it — it is
+short on purpose. **The why behind each rule is in
+[`docs/invariants-rationale.md`](docs/invariants-rationale.md)** (cited as *rationale:
+Section*) and in the ADRs under [`docs/adr/`](docs/adr/README.md). Read the rationale before
+changing a rule that looks wrong; most of them look wrong in exactly the way that bit someone.
 
 ## What this is
 
-**Planned Human-vault work:** read `docs/human-vault-handoff.md` and vault ADR 0048
-before implementing Human enrollment, editing, or synchronization. The selected
-design is database authority plus an OAuth Obsidian client, with server-only
-deletion and separate Human/Agent write grants. The existing invariants below
-describe current runtime behavior; ADR 0048 explicitly supersedes the former
-Human replica/import-exclusion rules for this implementation. No such rollout
-is implied by this planning note. Phase B1 (vault ADR 0049) is built: read the
-`collection` invariant below before changing any document mutation.
+The knowledge-platform bounded context: API models, domain records, Core tables,
+repositories, services, auth, embeddings, and two transports (HTTP routes and an MCP adapter).
+Runtime code and schema only — never corpus content, credentials, exports, or vectors. Hosted
+here as a staging location; extraction is scheduled (ADR 0062, `docs/vault-extraction-manifest.md`).
 
-The knowledge-platform bounded context: its own API models, domain records, Core tables,
-repositories, services, auth, embeddings, and two transports — HTTP routes and an MCP
-adapter. The package holds runtime code and schema definitions only — never corpus
-content, credentials, exports, or vectors.
+**Purpose (2026-11-25):** improve the quality of the user's agents — persistent memory across
+sessions and providers, judged by value per token of context. The agent loop lives in the
+client (ADR 0053); retrieval tuning is frozen until 500 active documents (ADR 0055).
 
-It is currently hosted inside HighScoreServer, which is a staging location rather than
-permanent ownership. See `docs/vault-extraction-manifest.md` for what leaves and what has to
-be edited when it does.
+## Before you change a module, read
 
-## Persistence
+| Touching | Read first |
+| --- | --- |
+| `tables.py`, `repository.py`, `vault_migrations/` | ADRs 0001–0003; rationale: *Persistence*, *Schema invariants* |
+| contribute / update / retire in `service.py` | 0016 (and its calibration amendments), 0018–0020, 0032; rationale: *The write path* |
+| amendments, `body_diff.py` | 0028, 0033, 0036, 0044 |
+| compile | 0027 |
+| `export.py`, `wikilinks.py`, promotion | 0012, 0022, 0023, 0025, 0030, 0061 |
+| `search.py`, `snippet.py`, embeddings | 0005–0007, 0013, 0031, 0034, 0055; `docs/embedding-calibration.md` |
+| `mcp.py` | 0021, 0026, 0031, 0032; rationale: *The MCP adapter* |
+| `oauth*.py`, `google_oidc.py`, `passwords.py` | 0024, 0029, 0037–0040; rationale: *The OAuth authorization server* |
+| `auth.py`, `principal.py`, `rate_limit.py` | 0015, 0020; rationale: *Authentication*, *Rate limiting* |
+| `read_policy.py`, `facets.py`, `origin.py` | 0010, 0014, 0017; migration 0010 |
+| Human routes and services | 0048–0052, 0054 |
 
-- **SQLAlchemy 2.x Core, never the ORM.** No `DeclarativeBase`, `Session`, `relationship`,
-  `mapped_column`, or `sessionmaker`. The host repo's raw-SQL ADR does not apply here; see
-  `docs/adr/0001-sqlalchemy-core-for-vault-bounded-context.md`.
-- Pydantic API models, domain records, Core tables, repositories, and services stay separate
-  layers. Public request/response models are deliberately not database records.
-- Repositories take an `AsyncConnection` as their first parameter and never acquire one
-  themselves. Services own transactions.
-- Core metadata exists for query construction and schema-drift tests. It never replaces
-  Alembic and must never reach `create_all()` in production.
-- Migrations are explicit reviewed SQL in `vault_migrations/`, a lineage separate from the
-  host's, versioned in `vault.vault_alembic_version`.
-- Historical revision modules import only migration-owned helpers from
-  `vault_migrations.helpers`, never the staged `app.vault` package. Alembic must be able to
-  construct the full graph after the lineage directory is moved independently; runtime-only
-  imports belong in `env.py` and are repointed during extraction.
-- `pgvector` is used only here and leaves with the package.
+## Persistence and isolation
 
-## Isolation
-
-- No imports between vault code and host leaderboard routes, models, repositories, or
-  tables, in either direction. `tests/vault/test_boundaries.py` enforces this.
-- Intra-package imports are **relative** (`from .constants import ...`). `app/vault/` must
-  contain no `from app.` or `import app.` — that is what keeps extraction a directory move
-  instead of a find-and-replace, and it is also asserted by `test_boundaries.py`.
-- No cross-schema foreign keys, views, triggers, shared sequences, or cross-domain
-  transactions. Everything lives in the qualified `vault` schema.
-- Documentation and ADRs live in `app/vault/docs/`, never in the host's `docs/`. The ADR
-  lineage here is independent and starts at 0001.
+- SQLAlchemy 2.x **Core, never the ORM** (no `DeclarativeBase`, `Session`, `relationship`,
+  `mapped_column`, `sessionmaker`). The host's raw-SQL ADR does not apply here. ADR 0001.
+- API models, domain records, Core tables, repositories and services stay separate layers.
+  Repositories take an `AsyncConnection` first and never acquire one; services own transactions.
+- Core metadata is for query building and drift tests; it never reaches `create_all()` in
+  production. Migrations are reviewed SQL in `vault_migrations/`, versioned in
+  `vault.vault_alembic_version`, importing only `vault_migrations.helpers`.
+- No imports between vault and leaderboard code in either direction; intra-package imports are
+  **relative** — no `from app.` / `import app.`. `tests/vault/test_boundaries.py` enforces both.
+- No cross-schema FKs, views, triggers, shared sequences or cross-domain transactions.
+  Everything lives in the `vault` schema. `pgvector` is used only here.
+- Docs and ADRs live in `app/vault/docs/`, never the host's `docs/`.
 
 ## Schema invariants
 
-- **Audit events carry correlation identifiers, not foreign keys.** `vault_audit_events` has
-  no FK to `vault_write_requests`: an audit insert must never fail on a referential
-  constraint, events for rejected or unauthenticated writes must keep their idempotency key,
-  and write requests must remain prunable. `target_type`/`target_id` follow the same rule.
-  `latency_ms` is nullable because lifecycle events have no meaningful latency. See ADR 0002.
-- **Embeddings live in `vault_document_embeddings`, keyed by `(document_id, profile_id)`** —
-  not as columns on `vault_documents`. "Not embedded" is the absence of a row. Re-embedding a
-  profile is an upsert. See ADR 0003.
-- **Compile provenance is durable.** A wiki document's `compile_run_id` is required by the
-  provenance consistency CHECK, so its foreign key uses `ON DELETE RESTRICT`. Never change it
-  to `SET NULL`: PostgreSQL would attempt an update that the CHECK rejects, and provenance
-  would be lost even if the CHECK were weakened.
-- **`kind` is lifecycle; `doc_type` is taxonomy.** `document_kind_enum('note','wiki')` stays a
-  coarse storage and lifecycle discriminator and keeps its role in
-  `vault_documents_compile_provenance_consistent`. The governance Type Dictionary value lives in
-  a separate nullable `doc_type TEXT`. The database CHECK constrains **shape only** — non-blank,
-  ≤64 characters, printable, interior spaces allowed for names like "Agent Note" and "Wiki Page". Which names
-  are legal is `types.yml`'s business, enforced in application code at the write boundary, so
-  that adding a type stays a data change rather than a migration. Do not "tighten" that CHECK
-  into a vocabulary list and do not widen the `kind` enum. Null means untyped, which is a real
-  state. See ADR 0009.
-- **`vault_path` is the only policy key.** `vault_documents.vault_path` is the vault-root-relative
-  posix path with extension, `NOT NULL UNIQUE`, byte-identical to the governance scanner's
-  `rel_path`. There is deliberately **no** `policy_scope` column: a document's context is a fold
-  over every matching `folders.yml` rule, not one winning rule, and five of the eight fields
-  overlay unconditionally while `default_type`/`allowed_types`/`purpose` fall back to a
-  less-specific ancestor. Port `vault_governance.inheritance.resolve_context`; do not
-  reimplement prefix matching by eye. Every glob is a literal prefix plus `/**`, which is why
-  the `text_pattern_ops` index exists. See ADR 0010.
-- **`status` and `doc_status` are different things.** `status` is the vault's own visibility
-  state and the thing `routes.READABLE_STATUSES` gates on — a closed enum on purpose.
-  `doc_status` is the `types.yml` Status Map value (`Evergreen`, `Stub`, `Proposed`), free text
-  with a shape-only CHECK, validated per-type at the write boundary. Neither derives from the
-  other. Do not gate reads on `doc_status`; that would move a security boundary into a file that
-  changes without review. See ADR 0011.
-- **`source_sha256` NULL means "no upstream file".** It is the SHA-256 of the Markdown a row
-  replicates, and NULL says the row was authored in the database instead — which is how a
-  mark-and-sweep run knows not to delete it. Reconciliation is mark-and-sweep keyed on
-  `vault_path`, **scoped by path prefix**, sweeping only after a complete walk and refusing an
-  implausibly small one. An unscoped sweep deletes every agent note. See ADR 0012.
-- **`facets` classifies; `tags` describes — and the difference is load-bearing.** `facets` JSONB
-  (`{"project": ["hss"]}`) relates notes to each other and is **never** read by
-  `assemble_embedding_text`. That exclusion is structural, not stylistic: measured on ten real
-  documents, one shared tag raised *every* pairwise cosine, mean +0.0385 against a dedup margin
-  of 0.0094 — over 4x. Putting classification in `tags` would lift the known-distinct floor above
-  the known-duplicate ceiling and make `flag_at` uncalibratable. Do not "simplify" facets into
-  namespaced tags, and do not add `facets` to the embeddable field set. Facet *names* are a
-  closed set in `facets.py`; values are open, per ADR 0009's precedent. A facet must never gate
-  a read — it is authored content, so ADR 0010 keeps `vault_path` the only policy key. See
-  ADR 0017.
-- **`origin` carries upstream provenance; `contributed_by` and `created_at` stay the
-  vault's.** When a corpus is replayed here, the credential that transmits a note is not the
-  agent that wrote it and the moment the row lands is not when it was authored. `origin`
-  JSONB holds the upstream `ContributedBy`, `CreatedAt`, `LastUpdated`, `Source` and
-  `ClientRunID`; empty means this vault is the origin. Do **not** "fix" the import by letting
-  the body set `contributed_by` — ADR 0016 takes it from the credential precisely so one
-  principal cannot write under another's name — and do not backdate `created_at`, which would
-  make the write ledger disagree with itself. Shape is a CHECK; the key set is closed in
-  `origin.py` at the write boundary, per ADR 0009's precedent. Timestamps are stored as the
-  ISO-8601 **text** they arrived as, so the export re-emits them verbatim. Contribution only:
-  an update is a new body for an existing row, not a new provenance for it. See migration
-  0010.
-- **Adding an optional field to `VaultContributionRequest` does not need a
-  `REQUEST_DIGEST_VERSION` bump.** `canonical_request_digest` dumps with `exclude_unset=True`
-  since migration 0006, so a request that does not mention the new field serializes exactly as
-  before. `tests/vault/test_origin.py` pins two pre-existing digests as the guard. Changing the
-  digest *function* is still a bump; growing the model is not.
-- **`vault_path`'s leaf name is the title's slug, and the folder is never caller-derived.**
-  ADR 0022's 2026-08-20 amendment: a uuid filename makes the exported tree unbrowsable, and the
-  exporter cannot rename it because ADR 0010 requires `vault_path` to equal the scanner's
-  `rel_path`. `slug.slugify` collapses every non-alphanumeric run to a hyphen, so no separator
-  survives a title into a path; the directory is a module constant. Collisions get `-2`, `-3`
-  suffixes resolved **under the corpus advisory lock**, because `vault_path` is UNIQUE and the
-  answer is only true while the lock is held — do not move that back to `_build_candidate`. A
-  retitled note keeps its path: `replace_content` leaves it alone, and a path that followed the
-  title would turn a frontmatter edit into a delete-plus-create in the export's git history.
-- **`promotion_status` routes through `vault_path`, and the two move together.** ADR 0023
-  says candidacy is a field and the folder is a projection of it — but the projection is the
-  path column, not a directory the exporter re-derives. ADR 0010 requires `vault_path` to stay
-  byte-identical to the governance scanner's `rel_path`, so a file under
-  `Agent/Promotion Candidates/` whose row still says `Agent/notes/` would resolve its
-  `allowed_types` and `validation_mode` against the wrong `folders.yml` rule. `folders.yml`
-  says the same thing from the other side: dropping a file into the folder by hand does
-  nothing, because "the row still names its own path". `VaultPromotionService` therefore sets
-  the field and resolves the new path in one statement, **under the corpus advisory lock** —
-  `vault_path` is UNIQUE and collisions suffix, so the free name is only still free while the
-  lock is held. `updated_at` deliberately does not move, and here that is load-bearing rather
-  than tidy: the rendered file is byte-identical either side of the move, which is what makes
-  git show a rename and follow the history. Home is keyed on `kind`, so a retracted **`Wiki
-  Page` returns to `Agent/wiki/`**, never to `Agent/notes/`, which is typed to `Agent Note`
-  alone. `NewVaultDocument` carries no `promotion_status` on purpose: a note is never a
-  candidate at birth, and keeping the field off that record is what makes the review-gated
-  verb the only way in. Active documents only — a candidate is "served to agents, returned by
-  search, and inside the dedup gate", which describes `active` and nothing else.
-- **`Agent/wiki/_index.md` is generated by the exporter, not stored as a row.** Every line in
-  it derives from pages the corpus already holds, so a row would be the same facts twice. It
-  joins the export's `expected` set explicitly — otherwise the prune sweep deletes the file it
-  just wrote, since no row accounts for it. Both its timestamps come from the pages
-  (earliest/latest), never from the clock: this module's contract is a zero-line diff on an
-  unchanged corpus, and it parses no markdown, so Stage A's "stamp `now()` and read the old
-  file for `CreatedAt`" is unavailable in both halves. It returns None when there are no wiki
-  pages, which is what lets a stale index be pruned once `Agent/wiki/` is owned.
-- **The export writes more prefixes than it prunes.** `EXPORTED_PATH_PREFIXES` is what may be
-  written; `CORPUS_OWNED_PATH_PREFIXES` is the subset the service is authoritative for and may
-  therefore delete from. `Agent/wiki/` joined the owned set on 2026-08-24, after the
-  Stage-A pages were imported as rows (ADR 0027) — in that order, because owning a prefix
-  before its files have rows lets `--prune` delete them. The owned set is explicit rather than derived from occupancy, per ADR 0023:
-  "sweep the prefixes that have rows" looks equivalent and fails exactly when an owned folder
-  empties — the last promotion candidate settles, no row names the prefix, the sweep skips it,
-  and the stale file survives advertising a candidacy that ended.
-- **Compilation plans; a model writes. And `find_similar` is notes-only.** ADR 0027. The
-  service decides which pages are stale — three reasons, `missing` / `stale` / `new-source`,
-  ported from the Stage-A engine and kept diffable against it — and a model writes the prose.
-  A plan carries note **ids**, never bodies: the agent fetches through the policy-checked read
-  surface rather than through a second one with its own disclosure rules. A **flagged note is
-  never offered as a new source**, because compiling unendorsed content launders it into a tree
-  the read surface serves freely.
-  **Wiki pages are excluded from the dedup corpus**, and that is correctness rather than
-  tuning: a page restates its sources by construction, so a note whose successor covers the
-  same ground would look like a duplicate of a document that exists only because that note
-  does. Pages are still *embedded* — search returning synthesis is the point — they are simply
-  not adjudicated. Do not "restore" the filter for symmetry with the read path.
-  **What stops a note being re-offered is a decline on the note, not a frontier.**
-  `compile_declined_at` (migration 0015) records that a compiler was shown a note and refused
-  it; planning reads that and no longer reads any frontier. The run still stores
-  `input_frontier`/`output_frontier` as its own history — do not plan from them again. The
-  reason is that a timestamp cannot tell "considered and refused" from "never offered", and the
-  difference was a real bug: a flagged note is deliberately never offered, yet it counted toward
-  `max(updated_at)` all the same, and `set_status` deliberately does not move `updated_at`, so
-  approving it later left it permanently below the bookmark and never offered again. Two correct
-  decisions and a clock standing in for a judgement.
-  A **decline expires when the note changes** (`updated_at > compile_declined_at`) — the
-  frontier gave that for free, this has to state it. `all_pages=true` ignores declines, which is
-  what makes it the recovery path. Declining a note the plan did not offer is allowed; declining
-  an id that resolves to no live note is a 422, and a wiki page id is one of those.
-  **`write_page`, `finish` and `fail` all take the corpus advisory lock.** `write_page`'s
-  check that the run is still running is only a guard because the settle path contends for the
-  same lock; without it a page commits into a settled run. `source_ids` are re-validated under
-  that lock too — the pre-embedding check goes stale across a third-party call that retirement
-  can land inside. `compiled_at` comes from the run's start so one run is one
-  timestamp, which is why `set_compile_provenance` exists apart from `replace_content` — that
-  one leaves provenance alone so an ordinary update cannot claim to have compiled anything.
-  `source_ids` are **validated** and refused when unresolved, unlike `related_ids`: provenance
-  naming something that never existed is a false claim, not a dangling edge.
-- **A review candidate is always a brand-new note, and a settled case releases it.**
-  `insert_pending` has one production caller: the contribute path's `Flag` branch, with the
-  note it just wrote. Pre-existing notes appear only as JSON evidence, and the update path
-  refuses on collision rather than opening a case. That is what licenses `rejected` to
-  **delete** rather than archive — a candidate was never endorsed and its substance is
-  already in the corpus. `candidate_document_id` is nullable and non-unique since migration
-  0011: `delete` clears it so a judgement outlives what it judged, and a second case can be
-  opened rather than overwriting the first. Only a **pending** case blocks retirement now;
-  ADR 0019's "every state" rule made a flagged note permanently undeletable. `superseded` is
-  reserved and unreachable — do not give it a meaning without a case that needs one.
-- **An amendment proposal is workflow state, never a document.** Migration 0016 and ADR
-  0028. It stores either an immutable full replacement or a bounded body diff against
-  `content_revision`, stays outside search/dedup/compile/export, and is applied only through
-  `vault:review`. Body diffs may add, edit, or remove exact lines; metadata and large changes
-  require replacement. Review materializes the complete result, canonical diff, and removal
-  summary. Any removed body line requires explicit acknowledgement, persisted on the proposal.
-  Acceptance compares
-  the base under the corpus lock; a changed or missing target settles `stale`. The reviewing
-  credential still holds no `vault:update`: it may select an existing proposal but cannot
-  compose arbitrary content. `content_revision` moves on `replace_content` only, not review,
-  promotion, compile decline, or other lifecycle changes.
-- **A span edit is a third authoring form, not a third stored kind** (ADR 0033).
-  `vault_propose_note_span_edit` takes `expected_text`/`replacement_text`/`occurrence`;
-  `VaultAmendmentService._materialize_span` converts it to a `body_diff` inside `propose`,
-  under the same advisory lock and after the base-revision check, and the `SpanEdit` never
-  reaches storage. Keep it that way: because storage is unchanged, the compact-diff policy,
-  the removal acknowledgement, the review surface and `apply_body_unified_diff` all apply
-  without being restated, and a reviewer reads one artifact however it was authored.
-  `tests/vault/test_span_edit.py` asserts the round trip — what
-  `span_edit_to_unified_diff` renders must apply through the strict applier — and that
-  assertion is what stops the span form becoming a weaker patch format in disguise.
-  - **Do not relax the diff grammar to make patches easier.** Optional or server-repaired
-    hunk counts were proposed and rejected: counts are what makes a mangled patch detectable,
-    and deriving them would let a corrupted request appear to mean something its author did
-    not intend. The span form exists so that the arithmetic never has to be authored, which
-    is the same goal reached without weakening anything.
-  - `occurrence=None` means *this span must be unique*, not *take the first match*. Do not
-    "helpfully" default it to 1; that collapses two different requests and silently edits the
-    wrong paragraph for a caller who had not considered duplicates.
-- **The review surface is REST *and* MCP, and the MCP half is scope-gated.** Reading a case
-  serves `flagged` content, the least-vetted text in the corpus, and deciding publishes or
-  destroys a note — so the tools exist only for a credential holding `vault:review`, which is
-  ADR 0021's defence applied through `list_tools`. **ADR 0026 reversed the destination this
-  invariant used to name:** there is no separate admin MCP, and the REST routes stay. See "The
-  MCP adapter" below for the operating rule that carries the rest of it.
-- **`related_ids` / `source_ids` carry no existence check on purpose — and that is not the same
-  as no check.** A contribution may reference a note that is archived, flagged, or not yet
-  written; a foreign key would fail the write for the reason ADR 0002 already rejected for audit
-  events. ADR 0030 draws the line ADR 0025 does not: a value containing whitespace or a bracket
-  is a *name*, not an id that points at nothing, and is refused at the request boundary
-  (`wikilinks.looks_like_a_name`, one statement of the rule, used by `api_models.validate_ids`
-  and reported by `export._warnings`). Deliberately weaker than the real id format — a validator
-  spelling `^[0-9a-f]{32}$` would be correct today and would pin the id format into a shipped
-  wire contract. The accepted residual is a bare slug, which passes. Do not "tighten" this into
-  a format rule without an ADR, and do not move it into a DDL CHECK: the constraint could not
-  have been applied while the bad rows existed, and the repair script has to be able to read
-  what it fixes.
-- **They hold ids, and `wikilinks.py` is where a name becomes one.** ADR 0025: inside the
-  database every edge is an id, translated only at the import and export boundaries — a human
-  writes `[[Some Note]]` and never sees a uuid. Unvalidated does not mean untyped, and the
-  2026-08-26 amendment exists because the two were confused: `import_vault_wiki` stored twenty-one
-  `[[Title]]` strings in `related_ids` and the exporter wrote them back out, so the bad data
-  survived a round trip looking correct. A name resolves by title, alias, or slug; an ambiguous
-  one is reported and never guessed; an unresolvable one is dropped **after** the original list is
-  preserved in `frontmatter`, because that is the premise the ADR's drop rule rests on. On the way
-  out, ids render as `[[slug]]` — `SeeAlso` beside `RelatedIDs` on an Agent Note, `Related` on a
-  Wiki Page (`global.yml` makes both `list_wikilink`, and neither is engine-owned) — and an id the
-  run cannot resolve is omitted, because a broken wikilink is worse than an absent one.
-  `scripts/resolve_vault_wikilinks.py` repairs rows written before that was true.
-- **The embedding text is title + aliases + tags + summary + body, and nothing else.** Timestamps
-  and identifiers churn without changing meaning; `Type`/`Status` are excluded because they are
-  columns (`doc_type`, `doc_status`) and filtering exactly beats matching fuzzily. `frontmatter`
-  JSONB exists for faithful projection and is deliberately **not** embedded. Re-import and
-  re-embed are separate: `vault_document_embeddings.embedded_text_sha256` decides the second, and
-  NULL there means stale, not current. See ADR 0013.
-- **`search_vector` uses `vault.text_array_to_string`, and must.** `array_to_string` is STABLE, so
-  PostgreSQL rejects it in a generated column; `array_to_tsvector` is IMMUTABLE but emits
-  unstemmed lexemes that silently never match a stemmed query. Aliases are weighted 'A'; tags are
-  deliberately absent, being already served exactly by their GIN index.
-- **`ai_read` is enforced twice, and fails closed.** `read_policy.READABLE_PATH_PREFIXES`
-  mirrors the `ai_read: allowed` rules in the private `folders.yml`. Excluded folders are
-  never imported; both search arms, the fusion hydration step, and fetch-by-ID filter again
-  anyway, because the two layers cover different failures. A path matching no prefix is
-  unreadable — never add a fallback that serves the unclassified. Not configuration, for
-  ADR 0008's reason. `get_by_id(readable_only=...)` defaults **off** because reconciliation
-  must load an excluded row in order to delete it. Reading leaves no diff, so unlike
-  `ai_write` this can never be a CI gate. See ADR 0014.
-- **`VAULT_TEXT_SEARCH_CONFIG` is a migration-time choice.** It is compiled into the
-  persisted `search_vector` generated column, so changing it later requires a table rewrite
-  and a GIN reindex, not a restart. A startup assertion compares the environment against the
-  expression actually stored in the catalog. Search queries must use the same configuration:
-  `websearch_to_tsquery(:config, :query)`.
-- **`decide()` and `Policy` are ported verbatim into `governance.py`** (ADR 0004) — keep them
-  diffable against `vault_contrib.core`. What is deliberately *not* ported is the **value** of
-  `flag_at`: Stage A's 0.85 is a title string ratio, here the score is cosine similarity on a
-  specific model. `DEFAULT_POLICY` ships `flag_at = 1.0` — only an identical embedding flags.
-  That is now the **measured** answer for `text-embedding-3-small`, not a placeholder: in the
-  2026-08-15 with-tags counterfactual, the corpus's closest legitimately-distinct pair scores
-  0.8318 and the weakest deliberate restatement scores 0.7500, so the bands overlap by 0.0818.
-  Do not "restore" 0.85, and do not derive a threshold from the corpus distribution alone —
-  real duplicates and legitimately adjacent notes do not separate cleanly. `flag_at` is derived
-  per model by the two-sided procedure in `calibration.py` / `docs/embedding-calibration.md`;
-  changing the constant needs a new row in that register. See ADR 0016 and its calibration
-  amendments.
-- **`collection` says whose write path owns a row, and every mutation predicates on it.**
-  ADR 0049 and migration 0021. `agent` rows live under `Agent/` and `human` rows under
-  `Human/`; `vault_documents_collection_matches_path` refuses anything else, so a move
-  cannot carry a note across and no row can live outside those two trees. Every
-  document mutation in the repositories takes `collection`, **defaulting to `agent`**,
-  in its `WHERE` clause: a wrong-collection target matches nothing and reads as not
-  found. Do not "simplify" the default into deriving the collection from the path — a
-  Human path must say it is one, and the default makes forgetting fail closed. Agent
-  service loads pass `collection=DocumentCollection.AGENT` so a refused target costs no
-  embedding call, and raw updates in scripts carry the same predicate.
-  `resource_revision` moves on every write to a column in `DOCUMENT_DOMAIN_COLUMNS` and
-  a CHECK holds it at or above `content_revision`, so a raw update that bumps content
-  must bump both; `content_revision` keeps its content-only contract for amendment
-  proposals. `vault_human_revisions` and `vault_human_changes` have no foreign key to
-  `vault_documents`, so history and tombstones outlive a deleted note, and any writer
-  to the feed must hold `CORPUS_LOCK_KEY` or its identity positions stop matching
-  commit order.
+- Audit events carry correlation ids, **not FKs**; an audit insert must never fail on a
+  constraint. `latency_ms` is nullable. ADR 0002.
+- Embeddings live in `vault_document_embeddings` keyed `(document_id, profile_id)`; "not
+  embedded" is the absence of a row; re-embedding is an upsert. One vector per document is
+  enforced — chunking is a migration. ADRs 0003, 0034.
+- A wiki row's `compile_run_id` FK is `ON DELETE RESTRICT`; never `SET NULL`.
+- `kind` is lifecycle (`note`/`wiki`); `doc_type` is taxonomy, free text with a **shape-only**
+  CHECK, vocabulary enforced from `types.yml` in code. Don't tighten the CHECK or widen `kind`. ADR 0009.
+- `vault_path` is the **only** policy key — no `policy_scope` column. Port
+  `inheritance.resolve_context`; don't reimplement prefix matching. ADR 0010.
+- `status` is the visibility gate (closed enum, `routes.READABLE_STATUSES`); `doc_status` is the
+  Status Map value. Never gate reads on `doc_status`. ADR 0011.
+- `source_sha256` NULL means "authored in the database". Reconciliation is mark-and-sweep
+  **scoped by path prefix**, after a complete walk, refusing an implausibly small one. ADR 0012.
+- `facets` classify and are **never** embedded; `tags` describe and are. Facet names are a closed
+  set in `facets.py`. A facet never gates a read. ADR 0017.
+- `origin` holds upstream provenance; `contributed_by` comes from the credential and
+  `created_at` is never backdated. Migration 0010.
+- Adding an optional request field needs no `REQUEST_DIGEST_VERSION` bump
+  (`exclude_unset=True`); changing the digest function does.
+- `vault_path`'s leaf is the title's slug; the folder is never caller-derived; collision suffixes
+  resolve **under the corpus advisory lock**; a retitled note keeps its path. ADR 0022.
+- `promotion_status` and `vault_path` move together in one statement under the lock;
+  `updated_at` does not move. A note is never a candidate at birth. ADRs 0023, 0061.
+- `Agent/wiki/_index.md` is generated by the exporter, not stored; its timestamps come from the
+  pages. The export **writes** more prefixes than it **prunes** (`EXPORTED_PATH_PREFIXES` ⊃
+  `CORPUS_OWNED_PATH_PREFIXES`); the owned set is explicit, never derived from occupancy.
+- Compilation: the service plans (`missing`/`stale`/`new-source`), a model writes. Plans carry
+  ids, never bodies. A flagged note is never offered. Wiki pages are embedded but **excluded from
+  dedup**. Declines (`compile_declined_at`) stop re-offers and expire when the note changes;
+  `write_page`/`finish`/`fail` take the corpus lock; `source_ids` are re-validated under it. ADR 0027.
+- A review candidate is always a brand-new note; `rejected` deletes it; only a **pending** case
+  blocks retirement; `superseded` is reserved. ADR 0019.
+- An amendment proposal is workflow state, never a document; applied only via `vault:review`;
+  removed lines need explicit acknowledgement; a changed base settles `stale`. A span edit is
+  converted to a `body_diff` inside `propose` and never stored as such; `occurrence=None` means
+  "must be unique". Don't relax the diff grammar. ADRs 0028, 0033.
+- `related_ids`/`source_ids` are shape-checked (a value that looks like a *name* is refused),
+  never existence-checked, never a DDL CHECK. Inside the database every edge is an id;
+  `wikilinks.py` translates at import/export. ADRs 0025, 0030.
+- Embedding text is title + aliases + tags + summary + body, nothing else.
+  `embedded_text_sha256` NULL means stale. ADR 0013.
+- `search_vector` uses `vault.text_array_to_string` (IMMUTABLE); `VAULT_TEXT_SEARCH_CONFIG` is
+  a migration-time choice, checked against the catalog at startup.
+- `ai_read` is enforced twice and **fails closed**: excluded at import and filtered on both
+  search arms, fusion hydration, and fetch. `get_by_id(readable_only=...)` defaults **off**. ADR 0014.
+- `decide()` and `Policy` stay diffable against `vault_contrib.core`. `flag_at` is derived per
+  model by the procedure in `docs/embedding-calibration.md`; never change it without a register
+  row. ADR 0016.
+- `collection` says whose write path owns a row; every mutation predicates on it, **defaulting
+  to `agent`**. `resource_revision` moves on every domain-column write and stays ≥
+  `content_revision`. Human history and feed tables have no FK to documents; feed writers hold
+  `CORPUS_LOCK_KEY`. ADR 0049.
+
+## The Human collection
+
+- Two read audiences, **chosen by route**: ordinary routes apply `readable_path_predicate`;
+  `/human/notes` applies `collection = 'human'` and no read policy. Never add an audience
+  parameter to `/notes`. Agent *workflows* (`find_similar`, compile planning, `write_page`
+  sources) exclude Human rows. ADR 0050.
+- A Human write is one transaction under the corpus lock: row, then snapshot and feed entry via
+  `VaultHumanHistoryRepository.record` (which checks `pg_locks` — keep that check), then audit.
+  No embedding call, no dedup. Edit and move are retry-safe by state; create by the ledger. ADR 0051.
+- Deletion leaves a tombstone; only `VaultHumanNoteService.restore` brings a note back, under
+  its own id. The feed cursor names an entry and is verified before resuming (410 on mismatch);
+  never reduce it to a position or order by `occurred_at`. ADR 0052.
 
 ## Retrieval and embeddings
 
-- The embedding **port** (`embeddings.py`) names no vendor. Adapters live in their own modules
-  (`embeddings_openai.py`), and `embedding_runtime.py` is the only place that maps a provider
-  name to an adapter. Nothing may import an adapter from the port.
-- `settings.py` deliberately does **not** validate that an adapter exists for the configured
-  provider. That separation keeps the Alembic environment free of transport imports; the
-  registry raises instead.
-- The embedding provider is **optional at runtime**. Without a credential the vault serves
-  lexical-only search and says so in the response. Do not turn a missing key back into a
-  startup failure — CI depends on this.
-- **The query request budget is three attempts at a 5s timeout**, settled by measurement on
-  2026-08-12 (single-query p99 1.194s; a 128-document batch takes 0.728s). Worst case
-  3 × 5s + 2 × 4s backoff = 23s, inside Heroku's 30s router budget. The realistic failure is a
-  transient 429/502, not slowness. See "Deferred decisions" item 3 in
-  `docs/vault-architecture.md`.
-- **`VAULT_EMBEDDING_TIMEOUT_SECONDS` is per attempt, and validated against the router budget
-  at startup.** The retry constants live in `constants.py`, not in the adapter, precisely so
-  `settings.py` can check them without importing a transport module — do not move them back.
-  A unit test on the default constant is not sufficient and was not: it passed for months while
-  every real environment carried 10, a 38s budget. A backfill wanting longer passes
-  `timeout_seconds` to the provider directly; the adapter parameter is deliberately unbounded
-  and the environment variable deliberately is not.
-- `vector_status` distinguishes `used` / `not_configured` / `failed`. Keep those three
-  separate: a broken provider must never be reportable as a deliberate lexical-only
-  deployment. `failed` also logs at ERROR; `not_configured` logs nothing per request.
-- Never log the query text or an embedding exception's message — both can carry user content.
-  Log the exception *type* instead. `tests/vault/test_search.py` asserts this.
-- Search must pass the text search configuration as a bound parameter —
-  `websearch_to_tsquery(:config, :query)` — never the database default, never interpolation.
-- **Search names candidates; it does not return documents** (ADR 0031). A hit carries
-  `note_id`, `title`, `summary`, `snippet`, `kind`, `doc_status`, `content_revision` and the
-  three ranking fields — and nothing else. `body`, `tags`, `aliases`, `facets`, `related_ids`,
-  `source_ids`, `vault_path`, `doc_type`, `status` and the timestamps were removed on
-  2026-08-26, when a ten-hit page cost 58,784 bytes on the wire and the same page now costs
-  10,650. The test a field must pass to be added back is *selection* value — does it help
-  decide which note to open — not smallness and not convenience. Do not reintroduce one behind
-  a `**document_detail(...).model_dump()`; that is exactly how the old shape arose.
-  - Both adapters build the response through `api_models.search_response`, for the reason they
-    share `canonical_request_digest`. Do not assemble a hit in an adapter.
-  - `snippet` is a **lead extract, not a match highlight**, and is supplied only when `summary`
-    is absent — read `summary or snippet`. A vector-only hit shares no vocabulary with the
-    query, so nothing could mark it; and for hits the lexical arm *did* find, ADR 0007's
-    disjunction rewrite lets one incidental shared word anchor a `ts_headline` fragment
-    somewhere useless, which measured worse than the lead extract. The 320-character bound was
-    measured against the corpus, not chosen; `snippet.py` carries the distribution it came
-    from.
-  - **A `ts_headline` arm is not "call `ts_headline`", and two plausible shortcuts do not
-    work.** Passing it only the terms the lexical arm matched is a *no-op* — an absent term
-    contributes nothing to it already. Routing by retrieval arm does not help either, because
-    the bad case matched lexically. It needs a document-frequency cut so weak terms cannot
-    anchor, and that cut is derived state that goes stale and is not trustworthy at this
-    corpus size. ADR 0031 records the measurements and the gate for revisiting.
-  - `next_cursor` is reserved and always null, and must stay that way until a resumable
-    ranking exists. RRF scores are positions within one query's candidate set, so an insert
-    can move every score beneath it and a document outside the window has no score at all. A
-    cursor here would be an offset promising stability it cannot deliver.
-  - `has_more` is bounded by the candidate window, not the corpus. `truncated` is a different
-    fact: the response was trimmed from the tail to fit `SEARCH_STRUCTURED_BUDGET_BYTES`.
-- **`tests/vault/test_mcp_budget.py` is a ratchet, and the numbers in it are measurements.**
-  Lowering a budget is a deliverable; raising one needs a reason in the commit message. It
-  counts *both* wire copies deliberately: a tool annotated `-> dict[str, Any]` looks
-  schema-less but is not — `func_metadata` derives a permissive object schema from it, which
-  is enough to make the SDK ship `structuredContent` beside the compatibility text block. So
-  every byte saved is saved twice, and typing a tool's return sharpens its schema without
-  adding a copy.
-- **Search returns `active` only; fetch-by-ID also resolves `archived`, never `flagged`** (ADR
-  0008). `routes.READABLE_STATUSES` is the single statement of that rule. Archived content is retired
-  but legitimate, so a `related_ids`/`source_ids` reference still resolves; `flagged` means the
-  write path declined to endorse it, and the consumer is an agent that will not check the
-  `status` field. `VaultDocumentRepository.get_by_id` stays **unfiltered by default** — review
-  tooling must be able to load a flagged document precisely because it is flagged — so the
-  restriction belongs at the calling surface, not in persistence.
-- The lexical arm **disjoins** the parsed query's terms (ADR 0007), rewriting ` & ` to ` | ` in
-  `websearch_to_tsquery`'s output. Quoted phrases keep their `<->` operator, and a query whose
-  parsed form contains `!` stays conjunctive — disjoining a negation inverts it. Do not
-  "simplify" this back to a plain `websearch_to_tsquery`, and do not re-lex the raw query
-  string with `to_tsvector`; that silently drops phrase support.
-- The first profile is `openai/text-embedding-3-small:1536` (ADR 0005); the two arms combine
-  by Reciprocal Rank Fusion (ADR 0006, amended by 0007). Changing provider or model is a
-  controlled re-embed, never a credentials-only config change.
+- The embedding port names no vendor; only `embedding_runtime.py` maps a provider to an
+  adapter. `settings.py` does not import transports.
+- The provider is optional at runtime: no key means lexical-only search, reported as such.
+  `vector_status` keeps `used` / `not_configured` / `failed` distinct.
+- Query budget: three attempts at 5s; `VAULT_EMBEDDING_TIMEOUT_SECONDS` is per attempt and
+  validated against Heroku's 30s router budget at startup. Retry constants live in `constants.py`.
+- Never log query text or an embedding exception's message — log the exception type.
+- Search passes the text-search config as a bound parameter, always.
+- Search returns **candidates, not documents** (ADR 0031). A field is added back only for
+  *selection* value. Both adapters build responses via `api_models.search_response`.
+  `snippet` is a lead extract, supplied only when `summary` is absent. `next_cursor` stays null.
+- `tests/vault/test_mcp_budget.py` is a ratchet: lowering a budget is a deliverable, raising one
+  needs a reason in the commit message. It counts both wire copies.
+- Search returns `active` only; fetch also resolves `archived`, never `flagged`. ADR 0008.
+- The lexical arm disjoins terms but keeps phrases and stays conjunctive under negation. ADR 0007.
+- Profile `openai/text-embedding-3-small:1536`, fused by RRF. Changing model is a controlled
+  re-embed, never a config change. ADRs 0005, 0006.
+- **Frozen until 500 active readable documents:** RRF parameters, the disjunction rule, the
+  snippet bound, a `ts_headline` arm, chunking, multi-query and batch fetch. ADR 0055.
 
-## Authentication
+## Authentication and authorization
 
-- **The credential dependency must not `yield` an open connection.** Sharing one checkout
-  between authentication and the handler looks like free savings and is not: a dependency that
-  yields holds the connection for the whole request, and `search`, `contribute` and `update`
-  all call the embedding provider *between* their checkouts on purpose. It would pin a pooled
-  connection across a 23s worst-case embedding budget, which is the same mistake as embedding
-  inside a transaction, one layer up. Authentication takes its own short checkout and releases
-  it. Considered and rejected 2026-08-14; see task 15 of the host repository's
-  `docs/archive/HANDOFF-2026-08-16.md`.
-- **Agents authenticate with `hssv1_<credential-id>_<secret>`**, verified against
-  `vault_agent_credentials`; only `sha256(secret)` is stored. `VAULT_READ_API_KEY` is gone and
-  there is no global on/off secret — a credential verifies or it does not. See ADR 0015.
-- The token is split **from the right**: credential IDs may contain `_`, secrets are hex so the
-  last `_` is unambiguously the separator. Do not "simplify" this to a left split.
-- A lookup miss still runs a comparison against a dummy hash. Removing that lets response
-  timing enumerate valid credential IDs.
-- Plain SHA-256 is correct **here** because secrets are machine-generated with full entropy.
-  Do not carry that reasoning to human-chosen passwords.
-- `last_used_at` is written only on success — it means "last used", not "last attempted".
-- `401` for a bad or inactive credential, `403` for a valid one missing a scope. Neither
-  response says which check failed.
-- Scopes are verbs, **one per route**. `vault:write` is *contribute only*; `vault:update` gates
-  replacement and `vault:delete` gates retirement (ADR 0020). Do not re-fold them into one
-  grant, and do not gate a new write route on an existing scope because adding one looks like
-  ceremony — that is exactly how `vault:write` came to mean "may destroy any note". A quota is
-  not an authorization boundary: `retire`'s tight bucket bounds how fast, not whether.
-- **The one sanctioned exception, and the test that bounds it.** `vault:write` gates two
-  routes: contribute, and ADR 0035's `set_summary`. That is allowed because the second grants
-  no capability the first did not already carry — a contributor could have written that summary
-  at contribute time, so the carveout adds a later *moment*, not a new power. A
-  `vault:summarize` could be neither usefully withheld from a contributor nor usefully granted
-  without one, and a scope that cannot be granted or withheld is a second name rather than a
-  boundary. **A route may share a verb only when it can reach nothing its holder could not
-  already have written.** Small is not the test; reachability is. A route touching the body,
-  the title, or another principal's note needs its own verb however narrow it looks.
-- The scope is `vault:delete` even though the route, service and quota bucket all say *retire*.
-  The internal vocabulary describes the operation; the permission name warns the operator
-  granting it, and "retire" reads as reversible when ADR 0019 makes it not.
-- *What* a credential may read is ADR 0014's path policy, a property of the
-  folder rather than of the credential.
-- **`vault:propose` is OAuth-baseline but non-mutating.** It writes an untrusted amendment
-  record, not corpus content. Applying one is `vault:review`, and direct replacement remains
-  `vault:update`; do not collapse any of the three.
-- **Human and Agent scopes never share a credential** (ADR 0049). `vault:human-read`,
-  `vault:human-write` and `vault:human-delete` are exclusive with `vault:write`,
-  `vault:propose`, `vault:update`, `vault:delete`, `vault:review` and `vault:compile` —
-  Human read included, because reading private Human notes while able to write
-  agent-readable ones is a laundering channel. Enforced by CHECKs on credentials, refresh
-  tokens and grants (over `authorized_scopes || entitled_scopes`), explained by the CLI,
-  and re-checked by `authorize`, which returns `incompatible`. All three are operator
-  entitlements, so a Human OAuth family is authorized requesting `vault:read` alone.
-  `vault:human-read` gates reading `/human/notes` (ADR 0050) and `vault:human-write`
-  gates create, edit and move there (ADR 0051); `vault:human-delete` gates deletion
-  (ADR 0052).
-- **A Human deletion is a tombstone, and only an operator's restore undoes it** (ADR
-  0052). The row goes; the `delete` snapshot and `delete` feed entry stay, at one past
-  the note's last revision. A resent delete returns that same tombstone. Edits, moves
-  and create replays of a deleted id are 404 -- do not add a code path that recreates
-  a Human row from anything but `VaultHumanNoteService.restore`, which keeps the id
-  and continues the revisions so every client sees the restore as newer. **The feed
-  cursor names an entry, and `/human/changes` checks that entry still exists with the
-  same note and revision before resuming** -- a mismatch is 410, because a database
-  restored to an earlier point reuses positions and a bare position would silently
-  skip changes. Do not "simplify" the cursor to a position, and do not order the feed
-  by `occurred_at`.
-- **A Human write is one transaction under the corpus lock, and the history write
-  checks the lock** (ADR 0051). `VaultHumanNoteService` changes the row, then
-  `VaultHumanHistoryRepository.record` writes the snapshot and feed entry, then the
-  audit event is appended. `record` queries `pg_locks` and raises without
-  `CORPUS_LOCK_KEY`; do not remove that check as redundant with the callers, because
-  the feed's commit-order guarantee is exactly the thing a caller forgetting would
-  break without a trace. Human writes make no embedding call and never run the dedup
-  gate. Edit and move are retry-safe by state rather than by key: a request the note
-  already matches returns 200 without writing, whatever base it names, and only a
-  change against a moved-on note is a 409 carrying `current_resource_revision`. Do not
-  "tighten" that into refusing every stale base — a resend after a lost response
-  would then conflict with itself. Create is idempotent through the write ledger, and
-  a replay must find a Human note behind the prior entry, since contributions share
-  the ledger's `(principal, key)` namespace.
-- **Two read audiences, chosen by route and stated in each query** (ADR 0050). The
-  ordinary routes apply `readable_path_predicate`; `/human/notes` applies
-  `collection = 'human'` and no read policy, and names no Agent note. Do not add an
-  audience parameter to `/notes`: a parameter is the caller's choice, and the scope
-  that admitted the request is what decides what it may see. Agent *reads* may return
-  `ai_read`-allowed Human notes; Agent *workflows* may not take them as input —
-  `find_similar` and compile planning (`note_states`, `note_frontier`) filter to the
-  Agent collection, and `write_page` validates sources against that same map.
-
-### The OAuth authorization server (ADR 0024)
-
-- **`load_access_token` returns the OAuth *client id*, and None for an operator credential.**
-  The SDK's revocation handler calls `revoke_token` only when the loaded token's `client_id`
-  equals the authenticated client's, so returning `principal_id` (`oauth-<slug>`) made
-  `/revoke` a silent 200 that revoked nothing. Returning None for a credential with no refresh
-  family is deliberate: an `hssv1_` credential must not be revocable through an endpoint any
-  self-registered client may call.
-- **Revocation and replay both burn the whole family.** Revoking one credential leaves its
-  refresh token able to mint a replacement, which is not revocation. And a `consume()` miss is
-  not automatically innocent — the SDK loads and exchanges separately, so two concurrent
-  requests both pass the `consumed_at` check and the loser is exactly the captured-token case
-  rotation exists to catch. Re-read the row: consumed means burn the family.
-- **The public OAuth routes carry the pre-auth guard as ASGI middleware.** They are
-  root-mounted Starlette routes and inherit neither the vault router's dependency nor the MCP
-  mount's; `/register` writes a row on every unauthenticated call. A route whose endpoint
-  already has its own slowapi bucket is left unwrapped — wrapping the login POST suppressed
-  its own tighter limit.
-- **Never raise the MCP SDK's protocol errors inside a transaction block.** `AuthorizeError`
-  and `TokenError` are *frozen dataclasses*, and unwinding through an `@asynccontextmanager`
-  runs `exc.__traceback__ = tb` in contextlib, which a frozen instance refuses — so the caller
-  gets a `FrozenInstanceError` from the exit path instead of the protocol error. Worse when the
-  block did security work first: `exchange_refresh_token` revoked a replayed token's whole
-  family and then raised, so the rollback undid the revocations, the family consume, and the
-  audit event. Detection that reports itself and then erases itself. Compute the outcome inside
-  the block, leave it, then raise. **Hit three times** — `authorize`, `exchange_refresh_token`,
-  and `exchange_authorization_code` — because none of these branches is reachable by a
-  sequential test: each needs two requests that both pass a load check before either consumes
-  the row. `tests/vault/test_boundaries.py` now enforces the rule lexically, since the runtime
-  path is exactly the part that does not get exercised.
-- **Redeeming a login nonce and minting its authorization code are one transaction.** They were
-  two, with bcrypt between them, and in that window an old registration has no pending
-  authorization, no code, and no live refresh token — the exact state stale-client pruning
-  deletes, so a correct password could end in a foreign-key 500. Atomic, no committed moment
-  exists in which neither row is present. The cost, accepted: bcrypt now runs before redemption,
-  so concurrent submits on one nonce each get a password evaluation before one wins. The login
-  bucket and bcrypt's cost are what bound guessing, and `/authorize` mints nonces freely, so
-  one-guess-per-nonce was never what stopped an attacker.
-- **A compile run belongs to the principal that opened it.** `compiler_principal_id` was
-  recorded and never checked, so any `vault:compile` holder could write pages into another
-  principal's run and settle it — a run naming one compiler while its pages and settlement
-  events name another. Refused with 409, not 403: the scope already permits writing wiki pages
-  and the caller may open its own run, so this is a consistency rule, not a permission.
-- **`/register` writes no audit event.** It is public and unauthenticated, and nothing prunes
-  `vault_audit_events` — by ADR 0002's design, since it is the durable record of what was done
-  to the corpus. One row per anonymous registration made an unauthenticated caller the author of
-  unbounded permanent storage; a rate limit slows that but does not bound it. The fact lives on
-  `vault_oauth_clients.registered_at`, which pruning covers, plus a structured log. `/register`
-  also carries its own tighter bucket, and slowapi scopes buckets by the wrapped callable's
-  **qualified name** — two guards built from `build_preauth_dependency` are both
-  `…<locals>.guard` and would silently share one.
-- **A paged read that must see one corpus needs `REPEATABLE READ`, not just one transaction.**
-  Under the default READ COMMITTED every statement takes a fresh snapshot, so sharing a
-  transaction buys atomicity for writes and nothing at all for a multi-statement walk. Keyset
-  paging does not close it either: it beats OFFSET on *insertions*, but `vault_path` is mutable
-  and promotion exists to move one, so a row can cross the cursor and be read twice or never.
-  `VaultExportService.documents` passes the isolation level for exactly this reason — and it
-  feeds the prune set, so getting it wrong deletes a document's old export without writing its
-  new one.
-- **An OAuth principal is `oauth-<client_id>` — the registration id, never the client's
-  name.** Same error as the consent screen's, in the place it does real damage: `principal_id`
-  is the actor for idempotency (`vault_write_requests` PK), for quota (the token buckets), and
-  for `contributed_by` and the audit trail, so a name-derived principal let two separately
-  approved clients share all three. `display_name` is where the readable name belongs.
-- **`authorize` and `delete_stale` both take `OAUTH_CLIENT_LOCK_KEY`.** Sparing a client with
-  an authorization in flight only works if the sweep cannot run *between* the SDK's client
-  lookup and the pending row's insert. Unlocked, that window is a foreign-key violation and a
-  500 on a valid flow.
-- **The consent screen shows the redirect origin and the registration id, and calls the
-  client's name unverified.** `client_name` is free text on an open registration endpoint, so a
-  page that leads with it lets anyone appear as "Claude" with a redirect they control — on the
-  real vault domain, reached by a real `/authorize` link. The destination is the part an
-  impersonator cannot forge, so it is the part the operator is shown. Truncate the name: it
-  renders above everything else and is unbounded.
-- **A compile `page_id` is checked for kind before anything is written.** `replace_content`
-  matches on id alone — right for it, since the ordinary update path edits notes through it —
-  while compile provenance is wiki-only. A note id therefore overwrote that note and *then*
-  found nothing to stamp. Refused up front as a 422, not an `assert`: the id is
-  request-controlled, and `-O` strips asserts.
-- **Registrations are pruned by age *and liveness*, never by `expires_at`.** The SDK leaves
-  `client_secret_expiry_seconds` unset and nothing else supplies one, so an expiry-only sweep
-  deleted nothing at all. A client with an unconsumed, unexpired refresh token is never a
-  candidate — deleting one cascades to its tokens and revokes a working connector. Nor is one
-  with an authorization **in flight**: a pending authorization or an unexchanged code, both of
-  which cascade too. An old registration with no live token is exactly the client that
-  reconnects, so that window is the ordinary path back, not an edge case. The delete and the
-  dry-run count read one predicate — a preview that disagrees with the delete it previews is
-  worse than no preview.
-- **An issued access token *is* a `vault_agent_credentials` row.** That is the load-bearing
-  choice and everything else follows: `contributed_by` derives from the principal, revocation
-  and the credential census work unchanged, scopes stay on the credential, and quota buckets
-  key on a principal an OAuth client has like any other. There is deliberately **no token
-  table** — a parallel identity type would duplicate scopes, revocation, quotas and
-  attribution, and every duplicate is somewhere the two paths could disagree.
-- **All OAuth state lives in Postgres, never in process memory.** Registration arrives
-  server-to-server from the vendor's backend while `/authorize` is a browser navigation, so the
-  two halves reliably land on different Gunicorn workers. The spike used a dict and failed
-  exactly there — deterministically, and only in production. Do not "optimise" any of the three
-  stores into a cache.
-- **`vault_oauth_clients.client_info` is JSONB, and must stay so.** RFC 7591 registrations carry
-  metadata neither this schema nor the SDK's `OAuthClientInformationFull` anticipated;
-  projecting into columns would drop whatever did not fit and need a migration each time the
-  SDK grew a field. Persistence never imports the SDK model — the provider validates the blob
-  at its own boundary, the same division `vault_documents.frontmatter` already draws.
-- **Nonces and authorization codes are stored as SHA-256, and single use is
-  `DELETE ... RETURNING`.** A check-then-mark is two statements a concurrent redemption can
-  interleave, and redeeming a pending authorization is what mints a code — running it twice
-  would issue two codes for one approval. Neither table has a `consumed_at`, on purpose.
-  `load_authorization_code` must **not** consume: the SDK splits load from exchange, and a
-  consuming load would destroy a code on a failed exchange the client is still entitled to
-  retry.
-- **`vault_oauth_authorization_codes.scopes` is OAuth-baseline only.** Operator entitlements
-  do not exist until the code exchange creates a refresh family (ADR 0029). Accepting a
-  privileged scope on the code would let consent state cross the operator boundary before the
-  durable grant exists. Refresh-token scopes remain wider because they project the effective
-  union for the SDK; the grant row is still authoritative.
-- **`passwords.py` is bcrypt and duplicates `app/auth.py` on purpose.** `app/vault/` may contain
-  no `from app.`, so a ten-line wrapper is cheaper than a host dependency the package cannot
-  take with it. bcrypt rather than `auth.hash_secret`'s SHA-256 because ADR 0015's
-  full-entropy reasoning does not transfer to a password a person chose — and because this runs
-  once per authorization, not once per request. It is offloaded with `asyncio.to_thread`;
-  bcrypt releases the GIL while hashing, so that genuinely moves the work rather than yielding.
-- **Operator identity methods are independent configuration.**
-  `VAULT_OPERATOR_PASSWORD_HASH` enables the bcrypt password form;
-  `VAULT_GOOGLE_OIDC_CLIENT_ID`, `VAULT_GOOGLE_OIDC_CLIENT_SECRET`, and
-  `VAULT_GOOGLE_OIDC_ALLOWED_EMAILS` together enable Google. Either or both may be present.
-  Partial Google configuration is refused. An unset password never means "any password
-  works"; it removes that form while Google may remain available.
-- **Google authenticates the operator, not the vault client.** Its code flow requests only
-  `openid email`; the callback validates Google's RS256 signature, issuer, audience, expiry,
-  the pending authorization's nonce, verified email, and the allowlist. The authorization
-  code subject stores Google's stable `sub`, never the mutable email. Google and password
-  both end in the same `_redeem_and_mint` transaction and cannot alter the OAuth scope cap.
-- **One failure message, whatever failed.** A wrong password, an expired nonce, a nonce that
-  never existed, a bad CSRF token and an unconfigured operator password all render identically,
-  which is why `redeem` returns None for every case rather than distinguishing them. A page that
-  told them apart would hand an attacker a probe for valid authorization attempts.
-- **The access token an OAuth client receives is an ordinary `hssv1_` string.** That is what
-  lets the whole resource server — the MCP mount, the REST routes, scope checks, quotas,
-  `contributed_by` — stay untouched by OAuth. Do not invent a second token format; if one ever
-  seems necessary, the thing to change is this property, deliberately, in an ADR.
-- **Refresh tokens rotate, and `vault_oauth_refresh_tokens` marks `consumed_at` rather than
-  deleting.** The other two transient OAuth tables delete on redemption; this one must not, and
-  the difference is a security property rather than a preference. A deleted row cannot be
-  distinguished from a token that never existed, while a consumed one is positive evidence that
-  a token was captured — so presenting one revokes every credential in its `family_id` chain
-  and burns every unconsumed token in it. OAuth 2.1 requires rotation *with replay detection*
-  for a public client, and this is the detection half. `load_refresh_token` is where it fires,
-  which is untidy and unavoidable: the SDK offers no hook between recognising a refresh token
-  and refusing it.
-- **Rotation mints a new credential and revokes the old one.** It cannot re-key: only
-  `sha256(secret)` is stored, so there is no way to hand back a token for an existing row.
-  Revoked credential rows therefore accumulate, one per refresh, and want pruning alongside
-  `vault_oauth_clients`. They grant nothing in the meantime.
-- **Persistent OAuth authority belongs to the refresh family, not the client or access
-  credential.** ADR 0029 and migration 0017. `vault_oauth_grants` keeps consented baseline
-  scopes separate from operator entitlements and each rotation projects their union. The
-  operator commands update the live credential too; static `grant` refuses OAuth rows. A new
-  browser authorization is a new family and inherits nothing. `vault:review` is accepted only
-  for a separately authorized read-only family, preserving ADR 0026's reviewer role.
-- **`load_authorization_code` must not consume.** The SDK splits load from exchange and does
-  real work between them — PKCE, the `redirect_uri` round trip, expiry — so a consuming load
-  would destroy a code whenever any of those failed, when the client may still retry.
-- **The login POST redeems the nonce whatever the password turns out to be**, so a wrong guess
-  burns the authorization and the operator restarts from the client. Do not "fix" that to be
-  friendlier: it is what stops a live authorization being reused as a guessing oracle.
-  **Bcrypt runs before the transaction, not after the redeem** — that ordering is required, not
-  incidental, because redeeming and minting the code have to be one transaction (see above) and
-  a bcrypt call must not be held across it. The consequence is accepted and deliberate:
-  concurrent submits on one nonce each get a password evaluation, and only one of them redeems.
-  The login bucket and bcrypt's own cost are what bound guessing — `/authorize` mints nonces
-  freely, so one-guess-per-nonce was never the thing doing that work.
-- **Absence of `VAULT_PUBLIC_URL` is the feature's off switch.** Every URL in the discovery
-  metadata is absolute, so a deployment that cannot state its own origin cannot serve correct
-  metadata — the variable that makes it work is the variable that enables it, and forgetting it
-  fails closed. Do not add a separate boolean; that would be a way to set one and not the other.
-- **The login page uses the vault's own Jinja2 environment (`templating.py`), never HSS's
-  `templates/`.** The boundary test scans *imports*, so a `{% extends "base.html" %}` would pass
-  every guard in this repository and fail only at extraction, as a missing file. Autoescaping is
-  on and must stay on: registration is open, so `client_name` is attacker-controlled text
-  rendered next to a password field.
+- Agents authenticate with `hssv1_<credential-id>_<secret>`, split **from the right**; only
+  `sha256(secret)` is stored; a miss still compares against a dummy hash. ADR 0015.
+- The credential dependency must **not yield an open connection** across the request.
+- `401` for bad/inactive, `403` for missing scope; neither says which check failed.
+  `last_used_at` is written on success only.
+- **Scopes are verbs, one per route** (`vault:write` = contribute; `update`, `delete`,
+  `propose`, `review`, `compile` are separate). A route may share a verb only if it reaches
+  nothing its holder could not already have written. ADRs 0020, 0035.
+- Human and Agent scopes never share a credential (`vault:human-*` exclusive with every
+  Agent-writing scope), enforced by CHECKs and at `authorize`. ADR 0049.
+- OAuth (ADR 0024): an access token **is** a `vault_agent_credentials` row and an ordinary
+  `hssv1_` string — no token table, no second format. The principal is `oauth-<client_id>`,
+  never the client name. All OAuth state lives in Postgres, never process memory.
+- Refresh tokens rotate and are marked `consumed_at`; replay or revocation burns the whole
+  family. `load_authorization_code` never consumes. Nonce and code redemption is
+  `DELETE ... RETURNING`; redeeming a nonce and minting its code is one transaction, with
+  bcrypt run before it.
+- **Never raise the MCP SDK's protocol errors inside a transaction block** — compute the
+  outcome, leave the block, then raise. `test_boundaries.py` enforces this lexically.
+- Entitlements belong to the refresh family (ADR 0029); codes carry baseline scopes only.
+- `/register` writes no audit event and has its own bucket; consent shows the redirect origin
+  and registration id and calls the client name unverified. Registrations are pruned by age
+  **and liveness**. `authorize` and `delete_stale` share `OAUTH_CLIENT_LOCK_KEY`.
+- A compile run belongs to the principal that opened it (409 otherwise); a compile `page_id` is
+  kind-checked before any write.
+- Operator identity: bcrypt password and/or Google OIDC, each independent; partial Google config
+  is refused; one failure message for every failure. Absence of `VAULT_PUBLIC_URL` turns OAuth
+  off. The login page uses the vault's own Jinja2 environment, autoescaped.
+- A paged read that must see one corpus uses `REPEATABLE READ`.
+- **The operator side is frozen** (2026-11-25): no new identity methods, console auth modes or
+  entitlement shapes without an ADR.
 
 ## The MCP adapter
 
-- **`routes.py` and `mcp.py` are two thin adapters over one service layer**, and neither may
-  import the other. Anything both need — `canonical_request_digest`, `document_detail` —
-  lives in `api_models.py`. A second copy in the second adapter is a silent drift bug: the
-  digest decides idempotency, so two of them eventually disagree about what "the same
-  request" is.
-- **Privileged tools live on the one mount, gated by scope (ADR 0026).** There is no separate
-  admin MCP; the proposal for one was considered and rejected. `vault_list_review_cases`,
-  `vault_read_review_case`, `vault_decide_review_case` and `vault_set_promotion_status` all
-  require `vault:review`, so a session without it neither sees nor can name them — the same
-  boundary that hides `vault_retire_note`.
-  **The operating rule that carries the rest: a reviewing credential holds `vault:read` and
-  `vault:review`, and nothing else.** Then adjudication cannot also retire or overwrite. That
-  rule is configuration rather than code, which is the deliberate cost — a separate mount
-  would have made the consumer surface structurally incapable of destruction, and this does
-  not. Re-open ADR 0026 if a second person gains a credential, or if an agent starts
-  adjudicating unattended.
-  `vault_list_review_cases` returns **no note bodies**: triage must not pull the least-vetted
-  text in the corpus into context. Only reading a specific case does that.
-- **`similars` is the verdict; `related_pages` is context, and they come from different
-  corpora.** `find_similar` is notes-only and feeds `decide()` and `top_similarity`;
-  `find_related_pages` is wiki-only and reaches the response and nothing else. Two queries
-  rather than one split afterwards, because a shared limit would let page hits starve the
-  gate's evidence. Never let a page reach the gate or the calibration register — that is
-  ADR 0027's whole point — and never withhold one from the response merely because the same
-  query used to serve both purposes.
-- **`list_tools` is filtered by the credential's scopes, and that is a security boundary.**
-  The corpus is untrusted input written by agents and read by agents; a note carrying
-  injected instructions is read *inside* an already-authenticated session, where no scope
-  check intercepts it. What stops it is the destructive tool being absent from the surface
-  the injected text can name. Do not advertise a tool the caller cannot use, and do not
-  remove the per-tool scope check either — listing decides what an agent can see, the tool
-  decides what it can do, and neither carries the boundary alone. See ADR 0021.
-- **The mount inherits nothing from the host.** Not the router's pre-auth guard, not the
-  exception handlers. `VaultMCPAuthMiddleware` carries the guard itself; removing it makes
-  the MCP endpoint the only unbounded door on the vault, and nothing fails until someone
-  hammers it.
-- **The mounted app's lifespan does not run**, so `app.main` enters `vault_mcp_lifespan`
-  explicitly. The session manager also refuses a second `run()`, which is why the app is
-  built per `create_app()` and held on app state rather than cached at module level.
-- **DNS-rebinding protection is off unless `VAULT_MCP_ALLOWED_HOSTS` is set.** The SDK
-  default validates `Host` against `127.0.0.1` and would 421 every request to a public
-  deployment. Do not "restore" the default.
-- **The contribution tool derives its idempotency key from content.** A model asked for one
-  invents a fresh value per attempt, which turns a retry into a duplicate note. It must hash
-  the same canonical form `canonical_request_digest` does.
-- The SDK's `token_verifier` is deliberately unused. It requires `AuthSettings.issuer_url`
-  and would publish discovery metadata through the SDK's resource-server profile; the
-  vault's authorization server (ADR 0024) publishes its own from `oauth_routes.py`, gated on
-  `VAULT_PUBLIC_URL`. The mount verifies tokens through `principal.resolve_credential`, and
-  because OAuth-minted tokens are ordinary `hssv1_` credentials, one verifier serves both.
+- `routes.py` and `mcp.py` are thin adapters over one service layer and never import each
+  other; shared shapes live in `api_models.py`.
+- Privileged tools live on the one mount, **gated by scope**; `list_tools` is filtered by the
+  credential's scopes *and* each tool re-checks. That is the prompt-injection boundary. ADRs 0021, 0026.
+- `vault_list_review_cases` returns no bodies. `similars` (notes-only, the verdict) and
+  `related_pages` (wiki-only, context) come from separate queries.
+- The mount inherits nothing from the host: `VaultMCPAuthMiddleware` carries the pre-auth
+  guard; `app.main` enters `vault_mcp_lifespan` explicitly; the app is built per `create_app()`.
+- DNS-rebinding protection is off unless `VAULT_MCP_ALLOWED_HOSTS` is set.
+- The contribution tool derives its idempotency key from content, never from the model.
+- A change to the tool surface is not finished until the `knowledge-vault` skill has been read
+  against it (host AGENTS.md, "Shipping a change to clients").
 
 ## The write path
 
-- **Embed before the transaction, never inside it.** An embedding call is a third-party round
-  trip; holding a transaction across it pins a pooled connection and the advisory lock for the
-  provider's latency. Idempotency is therefore re-checked *under the lock*.
-- **One corpus-wide `pg_advisory_xact_lock`** guards check-dedup-then-write. A per-key lock does
-  not help: the conflict is between different idempotency keys. Retirement takes the same lock
-  so its pending-review check cannot race with creation of a review case.
-- **Update provider I/O is conditional; vector persistence is unconditional.** The candidate
-  vector may be reused when its pre-lock digest matches, but every successful replacement
-  upserts that candidate under the lock. Otherwise a concurrent writer can make the pre-lock
-  decision stale and leave final text paired with the wrong embedding. See ADR 0018.
-- **Pending review evidence is undeletable.** Retirement checks both the candidate foreign key
-  and document IDs inside `similar_documents`; the latter is JSON and has no database FK. See
-  ADR 0019.
-- **No dedup, no write.** Missing embedding provider is 503, not a silent insert. The read path
-  may degrade to lexical; the write path may not degrade to no-dedup.
-- **Embedding context overflow is permanent input failure.** OpenAI documents an 8,192-token
-  maximum for `text-embedding-3-small`; its context-length 400 is not retried and maps to 422
-  on contribution and update. Other provider failures remain 503. Never infer permanence from
-  every 400: an invalid model or dimensions setting is an operator error, not bad note content.
-- **Settled outcomes are 200**, including `flagged` and `rejected` — a client that retries a
-  "flagged" as an error creates a second note that flags against the first.
-- The idempotency digest covers the **validated model**, not raw bytes, and v3 recursively sorts
-  object keys, so top-level or nested key order is not a 409. List order remains significant.
-  `contributed_by` comes from the **credential**, never the body. Any digest-rule change bumps
-  `REQUEST_DIGEST_VERSION` and gets an Alembic revision; old rows retain their version and use
-  the one-replay compatibility path in ADR 0016.
-- Create and update inherit one content request model. Do not add normalization or collection
-  validation to only one verb. Facet-name normalization rejects collisions rather than merging
-  or silently overwriting caller data.
-- An idempotent replay does not create a second document or write-request row, but it **does**
-  append a `replayed` audit event carrying that inbound attempt's request ID. A retry must not
-  disappear from incident reconstruction.
-- Reusing a current-version idempotency key for a different body appends a `conflict` audit
-  event before the service raises. The event uses a separate transaction because the
-  transaction that detects and raises the conflict rolls back.
-- `find_similar` applies `readable_path_predicate`: similarity output names and titles existing
-  documents, so an unscoped dedup query is a disclosure channel around ADR 0014.
-- `Merge` and `Link` raise. ADR 0004 keeps merge disabled and `link_at` unset; reaching either
-  means a policy set a band nobody decided on.
+- **Embed before the transaction, never inside it**; re-check idempotency under the lock.
+- One corpus-wide `pg_advisory_xact_lock` guards check-dedup-then-write and retirement.
+- Update vector persistence is unconditional under the lock (ADR 0018). Pending review evidence
+  is undeletable (ADR 0019).
+- **No dedup, no write**: no provider is 503. Context overflow is a permanent 422; other
+  provider failures 503.
+- Settled outcomes are 200, including `flagged` and `rejected`.
+- The digest covers the validated model with recursively sorted keys; `contributed_by` comes
+  from the credential. A digest-rule change bumps `REQUEST_DIGEST_VERSION` with a migration.
+- Create and update share one content model. A replay appends a `replayed` audit event; a
+  conflicting key appends `conflict` in a separate transaction.
+- `find_similar` applies `readable_path_predicate`. `Merge` and `Link` raise.
 
 ## Rate limiting
 
-- **Two layers, and they are not interchangeable.** The *quota* is a token bucket per
-  (principal, operation) and enforces what an operator granted a credential. The *pre-auth
-  guard* is IP-keyed and bounds the cost of authentication itself. Do not delete one as
-  redundant with the other.
-- **The quota is per authenticated principal, never per IP** — agents share egress addresses
-  and a credential is what an operator can revoke. Limits mirror the integration spec's
-  table; `LIMITS` is the single statement of them.
-- **The pre-auth guard must stay a router-level dependency, never a route decorator.**
-  FastAPI solves dependencies before calling the endpoint, and authentication *is* a
-  dependency that queries `vault_agent_credentials` — so a `@limiter.limit` decorator on the
-  endpoint charges after the database round trip it exists to prevent, protecting nothing.
-  Attached to the `APIRouter` so new routes inherit it.
-- **slowapi is used here, and that is not a boundary breach.** It is a third-party import;
-  the vault builds its own `Limiter` and never touches the host's. `app/vault/` still contains
-  no `from app.`. For the current direct-to-Heroku topology, key the guard from the rightmost
-  `X-Forwarded-For` value: Heroku appends the address it observes after caller-controlled
-  prefixes. If another proxy is placed in front of Heroku, revisit this assumption rather than
-  guessing at a different list position.
-- **A principal may be granted a wider quota, in code and never in configuration.**
-  `PRINCIPAL_LIMITS` widens named operations for a named principal; `limit_for` is
-  the single lookup and still raises on an operation `LIMITS` does not register, so
-  an override cannot invent one. **It ships empty as of 2026-09-02.** It held one
-  entry, granting `importer` bulk headroom on `contribute` and `update` -- import
-  writes, it does not search -- because the shared limits describe an interactive
-  agent and at 30/min a 500-note corpus takes over four hours. That principal no
-  longer runs, and the entry had also stopped matching: the runbook's
-  corpus-migration procedure moved to a fresh principal per re-import while the
-  override keyed on the literal name. Removed rather than widened to a prefix,
-  because a quota grant with no workload behind it is a standing exception nobody
-  is watching. Re-adding one is a deliberate edit here, in code -- do not move this
-  to an environment variable, since a quota a deployment can widen is a way to
-  unlimit production by accident. A returning bulk job also needs a *stable*
-  principal name: the write ledger is keyed `(principal_id, idempotency_key)`, so a
-  differently named principal bypasses the duplicate guard whatever its quota. The
-  original rule is in the host repository's `docs/archive/HANDOFF-2026-08-16.md`.
-- **Unknown quota operations fail closed.** Every route operation must be registered in
-  `LIMITS`; a typo or new operation without a deliberate quota is a programming error, not an
-  unlimited bucket.
-- **Both layers are per process by default**, so the real ceiling is the limit times the
-  worker count. Do not describe this as a hard limit in operator docs, and do not "fix" the
-  quota in-process — the fix is a shared backend. The pre-auth guard can already take one via
-  `VAULT_RATE_LIMIT_STORAGE_URI`, with slowapi's in-memory fallback so an unreachable Redis
-  degrades the layer instead of failing requests.
-- A bucket may be pruned **only** when elapsed time proves it would have refilled. Dropping a
-  partly-drained bucket silently refunds requests already charged.
+- Two layers, not interchangeable: a per-(principal, operation) token-bucket **quota**, and an
+  IP-keyed **pre-auth guard** attached to the router, never a route decorator.
+- Quotas are per principal, never per IP. `LIMITS` is the single statement; unknown operations
+  fail closed. `PRINCIPAL_LIMITS` overrides live in code, never configuration (empty today).
+- Key the guard from the rightmost `X-Forwarded-For` value (direct-to-Heroku topology).
+- Both layers are per process; don't describe them as hard limits. Prune a bucket only when it
+  would have refilled.
 
 ## Working agreements
 
-- Type hints on every function signature; no module-level side effects.
-- Any value interpolated into DDL or SQL is validated first — treat it as an injection
-  surface even when it comes from a trusted operator.
-- Flag anything needing an Alembic revision rather than only changing code.
-- Flag new dependencies explicitly; anything added here must be listed in the extraction
-  manifest as leaving with the package.
-- Material architectural decisions get a Nygard-format ADR in `docs/adr/`, continuing this
-  lineage's own numbering.
-- `tests/vault/` is not one ownership unit. Follow the classification and standalone-fixture
-  plan in `docs/vault-extraction-manifest.md`; never move the directory wholesale.
+- Type hints on every signature; no module-level side effects.
+- Validate anything interpolated into SQL or DDL, even from an operator.
+- Flag anything needing an Alembic revision; flag new dependencies and add them to the
+  extraction manifest.
+- Material decisions get a Nygard ADR in `docs/adr/`, claiming the number in its README first.
+- `tests/vault/` is not one ownership unit; follow the manifest's classification.
+- Keep this file short: a new rule gets one or two lines here and its reasoning in an ADR.
