@@ -248,9 +248,16 @@ is the checklist. In order:
      working directory. That is now fixed (`b002a50`, `tests/test_app_paths.py`).
    - **From here, vault changes go to `knowledge-vault`.** HSS's copy is frozen
      for rollback.
-5. **Cut over:** re-point `high-score-server` to `knowledge-vault`, deploy, and
-   verify. Then remove the vault from HSS per the manifest's "HSS files that
-   need editing".
+5. **Cut over. Done 2026-11-26, releases v90 and v91.**
+   - **What runs:** production is the composed app from `knowledge-vault`
+     (`729acfc`) with HSS `697df70`, verified publicly and with an
+     authenticated MCP search.
+   - **Still to do — the operator, in the dashboard:** point the app's GitHub
+     integration at `knowledge-vault` `main`, with automatic deploys. **Until
+     then, a push to HSS `main` redeploys HSS's frozen copy over the composed
+     app.**
+   - **After that:** once it has served real traffic, remove the vault from HSS
+     per the manifest's "HSS files that need editing".
 
 An HSS-only change reaches production on the next build of the vault app. Add a
 rebuild workflow later if that lag matters.
