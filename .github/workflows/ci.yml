@@ -16,6 +16,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Run on demand against any branch, e.g. `gh workflow run ci.yml --ref dev`.
+  # dev gets no automatic runs; this is how its full Postgres suite is checked
+  # before a PR exists.
+  workflow_dispatch:
 
 # Cancel older in-progress runs when a new commit lands on the same ref.
 # Mostly useful for PRs where I push fix-up commits in quick succession.
@@ -99,6 +103,11 @@ jobs:
       # DB under-built and the suite would fail with UndefinedColumn/Table.
       # A failed migration exits non-zero and fails the job. env.py reads
       # DATABASE_URL (not TEST_DATABASE_URL).
+      - name: Check offline vault grounding evaluator (no schema required)
+        run: |
+          python -m unittest tests.vault.test_grounding_evaluation tests.vault.test_grounding_comparison -v
+          python -m scripts.evaluate_vault_grounding
+
       - name: Apply database schema (alembic upgrade head)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/highscore_test

@@ -12,7 +12,12 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete
 
-from app.vault.domain import DocumentKind, DocumentStatus, NewVaultDocument
+from app.vault.domain import (
+    DocumentCollection,
+    DocumentKind,
+    DocumentStatus,
+    NewVaultDocument,
+)
 from app.vault.read_policy import (
     EXCLUDED_PATH_PREFIXES,
     READABLE_PATH_PREFIXES,
@@ -109,6 +114,12 @@ def test_search_and_fetch_withhold_a_row_in_an_excluded_folder(
                 body=f"A note mentioning {marker} exactly once.",
                 contributed_by="test:read-policy",
                 provenance={"fixture": True},
+                # The tree decides the owner (vault ADR 0049).
+                collection=(
+                    DocumentCollection.HUMAN
+                    if vault_path.startswith("Human/")
+                    else DocumentCollection.AGENT
+                ),
             )
 
         try:
@@ -203,6 +214,11 @@ def test_the_sql_predicate_agrees_with_the_python_one(
                             body="Compares the SQL filter against the Python one.",
                             contributed_by="test:read-policy",
                             provenance={"fixture": True},
+                            collection=(
+                                DocumentCollection.HUMAN
+                                if vault_path.startswith("Human/")
+                                else DocumentCollection.AGENT
+                            ),
                         ),
                     )
 

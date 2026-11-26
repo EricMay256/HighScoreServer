@@ -58,7 +58,7 @@ def build_standalone_app() -> Starlette:
     before any tool runs and the SDK's app knows nothing about either. That
     reintroduces the mount problem ADR 0021 records — a mounted application's
     lifespan does not run — so the outer lifespan enters ``vault_mcp_lifespan``
-    explicitly, exactly as ``app.main`` does. Two callers, one reason.
+    explicitly, exactly as ``app.vault.application`` does. Two callers, one reason.
     """
 
     from contextlib import asynccontextmanager
@@ -77,7 +77,7 @@ def build_standalone_app() -> Starlette:
     @asynccontextmanager
     async def lifespan(_: Starlette):
         await init_vault_db()
-        # Only after the engine is up, matching app.main: a provider with no
+        # Only after the engine is up, matching app.vault.application: a provider with no
         # corpus to search is not a useful thing to have running.
         await init_vault_embeddings()
         try:
@@ -120,7 +120,7 @@ if __name__ == "__main__":
     # No --reload. The reload worker is a spawned subprocess that would rebuild
     # the application, and the Streamable HTTP session manager refuses a second
     # run() — the same constraint that keeps the app off a module-level cache
-    # in app.main. A restart is a restart.
+    # in app.vault.application. A restart is a restart.
     print(f"Vault MCP server on http://{host}:{port}{MCP_PATH}")
     # Driven through Config/Server under our own asyncio.run rather than
     # uvicorn.run, because uvicorn.run performs its own event-loop setup

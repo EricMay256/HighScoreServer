@@ -117,3 +117,7 @@ $RECYCLE.BIN/
 # it stays committed.) If shared team config is ever wanted, force-add it
 # explicitly, e.g.: git add -f .claude/settings.json
 .claude/
+
+# Local grounding experiment working data (private skill snapshots and diagnostics).
+# Publishable fixture-only recordings live under app/vault/docs/evaluations/.
+.tmp/grounding-*

@@ -445,6 +445,7 @@ def test_batch_review_refuses_stale_content_without_settling_it(
                         .values(
                             body="A newer edit that must survive.",
                             content_revision=vault_documents.c.content_revision + 1,
+                            resource_revision=vault_documents.c.resource_revision + 1,
                             updated_at=func.now(),
                         )
                     )
@@ -716,6 +717,7 @@ def test_acceptance_settles_stale_instead_of_overwriting(
                         .values(
                             body="A newer edit that must survive.",
                             content_revision=vault_documents.c.content_revision + 1,
+                            resource_revision=vault_documents.c.resource_revision + 1,
                             updated_at=func.now(),
                         )
                     )

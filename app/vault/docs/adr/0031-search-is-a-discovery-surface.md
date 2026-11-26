@@ -4,7 +4,8 @@ Date: 2026-08-26
 
 ## Status
 
-Accepted 2026-08-26.
+Accepted 2026-08-26. Its reopening trigger is subject to ADR 0055 (2026-11-25): retrieval tuning waits
+for 500 active readable documents.
 
 Amends ADR 0006 (hybrid retrieval fused by reciprocal rank), which decided how results are
 *ordered* and left open what a result *is*. Depends on ADR 0008 (search returns active only;

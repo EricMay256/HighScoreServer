@@ -6,13 +6,31 @@ edited in HSS when it does.
 This file exists so extraction is a checklist rather than an audit. A single manifest is more
 durable than removability comments scattered across modules, which go stale silently.
 
+**Re-audited against `dev` on 2026-11-25.** Thirty test files, two scripts and two test assets
+that had landed since the last revision are now classified. Destination and composition
+follow vault ADR 0062; see "Destination and composition" below.
+
+## Destination and composition (ADR 0062)
+
+- **Destination:** a new private repository, `knowledge-vault` (package `knowledge_vault`),
+  holding no corpus content.
+- **It is the Heroku deploy root.** `high-score-server` is re-pointed to it. At build it fetches
+  HSS's public `main`, which needs no credential, and it owns the composed `wsgi`, the Procfile
+  and the release script.
+- **First step, done inside HSS 2026-11-25 (host ADR 0016): two applications.**
+  `create_vault_app()` in `app/vault/application.py` builds the vault alone, with its own
+  lifespan, exception handlers (including the 429 handler it used to borrow from the host)
+  and docs. `composed.py` at the repository root dispatches by path. `app/main.py` names no
+  vault code. At extraction `composed.py` moves to `knowledge-vault` with only its vault
+  import path changed.
+
 ## Moves with the package
 
 | Path | Destination | Note |
 | ---- | ----------- | ---- |
-| `app/vault/` | package root | Intra-package imports are already relative, so this is a directory move, not a rewrite. This includes the proposed librarian workflow, runners, console, and MCP adapter; `tests/vault/test_boundaries.py` enforces the property. |
+| `app/vault/` | package root | Intra-package imports are already relative, so this is a directory move, not a rewrite. This includes the MCP adapter, the consoles, and the Human routes and services (ADRs 0049–0052); `tests/vault/test_boundaries.py` enforces the property. |
 | `app/vault/AGENTS.md` | package root | Already inside the package; needs no edit. |
-| `app/vault/docs/` | package docs | Architecture, configuration runbook, extraction manifest, the librarian plan, and the vault ADR lineage. |
+| `app/vault/docs/` | package docs | Architecture, configuration runbook, extraction manifest, `invariants-rationale.md`, the answer-grounding specs and `evaluations/`, superseded plans kept for their reasoning, and the vault ADR lineage. |
 | `app/vault/templates/` | package assets | Built 2026-08-21 (vault ADR 0024): the vault's first browser assets. Deliberately the vault's own rather than HSS's root `templates/`, with its own environment in `templating.py`: a page extending the host's `base.html` would not move with the package, and `test_boundaries.py` could not catch it because it scans imports rather than templates. |
 | `app/vault/static/` | package assets | Versioned browser bundles and their licenses for the browse console. Served from the package-owned `/vault/assets/` mount; no host `public/` path or frontend build step is involved. |
 | `app/vault/docs/adr/` | package docs | Independent lineage starting at 0001. Does not interleave with HSS's `docs/adr/`. |
@@ -22,8 +40,12 @@ durable than removability comments scattered across modules, which go stale sile
 
 | Owner | Current tests | Extraction action |
 | ---- | ---- | ---- |
-| Vault package | `test_body_diff.py`, `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_credential_scopes.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_google_oidc.py`, `test_governance.py`, `test_hash_operator_password_script.py`, `test_oauth_store.py`, `test_origin.py`, `test_passwords.py`, `test_promotion.py`, `test_prune_oauth.py`, `test_remap_reference_ids.py`, `test_resolve_wikilinks_script.py`, `test_wiki_import.py`, `test_wikilinks.py`, `test_read_policy.py`, `test_repositories.py`, `test_reviews.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
+| Vault package | `test_body_diff.py`, `test_audit_schema.py`, `test_auth.py`, `test_calibration.py`, `test_credential_scopes.py`, `test_embedding_settings.py`, `test_embedding_text.py`, `test_embeddings_openai.py`, `test_export.py`, `test_facets.py`, `test_google_oidc.py`, `test_governance.py`, `test_hash_operator_password_script.py`, `test_human_boundary.py`, `test_oauth_store.py`, `test_origin.py`, `test_passwords.py`, `test_promotion.py`, `test_prune_oauth.py`, `test_remap_reference_ids.py`, `test_resolve_wikilinks_script.py`, `test_wiki_import.py`, `test_wikilinks.py`, `test_read_policy.py`, `test_repositories.py`, `test_reviews.py`, `test_search.py`, `test_settings.py`, `test_slug.py` | Move and repoint package imports. Replace the root `configure_test_env` dependency with a package-owned database URL fixture. |
 | Private composition | `test_amendments.py`, `test_compile.py`, `test_contributions.py`, `test_mcp.py`, `test_oauth_flow.py`, `test_routes.py`, `test_rate_limit.py`, `test_schema_drift.py`, `tests/vault/conftest.py` | Move to the composing application or split package-only cases out. Replace HSS's global `TestClient(app.main.app)` with a standalone vault application factory; provide package-owned migrated Postgres/pgvector and credential fixtures. |
+| Vault package, added 2026-11-25 (no database) | `test_browse_console.py`, `test_browse_propose_behaviour.py`, `test_chunk_eligibility_fences.py`, `test_console_session_module.py`, `test_console_style.py`, `test_describe_database.py`, `test_landing_page.py`, `test_listing_cursor.py`, `test_mcp_contract.py`, `test_measure_chunk_eligibility.py`, `test_measurement.py`, `test_pool_observer.py`, `test_public_url_drift.py`, `test_retrieval_cases.py`, `test_retrieval_harness.py`, `test_review_console.py`, `test_snippet.py`, `test_span_edit.py`, `test_wiki_import_revalidation.py`, plus the assets `console_harness.js` and `mcp_surface.json` | Move with the package. `test_browse_console.py` already builds its own Starlette app; none reaches `app.main`. |
+| Vault package, added 2026-11-25 (database) | `test_backfill_summaries_script.py`, `test_metadata_amendments.py`, `test_oauth_grant_label.py` | Move, replacing `TEST_DATABASE_URL`/`configure_test_env` with the package-owned database fixture. |
+| Vault package, added 2026-11-25 (vault app only) | `test_human_deletes.py`, `test_human_reads.py`, `test_human_writes.py`, `test_mcp_budget.py`, `test_note_listing.py`, `test_restore_human_note_script.py`, `test_span_edit_tool.py`, `test_summary_carveout.py` | Each overrides `client` with `vault_client`, so requests reach `create_vault_app()` alone (host ADR 0016). Move with the package; the only change is that `vault_client` owns the lifespan instead of borrowing `composed_client`'s. |
+| Composition, added 2026-11-25 | `test_composition.py`, `tests/test_vault_disabled.py` | Path ownership, no shadowed leaderboard route, CORS scope, the 429 shape, and the disabled-vault import guarantee. Move to `knowledge-vault`'s composition CI. |
 | HSS host | `test_hss_pool_config.py` | Keep in HSS and move out of `tests/vault/`; it verifies `app.db`, not the extracted package. |
 | Dual-lineage composition | `test_migrations.py`, `migration_helpers.py` | Keep the shared-vs-separate topology cases with the composition owner. Move vault-only upgrade/downgrade, offline-render, and extracted revision-graph cases with the vault lineage. |
 | Boundary contract | `test_boundaries.py` | Split: package-to-host and historical-migration checks move with the vault; the reverse host-to-vault scan stays in HSS. |
@@ -41,7 +63,7 @@ easy to overlook:
 
 | Path | Note |
 | ---- | ---- |
-| `vault_migrations/` | The vault Alembic lineage, versioned in `vault.vault_alembic_version`, including the proposed amendment-lineage and librarian-workflow schema revisions. Historical revisions import only `vault_migrations.helpers`, a stable migration-owned module. Repoint `env.py` from `app.vault.settings` to the extracted runtime settings module. |
+| `vault_migrations/` | The vault Alembic lineage, versioned in `vault.vault_alembic_version`, including `0021_human_collection_boundary` and any revisions ADRs 0058–0061 add. Historical revisions import only `vault_migrations.helpers`, a stable migration-owned module. Repoint `env.py` from `app.vault.settings` to the extracted runtime settings module. |
 | `alembic-vault.ini` | Points at `vault_migrations/`. |
 | `scripts/seed_vault_demo.py` | Onboarding fixture loader. Lives in the host's `scripts/` by convention and imports `app.env` and `app.vault.*` absolutely; both imports need repointing on the move. |
 | `scripts/measure_embedding_latency.py` | Provider latency measurement for the retry-budget decision. Same convention and the same absolute imports to repoint. |
@@ -57,7 +79,10 @@ easy to overlook:
 | `scripts/prune_vault_oauth.py` | Prunes expired OAuth state and long-revoked OAuth credentials (ADR 0024). Same convention and imports. |
 | `scripts/hash_vault_operator_password.py` | Prints the bcrypt hash for `VAULT_OPERATOR_PASSWORD_HASH` (ADR 0024). Same convention; imports `app.vault.passwords` and nothing else, so it needs no database and only that one import repointed. |
 | `scripts/export_vault_markdown.py` | Projects the `Agent/` tree out as markdown (ADR 0022). Same convention and imports; also imports `app.vault.export`. |
-| `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. |
+| `scripts/check_read_policy_parity.py` | Diffs `ai_read` in the private `folders.yml` against `READABLE_PATH_PREFIXES` (ADR 0048 phase A). Same convention; imports `app.vault.read_policy` and nothing else, so it needs no database and only that one import repointed. The governance file it reads stays in knowledge-platform and is passed by path, so nothing about it moves. |
+| `scripts/restore_human_note.py` | Operator-only restore of a tombstoned Human note under its own id (ADR 0052). Same convention and imports. |
+| `scripts/validate_body_diff.py` | Client-side validator for strict unified body diffs (ADR 0033's companion). Same convention; imports `app.vault.body_diff`. |
+| `scripts/release.sh` | **Shared, not vault-owned.** Remove only the `VAULT_ENABLED`-gated `alembic -c alembic-vault.ini upgrade head` block; the leaderboard lineage stays. The composed app's release script in `knowledge-vault` runs both. |
 
 ## Dependencies that leave
 
@@ -115,7 +140,7 @@ a future provider needs a vendor SDK, it belongs in this table.
 
 | File | Change |
 | ---- | ------ |
-| `app/main.py` | Remove vault lifespan wiring (`init_vault_db`, `init_vault_embeddings` and their `close_*` counterparts), the `vault_enabled()` route gate, and the `/api/v1/vault` router registration. The `load_environment()` call at the top of `create_app` exists so that gate can be evaluated — check whether anything else came to depend on it before removing it. |
+| `composed.py`, `wsgi.py`, `run_dev.py` | `composed.py` moves to `knowledge-vault`; HSS's `wsgi.py` and `run_dev.py` go back to `app.main:app`. `app/main.py` already names no vault code (host ADR 0016). Historical note, the wiring it once held: vault lifespan wiring (`init_vault_db`, `init_vault_embeddings` and their `close_*` counterparts), the `vault_enabled()` route gate, and the `/api/v1/vault` router registration. The `load_environment()` call at the top of `create_app` exists so that gate can be evaluated — check whether anything else came to depend on it before removing it. |
 | `app/db.py` | Restore an HSS-only pool default/capacity decision and remove comments whose arithmetic reserves connections for the vault. Do not blindly restore 10 per worker; retain operational reserve. |
 | `README.md` | Remove the staged-vault overview, extraction-cost table, dark-deployment notes, dual-lineage commands, and vault connection-budget discussion. |
 | `db/role.sql` | Remove the vault-schema ownership/grant commentary; keep leaderboard role grants unchanged. |
@@ -127,6 +152,16 @@ a future provider needs a vendor SDK, it belongs in this table.
 | `requirements.txt` | Remove `pgvector`. |
 | `AGENTS.md` | Delete the block delimited by `<!-- BEGIN vault-context -->` / `<!-- END vault-context -->`. |
 | `.env.example` | Remove the `VAULT_*` entries. |
+
+## Offline grounding evaluation assets
+
+Move `scripts/evaluate_vault_grounding.py`, `scripts/run_vault_grounding_comparison.py`,
+`tests/vault/test_grounding_evaluation.py`, `tests/vault/test_grounding_comparison.py`, and
+`tests/vault/fixtures/grounding/cases.json` with the vault. The runbook and specs
+already live under `app/vault/docs/`. Move the dedicated offline grounding CI step
+out of HSS and into the extracted package's CI; adjust its module paths and the
+checker's default fixture path if the destination layout differs. This evaluator
+uses Pydantic but imports no host application or database modules.
 
 ## Verification after extraction
 

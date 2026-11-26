@@ -46,6 +46,11 @@ Syncthing distributes that projection only to human devices.
 
 ## Eventual repository and CI composition
 
+> **Partially superseded 2026-11-25 by vault ADR 0062.** The direction below stands: the
+> private side composes, and neither product imports the other's domain. The private
+> `knowledge-vault` repository is the Heroku deploy root and fetches HSS's public `main` at
+> build, tracking heads instead of the component lock. The leak checks in item 6 still apply.
+
 An `app/vault/` package supplies code-level separation, but it does not by itself preserve
 repository focus. The eventual target inverts the dependency at the private deployment
 boundary:
@@ -178,9 +183,9 @@ calls, or policy decisions. Services own transaction boundaries. Domain records 
 business-relevant fields; they do not automatically carry vectors or generated search
 columns. API responses map deliberate subsets of those records.
 
-`app.main` initializes and disposes the vault engine in the existing FastAPI lifespan and
-includes the vault HTTP/MCP routers before the SPA/static catch-all. The engine is created
-once per worker, never per request.
+`create_vault_app()` (`application.py`) owns the vault's lifespan, routes and handlers, and
+`composed.py` runs it beside the leaderboard, dispatching by path (host ADR 0016). The engine
+is created once per worker, never per request.
 
 ### Identity and request correlation
 

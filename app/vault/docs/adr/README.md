@@ -24,25 +24,25 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0013 | [The embedding text carries semantic frontmatter, not bookkeeping](0013-embedding-text-is-semantic-fields-only.md) | Accepted |
 | 0014 | [`ai_read` excludes at import and again at query time](0014-ai-read-excludes-at-import-and-at-query.md) | Partially superseded by 0048 for Human storage; Agent query restrictions preserved |
 | 0015 | [Operator-issued agent credentials replace the shared read key](0015-agent-credentials-replace-the-shared-read-key.md) | Accepted |
-| 0016 | [The governed write path](0016-the-governed-write-path.md) | Accepted (amended 2026-08-12: `flag_at` derivation; 2026-08-13 and 2026-08-16: idempotency digest) |
+| 0016 | [The governed write path](0016-the-governed-write-path.md) | Accepted (amended 2026-08-12: `flag_at` derivation; 2026-08-13 and 2026-08-16: idempotency digest; 2026-11-25: adopting `flag_at` is a cost trade) |
 | 0017 | [Facets carry classification, outside the embedding text](0017-facets-carry-classification-outside-the-embedding.md) | Accepted |
 | 0018 | [Updates are a distinct endpoint that refuses on collision](0018-updates-are-a-distinct-endpoint-that-refuses-on-collision.md) | Accepted |
 | 0019 | [Retiring a document deletes it, and the ledger outlives it](0019-retiring-a-document-deletes-it.md) | Accepted (amended 2026-08-21: a settled review case releases its candidate) |
 | 0020 | [`vault:write` narrows to contribute; update and delete are their own scopes](0020-write-scopes-split-by-verb.md) | Accepted |
 | 0021 | [MCP is a second adapter, and a credential's scopes shape its tool surface](0021-mcp-is-a-second-adapter-with-scope-shaped-tools.md) | Accepted (its OAuth deferral is superseded by 0024) |
 | 0022 | [Two trees, one writer each: humans author markdown, agents author through the service](0022-two-trees-one-writer-each.md) | Partially superseded by 0048 for Human authority; Agent projection preserved |
-| 0023 | [Candidacy is a field, and the export projects it into a folder](0023-the-export-projects-only-the-engine-managed-folders.md) | Accepted |
+| 0023 | [Candidacy is a field, and the export projects it into a folder](0023-the-export-projects-only-the-engine-managed-folders.md) | Accepted (partially superseded by 0061: the meaning of `promoted`) |
 | 0024 | [The vault runs its own authorization server, and an OAuth token is a credential row](0024-oauth-tokens-are-credentials-minted-at-authorization.md) | Accepted |
-| 0025 | [The vault stores edges and does not traverse them](0025-the-vault-stores-edges-and-does-not-traverse-them.md) | Accepted (amended 2026-08-26: both boundaries built; a Wiki Page's `Related` is one) |
+| 0025 | [The vault stores edges and does not traverse them](0025-the-vault-stores-edges-and-does-not-traverse-them.md) | Accepted (amended 2026-08-26: both boundaries built; a Wiki Page's `Related` is one; extended by 0060) |
 | 0026 | [Privileged tools live on the one mount, gated by the credential's scopes](0026-privileged-tools-are-gated-by-scope-on-one-mount.md) | Accepted (reverses the separate admin MCP that 0019 and 0023 assumed) |
 | 0027 | [The service plans a compile run; the agent writes it](0027-the-service-plans-a-compile-run-and-the-agent-writes-it.md) | Accepted (amends 0016's "no dedup, no write" for wiki pages) |
 | 0028 | [Amendments are revision-bound proposals, not notes](0028-amendments-are-revision-bound-proposals.md) | Accepted (amended 2026-08-25: bounded general body diffs and removal acknowledgement) |
 | 0029 | [Operator-granted OAuth entitlements belong to the refresh family](0029-oauth-entitlements-belong-to-the-refresh-family.md) | Accepted |
-| 0030 | [An edge value is checked for shape, and still never for existence](0030-edge-values-are-shape-checked-never-existence-checked.md) | Accepted (answers 0025's 2026-08-26 amendment) |
-| 0031 | [Search names candidates; fetch returns documents](0031-search-is-a-discovery-surface.md) | Accepted (amends 0006, which ordered results without saying what one is) |
-| 0032 | [A contribution reports its verdict; the gate's working is opt-in](0032-a-contribution-reports-its-outcome.md) | Accepted (refines 0016) |
+| 0030 | [An edge value is checked for shape, and still never for existence](0030-edge-values-are-shape-checked-never-existence-checked.md) | Accepted (answers 0025's 2026-08-26 amendment; applies to 0060's edge) |
+| 0031 | [Search names candidates; fetch returns documents](0031-search-is-a-discovery-surface.md) | Accepted (amends 0006, which ordered results without saying what one is; trigger subject to 0055) |
+| 0032 | [A contribution reports its verdict; the gate's working is opt-in](0032-a-contribution-reports-its-outcome.md) | Accepted (refines 0016; amended 2026-11-25: similarity warning) |
 | 0033 | [An amendment may name a span; the server writes the diff](0033-an-amendment-may-name-a-span.md) | Accepted (adds a third authoring form to 0028) |
-| 0034 | [Embeddings are document-level, and chunking is deferred against a measured trigger](0034-embeddings-are-document-level-and-chunking-is-deferred.md) | Accepted |
+| 0034 | [Embeddings are document-level, and chunking is deferred against a measured trigger](0034-embeddings-are-document-level-and-chunking-is-deferred.md) | Accepted (trigger subject to 0055) |
 | 0035 | [A contributor may describe its own recent note](0035-a-contributor-may-describe-its-own-recent-note.md) | Accepted (amends 0028; refines 0032) |
 | 0036 | [Metadata is a change kind of its own](0036-metadata-is-a-change-kind-of-its-own.md) | Accepted (adds a fourth authoring form to 0028) |
 | 0037 | [The review console is an OAuth client, not an operator session](0037-the-review-console-is-an-oauth-client.md) | Accepted |
@@ -51,12 +51,26 @@ Alembic adoption, and 0008 and 0012–0015 overlap the same way. Inside `app/vau
 | 0040 | [An authorization carries an operator-assigned label](0040-an-authorization-carries-an-operator-label.md) | Accepted (preserves 0024's amendment) |
 | 0041 | [Human-authored notes in the vault](0041-human-authored-notes-in-the-vault.md) | Superseded by 0048 |
 | 0042 | [A mutable state store beside the corpus](0042-a-mutable-state-store-beside-the-corpus.md) | Considered, not scheduled |
-| 0043 | [Librarian runs are persisted drafts, and only humans commit them](0043-librarian-runs-are-persisted-drafts-and-only-humans-commit-them.md) | Proposed |
+| 0043 | [Librarian runs are persisted drafts, and only humans commit them](0043-librarian-runs-are-persisted-drafts-and-only-humans-commit-them.md) | Rejected by 0053 |
 | 0044 | [Tweaking a proposal creates a linked successor](0044-tweaking-a-proposal-creates-a-linked-successor.md) | Accepted |
 | 0045 | [The note listing is sorted, and its cursor is opaque](0045-the-note-listing-is-sorted-and-its-cursor-is-opaque.md) | Accepted |
 | 0046 | [The browse console renders sanitized Markdown from pinned local assets](0046-the-browse-console-renders-sanitized-markdown.md) | Accepted (supersedes 0039's source-only presentation) |
 | 0047 | [Publish selected Human notes while preserving Markdown ownership](0047-human-publishing-preserves-markdown-ownership.md) | Superseded by 0048; daily embedding behavior retained |
-| 0048 | [Human notes are database-owned and Obsidian is an OAuth sync client](0048-human-vault-database-authority-and-obsidian-sync.md) | Accepted direction, implementation pending (amended 2026-09-12: the extension is optional; a one-way projection takes its place) |
+| 0048 | [Human notes are database-owned and Obsidian is an OAuth sync client](0048-human-vault-database-authority-and-obsidian-sync.md) | Partially superseded by 0054 (no Obsidian extension; offline is a read-only download); phase B built |
+| 0049 | [The Human collection boundary: ownership, revisions, and a change feed](0049-the-human-collection-boundary.md) | Accepted (refines 0048's grant and deletion contracts) |
+| 0050 | [Human reads: the audience is the collection, and Agent workflows exclude it](0050-human-reads-the-audience-is-the-collection.md) | Accepted |
+| 0051 | [Human writes are revision-checked, recorded in one transaction, and retry-safe](0051-human-writes-are-revision-checked-and-retry-safe.md) | Accepted |
+| 0052 | [Human deletion leaves a tombstone, and the feed checks the entry it resumes from](0052-human-deletion-is-a-tombstone-and-the-feed-checks-its-anchor.md) | Accepted |
+| 0053 | [The agent loop lives in the client, and the librarian is not built](0053-the-agent-loop-lives-in-the-client.md) | Accepted (rejects 0043) |
+| 0054 | [Offline access is a read-only download; the Obsidian sync client is not built](0054-offline-access-is-a-read-only-download.md) | Accepted (partially supersedes 0048) |
+| 0055 | [Retrieval tuning is frozen until 500 active readable documents](0055-retrieval-tuning-is-frozen-until-500-documents.md) | Accepted |
+| 0056 | [The health report is deterministic, and models consume it rather than perform it](0056-the-health-report-is-deterministic.md) | Accepted, not implemented |
+| 0057 | [The activity log is derived from the audit trail](0057-the-activity-log-is-derived-from-the-audit-trail.md) | Accepted, not implemented |
+| 0058 | [Reads leave a usage trace](0058-reads-leave-a-usage-trace.md) | Accepted, not implemented (needs a migration) |
+| 0059 | [Feedback on a note is workflow state, not a document](0059-feedback-is-workflow-state-not-a-document.md) | Accepted, not implemented (needs a migration) |
+| 0060 | [A note may declare what it supersedes, and review archives what it replaced](0060-a-note-may-declare-what-it-supersedes.md) | Accepted, not implemented (needs a migration) |
+| 0061 | [Promotion means human endorsement, and agents may nominate](0061-promotion-is-human-endorsement.md) | Accepted, not implemented (needs a migration; partially supersedes 0023) |
+| 0062 | [The vault repository is the deploy root, and composes HSS's public `main` at build](0062-the-vault-repository-is-the-deploy-root.md) | Accepted (build mechanism to be proven on staging) |
 
 ## Reserved numbers
 

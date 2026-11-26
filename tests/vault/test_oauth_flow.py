@@ -79,7 +79,7 @@ def oauth_client(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     failures and the second an intermittent "Event loop is closed".
 
     ``tests/conftest.py`` therefore sets ``VAULT_PUBLIC_URL`` before
-    ``app.main`` is imported, which is what puts the OAuth routes on the one
+    ``composed`` is imported, which is what puts the OAuth routes on the one
     application the suite shares. All this fixture adds is the operator
     password, which ``operator_password_hash`` reads per call and so can be set
     per test.
@@ -270,13 +270,13 @@ def test_nothing_is_published_without_a_public_url(
     Asserted against the route table rather than over HTTP, because making
     requests would mean a second application -- which the ``oauth_client``
     docstring explains must not happen. The question here is only which routes
-    ``create_app`` assembles, and the table answers it exactly.
+    ``create_vault_app`` assembles, and the table answers it exactly.
     """
 
     monkeypatch.delenv("VAULT_PUBLIC_URL", raising=False)
-    from app.main import create_app
+    from app.vault.application import create_vault_app
 
-    paths = {getattr(route, "path", "") for route in create_app().router.routes}
+    paths = {getattr(route, "path", "") for route in create_vault_app().router.routes}
 
     assert "/authorize" not in paths
     assert "/token" not in paths
@@ -874,6 +874,47 @@ def test_review_entitlement_requires_a_separate_read_only_family(
     ]
 
 
+def test_human_entitlement_requires_a_family_without_agent_writes(
+    oauth_client: TestClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Vault ADR 0049: a family that consented to the baseline cannot turn Human."""
+
+    client_id, ordinary = full_flow(oauth_client)
+    ordinary_parsed = parse_token(ordinary["access_token"])
+    assert ordinary_parsed is not None
+    assert (
+        asyncio.run(
+            grant_oauth(ordinary_parsed.credential_id, [VaultScope.HUMAN_READ])
+        )
+        == 2
+    )
+    assert "cannot share a credential" in capsys.readouterr().err
+    assert VaultScope.HUMAN_READ not in _credential_scopes(
+        ordinary_parsed.credential_id
+    )
+
+    params = authorize(oauth_client, client_id, scopes=(VaultScope.READ,))
+    redirect = submit_login(oauth_client, params)
+    code = parse_qs(urlparse(redirect.headers["location"]).query)["code"][0]
+    human = exchange(oauth_client, client_id, code)
+    human_parsed = parse_token(human["access_token"])
+    assert human_parsed is not None
+
+    assert (
+        asyncio.run(
+            grant_oauth(
+                human_parsed.credential_id,
+                [VaultScope.HUMAN_READ, VaultScope.HUMAN_WRITE],
+            )
+        )
+        == 0
+    )
+    assert sorted(_credential_scopes(human_parsed.credential_id)) == sorted(
+        [VaultScope.READ, VaultScope.HUMAN_READ, VaultScope.HUMAN_WRITE]
+    )
+
+
 def test_static_scope_command_refuses_an_oauth_credential(
     oauth_client: TestClient,
     capsys: pytest.CaptureFixture[str],
@@ -1198,9 +1239,9 @@ def test_the_public_oauth_routes_carry_the_preauth_guard() -> None:
     next.
     """
 
-    from app.main import create_app
+    from app.vault.application import create_vault_app
 
-    routes = create_app().router.routes
+    routes = create_vault_app().router.routes
     guarded = {
         route.path
         for route in routes

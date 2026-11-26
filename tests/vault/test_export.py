@@ -21,6 +21,7 @@ from sqlalchemy import delete
 from app.vault import export as export_module
 from app.vault.db import create_vault_engine
 from app.vault.domain import (
+    DocumentCollection,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
@@ -672,6 +673,7 @@ def test_list_under_path_prefixes_pages_the_agent_tree(
                         id=human_id,
                         kind=DocumentKind.NOTE,
                         vault_path=f"Human/06 Reference/{human_id}.md",
+                        collection=DocumentCollection.HUMAN,
                         status=DocumentStatus.ACTIVE,
                         title="Not projected",
                         body="Markdown is authoritative for this tree.",

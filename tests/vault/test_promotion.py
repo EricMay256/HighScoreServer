@@ -361,11 +361,16 @@ def test_a_wiki_page_returns_to_the_wiki_folder_not_the_notes_folder() -> None:
 
 
 def test_a_document_outside_the_two_folders_is_refused() -> None:
-    """The one way this verb could move a row into a tree it does not own."""
+    """The one way this verb could move a row into a tree it does not own.
+
+    An Agent row outside both folders. A Human note never reaches this branch:
+    the load refuses it as not found first (vault ADR 0049), which
+    `test_human_boundary.py` pins.
+    """
 
     document_id = _seed(
-        title="An imported human note",
-        vault_path=f"Human/06 Reference/{uuid4().hex}.md",
+        title="A note outside both folders",
+        vault_path=f"Agent/review/{uuid4().hex}.md",
     )
 
     with pytest.raises(PromotionNotApplicable):

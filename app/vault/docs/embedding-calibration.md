@@ -1,5 +1,10 @@
 # Embedding calibration — deriving `flag_at` per model
 
+> **2026-11-25 (ADR 0016 amendment):** adopting `flag_at` is now a cost trade at a recorded
+> operating point, not a separation test, and the reference set is to grow to 15–20
+> realistic duplicates. The register below predates that rule; `flag_at` stays 1.0 until a
+> new row is measured under it.
+
 `Policy.flag_at` is a cosine similarity **on one specific embedding model**. It does not
 transfer between models: swapping the provider or the model changes the distribution the
 threshold sits in, so a value derived for `text-embedding-3-small` says nothing about

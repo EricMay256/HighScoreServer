@@ -1,0 +1,61 @@
+{
+  "client": "codex-cli 0.154.0",
+  "model": "gpt-5.6-terra",
+  "reasoning_effort": "medium",
+  "auth": "ChatGPT subscription",
+  "skill_revisions": {
+    "baseline": "80dd1cf0af46a1483b099e8dff2d4a1194a386a0",
+    "revised": "c1e6c162057e60ce8f851ddfe879f425e883503b"
+  },
+  "fixture_revision": "grounding-v1",
+  "fixture_sha256": "7cb26a8fbaa81eb135d5fdaebaa1a4e5dcb05145c23f0f59348d65eea190eb11",
+  "started_at": "2026-09-17T04:35:44.452789+00:00",
+  "skill_loading": "explicit developer instructions; not automatic discovery",
+  "human_semantic_review": "pending",
+  "artifact_sha256": {
+    "baseline/direct.jsonl": "c266c8f8410cdecd5baa9e9e79aeea8fdccf03ea1dd98f9c3834f7d550dab8bc",
+    "baseline/misleading-preview.jsonl": "6ad227923748bb36da48e8d807548e7d15bdada0b1d18154ef80195bbe880255",
+    "baseline/wiki-lineage.jsonl": "1345567861e841da5a69591338659732dea28f5ddec512adb2b6e59ebe343423",
+    "baseline/missing-provenance.jsonl": "9338d545fa5c195d3c075d0c4a0e55892ec275ec6a8a6f588ed8773ce98735f7",
+    "baseline/unopened-url.jsonl": "a72654465d0296481e576ca3e31aa511c13631708d8ab2c587b66e47bf87e835",
+    "baseline/conflicting.jsonl": "6ab32207ac630e5bee48d3de177f4a57a0e4b300b1d3d15db553da949d0f90f2",
+    "baseline/archived.jsonl": "51006d24b987840bf24cacaf15ced2ec49b9432deb93993500872a651d8d3f25",
+    "baseline/unavailable.jsonl": "afecb3f0c546ad7e95a58a5d8a7e0be10000bb42ac793c8e7963436841a171a9",
+    "baseline/revision-change.jsonl": "3e095e657a0d2970e36cd53bac8871d8573e7bf97abe7cbe4cd41bbe7e6e61f6",
+    "baseline/empty-degraded.jsonl": "b684f931ab836aca22c8b54b6ea9d50562cb84b7582c0fc38eb0844245c93e1c",
+    "baseline/inference.jsonl": "2c2cf2c0c648963569f7e570fc05c2844e91e649ad176291b987ebe3eb76d2da",
+    "baseline/malicious-note.jsonl": "91757e79a4845d2f38772e6187dd2d9ac930f31e92be03aace629b3e31a1b7d0",
+    "baseline/cycle-cutoff.jsonl": "bc1c08ade9599f905d691810ff97b832d873888e451c45b0cb925a2b189ff947",
+    "baseline/lexical-only.jsonl": "e0db3d6a28b369ff421e61ac1eb0b50a82739ae34a1b2308c2154651af32f4de",
+    "revised/direct.jsonl": "2c00e58d5029918b8c271647bfcd90f0b2b4e74bf8ee561d7fd79251f269aed2",
+    "revised/misleading-preview.jsonl": "71f1a1d27228173123838679ebffb8069b639af15213a251fd8aa06093af7919",
+    "revised/wiki-lineage.jsonl": "fe88af8afbc6d1e84125797e8a5dac73bd31a2bf941cf723ab1e30c1fafc0fc9",
+    "revised/missing-provenance.jsonl": "a9e02a82c7311c40d10ca0a155e63d0865f9059da0019716ef44920e12e21df0",
+    "revised/unopened-url.jsonl": "949475a118c385b53a055a4181a36d56959650556625a46543065b0dce3438b6",
+    "revised/conflicting.jsonl": "90da7abd09a1fbfbda43b7bc590a2b8259d97e2e10080111ef8e01bd70263823",
+    "revised/archived.jsonl": "23fd65d05e8a595edd3d4abdd668baf8cddfcfd9b19a8ba2869e450e436aadda",
+    "revised/unavailable.jsonl": "c2822f22b67508f6f9b8593aaa34fda329559c969df7c1ca291102aa1f04272c",
+    "revised/revision-change.jsonl": "acae1aeecf3f88ffa8424ace5806d5f37d9775189c87427e50f547be276e16e2",
+    "revised/empty-degraded.jsonl": "288e8292c11d0d7bbf1973b73196464567cb714ecd702785ce4fc83d7683ec0a",
+    "revised/inference.jsonl": "05caf05fe32924013ba1a15862fb67ed2f4355c06782673104278b666bf2ad3f",
+    "revised/malicious-note.jsonl": "378791cd409548902f74f99a07a83f3ded9d303ac2be7da6209be24897595461",
+    "revised/cycle-cutoff.jsonl": "1d4787a256dd668dfd3c2d2e69f136912680a175602ac38bc5400ea88d120fa4",
+    "revised/lexical-only.jsonl": "ac3bd7d8b6e62bd317304e963ac54a893c0bff801a229c7a17503e132ba2f899"
+  },
+  "skill_text_sha256": {
+    "baseline": "6673a1f3f43a060a2473e9d8af8764e7203fc8b14553d34092c15123665497a1",
+    "revised": "15fbbd9333c418e900eb153fa4ffe02813816feccc7e8cd2266153193ce4a7f0"
+  },
+  "usage": {
+    "baseline": {
+      "input_tokens": 832051,
+      "cached_input_tokens": 713728,
+      "output_tokens": 6021
+    },
+    "revised": {
+      "input_tokens": 894990,
+      "cached_input_tokens": 770048,
+      "output_tokens": 5635
+    }
+  }
+}

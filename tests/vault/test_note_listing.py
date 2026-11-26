@@ -25,6 +25,7 @@ from app.vault.api_models import (
 from app.vault.auth import VaultScope
 from app.vault.cursors import decode_cursor, encode_cursor
 from app.vault.domain import (
+    DocumentCollection,
     DocumentKind,
     DocumentStatus,
     NewVaultDocument,
@@ -106,6 +107,19 @@ CORPUS = (
 
 
 @pytest.fixture
+def client(vault_client: TestClient) -> TestClient:
+    """This module's requests go to the vault application alone.
+
+    Not the composed one: these tests exercise only vault routes, so they hold
+    against ``create_vault_app()`` and move with the package unchanged at
+    extraction (host ADR 0016). The vault's lifespan is still owned by the
+    session's ``composed_client``; see ``tests/vault/conftest.py``.
+    """
+
+    return vault_client
+
+
+@pytest.fixture
 def corpus(configure_test_env: None) -> dict[str, str]:
     """The six notes above, removed afterwards whatever the test asserted."""
 
@@ -135,6 +149,12 @@ def corpus(configure_test_env: None) -> dict[str, str]:
                         facets=facets,
                         contributed_by=f"agent:{PREFIX}seed",
                         provenance={"fixture": True},
+                        # The tree decides the owner (vault ADR 0049).
+                        collection=(
+                            DocumentCollection.HUMAN
+                            if path.startswith("Human/")
+                            else DocumentCollection.AGENT
+                        ),
                     ),
                 )
 

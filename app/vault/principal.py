@@ -104,6 +104,18 @@ async def resolve_credential(
         if failure is None and credential is not None:
             await repository.touch(connection, credential.id)
 
+    if failure == "incompatible" and credential is not None:
+        # Unreachable while migration 0021's CHECK constraints hold. Refused as
+        # a scope failure rather than an authentication one: the token is
+        # genuine, and what it carries is a grant nothing may use.
+        logger.error(
+            "Vault credential holds incompatible Human and Agent scopes",
+            extra={
+                "credential_id": credential.id,
+                "principal_id": credential.principal_id,
+            },
+        )
+        raise VaultScopeError("Credential lacks the required scope")
     if failure == "scope" and credential is not None:
         # Never log the token; the credential ID is the non-secret half and is
         # what an operator needs to find the row.

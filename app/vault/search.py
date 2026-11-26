@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import REGCONFIG, TSQUERY
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .constants import EMBEDDING_DIMENSIONS
-from .domain import DocumentKind, DocumentStatus, VaultDocument
+from .domain import DocumentCollection, DocumentKind, DocumentStatus, VaultDocument
 from .embeddings import EmbeddingVector
 from .governance import ScoredCandidate as GovernanceScoredCandidate
 from .read_policy import readable_path_predicate
@@ -273,6 +273,13 @@ class VaultSearchRepository:
         cannot express -- a page legitimately restates its sources, while a note
         restating another note is exactly what this gate exists to catch.
 
+        **Agent notes only**, too, for a different reason (ADR 0050). A Human
+        note is not a prior contribution an agent could be duplicating: it is
+        authored elsewhere, may say the same thing on purpose, and a gate that
+        refused an agent's note because a person had written something close
+        would turn the person's notes into a veto nobody can see. Human notes
+        stay out of the comparison until that is decided deliberately.
+
         Today `flag_at` is 1.0, so only an identical embedding flags and the
         practical effect is small. It will not stay small: the calibration
         register in `docs/embedding-calibration.md` exists to lower that value
@@ -305,6 +312,7 @@ class VaultSearchRepository:
                 vault_document_embeddings.c.profile_id == profile_id,
                 vault_documents.c.status == DocumentStatus.ACTIVE.value,
                 vault_documents.c.kind == DocumentKind.NOTE.value,
+                vault_documents.c.collection == DocumentCollection.AGENT.value,
                 readable_path_predicate(),
             )
             .order_by(distance, vault_documents.c.id)

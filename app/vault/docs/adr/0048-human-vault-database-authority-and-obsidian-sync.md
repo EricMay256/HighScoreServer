@@ -4,6 +4,9 @@ Date: 2026-09-11
 
 ## Status
 
+**Partially superseded 2026-11-25 by ADR 0054:** the Obsidian extension is not built,
+and offline access is a read-only download. Phase B (ADRs 0049–0052) stands as built.
+
 Accepted direction, implementation pending. Amended 2026-09-12: the Obsidian
 extension is optional rather than a committed deliverable, and if it is not built
 a one-way Human projection takes its place (see "Amendment: the extension is

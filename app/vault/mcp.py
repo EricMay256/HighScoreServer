@@ -632,6 +632,11 @@ def build_vault_mcp_server() -> VaultMCPServer:
         is retired but legitimate history, so a `related_ids` reference to one
         still works.
 
+        Source references record derivation, not verified support. Fetch relevant
+        sources before relying on them; unavailable IDs reveal no reason for their
+        absence. A source URL alone does not establish that it was read or is current.
+        The returned revision identifies observed content, not historical retrieval.
+
         Args:
             note_id: The note's full ID.
         """
@@ -724,7 +729,8 @@ def build_vault_mcp_server() -> VaultMCPServer:
                 verify each one with vault_get_note before sending it.
             source_ids: Full IDs of notes this was derived from. Same rule
                 as related_ids: ids, never titles or [[wikilinks]].
-            source_url: Optional external source.
+            source_url: Supplied external locator, not proof of retrieval,
+                freshness, or support for a claim.
             response_detail: "outcome" (default) returns the verdict.
                 "review" adds every note the dedup gate weighed and the wiki
                 pages near the result -- for building a review surface, not

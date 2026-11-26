@@ -93,7 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.env import load_environment
 from app.vault.constants import CORPUS_LOCK_KEY
 from app.vault.db import create_vault_engine, describe_database
-from app.vault.domain import DocumentKind, DocumentStatus
+from app.vault.domain import DocumentCollection, DocumentKind, DocumentStatus
 from app.vault.embedding_runtime import create_embedding_provider
 from app.vault.embedding_text import assemble_embedding_text, embedding_text_digest
 from app.vault.embeddings import EmbeddingError, EmbeddingInputKind, EmbeddingProvider
@@ -490,10 +490,17 @@ async def write(
                 )
                 .where(vault_documents.c.kind == DocumentKind.NOTE.value)
                 .where(vault_documents.c.status == DocumentStatus.ACTIVE.value)
+                # Agent notes only. A Human note changes through the Human
+                # write path, which records the revision and feed entry a raw
+                # update skips (vault ADR 0049).
+                .where(
+                    vault_documents.c.collection == DocumentCollection.AGENT.value
+                )
                 .values(
                     summary=item.summary,
                     updated_at=func.now(),
                     content_revision=vault_documents.c.content_revision + 1,
+                    resource_revision=vault_documents.c.resource_revision + 1,
                 )
                 .returning(vault_documents.c.id)
             )

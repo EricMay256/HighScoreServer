@@ -40,7 +40,7 @@ from uuid import uuid4
 from sqlalchemy import func, insert, select, update
 
 from app.env import load_environment
-from app.vault.auth import TOKEN_PREFIX, VaultScope, hash_secret
+from app.vault.auth import TOKEN_PREFIX, VaultScope, hash_secret, scopes_are_compatible
 from app.vault.constants import OAUTH_OPERATOR_ENTITLEMENT_SCOPES
 from app.vault.db import create_vault_engine, describe_database
 from app.vault.repository import (
@@ -70,6 +70,19 @@ KNOWN_SCOPES = (
     VaultScope.REVIEW,
     VaultScope.COMPILE,
     VaultScope.EXPORT,
+    VaultScope.HUMAN_READ,
+    VaultScope.HUMAN_WRITE,
+    VaultScope.HUMAN_DELETE,
+)
+
+# Why a scope set was refused, in the operator's terms. One statement for
+# `issue`, `grant` and `grant-oauth`, which all enforce vault ADR 0049's rule;
+# the schema refuses the same rows, so this is the explanation, not the guard.
+_INCOMPATIBLE_SCOPES_MESSAGE = (
+    "Human scopes (vault:human-read, vault:human-write, vault:human-delete) "
+    "cannot share a credential with vault:write, vault:propose, vault:update, "
+    "vault:delete, vault:review or vault:compile. Use a separate credential "
+    "holding vault:read plus the Human scopes it needs."
 )
 
 # 32 hex characters of the id keeps it inside the schema's 8..64 limit while
@@ -105,6 +118,9 @@ async def issue(name: str, scopes: list[str], days: int | None) -> int:
     if unknown:
         print(f"Unknown scope(s): {', '.join(unknown)}", file=sys.stderr)
         print(f"Known scopes: {', '.join(KNOWN_SCOPES)}", file=sys.stderr)
+        return 2
+    if not scopes_are_compatible(scopes):
+        print(_INCOMPATIBLE_SCOPES_MESSAGE, file=sys.stderr)
         return 2
 
     credential_id = secrets.token_hex(_ID_BYTES)
@@ -344,6 +360,10 @@ async def _adjust_scopes(
 
             before = set(row["scopes"])
             after = before | set(scopes) if granting else before - set(scopes)
+            if not scopes_are_compatible(after):
+                # Before any write, so returning leaves the row untouched.
+                print(_INCOMPATIBLE_SCOPES_MESSAGE, file=sys.stderr)
+                return 2
 
             if after == before:
                 verb = "already granted" if granting else "not held"
@@ -440,6 +460,23 @@ async def _adjust_oauth_entitlements(
                     file=sys.stderr,
                 )
                 return 1
+
+            if granting:
+                # Before adjusting rather than after, like the review check
+                # below cannot be: the grants CHECK would refuse the UPDATE
+                # itself and surface as a constraint traceback, not an answer.
+                current = await VaultOAuthGrantRepository().get(
+                    connection, family_id
+                )
+                if current is not None and not scopes_are_compatible(
+                    {
+                        *current.authorized_scopes,
+                        *current.entitled_scopes,
+                        *scopes,
+                    }
+                ):
+                    print(_INCOMPATIBLE_SCOPES_MESSAGE, file=sys.stderr)
+                    return 2
 
             adjusted = await VaultOAuthGrantRepository().adjust_entitlements(
                 connection,

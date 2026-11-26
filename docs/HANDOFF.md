@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated 2026-09-12. The start-here for a fresh session: where things are,
+Last updated 2026-11-25. The start-here for a fresh session: where things are,
 what is in flight, and the environment facts that bite and are not already in
 `AGENTS.md`. What remains to do is [`NEXT-STEPS.md`](NEXT-STEPS.md); why things
 are the way they are is in the ADRs. Previous handoffs are archived under
@@ -11,10 +11,11 @@ their reasoning, none of them current.
 
 | | |
 | --- | --- |
-| Branches | `main` is current with `dev` through PR #33, squash-merged, so `main` is not an ancestor and the next merge is a PR. Verified 2026-09-12: the branches differ only by the Human-vault documentation |
-| Migrations on `dev` but not `main` | None. Both lineages match; the vault head is `0020_note_listing_sort_indexes` |
+| Branches | `dev` is ahead of `main` (verified 2026-11-25): it carries Human-vault phases B1–B4 with vault migration 0021, the answer-grounding evaluation, and the 2026-11-25 direction batch. Merging it is NEXT-STEPS §1.1 |
+| Migrations on `dev` but not `main` | Vault `0021_human_collection_boundary`. The leaderboard lineage matches |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
-| Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
+| Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test`. That is the WSL Laptop. The Windows Desktop (no WSL, no admin) has portable PostgreSQL 17.9 with pgvector 0.8.6 built from source under `%LOCALAPPDATA%\hss-localdb` and a CI-shaped `highscore_test` database. **Start it detached** (`Start-Process pg_ctl.exe … start -WindowStyle Hidden`): started from a shell that later exits, every new backend dies with `0xC0000142`. |
+| CI on demand | `gh workflow run ci.yml --ref dev` (`workflow_dispatch`, 2026-11-25). Pushes and PRs still trigger CI only for `main` |
 | Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
 
 Production facts are as the documents last recorded them, with one exception:
@@ -26,17 +27,26 @@ them.
 
 ## In flight
 
-- **The librarian and proposal revision.** Vault ADR 0044 is Accepted and
-  unimplemented; ADR 0043 is Proposed. The plan is
-  [`librarian-plan.md`](../app/vault/docs/librarian-plan.md).
+- **The 2026-11-25 vault direction.** The vault exists to improve the user's agents —
+  memory across sessions and providers, valued per token of context. The librarian is
+  replaced by a client-side agent loop (vault ADR 0053, rejecting 0043); retrieval tuning is
+  frozen to 500 documents (0055); extraction is scheduled — the private `knowledge-vault` repo becomes the deploy root (0062). The vault
+  AGENTS.md was cut to its rules, with the old text in `app/vault/docs/invariants-rationale.md`.
+  See NEXT-STEPS "Vault direction".
 - **The Human vault.** Vault ADR 0048, 2026-09-11: enrolled Human notes become
   database-authoritative, edited in the browser, with server-only deletion and
   Human and Agent write grants that cannot be held together. The Obsidian sync
-  client is optional as of the 2026-09-12 amendment — it buys offline authoring
-  and nothing else that a one-way projection would not. Specification only — no
-  code, no migration, no enrollment, no schedule. Start at
-  [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md) and
-  NEXT-STEPS §4, which carries the five phases.
+  client is **not built** (vault ADR 0054, 2026-11-25); offline access is a
+  read-only download. **Phase A is done
+  locally as of 2026-09-12** — export rehearsal validated and idempotent,
+  governance and runtime read policy verified to agree per file, enrollment set
+  previewed — leaving deployment parity. **Phases B1–B4 are built** — the
+  schema and write boundary (vault ADR 0049, migration 0021), Human reads
+  (ADR 0050), create, edit and move (ADR 0051), and deletion, restore and the
+  change feed (ADR 0052) — with the disclosure regression suite (B5),
+  enrollment, and scheduling still to come. Start at
+  [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md), whose
+  phase A result section carries the findings, and NEXT-STEPS §4.
 - **The 2026-09-02 code review** —
   [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — is **done**. Every
   finding is addressed on `dev`, one commit each; the document is kept as the
@@ -48,8 +58,8 @@ them.
   version has since been confirmed as 3.12 — the pin matches what production
   was already doing. Still unconfirmed: the production game-mode list, which
   now decides the landing page (see NEXT-STEPS §1).
-- **The Human-vault documentation is on `dev` only.** The code merge is done
-  (PR #33); what is left unmerged is the ADR 0048 batch. See NEXT-STEPS §1.
+- **The Human-vault documentation is merged.** PR #33 carried the code, PR #34
+  the ADR 0048 batch; nothing is stranded on `dev`. See NEXT-STEPS §1.
 
 ## What August settled, so nobody re-litigates it
 
@@ -115,6 +125,20 @@ the two shells, and the worktree filesystem rule.
 - **`issue_vault_credential` prints the secret to stdout.** An agent that runs
   it has read the token into its transcript — twice already, on live
   credentials. The person runs it.
+- **A local `VAULT_PUBLIC_URL` fails three OAuth tests.** `tests/conftest.py`
+  only `setdefault`s `https://vault.test.invalid`, so a `.env` carrying
+  `http://127.0.0.1:8000` wins. The discovery-chain, protected-resource-metadata
+  and Google-login tests in `test_oauth_flow.py` then fail identically on a
+  clean `HEAD`. CI has no `.env`, so they pass there.
+- **`run_vault_migration` only upgrades.** It calls `command.upgrade` for every
+  revision but `base`, and upgrading to an ancestor is a silent no-op. A test
+  that needs a downgrade calls `command.downgrade` inside
+  `migration_environment`.
+- **A test that fails mid-way can strand rows that fail an unrelated one.** Not
+  every vault test cleans up in `finally`, and leftover `Agent/notes/` rows
+  surface in later modules — compile planning offers them as new sources. List
+  `vault.vault_documents` in the test database before blaming the module that
+  failed second.
 
 ## Durable records
 

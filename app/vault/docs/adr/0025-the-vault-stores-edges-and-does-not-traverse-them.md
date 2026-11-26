@@ -4,7 +4,8 @@ Date: 2026-08-22
 
 ## Status
 
-Accepted 2026-08-22.
+Accepted 2026-08-22. Extended 2026-11-25 by ADR 0060: `supersedes_ids` joins the
+stored edges, directed, settled by review, and still never traversed by the service.
 
 Names a structure that eight earlier ADRs use without defining. Depends on ADR 0008
 (fetch-by-id resolves archived, withholds flagged), ADR 0014 (`ai_read` excludes at import and

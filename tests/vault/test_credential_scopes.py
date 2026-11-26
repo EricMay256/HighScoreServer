@@ -18,7 +18,7 @@ from sqlalchemy import delete, insert, select
 
 from app.vault.auth import VaultScope, hash_secret
 from app.vault.tables import vault_agent_credentials
-from scripts.issue_vault_credential import grant, revoke_scope
+from scripts.issue_vault_credential import grant, issue, revoke_scope
 from tests.vault.test_search import vault_service
 
 
@@ -318,3 +318,41 @@ def _secret(credential_id: str) -> bytes:
         )
 
     return bytes(_run(read).scalar_one())
+
+
+# ------------------------------------------------ human/agent exclusion ----
+
+
+def test_granting_a_human_scope_to_an_agent_writer_is_refused(capsys) -> None:
+    credential_id = _seed((VaultScope.READ, VaultScope.WRITE))
+
+    assert _grant(credential_id, VaultScope.HUMAN_READ) == 2
+    assert _scopes(credential_id) == sorted([VaultScope.READ, VaultScope.WRITE])
+    assert "cannot share a credential" in capsys.readouterr().err
+
+
+def test_a_human_credential_widens_within_its_own_side(capsys) -> None:
+    credential_id = _seed((VaultScope.READ, VaultScope.HUMAN_READ))
+
+    assert _grant(credential_id, VaultScope.HUMAN_WRITE) == 0
+    assert _scopes(credential_id) == sorted(
+        [VaultScope.READ, VaultScope.HUMAN_READ, VaultScope.HUMAN_WRITE]
+    )
+
+
+def test_issuing_a_credential_with_both_writers_is_refused_before_any_write(
+    capsys,
+) -> None:
+    refused = asyncio.run(
+        issue(
+            f"{PRINCIPAL_PREFIX}mixed",
+            [VaultScope.READ, VaultScope.HUMAN_WRITE, VaultScope.UPDATE],
+            None,
+        )
+    )
+
+    assert refused == 2
+    captured = capsys.readouterr()
+    assert "cannot share a credential" in captured.err
+    # Refused before a connection was opened, so nothing names a database.
+    assert "database" not in captured.out

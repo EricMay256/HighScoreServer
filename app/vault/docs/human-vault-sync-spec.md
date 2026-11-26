@@ -2,6 +2,10 @@
 
 Date: 2026-09-11
 
+> **Partially superseded 2026-11-25 by vault ADR 0054.** The Obsidian client and the
+> bidirectional sync it needed are not built; offline access is a read-only download. The
+> server contracts built in phase B (ADRs 0049–0052) stand.
+
 Status: selected design; implementation pending. This is the active specification
 under [ADR 0048](adr/0048-human-vault-database-authority-and-obsidian-sync.md).
 It replaces the Markdown-authoritative Human reconciliation design. The user
@@ -15,6 +19,15 @@ ownership, the Human operator grant, revisions, deletion, and the change feed is
 unconditional and belongs to the service. The plugin packaging, platform, and
 local-state sections apply only if the extension is built; if it is not, a one-way
 Human projection keeps local Markdown readable in its place.
+
+Amended again 2026-09-12 by [ADR 0049](adr/0049-the-human-collection-boundary.md).
+The Human operator grant is three scopes — `vault:human-read`, `vault:human-write`
+(create, edit, rename, move), and `vault:human-delete` — rather than separate
+create, edit, and move verbs, because no client holds a strict subset of those
+three. `vault:human-read` is exclusive with every Agent mutation scope, not only
+with Human writes. Deletion is recoverable removal: the note leaves every read
+surface and a tombstone enters the feed, while its revision history is kept so an
+operator can restore it.
 
 ## Ownership, hosting, and AI visibility
 

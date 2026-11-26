@@ -9,6 +9,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy.exc import DBAPIError
 
 from app.vault.constants import (
     DEFAULT_TEXT_SEARCH_CONFIG as RUNTIME_DEFAULT_TEXT_SEARCH_CONFIG,
@@ -32,7 +33,7 @@ from vault_migrations.helpers import (
 
 # The head of the vault lineage, restated so that adding a migration is one
 # edit here rather than four identical literals that must all move together.
-VAULT_HEAD = "0020_note_listing_sort_indexes"
+VAULT_HEAD = "0021_human_collection_boundary"
 
 VAULT_TABLES = {
     "vault_agent_credentials",
@@ -41,6 +42,8 @@ VAULT_TABLES = {
     "vault_compile_runs",
     "vault_document_embeddings",
     "vault_documents",
+    "vault_human_changes",
+    "vault_human_revisions",
     "vault_oauth_authorization_codes",
     "vault_oauth_clients",
     "vault_oauth_grants",
@@ -431,4 +434,151 @@ def test_metadata_downgrade_removes_decided_proposals_not_only_pending_ones(
                         'agent:test', 'pending')
                 """,
                 (uuid4(),),
+            )
+
+
+def test_human_collection_migration_refuses_a_document_outside_agent(
+    disposable_database_urls: dict[str, str],
+) -> None:
+    """Classifying an unowned row is a decision, so the upgrade will not make it."""
+
+    database_url = disposable_database_urls["shared"]
+    run_vault_migration(database_url, "head")
+    config = Config(str(REPO_ROOT / "alembic-vault.ini"))
+    with migration_environment(
+        database_url_value=database_url,
+        vault_database_url_value=database_url,
+    ):
+        command.downgrade(config, "0020_note_listing_sort_indexes")
+
+    try:
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                """
+                INSERT INTO vault.vault_documents (
+                    id, vault_path, title, body, contributed_by,
+                    schema_version, content_revision
+                ) VALUES
+                    ('migration-agent-note', 'Agent/notes/migration-agent-note.md',
+                     'Agent', 'body', 'agent:migration', 2, 3),
+                    ('migration-human-note',
+                     'Human/03 Projects/migration-human-note.md',
+                     'Human', 'body', 'agent:migration', 2, 1)
+                """
+            )
+
+        with pytest.raises(DBAPIError, match="outside Agent/"):
+            run_vault_migration(database_url, "head")
+        assert version(database_url, "vault", "vault_alembic_version") == (
+            "0020_note_listing_sort_indexes"
+        )
+
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM vault.vault_documents WHERE id = 'migration-human-note'"
+            )
+        run_vault_migration(database_url, "head")
+
+        with psycopg.connect(database_url) as connection:
+            row = connection.execute(
+                """
+                SELECT collection::text, resource_revision, content_revision
+                FROM vault.vault_documents
+                WHERE id = 'migration-agent-note'
+                """
+            ).fetchone()
+        # The resource revision starts where content already stands.
+        assert row == ("agent", 3, 3)
+    finally:
+        # Whatever revision a failure left the database at, the fixture rows
+        # go, so they cannot block the upgrade the next test runs.
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM vault.vault_documents WHERE id LIKE 'migration-%'"
+            )
+        run_vault_migration(database_url, "head")
+
+
+def test_human_collection_downgrade_refuses_while_a_tombstone_exists(
+    disposable_database_urls: dict[str, str],
+) -> None:
+    """A feed entry is Human data too: a tombstone alone blocks the rollback."""
+
+    database_url = disposable_database_urls["shared"]
+    run_vault_migration(database_url, "head")
+    config = Config(str(REPO_ROOT / "alembic-vault.ini"))
+    try:
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                """
+                INSERT INTO vault.vault_human_changes (
+                    document_id, resource_revision, change_kind, vault_path
+                ) VALUES ('migration-gone', 1, 'delete', 'Human/03 Projects/gone.md')
+                """
+            )
+        with migration_environment(
+            database_url_value=database_url,
+            vault_database_url_value=database_url,
+        ), pytest.raises(DBAPIError, match="cannot remove the Human collection"):
+            command.downgrade(config, "0020_note_listing_sort_indexes")
+        assert version(database_url, "vault", "vault_alembic_version") == VAULT_HEAD
+    finally:
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM vault.vault_human_changes "
+                "WHERE document_id = 'migration-gone'"
+            )
+
+
+def test_human_collection_downgrade_strips_human_scopes_and_nothing_else(
+    disposable_database_urls: dict[str, str],
+) -> None:
+    """A down-then-up cycle can only ever reduce what a principal may do."""
+
+    database_url = disposable_database_urls["shared"]
+    run_vault_migration(database_url, "head")
+    credential_id = uuid4().hex[:16]
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            """
+            INSERT INTO vault.vault_agent_credentials (
+                id, principal_id, display_name, secret_sha256, scopes
+            ) VALUES (%s, 'migration-human', 'migration fixture', %s, %s)
+            """,
+            (
+                credential_id,
+                bytes(32),
+                ["vault:human-read", "vault:human-write", "vault:read"],
+            ),
+        )
+    config = Config(str(REPO_ROOT / "alembic-vault.ini"))
+    try:
+        # Through Alembic directly: `run_vault_migration` upgrades to any
+        # revision but `base`, and upgrading to an ancestor does nothing.
+        with migration_environment(
+            database_url_value=database_url,
+            vault_database_url_value=database_url,
+        ):
+            command.downgrade(config, "0020_note_listing_sort_indexes")
+        with psycopg.connect(database_url) as connection:
+            scopes = connection.execute(
+                "SELECT scopes FROM vault.vault_agent_credentials WHERE id = %s",
+                (credential_id,),
+            ).fetchone()[0]
+        assert scopes == ["vault:read"]
+
+        run_vault_migration(database_url, "head")
+        with psycopg.connect(database_url) as connection:
+            scopes = connection.execute(
+                "SELECT scopes FROM vault.vault_agent_credentials WHERE id = %s",
+                (credential_id,),
+            ).fetchone()[0]
+        # Nothing re-grants: migration 0007's rule.
+        assert scopes == ["vault:read"]
+    finally:
+        run_vault_migration(database_url, "head")
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM vault.vault_agent_credentials WHERE id = %s",
+                (credential_id,),
             )

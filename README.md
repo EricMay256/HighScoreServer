@@ -190,7 +190,7 @@ executable checklist; this is the summary of what changes for HSS.
 | **Two Alembic lineages**, `alembic-vault.ini`, and a release phase that gates one of them on a feature flag. | Back to a single lineage. `scripts/release.sh` loses its gated block, and the `Procfile` could return to `release: alembic upgrade head`. |
 | **`pgvector` is a production dependency** and CI layers it onto the Postgres image. | Leaves entirely. Nothing in HSS imports it. |
 | **A `vault` schema in the leaderboard database**, and a note in `db/role.sql` explaining why the restricted role deliberately cannot see it. | Schema dropped; the note becomes moot. |
-| **Vault wiring in `app/main.py`** — lifespan hooks, the route gate, and a 503 handler for SQLAlchemy pool timeouts that only the vault can raise. | All removed. Check `load_environment()` at the top of `create_app` before deleting it: it is there so the route gate can be evaluated. |
+| **`composed.py`** — the path dispatcher that runs the vault app beside the leaderboard (host ADR 0016). `app/main.py` already names no vault code. | Moves to `knowledge-vault`; `wsgi.py` goes back to `app.main:app`. |
 
 Two dependencies look like they should leave and do not. **SQLAlchemy** stays —
 HSS needs it as Alembic's engine layer regardless, and [ADR 0002](docs/adr/0002-raw-sql-over-orm.md)'s
@@ -253,13 +253,13 @@ psql -U postgres -d leaderboard -f db/seed.sql
 5. Start the development server:
 ```bash
 python run_dev.py          # Windows: required (see note)
-# uvicorn app.main:app --reload   # Linux/macOS: works directly
+# uvicorn composed:app --reload   # Linux/macOS: works directly
 ```
 
 > **Windows note:** psycopg3's async pool requires asyncio's `SelectorEventLoop`,
 > but Windows defaults to `ProactorEventLoop`, and uvicorn builds its loop before
 > importing the app. `run_dev.py` sets the Selector policy first (and survives
-> `--reload`); running `uvicorn app.main:app` directly on Windows fails to open a
+> `--reload`); running `uvicorn composed:app` directly on Windows fails to open a
 > DB connection. On Linux/macOS (and Heroku, via gunicorn's UvicornWorker) the
 > default loop already works, so the launcher isn't needed there.
 

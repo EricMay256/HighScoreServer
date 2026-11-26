@@ -4,7 +4,9 @@ from pathlib import Path
 
 VAULT_PACKAGE = Path(__file__).resolve().parents[2] / "app" / "vault"
 HOST_PACKAGE = VAULT_PACKAGE.parent
-HOST_VAULT_IMPORT_ALLOWLIST = {HOST_PACKAGE / "main.py"}
+# Empty since host ADR 0016: the composition root is the repository-root
+# composed.py, outside this package, so no leaderboard module may import the vault.
+HOST_VAULT_IMPORT_ALLOWLIST: set[Path] = set()
 
 # rglob, not glob: the package is flat today, so the two are equivalent and the
 # distinction looks academic. It stops being academic the moment anyone adds a
@@ -58,7 +60,11 @@ def test_vault_package_has_no_leaderboard_domain_imports() -> None:
 
 
 def test_host_modules_do_not_import_vault_internals() -> None:
-    """Only the composition root may know the staged vault package exists."""
+    """No leaderboard module may know the staged vault package exists.
+
+    The composition root that does is ``composed.py`` at the repository root
+    (host ADR 0016), which this walk over ``app/`` does not visit.
+    """
 
     violations: list[str] = []
     for path in HOST_PACKAGE.rglob("*.py"):

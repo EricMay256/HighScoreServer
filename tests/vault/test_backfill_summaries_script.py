@@ -390,7 +390,8 @@ def test_a_note_edited_after_embedding_is_skipped_not_indexed_stale(
                 cursor.execute(
                     """
                     UPDATE vault.vault_documents
-                    SET body = %s, content_revision = content_revision + 1
+                    SET body = %s, content_revision = content_revision + 1,
+                        resource_revision = resource_revision + 1
                     WHERE id = %s
                     """,
                     ("Someone else rewrote this body entirely.", note_id),
@@ -533,7 +534,8 @@ def test_a_note_rewritten_between_emit_and_apply_is_not_summarized(
                 """
                 UPDATE vault.vault_documents
                 SET body = %s, title = %s,
-                    content_revision = content_revision + 1
+                    content_revision = content_revision + 1,
+                    resource_revision = resource_revision + 1
                 WHERE id = %s
                 """,
                 (
