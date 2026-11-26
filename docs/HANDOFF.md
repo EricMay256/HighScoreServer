@@ -14,7 +14,8 @@ their reasoning, none of them current.
 | Branches | `dev` is ahead of `main` (verified 2026-11-25): it carries Human-vault phases B1–B4 with vault migration 0021, the answer-grounding evaluation, and the 2026-11-25 direction batch. Merging it is NEXT-STEPS §1.1 |
 | Migrations on `dev` but not `main` | Vault `0021_human_collection_boundary`. The leaderboard lineage matches |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
-| Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test` |
+| Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test`. That is the WSL Laptop. The Windows Desktop (no WSL, no admin) has portable PostgreSQL 17.9 with pgvector 0.8.6 built from source under `%LOCALAPPDATA%\hss-localdb` and a CI-shaped `highscore_test` database. **Start it detached** (`Start-Process pg_ctl.exe … start -WindowStyle Hidden`): started from a shell that later exits, every new backend dies with `0xC0000142`. |
+| CI on demand | `gh workflow run ci.yml --ref dev` (`workflow_dispatch`, 2026-11-25). Pushes and PRs still trigger CI only for `main` |
 | Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
 
 Production facts are as the documents last recorded them, with one exception:
