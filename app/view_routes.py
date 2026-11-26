@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
@@ -10,7 +11,10 @@ from app.periods import get_period_start
 
 router = APIRouter(tags=["views"])
 logger = logging.getLogger(__name__)
-templates = Jinja2Templates(directory="templates")
+# Resolved from this file, not the working directory, so the app serves the same
+# pages wherever the process starts -- including composed from another
+# repository (host ADR 0016). Same pattern as spa_routes._SPA_DIST.
+templates = Jinja2Templates(directory=Path(__file__).resolve().parent.parent / "templates")
 
 @router.get("/", response_class=HTMLResponse)
 def home_view(request: Request) -> HTMLResponse:

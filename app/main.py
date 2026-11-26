@@ -1,6 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import sentry_sdk
 from fastapi import FastAPI
@@ -24,6 +25,8 @@ from app.view_routes import router as view_router
 
 
 logger = logging.getLogger(__name__)
+
+_PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
 
 # Browser origins allowed to call public leaderboard GET endpoints.
 #
@@ -141,7 +144,9 @@ def create_app() -> FastAPI:
     # 6. SPA catch-all router — registered LAST so the explicit Jinja routes on / and /leaderboard win.
     app.include_router(spa_routes.router)
     # 7. Static files (served at root, so this goes last to avoid shadowing API and view routes)
-    app.mount("/", StaticFiles(directory="public", html=True), name="public")
+    #    Resolved from this file rather than the working directory, so a composed
+    #    deployment started elsewhere still finds it (host ADR 0016).
+    app.mount("/", StaticFiles(directory=_PUBLIC_DIR, html=True), name="public")
     return app
 
 
