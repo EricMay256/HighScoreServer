@@ -13,10 +13,10 @@ Historical handoffs are under [`archive/`](archive/README.md).
 
 ## State
 
-- **`dev` is ahead of `main`** (verified 2026-11-25). Since PR #34 it has
-  carried Human-vault phases B1–B4 with vault migration
-  `0021_human_collection_boundary`, the answer-grounding evaluation, and the
-  2026-11-25 direction batch. Merging it is §1.1.
+- **`main` is level with `dev` as of PR #35** (2026-11-26, squash-merged as
+  `697df70`), so `main` is not an ancestor of `dev` and the next merge is
+  another PR. Production runs it, with vault migration 0021 applied by the
+  release phase.
 - **Production, as last recorded on 2026-08-28** and not re-verified since:
   vault lineage `0017_oauth_entitlements`, 94 documents (80 notes, 14 wiki
   pages), all active; `VAULT_ENABLED`, `VAULT_PUBLIC_URL` and an operator
@@ -57,13 +57,18 @@ it. The decisions are vault ADRs 0053–0062 and amendments to 0016, 0023, 0025,
 
 ## 1. Immediate
 
-1. **Bring `main` level with `dev`.** `dev` carries migration
-   `0021_human_collection_boundary`, phases B1–B4, the answer-grounding
-   evaluation and the 2026-11-25 batch; `main`, and therefore production, does
-   not. Extraction (§6) deploys from `main`, so this goes first. Before merging,
-   record the production vault head with
-   `heroku run "python -m alembic -c alembic-vault.ini current"`. The last
-   recorded value is `0017`, and 0018–0021 would all apply in one release.
+1. **Bring `main` level with `dev`. Done 2026-11-26: PR #35, squash-merged as
+   `697df70`.**
+   - **Deploy:** Heroku deployed it successfully. The release phase exited
+     cleanly, and it runs the vault `upgrade head`, so migration 0021 is
+     applied.
+   - **Verified live:** the leaderboard, SPA and docs; the vault's docs, OAuth
+     metadata, landing page, 401s and MCP 307; no vault paths in HSS's OpenAPI;
+     no CORS on vault routes; an authenticated MCP search through the claude.ai
+     connector.
+   - **Still unchecked directly:**
+     `heroku run "python -m alembic -c alembic-vault.ini current"`. The CLI
+     token had expired.
 2. **Settle the production game-mode list.** Nothing hardcodes a mode any
    more, so `/leaderboard` and the SPA both land on the first row of
    `/game_modes`, ordered by `name` — the alphabetically first configured mode

@@ -11,8 +11,8 @@ their reasoning, none of them current.
 
 | | |
 | --- | --- |
-| Branches | `dev` is ahead of `main` (verified 2026-11-25): it carries Human-vault phases B1–B4 with vault migration 0021, the answer-grounding evaluation, and the 2026-11-25 direction batch. Merging it is NEXT-STEPS §1.1 |
-| Migrations on `dev` but not `main` | Vault `0021_human_collection_boundary`. The leaderboard lineage matches |
+| Branches | `main` is level with `dev` through PR #35 (2026-11-26, squash-merged as `697df70`, deployed). The vault's source of truth is now the private `knowledge-vault` repository; HSS's `app/vault/` is a frozen rollback copy |
+| Migrations on `dev` but not `main` | None. Production's release phase applied vault 0021 with #35 |
 | Production (last recorded 2026-08-28) | `VAULT_ENABLED=true`, `VAULT_PUBLIC_URL` and an operator identity set; vault lineage `0017_oauth_entitlements`; 94 documents — 80 notes and 14 wiki pages — all active |
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test`. That is the WSL Laptop. The Windows Desktop (no WSL, no admin) has portable PostgreSQL 17.9 with pgvector 0.8.6 built from source under `%LOCALAPPDATA%\hss-localdb` and a CI-shaped `highscore_test` database. **Start it detached** (`Start-Process pg_ctl.exe … start -WindowStyle Hidden`): started from a shell that later exits, every new backend dies with `0xC0000142`. |
 | CI on demand | `gh workflow run ci.yml --ref dev` (`workflow_dispatch`, 2026-11-25). Pushes and PRs still trigger CI only for `main` |
