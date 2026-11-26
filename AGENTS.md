@@ -105,8 +105,12 @@ See `docs/specs.md` for the validated-runs / cumulative-scoring spec, and ADR 00
 <!-- BEGIN vault-context — delete this block when app/vault/ is extracted -->
 ### `app/vault/`
 
-`app/vault/` and `vault_migrations/` are maintained separately and will be moved out.
-Read `app/vault/AGENTS.md` before changing anything under them.
+**As of 2026-11-25 the vault's source of truth is the private `knowledge-vault` repository**
+(vault ADR 0062), extracted with its history. `app/vault/`, `vault_migrations/` and the vault
+scripts and tests here are a **frozen copy**, kept only so a failed cutover can be rolled back
+by re-pointing the Heroku app. **Do not change them** — make vault changes in `knowledge-vault`.
+They are deleted after cutover per the extraction manifest. Read `app/vault/AGENTS.md` before
+touching anything under them.
 
 Rules that differ from the rest of this repository:
 

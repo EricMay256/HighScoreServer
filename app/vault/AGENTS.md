@@ -1,5 +1,9 @@
 # AGENTS.md — vault bounded context
 
+> **Frozen copy (2026-11-25).** The source of truth is the private `knowledge-vault`
+> repository, where this package lives as `knowledge_vault/` (vault ADR 0062). This copy is
+> kept only so the cutover can be rolled back. Make vault changes there, not here.
+
 Rules for work under `app/vault/` and `vault_migrations/`. This file travels with the
 package; the host repository's `AGENTS.md` governs everything else. Read all of it — it is
 short on purpose. **The why behind each rule is in

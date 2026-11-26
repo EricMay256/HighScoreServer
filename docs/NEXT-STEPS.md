@@ -232,9 +232,17 @@ is the checklist. In order:
    proven at cutover, under ADR 0062's rollback plan: cut over only when
    production's migration heads already match, keep the vault in HSS until the
    composed app is verified, and use `heroku rollback` if anything fails.
-4. **Create `knowledge-vault`** and move the package, migrations, scripts, tests
-   and docs per the manifest. Then repoint imports, add the package-owned test
-   fixtures, and set up CI.
+4. **Create `knowledge-vault`. Done 2026-11-25.** It is a private repository,
+   extracted with `git filter-repo` from `dev` with its full history (313
+   commits): `app/vault/` became `knowledge_vault/`, imports were repointed,
+   `hss_path.py` locates the HSS checkout, and it has its own test harness and
+   CI composing HSS's public `main`.
+   - **Results:** 1343 tests pass locally, against a schema built from empty
+     across both repos.
+   - **Found on the way:** HSS resolved `public/` and `templates/` against the
+     working directory. That is now fixed (`b002a50`, `tests/test_app_paths.py`).
+   - **From here, vault changes go to `knowledge-vault`.** HSS's copy is frozen
+     for rollback.
 5. **Cut over:** re-point `high-score-server` to `knowledge-vault`, deploy, and
    verify. Then remove the vault from HSS per the manifest's "HSS files that
    need editing".
