@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated 2026-11-25. The start-here for a fresh session: where things are,
+Last updated 2026-11-26. The start-here for a fresh session: where things are,
 what is in flight, and the environment facts that bite and are not already in
 `AGENTS.md`. What remains to do is [`NEXT-STEPS.md`](NEXT-STEPS.md); why things
 are the way they are is in the ADRs. Previous handoffs are archived under
@@ -13,7 +13,7 @@ their reasoning, none of them current.
 | --- | --- |
 | Branches | `main` is level with `dev` through PR #35 (2026-11-26, squash-merged as `697df70`, deployed). The vault's source of truth is now the private `knowledge-vault` repository; HSS's `app/vault/` is a frozen rollback copy |
 | Migrations on `dev` but not `main` | None. Production's release phase applied vault 0021 with #35 |
-| Production (2026-11-26) | Composed deployment from the private `knowledge-vault` repository (release v91: `knowledge-vault` `729acfc` with HSS `697df70`), deployed by `git push` to the Heroku remote. Leaderboard lineage `0004_auth_identities`, vault `0021_human_collection_boundary`. **The app's GitHub integration still points at HSS**, so a push to HSS `main` would redeploy HSS's frozen copy until it is repointed. Rollback: `heroku rollback v89` (HSS alone, frozen vault) |
+| Production (2026-11-26) | The composed deployment, built from the private `knowledge-vault` repository through the GitHub integration (repointed 2026-11-26); its build fetches this repository's `main`. Release v91: `knowledge-vault` `729acfc`, HSS `697df70`, leaderboard lineage `0004_auth_identities`. Rollback to HSS alone: `heroku rollback v89`, valid until the frozen vault copy is deleted |
 | Local development | PostgreSQL 17 with pgvector; the vault schema lives in the `leaderboard` database; `TEST_DATABASE_URL` points at `leaderboard_test`. That is the WSL Laptop. The Windows Desktop (no WSL, no admin) has portable PostgreSQL 17.9 with pgvector 0.8.6 built from source under `%LOCALAPPDATA%\hss-localdb` and a CI-shaped `highscore_test` database. **Start it detached** (`Start-Process pg_ctl.exe … start -WindowStyle Hidden`): started from a shell that later exits, every new backend dies with `0xC0000142`. |
 | CI on demand | `gh workflow run ci.yml --ref dev` (`workflow_dispatch`, 2026-11-25). Pushes and PRs still trigger CI only for `main` |
 | Suite | 1,373 tests, about seven minutes; `ruff check .` clean — the gate is the whole tree since 2026-09-02, not the old `app/ tests/ scripts/` |
@@ -27,26 +27,10 @@ them.
 
 ## In flight
 
-- **The 2026-11-25 vault direction.** The vault exists to improve the user's agents —
-  memory across sessions and providers, valued per token of context. The librarian is
-  replaced by a client-side agent loop (vault ADR 0053, rejecting 0043); retrieval tuning is
-  frozen to 500 documents (0055); extraction is scheduled — the private `knowledge-vault` repo becomes the deploy root (0062). The vault
-  AGENTS.md was cut to its rules, with the old text in `app/vault/docs/invariants-rationale.md`.
-  See NEXT-STEPS "Vault direction".
-- **The Human vault.** Vault ADR 0048, 2026-09-11: enrolled Human notes become
-  database-authoritative, edited in the browser, with server-only deletion and
-  Human and Agent write grants that cannot be held together. The Obsidian sync
-  client is **not built** (vault ADR 0054, 2026-11-25); offline access is a
-  read-only download. **Phase A is done
-  locally as of 2026-09-12** — export rehearsal validated and idempotent,
-  governance and runtime read policy verified to agree per file, enrollment set
-  previewed — leaving deployment parity. **Phases B1–B4 are built** — the
-  schema and write boundary (vault ADR 0049, migration 0021), Human reads
-  (ADR 0050), create, edit and move (ADR 0051), and deletion, restore and the
-  change feed (ADR 0052) — with the disclosure regression suite (B5),
-  enrollment, and scheduling still to come. Start at
-  [`human-vault-handoff.md`](../app/vault/docs/human-vault-handoff.md), whose
-  phase A result section carries the findings, and NEXT-STEPS §4.
+- **The vault moved to `knowledge-vault`** (2026-11-25, deployed from it 2026-11-26). Its
+  direction, roadmap, Human-vault phases and environment notes live in that repository's
+  `knowledge_vault/docs/NEXT-STEPS.md` and `HANDOFF.md`. Here, only the frozen copy's
+  deletion remains (NEXT-STEPS, "The vault").
 - **The 2026-09-02 code review** —
   [`code-review-2026-09-02.md`](code-review-2026-09-02.md) — is **done**. Every
   finding is addressed on `dev`, one commit each; the document is kept as the
