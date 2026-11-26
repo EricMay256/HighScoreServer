@@ -34,7 +34,15 @@ def test_browser_preflight_does_not_advertise_vault_write_methods(
     client: TestClient,
     method: str,
 ) -> None:
-    """Vault writes are machine-client APIs, outside the host browser CORS contract."""
+    """Vault writes are machine-client APIs, outside the host browser CORS contract.
+
+    Since host ADR 0016 the vault is its own application, and the leaderboard's
+    CORS middleware no longer wraps it, so a cross-origin preflight gets no grant
+    at all: no allowed origin and no allowed methods. That is stronger than the
+    shared application's answer, which was a 400 from the leaderboard's
+    middleware listing only GET, POST and OPTIONS. A browser treats either as a
+    refusal; this asserts the refusal rather than whose middleware produced it.
+    """
 
     response = client.options(
         "/api/v1/vault/notes/example",
@@ -45,8 +53,9 @@ def test_browser_preflight_does_not_advertise_vault_write_methods(
         },
     )
 
-    assert response.status_code == 400
-    assert method not in response.headers["access-control-allow-methods"]
+    assert not response.is_success
+    assert "access-control-allow-origin" not in response.headers
+    assert method not in response.headers.get("access-control-allow-methods", "")
 
 
 def _issue(scopes: tuple[str, ...] = (VaultScope.READ,), **overrides) -> tuple[str, str]:
